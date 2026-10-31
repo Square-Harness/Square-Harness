@@ -36,4 +36,9 @@ MODES = {
     "literature": "Research the literature with source-linked comparisons of precise results, hypotheses and methods; report search scope and limitations.",
     "check": "Find one or two precise references for a known result and confirm each against sources; report how far each was confirmed.",
     "writeup": "Write up the supplied notes as clean LaTeX in the user's template style, faithful to the sources; mark unclear points with TODO comments.",
+    "python_lab": "Carry out the computation the user requested in the Python sandbox (python-lab skill); report results, errors and the experiment id.",
+    "sanity_check": "Try to falsify the stated claim with cheap numerical experiments (numerical-sanity-check skill); numerical agreement is not proof.",
 }
+
+# Modes whose sandbox binding the user chose explicitly (see mathagent.numerics).
+SANDBOX_MODES = {"python_lab": "python-lab", "sanity_check": "numerical-sanity-check"}

@@ -34,6 +34,7 @@ from ..research import ResearchRunner
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT
+from ..numerics import PythonSandbox
 from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
@@ -270,6 +271,8 @@ class ChatCapture:
 class Hub:
     def __init__(self, args, bus=None):
         self.args = args
+        # Shared Docker sandbox: automatic numerical sanity checks in critic/explore engines.
+        self.sandbox = PythonSandbox.from_args(args)
         self.root = Path(args.workspace).resolve(strict=True)
         # Folders can be browsed and opened at or below this root only.
         self.base = Path(getattr(args, 'gui_root', None) or self.root).resolve(strict=True)
@@ -575,8 +578,13 @@ class Hub:
         args = self.args
         library = LiteratureTools(self.root, online=self.online(online),
                                   max_requests=args.research_requests, max_chars=args.research_chars)
+        # Only conversational engines (chats, the Assistant's main loop and its critic/explore
+        # workers) get the automatic sanity-check binding; python-lab is explicit (terminal).
+        numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
+                    if mode in ('critic', 'explore') else None)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
-                              args.allow_python, literature=library, read_types=store.read_types(self.root))
+                              args.allow_python, literature=library, read_types=store.read_types(self.root),
+                              numerics=numerics)
         client_class = INTERRUPTIBLE[args.backend]
         if args.backend == 'openai' and resolve_api_profile(getattr(args, 'api_profile', None)) == 'mlx':
             client_class = InterruptibleMLX

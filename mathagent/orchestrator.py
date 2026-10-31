@@ -118,8 +118,16 @@ Do not paraphrase the same objective, raise effort, or use another worker to
 evade it. Use an available independent capability or explain the blocker.
 """
 
+NUMERICS_POLICY = """
+Before relying on a nontrivial claim (an inequality, positivity, a matrix or spectral
+identity, an asymptotic rate, a doubtful proof step), consider one cheap falsification
+experiment with execute_python; skip it when an exact argument is immediate. Numerical
+agreement is never a proof; heavier computations are for the user's /python-lab.
+"""
 WEB_TOOLS = frozenset({'open_url', 'read_page', 'search_page', 'read_references', 'search_web'})
 READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text'}) | WEB_TOOLS
+# Sandbox tools of a controller-bound NumericsSession (automatic sanity checks only here).
+NUMERICS_TOOLS = frozenset({'execute_python', 'read_experiment', 'read_skill_reference'})
 STATE_VERSION = 1
 # A direct answer can be a full explanation: the first call has the same ceiling as
 # a synthesis. The model stops early when it only chooses an action.
@@ -367,7 +375,18 @@ class Orchestrator:
         if workspace is not None:
             tools.extend(copy.deepcopy(item) for item in workspace.schemas()
                          if item.get('function', {}).get('name') in READ_ONLY_TOOLS)
+            numerics = self._numerics()
+            if numerics is not None:
+                tools.extend(copy.deepcopy(item) for item in numerics.schemas()
+                             if item['function']['name'] in NUMERICS_TOOLS)
         return tools
+
+    def _numerics(self):
+        """The sandbox session bound by the controller, if any (never a python-lab binding here)."""
+        numerics = getattr(getattr(self.agent, 'workspace', None), 'numerics', None)
+        if numerics is not None and getattr(numerics, 'explicit', False):
+            raise AgentError('The assistant accepts only an automatic sandbox binding')
+        return numerics
 
     def _action_room(self):
         return self.max_actions is None or self.state['actions'] < self.max_actions
@@ -399,7 +418,8 @@ class Orchestrator:
         if any(child['status'] == 'complete' for child in self.state['children']):
             return True
         for message in self.state['messages']:
-            if message.get('role') != 'tool' or message.get('tool_name') not in READ_ONLY_TOOLS - {'list_files'}:
+            if message.get('role') != 'tool' or message.get('tool_name') not in (
+                    READ_ONLY_TOOLS - {'list_files'}) | {'execute_python'}:
                 continue
             try:
                 result = json.loads(message.get('content', ''))
@@ -438,7 +458,7 @@ class Orchestrator:
             raise AgentError('The shared generated-token budget is exhausted')
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
-            'messages': [{'role': 'system', 'content': POLICY + (
+            'messages': [{'role': 'system', 'content': POLICY + self._numerics_policy(tools) + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
                 'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (
@@ -524,6 +544,12 @@ class Orchestrator:
             raise CallContextError('A longer replacement answer cannot fit the remaining output or context budget. '
                                    'The saved worker results remain available; change the request or limit before retrying.', allocation)
         return payload
+
+    def _numerics_policy(self, tools):
+        numerics = self._numerics()
+        if numerics is None or not any(t['function']['name'] == 'execute_python' for t in tools):
+            return ''
+        return NUMERICS_POLICY  # The skill's full instructions are in the tool description.
 
     def _stream(self, payload):
         self.agent.last_stats = {}
@@ -754,6 +780,25 @@ class Orchestrator:
                     raise ValueError('Unknown child job_id')
                 return {'job_id': child['job_id'], 'child_id': child['id'], 'status': child['status'],
                         'result': copy.deepcopy(child['result'])}
+            if name in NUMERICS_TOOLS:
+                numerics = self._numerics()
+                if numerics is None or name not in {item['function']['name'] for item in self._tools()}:
+                    raise ValueError('The Python sandbox is unavailable in this conversation')
+                if isinstance(pending.get('result'), dict):
+                    return copy.deepcopy(pending['result'])  # Resumed: never run the code twice.
+                value = json.loads(numerics.execute(name, args))
+                status = value.get('status')
+                if status in ('refused', 'invalid_arguments', 'sandbox_unavailable'):
+                    result = {'status': 'invalid_action', 'error': value.get('message') or status,
+                              'sandbox_result': value}
+                elif status == 'budget_exhausted':
+                    result = {'status': 'budget_exhausted', 'sandbox_result': value}
+                else:
+                    result = {'status': 'complete', 'sandbox_result': value}
+                with self._state_lock:
+                    pending['result'] = copy.deepcopy(result)
+                    self._save()
+                return result
             if name in READ_ONLY_TOOLS:
                 workspace = getattr(self.agent, 'workspace', None)
                 if workspace is None or name not in {item['function']['name'] for item in self._tools()}:
@@ -971,6 +1016,9 @@ class Orchestrator:
     def run(self, query, *, files=(), history=(), state=None):
         if state is None:
             self._new_state(query, files, history)
+            numerics = self._numerics()
+            if numerics is not None:
+                numerics.new_turn()  # One sanity-check allowance per user turn.
         else:
             self._restore(state, query, files)
             if self.state['status'] in ('complete', 'failed'):

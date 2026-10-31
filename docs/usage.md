@@ -197,6 +197,9 @@ and referee reports and LaTeX write-ups are described in [research.md](research.
 they are not part of the proof benchmark. The [visual interface](#visual-interface)
 offers all of these modes, and proof mode, in a browser.
 
+Sandboxed Python is separate: `/python-lab` runs requested computations in a
+Docker container without network or file access, and critic/explore answers may
+run small automatic numerical checks; see [python-numerics.md](python-numerics.md).
 Manuscript writes require approval. Optional Python execution requires separate
 approval and is not sandboxed. Saved jobs can contain unpublished text; keep
 research workspaces private. The repository ignores `.mathagent/`, but an external

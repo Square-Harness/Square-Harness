@@ -13,7 +13,10 @@ from urllib.parse import urlparse, quote
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
 from .api_profiles import MLX, resolve_api_profile
-from .prompts import MODES
+from .prompts import MODES, SANDBOX_MODES
+from .numerics import PythonSandbox, SandboxUnavailable
+from .numerics.session import MIN_AUTOMATIC_CONTEXT
+from . import skill_catalog
 from .proof import ProofRunner
 from .ledger import ProofStore
 from .tools import Workspace
@@ -110,10 +113,13 @@ HELP = '''Commands
                                       result of the --research-file manuscript, e.g. "Lemma 3.2"
   /explain [result + proof]           Precise step-by-step explanation of a result and its proof
   /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
+  /python-lab [request or code]       Run Python experiments, plots, simulations in the Docker sandbox
+  /sanity-check [claim]               Try to falsify a claim with cheap numerical experiments
+  /experiments                       List saved sandbox experiments (.mathagent/experiments/)
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
   /research-resume <id>               Resume a research job with its saved budgets
-  /skills                            Show the built-in report skills
+  /skills                            Show the built-in skills
   /resume [proof-id]                  Resume a saved proof with its remaining budget
   /proof-report [proof-id]            Read its saved report (works offline; /ledger alias)
   /proofs                            List saved proof jobs (works offline)
@@ -127,13 +133,20 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Python is opt-in (--allow-python), always approved per call, and NOT sandboxed.
+Sandboxed Python (Docker, no network, no file access): /python-lab on request; critic/explore
+chats may run small automatic numerical checks (--no-numerical-checks disables them).
+Unsandboxed Python is separate: opt-in (--allow-python), approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
 Offline is the default: a loopback model server and cached/local sources only.
 External research requires --online. Proof mode uses pinned text and no tools.
 Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
+
+
+# Hyphenated skill names as typed commands.
+COMMAND_ALIASES = {'/python-lab': 'python_lab', '/sanity-check': 'sanity_check',
+                   '/numerical-sanity-check': 'sanity_check'}
 
 
 def parser():
@@ -193,6 +206,14 @@ def parser():
     p.add_argument('--no-think', action='store_true')
     p.add_argument('--show-thinking', action='store_true')
     p.add_argument('--allow-python', action='store_true', help='Offer unsandboxed Python with per-call approval (Linux)')
+    sandbox = p.add_argument_group('Python sandbox (Docker; see docs/python-numerics.md)')
+    sandbox.add_argument('--no-numerical-checks', action='store_true',
+                         help='Do not offer automatic numerical sanity checks in chat (/python-lab and /sanity-check remain)')
+    sandbox.add_argument('--no-python-sandbox', action='store_true',
+                         help='Disable the Docker Python sandbox entirely (python-lab and numerical checks)')
+    sandbox.add_argument('--python-image', metavar='TAG', help='Sandbox image (default: square-harness/python-numerics:1)')
+    sandbox.add_argument('--python-limits', type=Path, metavar='FILE',
+                         help='JSON file with sanity-check and python-lab limits, bounded by built-in maxima')
     p.add_argument('--gui', action='store_true', help='Serve the visual interface in your browser instead of the terminal prompt')
     p.add_argument('--gui-host', default='127.0.0.1',
                    help='Interface address (default: %(default)s); 0.0.0.0 lets phones on your network connect with the access token')
@@ -305,6 +326,7 @@ def main():
         literature = LiteratureTools(args.workspace, online=args.online,
             max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
+        sandbox = PythonSandbox.from_args(args)
         client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
                   else MLX(args.host, timeout=args.request_timeout) if args.backend == 'openai' and args.api_profile == 'mlx'
                   else OpenAICompatible(args.host, timeout=args.request_timeout) if args.backend == 'openai'
@@ -401,8 +423,37 @@ def main():
             dest.write_text(exported, encoding='utf-8')
             ui.say(f'Exported {dest}')
 
+    sandbox_noted = False
+
+    def bind_numerics(mode):
+        """The sandbox binding for this turn, chosen here and never by the model."""
+        nonlocal sandbox_noted
+        skill = SANDBOX_MODES.get(mode)
+        if skill:
+            # The user typed /python-lab or /sanity-check: an explicit invocation.
+            try:
+                return sandbox.bind(skill, workspace.root, explicit=True, approve=ui.approve)
+            except SandboxUnavailable as exc:
+                raise ValueError(f'{skill} needs the Python sandbox. {exc}') from None
+        if mode not in ('critic', 'explore'):
+            return None
+        session = sandbox.automatic_session(workspace.root, ctx=agent.ctx)
+        if session is None and sandbox.enabled and sandbox.automatic and not sandbox_noted:
+            sandbox_noted = True
+            reason = sandbox.unavailable() or f'they need --ctx {MIN_AUTOMATIC_CONTEXT} or more'
+            ui.say(f'Note: automatic numerical checks are off: {reason}')
+        return session
+
+    def chat(target, query):
+        workspace.numerics = bind_numerics(target.mode)
+        try:
+            return target.run(query, ui.emit)
+        finally:
+            workspace.numerics = None
+
     def run_query(query):
         nonlocal proof_running, last_proof_id, research_running, last_research_id
+        workspace.numerics = None
         fresh_library()
         if agent.mode == 'prove':
             if args.output:
@@ -471,7 +522,7 @@ def main():
                 raise ValueError('--output is for literature/referee reports')
             ensure_model()
             workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
-            agent.run(query, ui.emit)
+            chat(agent, query)
 
     while True:
         try:
@@ -495,6 +546,16 @@ def main():
                 elif command == '/skills':
                     for name in ('literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
+                    for skill in skill_catalog.catalog():
+                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in critic/explore, or /sanity-check'
+                        ui.say(f'{skill.name} ({how}): {Path(__file__).parent / "skills" / skill.name / "SKILL.md"}')
+                elif command == '/experiments':
+                    from .numerics.artifacts import ExperimentStore
+                    records = ExperimentStore(workspace.root).list(limit=30)
+                    for item in records:
+                        ui.say(f'{item["id"]}  {item["skill"]:<24} {item["status"]:<12} {item.get("purpose") or ""}')
+                    if not records:
+                        ui.say('No sandbox experiments in this workspace.')
                 elif command == '/researches':
                     jobs = ResearchRunner.list(workspace.root)
                     if not jobs:
@@ -524,8 +585,8 @@ def main():
                     research_running = False
                     model_checked = False
                     research_result(result, export=not writeup)
-                elif command in {'/' + m for m in MODES}:
-                    agent.mode = command[1:]
+                elif command in {'/' + m for m in MODES} or command in COMMAND_ALIASES:
+                    agent.mode = COMMAND_ALIASES.get(command, command[1:])
                     ui.say('Mode: ' + agent.mode)
                     if rest:
                         run_query(rest)
@@ -601,8 +662,8 @@ def main():
                     reviewer.mode, reviewer.history = 'critic', []
                     ensure_model()
                     ui.say('Fresh-context model critique; this is not formal verification.')
-                    result = reviewer.run('Audit this proposed answer. Re-read relevant files if needed.\n'
-                                          f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}', ui.emit)
+                    result = chat(reviewer, 'Audit this proposed answer. Re-read relevant files if needed.\n'
+                                          f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}')
                     agent.history.extend([{'role': 'user', 'content': 'Critique the preceding answer.'},
                                           {'role': 'assistant', 'content': result}])
                     agent.last_stats = reviewer.last_stats

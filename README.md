@@ -135,6 +135,8 @@ proof modes are not part of v0.5.
 | `/resume <id>` | Resume an interrupted v0.5 job |
 | `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
 | `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
+| `/python-lab <request>` | Run Python experiments and plots in an isolated Docker sandbox |
+| `/sanity-check <claim>` | Try to falsify a claim with cheap numerical experiments |
 | `/help` | Show commands |
 | `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 
@@ -148,6 +150,7 @@ an alias; `python -m mathagent` also works from the checkout.
 - [HyperQwen on A10](docs/hyperqwen-a10.md): the pinned fast serving profile.
 - [A10 llama.cpp](docs/a10.md) / [two V100S](docs/ovh.md): retained hardware alternatives.
 - [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts, LaTeX write-ups.
+- [Python sandbox](docs/python-numerics.md): `/python-lab` experiments and automatic numerical sanity checks in Docker.
 
 Ollama, llama.cpp and OpenAI-compatible servers are supported. The solver and
 verifier currently use the same model in separate contexts and can share errors.

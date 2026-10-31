@@ -1,0 +1,7 @@
+# Direct dependencies of the sandbox image. Regenerate requirements.lock with the
+# command in docs/python-numerics.md; never install packages at run time.
+numpy
+scipy
+sympy
+mpmath
+matplotlib
