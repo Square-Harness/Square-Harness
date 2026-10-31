@@ -13,10 +13,13 @@ import html
 import json
 import math
 import re
+from xml.etree.ElementTree import ParseError
 
+from .jsonutil import loads
+from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
 from .literature import LiteratureError, _fold
-from .research import ResearchRunner, _reference_prompt, remaining_limit
+from .research import ResearchRunner, ResearchBudget, _reference_prompt, remaining_limit
 
 PIPELINE = 'reading-list-v1'
 PHASES = ('scope', 'sweep', 'graph', 'screen', 'organise', 'annotate', 'write', 'done')
@@ -102,6 +105,8 @@ class ReviewRunner(ResearchRunner):
     def start(self, goal, *, kind='literature', source_files=(), **budgets):
         if kind != 'literature':
             raise ValueError('The reading-list pipeline builds literature reviews only')
+        if budgets.get('max_requests') is None:
+            budgets['max_requests'] = 6 * breadth(budgets.get('max_rounds', 6))['queries'] + 26
         return super().start(goal, kind='literature', source_files=source_files, **budgets)
 
     def _extra_state(self):
@@ -126,13 +131,32 @@ class ReviewRunner(ResearchRunner):
         return breadth(self.state['settings']['max_rounds'])
 
     def _json(self, result):
+        text = result.get('text', '')
         if result.get('complete') is False:
-            return None
+            # Keep only fully decoded leading items; never complete a partial item.
+            match = re.search(r'"items"\s*:\s*\[', text)
+            items = []
+            if match:
+                decoder, tail = json.JSONDecoder(strict=False), text[match.end():]
+                while tail.lstrip().startswith('{'):
+                    tail = tail.lstrip()
+                    try:
+                        item, end = decoder.raw_decode(tail)
+                    except ValueError:
+                        break
+                    items.append(item)
+                    tail = tail[end:].lstrip().removeprefix(',')
+            return {'items': items} if items else None
         try:
-            value = json.loads(result['text'])
-        except ValueError:
+            value = loads(text)
+        except (ValueError, TypeError):
             return None
         return value if isinstance(value, dict) else None
+
+    def _cancel(self):
+        cancel = getattr(self, 'cancel', None)
+        if cancel is not None and (cancel.is_set() if hasattr(cancel, 'is_set') else cancel()):
+            raise KeyboardInterrupt
 
     def _remaining(self, share):
         settings = self.state['settings']
@@ -141,22 +165,36 @@ class ReviewRunner(ResearchRunner):
                 and remaining_limit(settings, 'max_input_tokens', self.state['input_tokens_charged']) > 8000)
 
     def _log(self, source, query, count=None, error=None):
-        self.state['sweep_log'].append({'source': source, 'query': query, 'results': count, 'error': error})
+        log = self.state['sweep_log']
+        entry = {'source': source, 'query': query, 'results': count, 'error': error}
+        previous = next((i for i, row in enumerate(log) if row['source'] == source and row['query'] == query), None)
+        if previous is None:
+            log.append(entry)
+        else:
+            log[previous] = entry
 
     def _fetch(self, source, query, call):
         """Run one source call; failures are logged (and reported as coverage gaps), never fatal.
         A source out of quota is not asked again in this job."""
+        self._cancel()
         if source in self.state['down']:
             self._log(source, query, error='skipped: unavailable earlier in this job')
             return []
         try:
             results = call()
-        except LiteratureError as exc:
+        except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
             if re.search(r'rate limited|budget used up|HTTP 429|request budget exhausted|Offline', message):
                 self.state['down'].append(source)
             self._log(source, query, error=message[:200])
             return []
+        if not isinstance(results, list):
+            self._log(source, query, error='Malformed provider result: expected a list')
+            return []
+        if any(not isinstance(record, dict) for record in results):
+            self._log(source, query, error='Malformed provider records: expected objects')
+            return []
+        self._cancel()
         self._log(source, query, len(results))
         return results
 
@@ -167,10 +205,11 @@ class ReviewRunner(ResearchRunner):
     def _record(self, raw, source, via):
         """A pool record from a source result; merged with an existing record for the same work."""
         ident = str(raw.get('identifier') or '')
-        record = {'title': html.unescape(str(raw.get('title') or ''))[:300],
+        clean = lambda value: ' '.join(html.unescape(re.sub(r'<[^>]*>', '', str(value or ''))).split())
+        record = {'title': clean(raw.get('title'))[:300],
                   'authors': [html.unescape(str(a)) for a in raw.get('authors') or []][:15],
                   'year': raw.get('year') or (str(raw.get('published') or '')[:4] or None),
-                  'type': raw.get('type'), 'venue': html.unescape(str(raw.get('venue') or raw.get('source') or '')).rstrip(' .') or None,
+                  'type': raw.get('type'), 'venue': clean(raw.get('venue') or raw.get('source')).rstrip(' .') or None,
                   'doi': (raw.get('doi') or '').replace('https://doi.org/', '') or None,
                   'arxiv': raw.get('arxiv_id') or (ident[6:] if ident.startswith('arxiv:') else None),
                   'zbl': ident[4:] if ident.startswith('zbl:') else None,  # Crossref identifiers are doi:...
@@ -191,7 +230,7 @@ class ReviewRunner(ResearchRunner):
         match = next((r for r in pool if (record['s2'] and r['s2'] == record['s2'])
                       or (record['doi'] and r['doi'] and r['doi'].lower() == record['doi'].lower())
                       or (record['arxiv'] and r['arxiv'] == record['arxiv'])
-                      or (_norm(r['title']) == _norm(record['title']) and _norm(record['title']))), None)
+                      or self._same_title_work(r, record)), None)
         if match is None:
             record['n'] = len(pool) + 1
             pool.append(record)
@@ -208,8 +247,18 @@ class ReviewRunner(ResearchRunner):
                 match[key] = value
         return match
 
+    @staticmethod
+    def _same_title_work(a, b):
+        if not _norm(a['title']) or _norm(a['title']) != _norm(b['title']):
+            return False
+        aa, ba = a.get('authors') or [], b.get('authors') or []
+        if aa and ba:
+            return _fold(_surname(aa[0])) == _fold(_surname(ba[0]))
+        ay, by = str(a.get('year') or ''), str(b.get('year') or '')
+        return ay.isdigit() and by.isdigit() and abs(int(ay) - int(by)) <= 1
+
     def _expository(self, r):
-        return bool(EXPOSITORY.search(r['title'])) or str(r.get('type') or '').lower() in ('book', 'review', 'book / book article')
+        return bool(EXPOSITORY.search(r['title'])) or str(r.get('type') or '').lower() in ('book', 'review', 'book / book article', 'monograph', 'reference-book', 'edited-book')
 
     def _score(self, r):
         queries = sum(1 for v in r['found_by'] if v.startswith('query'))
@@ -297,13 +346,14 @@ class ReviewRunner(ResearchRunner):
             'they do not exist. Never copy manuscript text into queries.\n\nREQUEST:\n' + self.state['goal'] + material)
         self.emit('notice', 'Scoping the topic')
         value = None
-        for think, cap in ((True, 4000), (False, 2000)):
+        for think, cap in ((False, 1800), (False, 1200)):
             value = self._json(self._call('scope', instruction, cap=cap, format_schema=SCOPE_SCHEMA, think=think))
             if value:
                 break
             self.state['warnings'].append('The scoping answer was not usable JSON' + (' after thinking; retried without.' if think else '.'))
         value = value or {}
         queries = [' '.join(str(q).split())[:120] for q in value.get('queries') or [] if str(q).strip()]
+        queries = self._public_queries(queries)
         if not queries:
             self.state['warnings'].append('No usable public topic queries were produced; private request text was not sent as a fallback query.')
         self.state['scope'] = {
@@ -311,7 +361,7 @@ class ReviewRunner(ResearchRunner):
             'msc': [m for m in (str(x).strip().upper() for x in value.get('msc') or []) if re.fullmatch(r'\d\d[A-Z-]?\d{0,2}', m)][:3],
             'intent': value.get('intent') if value.get('intent') in ('learn', 'frontier', 'both') else 'both',
             'assumptions': str(value.get('assumptions') or '')[:600], 'queries': list(dict.fromkeys(queries))[:b['queries']],
-            'seeds': list({_norm(s['title']): s for s in value.get('seeds') or []
+            'seeds': list({(_norm(s['title']), tuple(_fold(_surname(a)) for a in s.get('authors') or [])): s for s in value.get('seeds') or []
                            if isinstance(s, dict) and str(s.get('title') or '').strip()}.values())[:8]}
         sc = self.state['scope']
         self.state['plan'] = '\n'.join([
@@ -322,12 +372,36 @@ class ReviewRunner(ResearchRunner):
             *([f'- {", ".join(str(a) for a in w.get("authors") or [])}, *{w["title"]}* ({w.get("year") or "?"})' for w in sc['seeds']] or ['- none'])])
         self.state['phase'] = 'sweep'
 
+    def _public_queries(self, queries):
+        """Reject long verbatim phrases from pinned text unless the human requested them.
+
+        This guards copied private prose; it cannot decide whether every mathematical
+        term is public. Short public-topic generation remains part of the model task.
+        """
+        words = lambda text: re.findall(r'\w+', _fold(text))
+        phrase = lambda tokens: ' ' + ' '.join(tokens) + ' '
+        requested = phrase(words(self.state['goal']))
+        private = [phrase(words(source['content'])) for source in self.state['sources']]
+        allowed = []
+        for query in queries:
+            tokens = words(query)
+            copied = any(phrase(tokens[i:i + 8]) in text and phrase(tokens[i:i + 8]) not in requested
+                         for i in range(max(0, len(tokens) - 7)) for text in private)
+            if copied:
+                self.state['warnings'].append('A generated public query copied a long phrase from pinned source text and was not sent.')
+            else:
+                allowed.append(query)
+        return allowed
+
     def _sweep(self):
         lit, scope = self.literature, self.state['scope']
         if lit is None:
             raise ValueError('The literature review needs the literature tools')
         self.emit('notice', f'Searching Crossref, arXiv, zbMATH and Semantic Scholar with {len(scope["queries"])} queries')
         for i, query in enumerate(scope['queries'], 1):
+            self._cancel()
+            if i <= self.state.get('sweep_queries_done', 0):
+                continue
             via = f'query {i}'
             for raw in self._fetch('semantic_scholar', query, lambda: lit.search_papers(query, 'semantic_scholar', 8)['results']):
                 self._record(raw, 'semantic_scholar', via)
@@ -344,10 +418,15 @@ class ReviewRunner(ResearchRunner):
                 found = self._fetch('zbmath', query, lambda: lit.search_papers(query, 'zbmath', 6)['results'])
             for raw in found:
                 self._record(raw, 'zbmath', via)
+            self.state['sweep_queries_done'] = i
             self._save()
         self.emit('notice', f'Checking {len(scope["seeds"])} remembered works')
         for i, seed in enumerate(scope['seeds'], 1):
+            self._cancel()
+            if i <= self.state.get('sweep_seeds_done', 0):
+                continue
             self._resolve(seed, f'seed {i}')
+            self.state['sweep_seeds_done'] = i
             self._save()
         hidden = self.state.get('hidden', [])[:50]
         if hidden:
@@ -372,6 +451,7 @@ class ReviewRunner(ResearchRunner):
             return (words and len(words & found) >= max(1, math.ceil(0.6 * len(words)))
                     and (not names or any(_fold(n) in authors for n in names)))
         query = (title + ' ' + ' '.join(names)).strip()
+        log_start = len(self.state['sweep_log'])
         hits = [r for r in self._fetch('crossref', query, lambda: lit.crossref(query=query, limit=5)) if fits(r)]
         if names:
             zb = f'au:{names[0]} ti:' + ' '.join(re.findall(r'[^\W\d_]+', title)[:8])
@@ -381,11 +461,17 @@ class ReviewRunner(ResearchRunner):
             self._record(raw, 'zbmath' if ident.startswith('zbl:') else 'crossref', via)
         if not hits:
             year = re.search(r'(?:1[5-9]|20)\d\d', str(seed.get('year') or ''))
-            self.state['unverified'].append({'authors': names, 'title': title, 'year': year.group() if year else ''})
+            attempts = self.state['sweep_log'][log_start:]
+            checked = any(not row['error'] for row in attempts)
+            self.state['unverified'] = [u for u in self.state['unverified'] if (u['title'], u['authors']) != (title, names)]
+            self.state['unverified'].append({'authors': names, 'title': title, 'year': year.group() if year else '',
+                'checked': checked, 'reason': '; '.join(dict.fromkeys(row['error'] for row in attempts if row['error']))})
 
     def _graph(self):
         lit, b = self.literature, self._breadth()
-        if b['hubs'] and self._remaining(.5):
+        self._cancel()
+        followed = bool(b['hubs'] and self._remaining(.5))
+        if followed:
             hubs = sorted(self.state['pool'], key=lambda r: -r['score'])[:b['hubs']]
             self.emit('notice', f'Following the citations of the pool and of {len(hubs)} key works')
             # Backward: works the pool keeps citing (the hubs' references break ties). Forward: what cites the hubs.
@@ -422,8 +508,8 @@ class ReviewRunner(ResearchRunner):
         self.state['screen_order'] = [r['n'] for r in ranked[:b['screen']]]
         self.emit('notice', f'{len(self.state["pool"])} candidates; screening the best {len(self.state["screen_order"])}')
         top = '\n'.join('- ' + self._line(self._by_n(n)) for n in self.state['screen_order'][:15])
-        self._note('Citation graph and ranking', f'{len(self.state["pool"])} candidates after following citations. '
-                   f'Best ranked before screening:\n{top}')
+        self._note('Citation graph and ranking', f'{len(self.state["pool"])} candidates' + (' after following citations. ' if followed else '; citation graph skipped (time budget). ')
+                   + f'Best ranked before screening:\n{top}')
         self.state['phase'] = 'screen'
 
     def _by_n(self, n):
@@ -494,7 +580,11 @@ class ReviewRunner(ResearchRunner):
             'gaps (missing angles, recent directions, what the candidates did not cover). Each work appears at most once.\n\n'
             'WORKS:\n' + lines)
         self.emit('notice', 'Organising the reading list')
-        value = self._json(self._call('organise', instruction, cap=3000, format_schema=ORGANISE_SCHEMA)) or {}
+        try:
+            value = self._json(self._call('organise', instruction, cap=2500, format_schema=ORGANISE_SCHEMA)) or {}
+        except ResearchBudget as exc:
+            self.state['warnings'].append('Organisation stopped: ' + str(exc))
+            value = {}
         allowed, used = {n for n, _ in kept}, set()
 
         def take(numbers, limit):
@@ -513,6 +603,8 @@ class ReviewRunner(ResearchRunner):
                     themes.append({'name': str(theme['name'])[:100], 'core': core or deeper[:1], 'deeper': deeper if core else deeper[1:]})
         if not value:
             self.state['warnings'].append('The organising answer was not usable; works are grouped by screening role.')
+        if not entry:
+            entry = take([n for n, v in kept if v['role'] == 'entry'], 3)
         if not themes:
             themes = [{'name': 'Core literature', 'core': take([n for n, v in kept if v['role'] in ('core', 'entry')], 8),
                        'deeper': take([n for n, v in kept if v['role'] == 'deeper'], 8)}]
@@ -520,8 +612,12 @@ class ReviewRunner(ResearchRunner):
             entry = take([n for n, v in kept if v['role'] == 'entry'], 3)
         self.state['organisation'] = {'orientation': str(value.get('orientation') or '')[:900], 'entry': entry,
                                       'themes': [t for t in themes if t['core'] or t['deeper']],
-                                      'reading_order': self._numbers_to_names(str(value.get('reading_order') or '')[:900]),
+                                      'reading_order': str(value.get('reading_order') or '')[:900],
                                       'gaps': str(value.get('gaps') or '')[:900]}
+        for key in ('orientation', 'reading_order', 'gaps'):
+            self.state['organisation'][key] = self._numbers_to_names(self.state['organisation'][key])
+        for theme in self.state['organisation']['themes']:
+            theme['name'] = self._numbers_to_names(theme['name'])
         self.state['phase'] = 'annotate'
 
     def _note(self, title, text):
@@ -530,8 +626,12 @@ class ReviewRunner(ResearchRunner):
     def _numbers_to_names(self, text):
         def name(match):
             r = self._by_n(int(match.group(1)))
-            if not r:
-                return match.group(0)
+            chosen = self._chosen() if self.state.get('organisation') else None
+            if not r or chosen is not None and r['n'] not in chosen:
+                warning = 'A model comment referred to an unlisted candidate; its unsupported name was omitted.'
+                if warning not in self.state['warnings']:
+                    self.state['warnings'].append(warning)
+                return '[unlisted candidate]'
             return f'{_surname(r["authors"][0]) if r["authors"] else r["title"][:30]} ({r.get("year") or "n.d."})'
         return re.sub(r'#(\d+)', name, text)
 
@@ -555,7 +655,12 @@ class ReviewRunner(ResearchRunner):
             '"fits the theme" or "a core work". Base it on the title, abstract or review shown; do not claim details '
             'they do not state. Add a prerequisite only when the jump is steep.\n\nWORKS:\n' + lines)
         self.emit('notice', f'Annotating {len(batch)} works')
-        value = self._json(self._call('annotate', instruction, cap=2400, format_schema=ANNOTATE_SCHEMA)) or {}
+        try:
+            value = self._json(self._call('annotate', instruction, cap=2400, format_schema=ANNOTATE_SCHEMA)) or {}
+        except ResearchBudget as exc:
+            self.state['warnings'].append('Annotations stopped: ' + str(exc))
+            self.state['phase'] = 'write'
+            return
         for item in value.get('items') or []:
             if isinstance(item, dict) and item.get('n') in batch and str(item.get('why') or '').strip():
                 self.state['annotations'][str(item['n'])] = {'why': str(item['why']),
@@ -576,7 +681,7 @@ class ReviewRunner(ResearchRunner):
         if r.get('doi'):
             parts.append(f'[doi:{r["doi"]}](https://doi.org/{r["doi"]})')
         if r.get('zbl'):
-            parts.append(f'[Zbl {r["zbl"]}]({r.get("url") or "https://zbmath.org/?q=an:" + r["zbl"]})')
+            parts.append(f'[Zbl {r["zbl"]}]({"https://zbmath.org/?q=an:" + r["zbl"]})')
         if not parts and r.get('s2'):
             parts.append(f'[Semantic Scholar]({r.get("url") or "https://www.semanticscholar.org/paper/" + r["s2"]}) (no DOI or arXiv ID found)')
         return ' · '.join(parts)
@@ -587,16 +692,19 @@ class ReviewRunner(ResearchRunner):
             return ''
         names = [' '.join(reversed([x.strip() for x in a.split(',', 1)])) if a.count(',') == 1 else a for a in r['authors']]
         authors = ', '.join(names[:4]) + (' et al.' if len(names) > 4 else '')
-        kind = ('survey/expository' if self._expository(r) and str(r.get('type')) not in ('book', 'book / book article')
-                else 'book' if 'book' in str(r.get('type') or '') else 'preprint' if r.get('arxiv') and not r.get('doi') else 'article')
+        is_book = str(r.get('type') or '').casefold() in ('book', 'book / book article', 'monograph', 'reference-book', 'edited-book')
+        kind = ('book' if is_book else 'survey/expository' if self._expository(r)
+                else 'preprint' if r.get('arxiv') and not r.get('doi') else 'article')
         venue = f'{r["venue"]}. ' if r.get('venue') and 'book' not in kind else ''
         note = self.state['annotations'].get(str(n), {})
         line = f'- **{authors or "Unknown author"} ({r.get("year") or "n.d."}).** *{r["title"]}*. {venue}'
         line += (f'[{kind}] ' if label else '') + f'— {self._identifier(r)}'
         if note.get('why'):
-            line += f' — *Why:* {note["why"]}'
+            line += f' — *Why:* {self._numbers_to_names(note["why"])}'
+            if not (r.get('abstract') or r.get('review')):
+                line += ' (title-based assessment; detailed contents unverified)'
         if note.get('prerequisite'):
-            line += f' *Prerequisite:* {note["prerequisite"]}'
+            line += f' *Prerequisite:* {self._numbers_to_names(note["prerequisite"])}'
         return line
 
     def _compose(self):
@@ -625,10 +733,12 @@ class ReviewRunner(ResearchRunner):
             if o.get('reading_order'):
                 out += ['## Suggested reading order', o['reading_order'], '']
         else:
-            ranked = sorted(s['pool'], key=lambda r: -r.get('score', 0))[:15]
+            ranked = sorted((r for r in s['pool'] if str(r['n']) not in s['screened'] or
+                (s['screened'][str(r['n'])]['role'] != 'exclude' and s['screened'][str(r['n'])]['relevance'] >= 2)),
+                key=lambda r: -r.get('score', 0))[:15]
             out += ['## Candidates found (not organised)',
-                    '*The review stopped before the model organised the list; these are the best-ranked verified records.*']
-            out += [self._entry(r['n']) for r in ranked] + ['']
+                    '*The review stopped before the model organised the list; these are bibliographically verified records; any unscreened candidates have unassessed relevance.*']
+            out += [self._entry(r['n']) + (' (not screened)' if str(r['n']) not in s['screened'] else '') for r in ranked] + ['']
         out += ['## Notes & gaps']
         if o and o.get('gaps'):
             out += [o['gaps'], '']
@@ -647,10 +757,14 @@ class ReviewRunner(ResearchRunner):
         out.append('- Every entry comes from a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as '
                    'returned. Annotations are based on titles, abstracts and zbMATH reviews, not on reading the works; '
                    'MathSciNet and paywalled full texts were not used.')
-        if s['unverified']:
-            out.append('- Remembered by the model but not found in the sources (not listed above; check before using): '
-                       + '; '.join(f'{", ".join(u["authors"]) or "?"}, *{u["title"]}*' + (f' ({u["year"]})' if u["year"] else '')
-                                   for u in s['unverified']) + '.')
+        for checked, label in ((True, 'Remembered by the model but not found in answered searches'),
+                               (False, 'Remembered works not checked because no lookup answered')):
+            works = [u for u in s['unverified'] if u.get('checked', True) == checked]
+            if works:
+                out.append('- ' + label + ' (not listed above): ' + '; '.join(
+                    f'{", ".join(u["authors"]) or "?"}, *{u["title"]}*' +
+                    (f' ({u["year"]})' if u['year'] else '') +
+                    (f' — {u.get("reason")}' if not checked and u.get('reason') else '') for u in works) + '.')
         for warning in dict.fromkeys(s['warnings']):
             out.append(f'- {warning}')
         return '\n'.join(out).strip() + '\n'
@@ -667,9 +781,20 @@ class ReviewRunner(ResearchRunner):
         o, issues = self.state['organisation'], []
         if self.state.get('screen_failed'):
             issues.append(f'{len(self.state["screen_failed"])} candidates could not be screened; generation failures are not relevance exclusions.')
+        pending = set(self.state.get('screen_order', [])) - {int(n) for n in self.state['screened']}
+        if pending:
+            issues.append(f'{len(pending)} of {len(self.state.get("screen_order", []))} candidates were not screened within the budget.')
+        queries = (self.state.get('scope') or {}).get('queries', [])
+        answered = sum(any(row['query'] in (q, q + ' (newest)') and not row['error'] for row in self.state['sweep_log']) for q in queries)
+        if queries and answered < len(queries) / 2:
+            issues.append(f'Only {answered} of {len(queries)} topic queries received an answered search.')
+        for source in set(row['source'] for row in self.state['sweep_log']):
+            rows = [r for r in self.state['sweep_log'] if r['source'] == source]
+            if sum(bool(r['error']) for r in rows) > len(rows) / 2:
+                issues.append(f'Most {source} searches failed; coverage is incomplete.')
         if not o:
-            return ['The list was not organised into entry points and themes.']
-        if not o['entry']:
+            return issues + ['The list was not organised into entry points and themes.']
+        if not o['entry'] and (self.state.get('scope') or {}).get('intent') != 'frontier':
             issues.append('No entry point suitable for a newcomer was found among the candidates.')
         for theme in o['themes']:
             if not theme['core']:
@@ -685,17 +810,17 @@ class ReviewRunner(ResearchRunner):
         return {'phase': self.state['phase'], 'completed': sum(str(n) in entries for n in chosen),
                 'total': len(chosen), 'unit': 'literature items', 'scope': self.state['goal'],
                 'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
-                'resumable': self.state['status'] in ('running', 'paused')}
+                'resumable': self.state['status'] in ('running', 'paused', 'budget_exhausted')}
 
     def _report(self):
         s = self.state
-        text = s.get('draft') or self._compose()
+        text = self._compose()
+        s['draft'] = text
+        self._save()
         header = [f'Status: `{s["status"]}`. Phase: `{s["phase"]}`. Job ID: `{s["id"]}`.', '',
                   s.get('stop_reason', 'The literature review is in progress.'), '']
         footer = ['', '## Search log', '']
         footer += [f'- {e["source"]}: {e["query"]} → ' + (f'error: {e["error"]}' if e['error'] else f'{e["results"]} results')
                    for e in s['sweep_log']] or ['No search was run.']
-        footer += ['', f'Generated tokens charged: {s["tokens_charged"]}/{s["settings"]["max_tokens"]}; input tokens charged: '
-                       f'{s["input_tokens_charged"]}/{s["settings"]["max_input_tokens"]}; elapsed seconds: '
-                       f'{s["seconds_used"]:.1f}/{s["settings"]["max_seconds"]}.', '']
+        footer += ['', usage_footer(s), '']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(header) + text + '\n'.join(footer)))

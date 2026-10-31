@@ -5,8 +5,8 @@ import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Inline, Markdown } from '../components/Markdown'
 import { candidateLook, proofLook, proofResumable, Square, type Variant } from '../components/Square'
 import { ago, bytes, count, duration, plural } from '../format'
-import { go } from '../router'
-import { capacityFull, taskForJob } from '../concurrency'
+import { go, href, useRoute } from '../router'
+import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ReviewBody, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
@@ -38,12 +38,13 @@ function attempts(data: ProofDetail): Attempt[] {
 export function ProofView({ id, tab }: { id: string; tab: string | null }) {
   const tick = useTick(id)
   const app = useApp()
+  const route = useRoute()
   const { data, error } = useLoad(() => api.proof(id), [id, tick])
   const [artifact, setArtifact] = useState<string | null>(null)
   const active = tab || 'work'
   const jobClass = useJobClass()
-  const task = taskForJob(app.snapshot, 'proof', id)?.task
-  const ours = !!task && task.kind === 'proof' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
+  const task = taskForJob(app.snapshot, 'proof', id)?.task || data?.owner_task || (data?.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
+  const ours = !!data?.running && !!task && ['starting', 'running', 'pausing'].includes(task.state)
 
   const focusAttempt = (index: number) => {
     if (active !== 'work') go('prove', id, null)
@@ -86,7 +87,8 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
   const [expanded, setExpanded] = useState(false)
   const app = useApp()
   const busy = capacityFull(app.snapshot, app.status)
-  const ownTask = taskForJob(app.snapshot, 'proof', data.id)?.task
+  const route = useRoute()
+  const ownTask = taskForJob(app.snapshot, 'proof', data.id)?.task || data.owner_task || (data.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const long = data.goal.length > 420
   const resumable = proofResumable(data.status, data.version)
@@ -130,7 +132,8 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
-        {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
+        {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
+        {data.running && !ours && !route.from && ownTask?.kind !== 'chat' && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
       {!ours && busy && resumable && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>

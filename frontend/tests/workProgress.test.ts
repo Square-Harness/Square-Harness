@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { meterDisplay } from '../src/usage.ts'
-import { workProgressText } from '../src/workProgress.ts'
+import { workProgressText, PHASES } from '../src/workProgress.ts'
 import type { WorkProgress } from '../src/api.ts'
 
 const progress: WorkProgress = {
@@ -30,4 +30,11 @@ test('saved work distinguishes pause, failure, and finished coverage', () => {
   assert.equal(workProgressText(progress, 'paused'), 'Paused. 3 of 8 reading parts finished; 5 pending.')
   assert.equal(workProgressText(progress, 'failed'), 'Work stopped. 3 of 8 reading parts finished; 5 pending.')
   assert.equal(workProgressText({ ...progress, completed: 8 }, 'reviewed'), '8 of 8 reading parts finished.')
+})
+
+test('every review and reading-list phase has a meaningful running label', () => {
+  for (const phase of ['extract', 'pick', 'check', 'verify', 'fix', 'literature', 'scope', 'read', 'sweep', 'graph', 'screen', 'organise', 'annotate', 'write', 'done']) {
+    assert.ok(PHASES[phase], phase)
+    assert.notEqual(workProgressText({ phase, total: 0, completed: 0, unit: '', scope: '', partial: false }, 'running', true), 'Working…')
+  }
 })

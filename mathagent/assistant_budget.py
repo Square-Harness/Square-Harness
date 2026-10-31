@@ -26,8 +26,9 @@ class _Pool:
 class BudgetClient:
     def __init__(self, client, *, state=None, max_tokens=None, max_input_tokens=None,
                  max_seconds=900, checkpoint=lambda: None, concurrency=2, pool=None,
-                 allowance=None, usage=None, adaptive_limits=None):
+                 allowance=None, usage=None, adaptive_limits=None, deadline=None):
         self.client = client
+        self.deadline = deadline
         budget = dict(state or {'tokens': 0, 'input_tokens': 0, 'seconds': 0,
                                'max_tokens': max_tokens, 'max_input_tokens': max_input_tokens,
                                'max_seconds': max_seconds})
@@ -56,6 +57,14 @@ class BudgetClient:
         return getattr(self.client, name)
 
     @property
+    def thinking_budget_policy(self):
+        return getattr(self.client, 'thinking_budget_policy', {})
+
+    @thinking_budget_policy.setter
+    def thinking_budget_policy(self, value):
+        self.client.thinking_budget_policy = value
+
+    @property
     def timeout(self):
         return self.client.timeout
 
@@ -63,8 +72,9 @@ class BudgetClient:
     def timeout(self, value):
         self.client.timeout = value
 
-    def fork(self, client, *, allowance, usage):
-        return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage)
+    def fork(self, client, *, allowance, usage, max_seconds=None):
+        deadline = None if max_seconds is None else time.monotonic() + max_seconds
+        return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage, deadline=deadline)
 
     def ensure_limits(self, **requested):
         """Promote only saved adaptive limits; explicit caps and usage never change."""
@@ -87,7 +97,10 @@ class BudgetClient:
 
     @property
     def remaining_seconds(self):
-        return max(0, self.pool.state['max_seconds'] - self.snapshot()['seconds'])
+        remaining = self.pool.state['max_seconds'] - self.snapshot()['seconds']
+        if self.deadline is not None:
+            remaining = min(remaining, self.deadline - time.monotonic())
+        return max(0, remaining)
 
     def snapshot(self):
         with self.pool.lock:

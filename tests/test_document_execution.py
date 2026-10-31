@@ -204,7 +204,7 @@ class DocumentExecutionTests(ReviewTestCase):
         self.assertIsNone(runner._clean_explanation(value, segment=[[4, 4]]))
         self.assertTrue(any('instead of changing its citation' in w for w in runner.state['warnings']))
 
-    def test_scope_preserves_all_selected_setting_lines_in_check_packets(self):
+    def test_oversized_notation_is_bounded_and_review_is_explicitly_partial(self):
         from tests.test_review import PAPER
         setting = '\n'.join('Setting assumption ' + str(i) + '.' for i in range(1, 151))
         text = PAPER.replace('\\begin{document}', '\\begin{document}\n' + setting + '\nLATE_UNIFORM_HYPOTHESIS')
@@ -214,12 +214,14 @@ class DocumentExecutionTests(ReviewTestCase):
         client.count_input_tokens = lambda payload: 1000
         runner = JournalRunner(self.agent(client, ctx=40960))
         result = runner.start('Review this paper.', source_files=['paper.tex'], max_rounds=1)
-        self.assertEqual(result['status'], 'reviewed', result)
-        self.assertEqual(runner.state['scope']['notation'], [[1, len(text.splitlines())]])
+        self.assertEqual(result['status'], 'partial', result)
+        self.assertEqual(runner.state['scope']['notation'], [[1, 60]])
+        self.assertTrue(runner.state['scope_incomplete'])
+        self.assertIn('(provisional)', result['report'])
         check_packets = [r['messages'][1]['content'] for r in client.requests
                          if 'SETTING AND NOTATION OF THE MANUSCRIPT' in r['messages'][1]['content']]
         self.assertTrue(check_packets)
-        self.assertTrue(all('LATE_UNIFORM_HYPOTHESIS' in prompt for prompt in check_packets))
+        self.assertTrue(any('Setting and notation ranges were bounded' in w for w in runner.state['warnings']))
 
     def test_unknown_finish_or_missing_usage_cannot_be_a_usable_explanation(self):
         for stats in ({'eval_count': 50, 'prompt_eval_count': 200},

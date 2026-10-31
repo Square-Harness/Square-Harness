@@ -1,4 +1,4 @@
-"""Prompts and JSON schemas of the three review kinds: quick check, journal report, explanation.
+"""Prompts and JSON schemas of the four review kinds: quick check, paper review, detailed review, explanation.
 
 Kept apart from proof_policy.py on purpose: that file's hash is part of every saved
 proof's provenance, so it is imported here, never edited for the review.
@@ -261,7 +261,8 @@ the literature evidence listed (say when novelty could not be assessed). correct
 the checks actually done and states what was not checked. presentation: overall quality of writing. recommendation and
 reasons: accept, minor_revision, major_revision or reject, justified by the comments; use no_recommendation when the
 review covered too little to decide. confidential: a short note to the editor only (e.g. confidence of this review,
-parts not examined, possible conflicts with the literature)."""
+parts not examined, possible conflicts with the literature). A recommendation must be provisional when
+main_results_without_located_proof is nonempty; explicitly identify these unchecked main results."""
 
 NO_PROOFS_NOTE = """This review did not check the proofs: there are no numbered major or minor comments, so never write
 "Major 1" or "Minor 2"; the typos and presentation comments are listed separately by line. Base the

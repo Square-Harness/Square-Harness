@@ -33,7 +33,7 @@ from ..review import ReviewBase, runner_class as review_runner, runner_for_state
 from ..research import ResearchRunner
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
-from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT
+from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT, MAIN_PREDICT
 from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
@@ -431,6 +431,14 @@ class Hub:
             with self._lock:
                 task.state, task.error = 'error', f'{type(exc).__name__}: {exc}'
         finally:
+            if task.error and task.kind == 'chat':
+                try:
+                    chat = store.load_chat(self.root, task.target)
+                    last = chat['transcript'][-1] if chat['transcript'] else {}
+                    if last.get('role') != 'notice' or not (task.error in last.get('content', '') or last.get('content', '') in task.error):
+                        self._discarded(task.target, '', AgentError(task.error))
+                except (ValueError, OSError, store.NotFound):
+                    pass
             task.finished = time.time()
             task.ready.set()
             self._publish_task(task)
@@ -574,7 +582,7 @@ class Hub:
     def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
         args = self.args
         library = LiteratureTools(self.root, online=self.online(online),
-                                  max_requests=args.research_requests, max_chars=args.research_chars)
+                                  max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root))
         client_class = INTERRUPTIBLE[args.backend]
@@ -721,12 +729,15 @@ class Hub:
         budgets = self._research_budgets(**limits)
         online = self.online(online)
         variant = (variant or 'review') if kind == 'referee' else None
+        if budgets['max_requests'] is None and kind != 'literature':
+            budgets['max_requests'] = 12
 
         def work(task):
             agent, _ = self._engine(task, mode=kind, online=online)
             self._ensure_model(agent)
             if kind == 'literature':  # a verified, themed reading list
                 runner = ReviewRunner(agent)
+                runner.cancel = task.cancel
                 runner.emit = self._job_emit(task, runner, 'research')
                 return runner.start(goal, source_files=list(source_files), **budgets)
             runner = review_runner(variant)(agent, concurrency=self.review_concurrency())
@@ -738,6 +749,8 @@ class Hub:
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
                       notes='', output='', queue=False, on_update=None, **limits):
         budgets = self._research_budgets(**limits)
+        if budgets['max_requests'] is None:
+            budgets['max_requests'] = 12
         texts = store.load_template(self.base, template) if template else []
         if save_template:
             store.save_template(self.base, Workspace(self.root), save_template, list(template_files))
@@ -752,7 +765,7 @@ class Hub:
                                 template_texts=texts, notes=notes, output=output, **budgets)
         return self._started(self._begin('research', None, LABELS['writeup'], goal, work, queue=queue, on_update=on_update))
 
-    def resume_research(self, job_id, queue=False):
+    def resume_research(self, job_id, queue=False, additional_seconds=0):
         state = store.research_state(self.root, job_id)
         runner_class = (WriteupRunner if state['kind'] == 'writeup' else
                         ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else runner_for_state(state))
@@ -763,8 +776,9 @@ class Hub:
             agent, _ = self._engine(task, mode=state['kind'], online=online)
             runner = (runner_class(agent, concurrency=self.review_concurrency()) if issubclass(runner_class, ReviewBase)
                       else runner_class(agent))
+            runner.cancel = task.cancel
             runner.emit = self._job_emit(task, runner, 'research')
-            return runner.resume(job_id)
+            return runner.resume(job_id, additional_seconds=additional_seconds)
         label = VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup'])
         task = self._begin('research', job_id, label, state['goal'], work, queue=queue)
         task.ready.set()
@@ -781,7 +795,10 @@ class Hub:
         mode = mode or session['mode']
         if mode not in ('critic', 'explore'):
             raise ValueError('Conversation turns use the critic or explore mode')
-        files = self.check_files(conversation_sources(content, list(files), session['transcript']))
+        selected = conversation_sources(content, list(files), session['transcript'])
+        if not files:
+            selected = [name for name in selected if (self.root / name).is_file()]
+        files = self.check_files(selected)
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(files)) if files else '')
 
         def work(task):
@@ -862,6 +879,11 @@ class Hub:
             agent, _ = self._engine(task, mode='critic', think=fresh['settings'].get('think'),
                                     online=fresh['settings'].get('online', False) and not self.online_locked)
             self._ensure_model(agent)
+            agent.predict = MAIN_PREDICT
+            agent.workspace.pin_files([name for item in fresh['transcript'] if item.get('role') == 'user' for name in item.get('files', []) if (self.root / name).is_file()])
+            agent.workspace.readable = set()
+            schemas = agent.workspace.schemas
+            agent.workspace.schemas = lambda: [schema for schema in schemas() if schema['function']['name'] not in ('list_files', 'write_file', 'run_python')]
             capture = ChatCapture(self, task, chat_id, agent)
             try:
                 result = agent.run('Audit this proposed answer. Re-read relevant files if needed.\n'
@@ -888,8 +910,8 @@ class Hub:
 
     # -- Assistant: bounded main agent and existing workers -----------------
 
-    def route(self, chat_id, content, files=(), *, required_mode=None):
-        return self._assistant_turn(chat_id, content, files, required_mode=required_mode)
+    def route(self, chat_id, content, files=(), *, required_mode=None, required_effort=None):
+        return self._assistant_turn(chat_id, content, files, required_mode=required_mode, required_effort=required_effort)
 
     def resume_assistant(self, chat_id):
         chat = store.load_chat(self.root, chat_id)
@@ -898,13 +920,27 @@ class Hub:
             raise ValueError('This Assistant turn is not paused or recoverable.')
         return self._assistant_turn(chat_id, state['query'], state.get('files', ()), resume=True)
 
-    def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None):
+    def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None, required_effort=None):
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
             raise ValueError('Only Assistant conversations orchestrate workers.')
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters.')
-        files = self.check_files(conversation_sources(content, list(files), chat['transcript']) if not resume else list(files))
+        selected = conversation_sources(content, list(files), chat['transcript']) if not resume else list(files)
+        if not files and not resume:
+            selected = [name for name in selected if (self.root / name).is_file()]
+        try:
+            files = self.check_files(selected)
+        except (ValueError, OSError) as exc:
+            if resume:
+                failed = chat.get('assistant_state') or {}
+                failed['status'] = 'failed'
+                failed.setdefault('warnings', []).append(str(exc))
+                store.save_assistant(self.root, chat_id, failed)
+                store.append_items(self.root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc),
+                    'discarded': True, 'time': store._now()}])
+                self.bus.publish('chat_saved', chat=chat_id)
+            raise
         saved = chat.get('assistant_state') or {}
         with self._lock:
             store.load_chat(self.root, chat_id)
@@ -925,7 +961,7 @@ class Hub:
         if not resume:
             self.bus.publish('chat_saved', chat=chat_id)
 
-        def work(task):
+        def run_turn(task):
             fresh = store.load_chat(root, chat_id)
             previous = fresh.get('assistant_state') if resume else None
             online = bool(fresh['settings'].get('online')) and not self.online_locked
@@ -953,11 +989,11 @@ class Hub:
                     self.bus.publish('chat_saved', chat=chat_id)
 
             concurrency = getattr(self.args, 'assistant_concurrency', 2) if self.args.backend == 'openai' else 1
-            maximum = effort.EFFORTS['poincare']
             configured = {key: getattr(self.args, argument, None) for key, argument in (
                 ('max_tokens', 'assistant_tokens'), ('max_input_tokens', 'assistant_input_tokens'),
                 ('max_seconds', 'assistant_seconds'))}
-            adaptive = {'max_seconds': maximum['minutes'] * 60} if configured['max_seconds'] is None else {}
+            adaptive_seconds = max(effort.level(mode, 'poincare')['minutes'] * 60 for mode in JOB_MODES) + 300
+            adaptive = {'max_seconds': adaptive_seconds} if configured['max_seconds'] is None else {}
             budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
                                   max_tokens=configured['max_tokens'],
                                   max_input_tokens=configured['max_input_tokens'],
@@ -980,12 +1016,14 @@ class Hub:
                     capture.emit('notice', message)
                 elif kind != 'result':
                     capture.emit(kind, value)
+                    if kind == 'end' and parent is not None and capture.calls:
+                        capture.calls[-1]['discarded'] = (parent.state.get('last_call') or {}).get('status') == 'invalid_tool_call'
             parent = ModeOrchestrator(main, lambda action, child, save: self._assistant_worker(
                 task, root, chat_id, parent, budget, action, child, save, online, checkpoint_lock),
                 emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
                 max_actions=previous['limits']['actions'] if previous else DEFAULT_ACTIONS,
                 max_children=previous['limits']['children'] if previous else None,
-                required_mode=required_mode)
+                required_mode=required_mode, required_effort=required_effort or (previous or {}).get('required_effort'))
             checkpoint_lock = parent._state_lock
             history = fresh['history']
             if not history:
@@ -1007,7 +1045,7 @@ class Hub:
                 parent.state['status'] = 'budget_exhausted' if exhausted else 'failed' if permanent else 'interrupted'
                 parent.state.setdefault('warnings', []).append(str(exc))
                 checkpoint()
-                store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc), 'time': store._now()}])
+                store.append_items(root, chat_id, [{'role': 'notice', 'content': ('Not added to the conversation: ' if exhausted or permanent else '') + str(exc), 'discarded': exhausted or permanent, 'time': store._now()}])
                 self.bus.publish('chat_saved', chat=chat_id)
                 if exhausted or permanent:
                     return {'status': parent.state['status'], 'answer': ''}
@@ -1023,6 +1061,25 @@ class Hub:
             checkpoint()
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': result['status'], 'answer': result.get('answer', '')}
+
+        def work(task):
+            try:
+                return run_turn(task)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                fresh = store.load_chat(root, chat_id)
+                state = fresh.get('assistant_state')
+                if state and state.get('status') == 'interrupted':
+                    raise
+                if state:
+                    state['status'] = 'failed'
+                    state.setdefault('warnings', []).append(str(exc))
+                    store.save_assistant(root, chat_id, state)
+                store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc),
+                    'discarded': True, 'time': store._now()}])
+                self.bus.publish('chat_saved', chat=chat_id)
+                raise
 
         live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'free'}
         try:
@@ -1051,7 +1108,8 @@ class Hub:
             pending = [c for c in parent.state['children'] if c.get('status') != 'complete' and 'allocation' not in c]
             if pending:
                 levels = [effort.level(c['action']['mode'], c['action']['effort']) for c in pending]
-                budget.ensure_limits(max_seconds=max(l['minutes'] * 60 for l in levels))
+                worker_seconds = max(l['minutes'] * 60 for l in levels)
+                budget.ensure_limits(max_seconds=worker_seconds + min(300, 0.1 * worker_seconds))
                 parent.agent.workspace.literature.deadline = time.monotonic() + budget.remaining_seconds
                 # Leave room for synthesis and one empty-answer recovery. Workers
                 # share what remains in proportion to their requested effort.
@@ -1084,9 +1142,10 @@ class Hub:
             agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] not in ('write_file', 'run_python')]
             if action['effort'] == 'low':
                 agent.think = False
-        agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'])
         level = effort.level(mode, action['effort'])
-        seconds = min(level['minutes'] * 60, budget.remaining_seconds)
+        reserve = min(300, 0.1 * budget.pool.state['max_seconds'])
+        seconds = max(0.1, min(level['minutes'] * 60, budget.remaining_seconds - reserve))
+        agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds)
         input_limit = budget.pool.state['max_input_tokens']
         configured_input = getattr(self.args, 'research_input_tokens', None)
         if configured_input is not None:
@@ -1117,8 +1176,7 @@ class Hub:
             agent.workspace.checker = nested_checker(agent, emit)
         try:
             if mode == 'prove':
-                if any(f.lower().endswith('.pdf') for f in files):
-                    raise ValueError('The proof worker needs text sources. Read the required PDF passages before delegating the precise statement.')
+                files = [f for f in files if not f.lower().endswith('.pdf')]
                 runner = ProofRunner(agent, emit)
                 if child.get('job_id'):
                     result = runner.resume(child['job_id'])
@@ -1132,7 +1190,8 @@ class Hub:
                         verify = max(128, min(verify, allocation - solve))
                     repair = min(solve, self.args.proof_repair_tokens or solve)
                     minimum = min(repair, self.args.proof_min_solve_tokens or 128)
-                    result = runner.start(goal, source_files=files, max_rounds=level['tries'],
+                    result = runner.start(action['request'],
+                        reference_context=context, source_files=files, max_rounds=level['tries'],
                         max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
                         verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
                         verify_temperature=self.args.proof_verify_temperature)
@@ -1143,7 +1202,7 @@ class Hub:
                           'artifact': str(Path(result['proof_path']).relative_to(root))}
             elif mode == 'check':
                 # A quick verified lookup: its own small budgets (refcheck.EFFORTS), capped by
-                # this worker's share. It sees only the objective, so its queries stay public words.
+                # this worker's share. Reference context preserves the hypotheses; public queries must omit private source text.
                 runner = CheckRunner(agent, emit)
                 if child.get('job_id'):
                     result = runner.resume(child['job_id'])
@@ -1155,7 +1214,7 @@ class Hub:
                         lookup='precise' if precise_reference_request(parent.state['query']) else 'standard',
                         max_tokens=allocation,
                         max_input_tokens=input_limit,
-                        max_seconds=max(0.1, min(check['seconds'], budget.remaining_seconds)))
+                        max_seconds=max(0.1, min(check['seconds'], seconds)))
                 status = result['status']
                 references = json.loads(runner.result_for_agent())
                 outcome = {'answered': 'Reference confirmed; see the answer.',
@@ -1173,9 +1232,10 @@ class Hub:
                     result['disposition'] = 'answer_with_qualification'
             elif mode in ('literature', 'writeup') or mode in REVIEW_MODES:
                 # Literature is the verified reading-list pipeline; the exact conversation sets its scope.
-                # Review variants run one call at a time here: the Assistant already shares its budget.
+                # Independent review calls use the same bounded global inference pool.
                 runner = (WriteupRunner(agent, emit) if mode == 'writeup' else ReviewRunner(agent, emit) if mode == 'literature'
-                          else review_runner(REVIEW_MODES[mode])(agent, emit))
+                          else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=self.review_concurrency()))
+                runner.cancel = task.cancel
                 if child.get('job_id'):
                     result = runner.resume(child['job_id'])
                 else:
@@ -1184,6 +1244,12 @@ class Hub:
                         max_seconds=max(0.1, seconds), max_requests=level['requests'], max_chars=level['chars'])
                     if mode == 'literature':
                         kwargs['kind'] = mode
+                    elif mode == 'writeup':
+                        templates = [f for f in files if Path(f).suffix.lower() in ('.sty', '.cls', '.bib') or
+                                     (f.lower().endswith('.tex') and '\\begin{document}' in agent.workspace.text(agent.workspace.path(f)))]
+                        kwargs['template_files'] = templates
+                        kwargs['source_files'] = [f for f in files if f not in templates]
+                        kwargs['notes'] = context['query'] if not kwargs['source_files'] else ''
                     result = runner.start(action['request'], reference_context=context, **kwargs)
                 verdict = (runner.state or {}).get('verdict')
                 outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
@@ -1229,10 +1295,17 @@ class Hub:
                 if article_overview:
                     result['source_excerpt'] = child['source_overview']
                 outcome = 'Worker finished.' if complete else 'Worker reached its output limit.'
-            if task.cancel.is_set() or result['status'] == 'paused':
+            if result['status'] == 'paused' and not task.cancel.is_set():
+                result['status'] = 'partial'
+                result.setdefault('warnings', []).append('The worker stopped early; its saved job can be resumed.')
+            if task.cancel.is_set():
                 store.update_item(root, chat_id, index, status='stopped', outcome='Paused; work is saved.')
                 save()
                 raise KeyboardInterrupt
+            with state_lock:
+                child.pop('progress', None)
+                parent.state.pop('progress', None)
+                save()
             store.update_item(root, chat_id, index, status='done', outcome=outcome,
                               error=(result.get('error') or {}).get('message'),
                               job_id=result['job_id'] if mode not in ('critic', 'explore') else None)

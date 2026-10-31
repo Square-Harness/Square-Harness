@@ -41,7 +41,7 @@ class ReadingStatusTests(ReviewTestCase):
 
     def test_one_failed_part_preserves_successful_coverage(self):
         def read(prompt, schema):
-            if '\nL1:' in prompt:
+            if '\nL5:' in prompt:
                 return 'bad answer'
             return {'summary': 'This part introduces the setting and presents its result.', 'comments': []}
         client = FakeClient({'read': read})

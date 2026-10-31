@@ -46,7 +46,10 @@ class MLX(OpenAICompatible):
             instruction = 'Return only a JSON object in the final answer, without Markdown fences.'
             if isinstance(schema, dict):
                 instruction += ' It must match this JSON schema: ' + json.dumps(schema, ensure_ascii=False)
-            data['messages'].append({'role': 'user', 'content': instruction})
+            if data['messages'] and data['messages'][-1]['role'] == 'user' and isinstance(data['messages'][-1].get('content'), str):
+                data['messages'][-1] = {**data['messages'][-1], 'content': data['messages'][-1]['content'] + '\n\n' + instruction}
+            else:
+                data['messages'].append({'role': 'user', 'content': instruction})
         return data
 
     def count_input_tokens(self, payload):

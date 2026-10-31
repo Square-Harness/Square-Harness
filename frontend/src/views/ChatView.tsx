@@ -5,10 +5,10 @@ import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, ErrorNote, Loading, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
-import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
+import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
-import { callPayload, type ModeCall } from '../modeCalls'
+import { callPayload, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -23,7 +23,7 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Reference check for citations, Literature for reading lists, Quick review to check a proof, Review and Detailed review for manuscripts, Explain for a result and its proof, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
+    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Literature check for citations, Literature for reading lists, Quick review to check a proof, Review and Detailed review for manuscripts, Explain for a result and its proof, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
       'Find a reference on the $H^2$ regularity of elliptic problems with Neumann boundary conditions.',
@@ -64,7 +64,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check'
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
   writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
 }
-const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
+const kindOf = (mode: RouteMode | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook.
@@ -91,9 +91,15 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const routing = work.routing
   const [draft, setDraft] = useState('')
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
+  const [selectedEffort, setSelectedEffort] = useState<EffortLevel>('medium')
+  const selectCall = (next: ModeCall | null) => {
+    if (next?.mode !== selectedCall?.mode) setSelectedEffort(next?.mode === 'detailed_review' ? 'high' : 'medium')
+    setSelectedCall(next)
+  }
   const [attachments, setAttachments] = useState<string[]>([])
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
+  const createdChat = useRef<string | null>(null)
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
   // Online search is on for new conversations unless the interface was launched --offline.
@@ -103,7 +109,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const pinned = useRef(true)
 
   useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]))
-  useEffect(() => { if (data) { setThink(data.settings.think); setOnline(!!data.settings.online) } }, [data])
+  useEffect(() => { if (data) { setThink(data.settings.think); setOnline(!!data.settings.online) } }, [data?.id])
 
   // Follow new output while the reader is at the bottom; never yank them back up.
   const liveSize = live ? live.steps.reduce((n, step) => n + (step.type === 'call' ? step.text.length + step.thinking.length : 1), 0) : 0
@@ -117,14 +123,14 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
     const raw = text ?? draft
-    const modeCall = free && text === undefined ? callPayload(raw, selectedCall) : undefined
+    const modeCall = free && text === undefined ? callPayload(raw, selectedCall, selectedEffort) : undefined
     const content = modeCall ? raw : raw.trim()
     if (!content.trim() || sending || resuming || paused || work.blocked) return
     setSending(true)
     setSendError('')
     try {
-      let chatId = id
-      if (!chatId) chatId = (await api.createChat(mode, think, locked ? undefined : online)).id
+      let chatId = id || createdChat.current
+      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : online)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall)
       else await api.send(chatId, content, attachments)
       setDraft('')
@@ -156,6 +162,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
+  const taskError = app.snapshot.task?.target === id && app.snapshot.task.state === 'error' ? app.snapshot.task.error : ''
   const transcript = data?.transcript || []
   const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route')
   const canReview = !!id && !work.blocked && !paused && !sending && !resuming && !!last && last.role === 'assistant' && !!last.content
@@ -210,7 +217,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           </div>
         )}
         <div className="composer-box">
-          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={setSelectedCall}
+          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
             onSend={() => { send() }} disabled={blocked || sending || resuming} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -231,7 +238,14 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           )}
         </div>
         <div className="composer-bar">
-          {free ? <span className="muted small" title="Short questions get a direct answer; harder tasks receive more effort as needed.">Adaptive effort</span>
+          {free ? validCall(draft, selectedCall) ? (
+            <label className="composer-effort">Effort
+              <select aria-label="Effort for selected mode" value={selectedEffort} disabled={blocked || sending || resuming}
+                onChange={(event) => setSelectedEffort(event.target.value as EffortLevel)}>
+                {EFFORTS.map((effort) => <option key={effort.id} value={effort.id}>{effort.label}</option>)}
+              </select>
+            </label>
+          ) : <span className="muted small" title="Short questions get a direct answer; harder tasks receive more effort as needed.">Adaptive effort</span>
             : <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           <span title={locked ? 'Launched with --offline: online search stays off' : online ? 'Search queries leave this computer' : 'Local and cached sources only'}>
             <Toggle label="Search online" checked={online && !locked} onChange={changeOnline} disabled={locked} />
@@ -258,7 +272,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         </div>
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
-        <ErrorNote>{sendError}</ErrorNote>
+        <ErrorNote>{sendError || taskError}</ErrorNote>
       </form>
     </div>
   )
@@ -275,7 +289,7 @@ function Intro({ mode, onPick }: { mode: ChatMode; onPick: (text: string) => voi
         {mode === 'free' && <p className="lede">
           To force a worker, type <code>@</code> anywhere in your prompt and confirm a choice in the popup.
           The available calls are <code>@prove</code>, <code>@check</code>, <code>@literature</code>, <code>@quick_review</code>,
-          {' '}<code>@referee</code> (a review), <code>@detailed_review</code> and <code>@explain</code>.
+          {' '}<code>@referee</code> (a review), <code>@detailed_review</code>, <code>@explain</code>, <code>@writeup</code>, <code>@critic</code> and <code>@explore</code>.
           Unconfirmed <code>@</code> text stays part of your message.
         </p>}
         <div className="examples">

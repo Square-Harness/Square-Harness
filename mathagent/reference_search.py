@@ -3,6 +3,8 @@ import copy
 import json
 import re
 
+from .jsonutil import loads
+
 
 class StandardReferenceSearch:
     def _standard_recall_instruction(self):
@@ -50,7 +52,7 @@ class StandardReferenceSearch:
         if wanted == 'any' and candidate:
             wanted = candidate.get('source_type', 'unknown')
         if wanted == 'book':
-            return 'book' in kind and not any(part in kind for part in ('review', 'chapter', 'section', 'part', 'track'))
+            return kind in ('book', 'monograph', 'reference-book', 'edited-book', 'book / book article')
         if wanted == 'article':
             return ('article' in kind or 'arxiv' in str(record.get('identifier')) or
                     kind in ('preprint', 'posted-content')) and 'book' not in kind
@@ -67,7 +69,7 @@ class StandardReferenceSearch:
             if provider and value.get('error'):
                 error = str(value['error'])
                 # A missing work is not a provider outage.
-                if re.search(r'timeout|timed out|HTTP (?:429|50[0-9])|unavailable|resolve|reach|network|operation failed', error, re.I):
+                if re.search(r'timeout|timed out|HTTP (?:429|50[0-9])|rate limited|unavailable|resolve|reach|network|operation failed', error, re.I):
                     failed[provider] = error
         return failed
 
@@ -129,8 +131,6 @@ class StandardReferenceSearch:
 
     def _standard_verify(self):
         s = self.state
-        if self.literature and self.literature.online:
-            s.setdefault('standard_selection_done', True)
         if s['pending_tools']:
             self._execute_pending()
             self._tag(s['current'])
@@ -257,15 +257,16 @@ class StandardReferenceSearch:
             'A truncated abstract/review is partial evidence; do not infer absent content. '
             'Never name, recommend or allude to any work outside these records, including in unresolved, '
             'reason or limitations. Unresolved describes missing mathematical scope only, not other references.')
-        result = self._call('reference_select', instruction, cap=3200, think=True)
+        result = self._call('reference_select', instruction, cap=1800, think=False)
         try:
-            value = json.loads(result['text'])
+            value = loads(result['text'])
         except (ValueError, TypeError):
             value = {}
         items = value.get('selections') if isinstance(value, dict) else None
         if not isinstance(items, list):
             self.state['warnings'].append('The relevance selection was unusable; no unseen source was substituted.')
-            items = []
+            s['phase'] = 'answer'
+            return
         known = {item['id']: item for item in pool}
         selected = []
         previous = [candidate for candidate in s['candidates'] if candidate.get('selected')]
@@ -308,6 +309,7 @@ class StandardReferenceSearch:
                 candidate['suitability']['limitations'] = 'Only bibliographic metadata was available; exact assumptions and coverage remain unchecked.'
             selected.append(item['id'])
         s['standard_selection_done'] = True
+        s['standard_selection_usable'] = True
         s['standard_unresolved'] = str(value.get('unresolved') or '')[:1200] if isinstance(value, dict) else ''
         partial = any(candidate.get('selected') and candidate.get('suitability', {}).get('coverage') == 'partial'
                       for candidate in s['candidates'])
@@ -315,14 +317,14 @@ class StandardReferenceSearch:
         if selected and needs_more and s['standard_selection_calls'] < 3 and not s.get('standard_discovery_continued'):
             if s.get('standard_discovery_stage', 0):
                 s['standard_discovery_continued'] = True
-                s['standard_pool'] = [source for source in pool if
-                    source.get('candidate_index') is not None and
-                    s['candidates'][source['candidate_index']].get('selected')]
+                retained = [source for source in pool if source.get('candidate_index') is not None
+                            and s['candidates'][source['candidate_index']].get('selected')]
+                s.setdefault('standard_record_archive', []).extend(source for source in pool if source not in retained)
+                s['standard_pool'] = retained
             s['phase'] = 'standard_discover'
         elif selected:
             s['phase'] = 'answer'
         elif s['standard_selection_calls'] < 3 and not s.get('standard_discovery_continued'):
-            s['standard_pool'] = []
             if s.get('standard_discovery_stage', 0):
                 s['standard_discovery_continued'] = True
             s['phase'] = 'standard_discover'
@@ -333,6 +335,9 @@ class StandardReferenceSearch:
     def _compose_standard(self):
         from .refcheck import describe, _fold
         chosen = self.chosen()
+        status = self.state.get('status', 'running')
+        stopped = ('The check stopped early: ' + self.state.get('stop_reason', status) + '\n\n'
+                   if status not in ('answered', 'partial', 'running') else '')
         if not chosen:
             out = ['No suitable scholarly reference was confirmed in this bounded search.']
             if self.state.get('standard_unresolved'):
@@ -341,7 +346,7 @@ class StandardReferenceSearch:
             if failures:
                 out.append('Unavailable sources: ' + '; '.join(provider + ': ' + error for provider, error in failures.items()) + '.')
             out.append('The search log retains the attempted candidates and queries; an unchecked title or Wikipedia page was not substituted.')
-            return '\n\n'.join(out)
+            return stopped + '\n\n'.join(out)
         out = []
         for index, candidate in enumerate(chosen, 1):
             verdict = candidate['verdict']
@@ -350,7 +355,7 @@ class StandardReferenceSearch:
             heading = 'Suggested standard reference: ' if len(chosen) == 1 else str(index) + '. Suggested reference: '
             out.append(heading + '**' + describe(source) + '**.')
             if not record:
-                out.append('Unverified suggestion from model recall; the bibliographic lookup did not confirm this work.')
+                out.append('Unverified suggestion from model recall; no bibliographic record was confirmed' + (' by the lookup.' if self.state['settings'].get('online') else ' (online search was disabled).'))
                 continue
             normal = lambda title: re.findall(r'\w+', _fold(title))
             if normal(record['title']) != normal(candidate['title']):
@@ -364,6 +369,8 @@ class StandardReferenceSearch:
                 out.append('Relevance assessment from the indexed description: ' + suitability['reason'])
                 if record.get('description_source_url') and record['description_source_url'] != record.get('url'):
                     out.append('Indexed description source: ' + record['description_source_url'])
+            elif not suitability:
+                out.append('The bibliographic record was located; relevance was not assessed before the check stopped.')
             elif suitability:
                 out.append('Relevance is a lead based on the title and bibliographic metadata; detailed coverage remains unverified.')
             if suitability.get('limitations'):
@@ -381,4 +388,4 @@ class StandardReferenceSearch:
             out.append('Part of the requested scope remains unconfirmed; see the source-specific limits above.')
         if any(candidate['verdict'].get('record') for candidate in chosen):
             out.append('Bibliographic identity was checked for the linked records. Exact theorem statements, locations and hypotheses were not verified in the full text.')
-        return '\n\n'.join(out)
+        return stopped + '\n\n'.join(out)

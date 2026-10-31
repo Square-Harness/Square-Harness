@@ -70,7 +70,7 @@ class ProofCoverageTests(ReviewTestCase):
 
     def test_budget_skips_are_counted_even_when_many_early_chunks_succeeded(self):
         def affordable(runner, cap, input_tokens, **kwargs):
-            return cap <= 3 * runner._check_cap()
+            return kwargs.get('jobs', 1) <= 3
         with patch.object(QuickReviewRunner, '_affordable', affordable):
             runner, result, _ = self.quick()
         coverage = runner._check_coverage(runner.state['unit']['id'])

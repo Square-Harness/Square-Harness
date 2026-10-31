@@ -1,6 +1,7 @@
 """Native Ollama HTTP client and bounded, backend-independent agent loop."""
 import copy
 import json
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
@@ -41,18 +42,30 @@ class Ollama:
             raise AgentError(f'Cannot reach Ollama at {self.host}: {e}. Check ollama serve.') from e
 
     def models(self):
-        with self.request('/api/tags') as response:
-            return [m['name'] for m in json.load(response).get('models', [])]
+        try:
+            with self.request('/api/tags') as response:
+                result = json.load(response)
+                models = [m['name'] for m in result['models']]
+                if any(not isinstance(name, str) for name in models):
+                    raise ValueError('Invalid model name')
+                return models
+        except (OSError, HTTPException, ValueError, TypeError, KeyError) as exc:
+            raise AgentError('Malformed or interrupted Ollama model-list response') from exc
 
     def stream(self, payload):
-        with self.request('/api/chat', payload) as response:
-            for line in response:
-                if not line.strip():
-                    continue
-                event = json.loads(line)
-                if 'error' in event:
-                    raise AgentError(str(event['error']))
-                yield event
+        try:
+            with self.request('/api/chat', payload) as response:
+                for line in response:
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError('Model event must be an object')
+                    if 'error' in event:
+                        raise AgentError(str(event['error']))
+                    yield event
+        except (OSError, HTTPException, ValueError, TypeError) as exc:
+            raise AgentError('Malformed or interrupted Ollama stream: ' + str(exc)) from exc
 
 
 class Agent:
@@ -85,8 +98,7 @@ class Agent:
             # The complete native request is counted, including tool schemas.
             # Context fitting adjusts output room, never mathematical premises.
             from .call_policy import allocate_call
-            payload, allocation = allocate_call(self.client, payload, self.predict,
-                explicit_cap=getattr(self, 'document_output_cap', None))
+            payload, allocation = allocate_call(self.client, payload, self.predict)
             self.last_allocation = allocation
             emit('start', '')
             assistant = {'role': 'assistant', 'content': ''}
@@ -139,4 +151,3 @@ class Agent:
                 message.pop('thinking', None)
             self.history = messages
             return assistant['content']
-        raise AgentError('Agent round limit reached')

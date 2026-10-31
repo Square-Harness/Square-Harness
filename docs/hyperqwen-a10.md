@@ -12,14 +12,14 @@ those results do not validate the new proof engine.
 | Context per request, input plus output | 40,960 | 40,960 |
 | Initial solve ceiling | 32,768 | 32,768 |
 | Verification ceiling per call | — | 16,384 |
-| Total generated-token ceiling | 32,768 | 120,000 |
-| Maximum solver attempts | 1 | 3 |
+| Total generated-token ceiling | 32,768 | 80,000 |
+| Maximum solver attempts | 1 | 2 |
 | Job time guard | 1,800 seconds | 1,800 seconds |
 
 The two initial calls use the same instruction, statement, temperature 0.6,
 top-p 0.95 and problem seed, with thinking enabled and no tools. Repairs use the
 same solver cap when it fits the 40,960-token context, otherwise a fitted cap of at
-least 16,384 (`min_solve_tokens` in the lock). Verification has its own prompt, a
+least 14,000 (`min_solve_tokens` in the lock). Verification has its own prompt, a
 fresh context and temperature 0.6 (`verify_temperature`); one review decides. The proof
 arm has additional compute; this is not an equal-total-budget comparison.
 
@@ -57,7 +57,7 @@ For interactive use against an already running matching server:
 square-harness --workspace ~/research/my-paper \
   --backend openai --host http://127.0.0.1:18020 --model qwen3.8-27b \
   --ctx 40960 --proof-solve-tokens 32768 --proof-verify-tokens 16384 \
-  --proof-tokens 120000 --proof-rounds 3 --proof-seconds 1800 \
+  --proof-tokens 80000 --proof-rounds 2 --proof-seconds 1800 \
   --request-timeout 1800 --proof-file statement.tex \
   --prompt "Prove the statement in statement.tex."
 ```
@@ -94,7 +94,7 @@ launch identity, complete streams, candidate history and grading exports.
 
 ## Duration and interpretation
 
-The 20 jobs allow at most **1,527,680 generated tokens**. Runtime depends on actual
+The 20 jobs allow at most **1,127,680 generated tokens**. Runtime depends on actual
 stopping, prompt processing, review length and repairs. The job time guards sum
 to ten hours; that is a ceiling from the configured guards, not a runtime forecast.
 No new GPU run or mathematical score is implied by preparing the v0.5 profile.

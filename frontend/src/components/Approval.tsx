@@ -2,6 +2,8 @@
 import { useState } from 'react'
 import { api } from '../api'
 import { useApp } from '../store'
+import { href, type Mode } from '../router'
+import { activeTasks } from '../concurrency'
 import { ErrorNote, Modal } from './common'
 
 export function Diff({ text }: { text: string }) {
@@ -21,11 +23,15 @@ function relative(path: string, workspace?: string) {
 }
 
 export function ApprovalDialog() {
-  const { snapshot, status } = useApp()
+  const { snapshot, status, chats, proofs, research } = useApp()
   const approval = snapshot.approvals[0]
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   if (!approval) return null
+  const task = activeTasks(snapshot).find((entry) => entry.task.id === approval.task)?.task
+  const target = approval.target || task?.target
+  const mode: Mode = approval.task_kind === 'chat' ? 'free' : approval.task_kind === 'proof' ? 'prove' : research?.find((job) => job.id === target)?.kind || 'literature'
+  const titleText = chats?.find((chat) => chat.id === target)?.title || proofs?.find((job) => job.id === target)?.title || research?.find((job) => job.id === target)?.title || task?.title || target || approval.task
   const [head, ...rest] = approval.preview.split('\n')
   const body = rest.join('\n')
   const decide = async (approve: boolean) => {
@@ -41,7 +47,8 @@ export function ApprovalDialog() {
   }
   const title = approval.kind === 'write' ? 'Approve this file change?' : approval.kind === 'python' ? 'Run this Python code?' : 'Confirm this action?'
   return (
-    <Modal title={title} wide>
+    <Modal key={approval.id} title={title} onClose={busy ? undefined : () => { void decide(false) }} wide>
+      <p>Requested by {target ? <a href={href(mode, target)}>{titleText}</a> : titleText}.</p>
       {approval.kind === 'write' && (
         <>
           <p>The model asks to write <code>{relative(head.replace(/^WRITE /, ''), status?.workspace)}</code> in your workspace. Nothing changes unless you approve.</p>

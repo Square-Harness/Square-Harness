@@ -21,7 +21,7 @@ const LITERATURE: Copy = {
   field: 'Scope and request', files: 'Pinned sources', noun: 'literature report',
 }
 
-// The Review notebook holds three kinds of review; the engine kind stays 'referee'.
+// The Review notebook holds four kinds of review; the engine kind stays 'referee'.
 const REVIEW: Record<ReviewVariant, Copy> = {
   quick: {
     title: 'Check a proof',
@@ -47,7 +47,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   explain: {
     title: 'Explain a result',
     lede: 'Paste a lemma or theorem with its proof, or pin a file and say which result. You get what it says, the idea, a line-by-line walkthrough for short proofs, the standard facts used and where each hypothesis matters: precise, for a mathematician from another field.',
-    placeholder: 'Lemma. … \nProof. …',
+    placeholder: 'Lemma. …\nProof. …',
     pinHint: 'Optional: instead of pasting, pin a file and name the result below.',
     field: 'Result and proof', files: 'Or pin a file', noun: 'explanation',
   },
@@ -234,7 +234,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />
-                {!pasted && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={100} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
+                {!pasted && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
                 {!pasted && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
               </div>
             </Collapse>

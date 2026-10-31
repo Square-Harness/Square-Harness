@@ -6,6 +6,7 @@ hostname for TLS, so a second DNS lookup cannot turn a public URL into localhost
 """
 from datetime import datetime, timezone
 import hashlib
+from html import unescape
 from html.parser import HTMLParser
 import http.client
 import ipaddress
@@ -59,7 +60,7 @@ def _schema(name, description, properties, required):
                        'required': required, 'additionalProperties': False}}}
 
 
-PLACE_WORDS = r'(?:theorem|thm|lemma|lem|proposition|prop|corollary|cor|section|sect|sec|chapter|chap|ch|remark|rem|§)'
+PLACE_WORDS = r'(?<![A-Za-z])(?:theorem|thm|lemma|lem|proposition|prop|corollary|cor|section|sect|sec|chapter|chap|ch|remark|rem|§)'
 
 
 def _fold(text):
@@ -473,8 +474,17 @@ class LiteratureTools:
         raw = self._read(parts, 3_000_000)
         if raw is not None:
             result = json.loads(raw)
-            result['cached'] = True
-            return result
+            volatile = provider in ('arxiv-recent', 's2-citations') or not result.get('results')
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(result['retrieved_at'])).total_seconds()
+            except (ValueError, KeyError, TypeError):
+                age = float('inf')
+            stale = volatile and age >= 86400
+            if not stale or not self.online:
+                result['cached'] = True
+                if stale:
+                    result['stale_cache'] = True
+                return result
         if not self.online:
             raise LiteratureError('Offline mode: this search is not cached. Enable online research explicitly to access the internet.')
         results = fetch()
@@ -615,10 +625,10 @@ class LiteratureTools:
                 year = ((r.get('issued') or {}).get('date-parts') or [[None]])[0][0]
                 refs = [str(x['DOI']).lower() for x in r.get('reference') or [] if isinstance(x, dict) and x.get('DOI')]
                 out.append({'identifier': 'doi:' + str(r.get('DOI', '')).lower(), 'doi': str(r.get('DOI', '')).lower() or None,
-                            'title': _plain((r.get('title') or [''])[0], 300), 'type': r.get('type'), 'year': year,
+                            'title': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('title') or [''])[0])), 300), 'type': r.get('type'), 'year': year,
                             'authors': [_plain(' '.join(x for x in (a.get('given'), a.get('family')) if x), 80)
                                         for a in r.get('author') or [] if isinstance(a, dict)][:15],
-                            'venue': _plain((r.get('container-title') or [''])[0], 120) or None,
+                            'venue': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('container-title') or [''])[0])), 120) or None,
                             'cited_by': r.get('is-referenced-by-count'), 'references': ['doi:' + d for d in refs][:150],
                             **({'reference_texts': [_plain(' '.join(str(x.get(k) or '') for k in (
                                 'unstructured', 'author', 'volume-title', 'article-title', 'year')), 300)
@@ -1048,7 +1058,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
 
     def _addresses(self, host):
         try:
-            addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
+            addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)},
+                               key=lambda address: (ipaddress.ip_address(address).version, address))
         except OSError:
             raise LiteratureError('Could not resolve the public source hostname') from None
         if not addresses or any(not self._public(ipaddress.ip_address(value)) for value in addresses):
@@ -1063,12 +1074,23 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         conn = http.client.HTTPSConnection(parts.hostname, timeout=timeout, context=context)
         try:
             # Pin the validated IP while retaining the original TLS verification name.
-            raw = socket.create_connection((addresses[0], 443), timeout=timeout)
-            try:
-                conn.sock = context.wrap_socket(raw, server_hostname=parts.hostname)
-            except BaseException:
-                raw.close()
-                raise
+            deadline = time.monotonic() + timeout
+            for index, address in enumerate(addresses):
+                raw = None
+                try:
+                    remaining = timeout if index == 0 else max(.1, deadline - time.monotonic())
+                    raw = socket.create_connection((address, 443), timeout=remaining)
+                    conn.sock = context.wrap_socket(raw, server_hostname=parts.hostname)
+                    break
+                except ssl.SSLCertVerificationError:
+                    if raw is not None:
+                        raw.close()
+                    raise
+                except OSError:
+                    if raw is not None:
+                        raw.close()
+                    if index == len(addresses) - 1 or time.monotonic() >= deadline:
+                        raise
             path = urlunsplit(('', '', parts.path or '/', parts.query, ''))
             conn.request('GET', path, headers={'User-Agent': 'SquareHarness/0.4 literature research',
                                               'Accept-Encoding': 'identity', **headers})
@@ -1159,7 +1181,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 if delay > 5:
                     if provider:
                         self.down.add(provider)
-                    raise LiteratureError('Provider rate limited this request; try later or use a different provider')
+                    raise LiteratureError('Source returned HTTP 429 (rate limited); try later or use a different provider')
                 self._pause(max(1, delay))
                 retries += 1
                 continue

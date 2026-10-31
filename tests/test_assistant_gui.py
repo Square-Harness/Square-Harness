@@ -204,7 +204,7 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual((card['mode'], card['status']), ('prove', 'done'))
         proof = self.ok('GET', f'/api/proofs/{card["job_id"]}')
         self.assertEqual((proof['status'], proof['answer']), ('candidate_complete', PROOF))
-        self.assertIn(query, proof['goal'])
+        self.assertEqual(proof['goal'], 'Prove the identity in identity.tex.')
         self.assertEqual(self.ok('GET', f'/api/proofs/{card["job_id"]}/sources')['sources'][0]['content'], source)
         parent_final = self.fake.requests[-1]
         result = json.loads(next(message['content'] for message in reversed(parent_final['messages'])
@@ -233,7 +233,7 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual(saved['status'], 'complete', saved['warnings'])
         self.assertIsNone(saved['budget']['max_tokens'])
         self.assertIsNone(saved['budget']['max_input_tokens'])
-        self.assertEqual(saved['budget']['max_seconds'], 7200)
+        self.assertEqual(saved['budget']['max_seconds'], 7500)
         [child] = saved['children']
         proof = self.ok('GET', f'/api/proofs/{child["job_id"]}')
         state = json.loads((self.root / '.mathagent' / 'proofs' / child['job_id'] / 'state.json').read_text())
@@ -241,8 +241,10 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual(state['rounds_started'], 2)
         self.assertEqual(state['settings']['max_rounds'], 10)
         self.assertIsNone(state['settings']['max_tokens'])
-        self.assertIn(original, state['goal'])
-        self.assertIn('ORIGINAL USER REQUEST is authoritative', state['goal'])
+        self.assertEqual(state['goal'], 'Prove the exact original statement.')
+        self.assertEqual(state['settings']['reference_context']['query'], original)
+        self.assertFalse(state['goal'].startswith('You are one child worker'))
+        self.assertLessEqual(state['settings']['max_seconds'], 7200)
         self.assertEqual(saved['budget']['tokens'], 8 + 32768 + 20000 + 8000 + 20)
 
     def test_explicit_assistant_caps_are_not_raised_by_poincare_worker(self):
@@ -724,3 +726,80 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual(after['blockers'], before['blockers'])
         self.assertEqual([child['action']['mode'] for child in after['children']], ['literature', 'critic'])
         self.assertEqual(sum(item['role'] == 'user' for item in self.detail(chat)['transcript']), 1)
+
+
+    def test_pdf_attachment_does_not_block_selected_proof(self):
+        chat = self.conversation()
+        (self.root / 'article.pdf').write_bytes(b'%PDF-1.4\n')
+        self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL)), text('The candidate was reviewed.')]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@prove Prove x=x.', 'files': ['article.pdf'],
+            'mode_call': {'mode': 'prove', 'start': 0}})
+        self.wait_task()
+        saved = self.detail(chat)
+        [card] = [i for i in saved['transcript'] if i['role'] == 'route']
+        proof = self.ok('GET', f'/api/proofs/{card["job_id"]}')
+        self.assertEqual(proof['status'], 'candidate_complete')
+        self.assertEqual(self.ok('GET', f'/api/proofs/{card["job_id"]}/sources')['sources'], [])
+
+    def test_initial_model_error_is_visible_and_does_not_strand_conversation(self):
+        from mathagent.agent import AgentError
+        chat = self.conversation()
+        with patch.object(self.hub, '_ensure_model', side_effect=AgentError('Model unavailable')):
+            self.ask(chat, 'Prove x=x.')
+            self.wait_task()
+        saved = self.detail(chat)
+        self.assertTrue(any(i['role'] == 'notice' and 'Model unavailable' in i['content'] for i in saved['transcript']))
+        self.fake.replies = [text('Reflexivity gives x=x.')]
+        self.ask(chat, 'Try the simple identity again.')
+        self.wait_task()
+        self.assertEqual(self.detail(chat)['assistant_status'], 'complete')
+
+    def test_pasted_tex_with_missing_inputs_is_accepted(self):
+        chat = self.conversation()
+        self.fake.replies = [text('The pasted source mentions an input file.')]
+        self.ask(chat, r'Explain this LaTeX command: \input{missing-macros.tex}.')
+        self.wait_task()
+        self.assertEqual(self.detail(chat)['assistant_status'], 'complete')
+
+    def test_assistant_writeup_receives_typed_notes_and_templates(self):
+        from mathagent.writeup import WriteupRunner
+        chat = self.conversation()
+        (self.root / 'macros.sty').write_text(r'\newcommand{\R}{\mathbb{R}}')
+        captured = {}
+        def start(runner, request, **kwargs):
+            captured.update(kwargs)
+            runner.state = {'id': 'saved-writeup', 'status': 'complete', 'warnings': []}
+            return {'status': 'complete', 'report': 'The typed notes were written up.', 'id': 'saved-writeup',
+                    'report_path': str(self.root / '.mathagent' / 'research' / 'saved-writeup' / 'report.md')}
+        self.fake.replies = [delegation('writeup', 'Write the notes using macros.sty.', ['macros.sty']), text('The write-up is saved.')]
+        with patch.object(WriteupRunner, 'start', start):
+            self.ask(chat, 'Write up these notes using macros.sty: every square of a real number is nonnegative.', files=['macros.sty'])
+            self.wait_task()
+        self.assertEqual(captured['template_files'], ['macros.sty'])
+        self.assertIn('every square', captured['notes'])
+        self.assertEqual(captured['source_files'], [])
+
+
+    def test_explicit_mode_effort_is_saved_and_maximum_selection_is_authorized(self):
+        chat = self.conversation()
+        self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL)), text('The proof worker finished.')]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@prove Prove x=x.',
+            'mode_call': {'mode': 'prove', 'start': 0, 'effort': 'poincare'}})
+        self.wait_task()
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        self.assertEqual(saved['children'][0]['action']['effort'], 'poincare')
+        self.assertEqual(saved['required_effort'], 'poincare')
+
+
+    def test_deleted_attachment_on_resume_does_not_strand_the_chat(self):
+        chat = self.conversation()
+        store.save_assistant(self.root, chat, {'status': 'interrupted', 'query': 'Review missing.tex.',
+            'files': ['missing.tex'], 'warnings': []})
+        status, value, _ = self.request('POST', f'/api/chats/{chat}/assistant/resume', {})
+        self.assertEqual(status, 400, value)
+        self.assertEqual(store.load_chat(self.root, chat)['assistant_state']['status'], 'failed')
+        self.fake.replies = [text('A new request can be answered.')]
+        self.ask(chat, 'Explain x=x without that file.')
+        self.wait_task()
+        self.assertEqual(self.detail(chat)['assistant_status'], 'complete')

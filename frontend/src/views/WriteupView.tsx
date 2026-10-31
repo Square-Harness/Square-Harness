@@ -6,8 +6,8 @@ import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago } from '../format'
 import { isPanelHidden } from '../panels'
-import { go } from '../router'
-import { capacityFull, taskForJob } from '../concurrency'
+import { go, href, useRoute } from '../router'
+import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
@@ -22,14 +22,15 @@ const STEP_NAMES: Record<string, string> = {
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
   const tick = useTick(id)
   const app = useApp()
+  const route = useRoute()
   const { data, error } = useLoad(() => api.research(id), [id, tick])
-  const sources = useLoad(() => api.researchSources(id), [id])
+  const sources = useLoad(() => api.researchSources(id), [id, tick])
   const [artifact, setArtifact] = useState<string | null>(null)
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'document'
   const jobClass = useJobClass()
-  const task = taskForJob(app.snapshot, 'research', id)?.task
-  const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
+  const task = taskForJob(app.snapshot, 'research', id)?.task || data?.owner_task || (data?.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
+  const ours = !!data?.running && !!task && ['starting', 'running', 'pausing'].includes(task.state)
   const openCite = (ref: string) => {
     setCite(ref)
     if (isPanelHidden('aside') || window.matchMedia('(max-width: 1179px)').matches) go('writeup', id, 'checks')
@@ -58,7 +59,7 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'compile' && <CompileTab data={data} onArtifact={setArtifact} />}
           {active === 'review' && <Markdown>{data.review}</Markdown>}
           {active === 'outline' && <OutlineTab data={data} />}
-          {active === 'sources' && <SourcesTab data={data} sources={sources.data?.sources || null} />}
+          {active === 'sources' && <>{sources.error ? <><ErrorNote>{sources.error}</ErrorNote><button type="button" className="btn" onClick={sources.reload}>Retry loading sources</button></> : <SourcesTab data={data} sources={sources.data?.sources || null} />}</>}
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
@@ -73,7 +74,8 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const look = researchLook(data.status, data.running)
   const [error, setError] = useState('')
   const busy = capacityFull(app.snapshot, app.status)
-  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task
+  const route = useRoute()
+  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task || data.owner_task || (data.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
@@ -113,6 +115,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
       </div>
       {!ours && busy && resumable && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>
@@ -125,7 +128,7 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
   const errorLines = new Set((data.compile?.errors || []).filter((e) => e.file === 'document.tex' && e.line).map((e) => e.line as number))
   return (
     <div className="document">
-      {data.running && data.live && <LiveWriteup id={data.id} role={data.live.role} file={data.live.file} ours={ours} />}
+      {data.running && data.live && <LiveWriteup id={data.id} role={data.live.role} file={data.live.file} ours={ours} owner={data.owner_task} />}
       {data.document ? (
         <>
           <p className="caveat">Model draft. Each <code>% src</code> mark opens the note lines a paragraph came from; red ones cite lines that were never read. TODO comments are left for you.</p>
@@ -145,13 +148,13 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
   )
 }
 
-function LiveWriteup({ id, role, file, ours }: { id: string; role: string; file: string; ours: boolean }) {
+function LiveWriteup({ id, role, file, ours, owner }: { id: string; role: string; file: string; ours: boolean; owner?: ResearchDetail['owner_task'] }) {
   const stream = useLiveStream('research', id, file)
   const app = useApp()
   return (
     <div className="live" id="live">
       <p className="live-head"><Square variant="running" size={14} /> {ROLES[role === 'plan' ? 'outline' : role]?.active || role}</p>
-      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
+      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || activeTasks(app.snapshot).find((entry) => entry.task.id === owner?.id)?.activity || []} />}
       {role === 'plan' ? <StreamBody stream={stream} role="outline" live />
         : role === 'fidelity' ? <StreamBody stream={stream} role="fidelity" live />
         : <pre className="source tex live-tex">{stream.text || 'Waiting for the first tokens…'}</pre>}

@@ -1,8 +1,8 @@
-import type { ReviewVariant } from './api'
+import type { Budget, ReviewVariant } from './api'
 import type { EffortLevel } from './effort'
 import type { Variant } from './components/Square'
 
-/** The three kinds of review behind the Review notebook; the engine kind stays 'referee'. */
+/** The four kinds of review behind the Review notebook; the engine kind stays 'referee'. */
 // 'journal' is the detailed review: the review plus a check of the proofs.
 export const VARIANTS: ReviewVariant[] = ['quick', 'review', 'journal', 'explain']
 
@@ -33,9 +33,9 @@ export const VARIANT_STEP_NAMES: Record<string, string> = {
 }
 
 /** The effort each kind starts from: a quick check wants two passes, a referee report depth. */
-export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'medium', journal: 'high', explain: 'low' }
+export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'medium', journal: 'high', explain: 'medium' }
 
-/** A detailed review also checks the proofs: twice the tokens, context and time of a review (gui/effort.py). */
+/** A detailed review also checks the proofs: twice the working time of a review (gui/effort.py). */
 export const VARIANT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 1, journal: 2, explain: 1 }
 
 export const VARIANT_CAVEATS: Record<ReviewVariant, string> = {
@@ -43,4 +43,9 @@ export const VARIANT_CAVEATS: Record<ReviewVariant, string> = {
   review: 'Model draft of a referee report on understanding and presentation; the proofs were not checked. Links open the manuscript lines.',
   journal: 'Model draft of a detailed referee report. The comments on proofs come from checked findings; links open the manuscript lines they cite.',
   explain: 'Model explanation. Links open the source lines each step explains; an accuracy pass checks it against the source when the effort allows.',
+}
+
+/** Resuming near a time cap requires a visibly labelled, explicit extension. */
+export function resumeAdditionalSeconds(budget: Budget) {
+  return budget.limit !== null && budget.limit > 0 && budget.used >= 0.8 * budget.limit ? budget.limit : 0
 }

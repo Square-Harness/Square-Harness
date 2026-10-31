@@ -228,7 +228,8 @@ def approval(h, body, approval):
 
 @route('GET', '/api/files')
 def files(h, body):
-    return {'files': store.list_files(h.server.hub.root)}
+    records = store.list_files(h.server.hub.root, limit=2001)
+    return {'files': records[:2000], 'truncated': len(records) > 2000}
 
 
 @route('GET', '/api/proofs')
@@ -238,6 +239,9 @@ def proofs(h, body):
 
 @route('POST', '/api/proofs')
 def proof_start(h, body):
+    unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'literature'}
+    if unknown:
+        raise ValueError('Unknown proof options: ' + ', '.join(sorted(unknown)))
     if _flag(body, 'literature'):
         raise ValueError('Proof jobs use the pinned text only, with no tools: pin the sources the proof needs')
     task = h.server.hub.start_proof(
@@ -249,9 +253,25 @@ def proof_start(h, body):
     return {'task': task.summary(), 'id': task.target}
 
 
+def _owner_task(hub, job_id):
+    with hub._lock:
+        for task in hub._tasks.values():
+            if task.kind != 'chat' or task.state not in ('starting', 'running', 'pausing'):
+                continue
+            try:
+                chat = store.load_chat(hub.root, task.target)
+            except (ValueError, OSError, store.NotFound):
+                continue
+            if any(c.get('job_id') == job_id and c.get('status') == 'running' for c in (chat.get('assistant_state') or {}).get('children', [])):
+                return {**task.summary(), 'chat': task.target, 'title': chat.get('title') or task.title}
+    return None
+
+
 @route('GET', '/api/proofs/' + UUID)
 def proof(h, body, id):
-    return store.proof_detail(h.server.hub.root, id, h.active('proof'))
+    result = store.proof_detail(h.server.hub.root, id, h.active('proof'))
+    result['owner_task'] = _owner_task(h.server.hub, id)
+    return result
 
 
 @route('POST', '/api/proofs/' + UUID + '/resume')
@@ -296,19 +316,21 @@ def research_start(h, body):
         body.get('kind'), _text(body, 'goal', 20000), source_files=_files(body), variant=variant, target=target,
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
-        requests=_int(body, 'requests', 0, 100), chars=_int(body, 'chars', 1000, 1_000_000),
+        requests=_int(body, 'requests', 0, 1000), chars=_int(body, 'chars', 1000, 1_000_000),
         online=_flag(body, 'online'), queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
 @route('GET', '/api/research/' + UUID)
 def research(h, body, id):
-    return store.research_detail(h.server.hub.root, id, h.active('research'))
+    result = store.research_detail(h.server.hub.root, id, h.active('research'))
+    result['owner_task'] = _owner_task(h.server.hub, id)
+    return result
 
 
 @route('POST', '/api/research/' + UUID + '/resume')
 def research_resume(h, body, id):
-    return {'task': h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue'))).summary(), 'id': id}
+    return {'task': h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue')), additional_seconds=_seconds(body, 'additional_seconds') or 0).summary(), 'id': id}
 
 
 @route('GET', '/api/research/' + UUID + '/sources')
@@ -378,7 +400,7 @@ def chat_message(h, body, id):
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
     content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'))
-    h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode)
+    h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode, required_effort=(body.get('mode_call') or {}).get('effort'))
     return {'ok': True}
 
 
@@ -397,7 +419,7 @@ def route_start(h, body, id, index):
         ('solve_tokens', _int(raw, 'solve_tokens', 128, 1_000_000)),
         ('verify_tokens', _int(raw, 'verify_tokens', 128, 1_000_000)),
         ('input_tokens', _int(raw, 'input_tokens', 2048)), ('seconds', _seconds(raw, 'seconds')),
-        ('requests', _int(raw, 'requests', 0, 100)), ('chars', _int(raw, 'chars', 1000, 1_000_000))) if value is not None}
+        ('requests', _int(raw, 'requests', 0, 1000)), ('chars', _int(raw, 'chars', 1000, 1_000_000))) if value is not None}
     task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request', 60000),
                                     _files(body, 'files'), limits)
     return {'task': task.summary()}
@@ -508,6 +530,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'SquareHarness/' + VERSION
     sys_version = ''
+
+    timeout = 30
 
     def log_message(self, format, *args):
         pass  # request logs would print job IDs and paths on every poll

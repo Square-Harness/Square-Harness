@@ -71,9 +71,9 @@ export type Tab = { id: string; label: string; badge?: ReactNode; hidden?: boole
 
 export function Tabs({ tabs, active, onChange }: { tabs: Tab[]; active: string; onChange: (id: string) => void }) {
   return (
-    <div className="tabs" role="tablist">
+    <div className="tabs" aria-label="Page sections">
       {tabs.filter((tab) => !tab.hidden).map((tab) => (
-        <button key={tab.id} type="button" role="tab" aria-selected={tab.id === active}
+        <button key={tab.id} type="button" aria-pressed={tab.id === active}
           className={'tab' + (tab.id === active ? ' tab-active' : '') + (tab.narrowOnly ? ' tab-narrow' : '')}
           onClick={() => onChange(tab.id)}>
           {tab.label}{tab.badge !== undefined && <span className="tab-badge">{tab.badge}</span>}
@@ -132,12 +132,13 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
 }) {
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState<WorkspaceFile[] | null>(null)
+  const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState('')
   const changed = useTick('files')
-  useEffect(() => { setFiles(null) }, [changed])  // a dropped file or another folder
+  useEffect(() => { setFiles(null); setTruncated(false); setError('') }, [changed])  // a dropped file or another folder
   useEffect(() => {
     if (!open || files) return
-    api.files().then((result) => setFiles(result.files), (reason: Error) => setError(reason.message))
+    api.files().then((result) => { setFiles(result.files); setTruncated(!!result.truncated); setError('') }, (reason: Error) => setError(reason.message))
   }, [open, files])
   const available = (files || []).filter((file) => (allowPdf || file.kind === 'text')
     && (!accept || accept.some((suffix) => file.path.toLowerCase().endsWith(suffix))))
@@ -162,6 +163,7 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
       {open && (
         <div className="picker-list">
           {error && <p className="error-note">{error}</p>}
+          {truncated && <p className="warning-note" role="status">This folder has more files than the picker can list. Open a smaller folder to see the rest.</p>}
           {!files && !error && <p className="muted">Reading the workspace…</p>}
           {files && !available.length && (
             <p className="muted">No {allowPdf ? 'text or PDF' : 'text'} files in this workspace. Files must be .tex, .md, .txt{allowPdf ? ', .pdf' : ''} and similar, outside hidden folders.</p>
@@ -179,18 +181,45 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
   )
 }
 
+let openModalCount = 0
+let backgroundWasInert = false
+
 export function Modal({ title, onClose, children, wide }: { title: ReactNode; onClose?: () => void; children: ReactNode; wide?: boolean }) {
   const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
-    if (!onClose) return
-    const key = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
-    window.addEventListener('keydown', key)
-    return () => window.removeEventListener('keydown', key)
-  }, [onClose])
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const root = document.getElementById('root')
+    if (openModalCount++ === 0) backgroundWasInert = !!root?.inert
+    if (root) root.inert = true
+    const focusable = () => [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
+    ;(focusable()[0] || dialog).focus()
+    const key = (event: KeyboardEvent) => {
+      if ([...document.querySelectorAll('[role="dialog"]')].at(-1) !== dialog) return
+      if (event.key === 'Escape' && closeRef.current) { event.preventDefault(); closeRef.current() }
+      if (event.key !== 'Tab') return
+      const controls = focusable()
+      const first = controls[0], last = controls[controls.length - 1]
+      if (!first) { event.preventDefault(); dialog.focus() }
+      else if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', key)
+    return () => {
+      document.removeEventListener('keydown', key)
+      openModalCount--
+      if (root && openModalCount === 0) root.inert = backgroundWasInert
+      if (opener?.isConnected) opener.focus()
+    }
+  }, [])
   // A portal: a dialog opened from the mobile drawer must not inherit its transform.
   return createPortal(
     <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose?.()}>
-      <div className={'modal' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div ref={dialogRef} tabIndex={-1} className={'modal' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="modal-head">
           <h2 id={titleId}>{title}</h2>
           {onClose && (

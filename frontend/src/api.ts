@@ -1,4 +1,5 @@
 // Typed client for the harness's local /api. Shapes mirror mathagent/gui/store.py.
+import type { EffortLevel } from './effort'
 
 export type Budget = { used: number; limit: number | null; reserved?: number }
 
@@ -196,6 +197,7 @@ export type ProofListItem = {
 }
 
 export type ProofDetail = {
+  owner_task?: TaskSummary | null
   id: string
   kind: 'proof'
   version: number
@@ -253,7 +255,7 @@ export type ResearchListItem = {
   verdict?: string | null
 }
 
-/** The three kinds of review behind the Review notebook (engine kind 'referee'). */
+/** The four kinds of review behind the Review notebook (engine kind 'referee'). */
 export type ReviewVariant = 'quick' | 'review' | 'journal' | 'explain'
 
 export type WriteupSection = { title: string; sources: string[]; goal: string; latex: string; complete: boolean; truncated: boolean }
@@ -268,6 +270,7 @@ export type CompileResult = {
 }
 
 export type ResearchDetail = {
+  owner_task?: TaskSummary | null
   id: string
   kind: 'literature' | 'referee' | 'writeup'
   goal: string
@@ -433,7 +436,7 @@ export const api = {
   pause: (task: string) => post<{ task: TaskSummary }>('/api/task/pause', { task }),
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
-  files: () => get<{ files: WorkspaceFile[] }>('/api/files'),
+  files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
 
   proofs: () => get<{ jobs: ProofListItem[] }>('/api/proofs'),
   proof: (id: string) => get<ProofDetail>(`/api/proofs/${id}`),
@@ -450,7 +453,7 @@ export const api = {
   researchArtifact: (id: string, name: string) => get<Artifact>(`/api/research/${id}/artifacts/${name}`),
   researchStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/research/${id}/stream/${name}?from=${from}`),
   startResearch: (body: Record<string, unknown>) => post<StartResult>('/api/research', body),
-  resumeResearch: (id: string, queue = false) => post<StartResult>(`/api/research/${id}/resume`, { queue }),
+  resumeResearch: (id: string, queue = false, additionalSeconds = 0) => post<StartResult>(`/api/research/${id}/resume`, { queue, ...(additionalSeconds > 0 ? { additional_seconds: additionalSeconds } : {}) }),
 
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
@@ -466,14 +469,17 @@ export const api = {
       throw new ApiError(0, 'The harness is not reachable.')
     }
     const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new ApiError(response.status, data.error || response.statusText)
+    if (!response.ok) {
+      if (response.status === 401) authListeners.forEach((listener) => listener())
+      throw new ApiError(response.status, data.error || response.statusText)
+    }
     return data as { path: string }
   },
   templates: () => get<{ templates: Template[] }>('/api/templates'),
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
-  route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
+  route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number | null> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),

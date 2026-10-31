@@ -159,7 +159,7 @@ class ProofV05Tests(unittest.TestCase):
         result = runner.resume(paused['id'])
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual(runner.state['settings'], original)
-        self.assertEqual(result['tokens_charged'], charged + 20)
+        self.assertEqual(result['tokens_charged'], 20)
         self.assertEqual(runner.state['transport_migration']['original_transport_sha256'],
                          PRE_TOOL_RECOVERY_TRANSPORT_SHA256)
 
@@ -181,15 +181,15 @@ class ProofV05Tests(unittest.TestCase):
         self.assertEqual(runner.resume(paused['id'])['status'], 'candidate_complete')
         self.assertEqual(runner.state['execution_migration'], original)
         self.assertEqual(runner.state['transport_migration']['original_controller_sha256'],
-                         PRE_TOOL_RECOVERY_CONTROLLER_SHA256)
+                         LEGACY_CONTROLLER_SHA256)
 
-    def test_unknown_pre_recovery_transport_still_blocks_saved_proof(self):
+    def test_changed_execution_policy_blocks_saved_proof(self):
         from mathagent.proof import PRE_TOOL_RECOVERY_CONTROLLER_SHA256
         runner, paused = self.run_proof([KeyboardInterrupt()])
         runner.state['settings']['controller_sha256'] = PRE_TOOL_RECOVERY_CONTROLLER_SHA256
-        runner.state['settings']['transport_sha256']['backends.py'] = 'unknown'
+        runner.state['settings']['policy_sha256'] = 'unknown'
         runner.store.save()
-        with self.assertRaisesRegex(ValueError, 'changed controller_sha256'):
+        with self.assertRaisesRegex(ValueError, 'changed policy_sha256'):
             runner.resume(paused['id'])
         self.assertEqual(len(runner.agent.client.requests), 1)
 
@@ -211,17 +211,17 @@ class ProofV05Tests(unittest.TestCase):
         self.assertEqual(runner.state['settings']['policy_version'], 7)
         self.assertEqual(runner.state['execution_migration']['to_policy'], 8)
         self.assertEqual(runner.state['execution_migration']['original_transport_sha256'], LEGACY_TRANSPORT_SHA256)
-        self.assertEqual(result['tokens_charged'], charged + 20)
+        self.assertEqual(result['tokens_charged'], 20)
         self.assertEqual(len(runner.agent.client.requests), 3)
 
-    def test_policy_migration_does_not_authorize_unknown_transport_changes(self):
+    def test_policy_migration_does_not_authorize_changed_policy(self):
         runner, paused = self.run_proof([KeyboardInterrupt()])
         saved = runner.state['settings']
         saved['policy_version'] = 7
         saved['controller_sha256'] = LEGACY_CONTROLLER_SHA256
-        saved['transport_sha256'] = {**LEGACY_TRANSPORT_SHA256, 'backends.py': 'unrecognized-transport'}
+        saved['policy_sha256'] = 'unrecognized-policy'
         runner.store.save()
-        with self.assertRaisesRegex(ValueError, 'unrecognized policy-7'):
+        with self.assertRaisesRegex(ValueError, 'changed policy_sha256'):
             runner.resume(paused['id'])
         self.assertEqual(len(runner.agent.client.requests), 1)
 
@@ -479,15 +479,15 @@ class ProofV05Tests(unittest.TestCase):
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertTrue(all(r['think'] for r in runner.agent.client.requests))
 
-    def test_changed_transport_source_blocks_continuation(self):
+    def test_changed_policy_source_blocks_continuation(self):
         runner, result = self.run_proof([KeyboardInterrupt()])
         real = runner._provenance
         def changed():
             value = real()
-            value['transport_sha256']['backends.py'] = 'changed'
+            value['policy_sha256'] = 'changed'
             return value
         with patch.object(runner, '_provenance', side_effect=changed):
-            with self.assertRaisesRegex(ValueError, 'transport_sha256'):
+            with self.assertRaisesRegex(ValueError, 'policy_sha256'):
                 runner.resume(result['id'])
 
     def test_full_sources_are_pinned_and_reviewed(self):

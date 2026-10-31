@@ -304,7 +304,7 @@ class BibliographicRecoveryTests(unittest.TestCase):
         self.assertIn('Unverified', runner.state['answer'])
         self.assertIn('model recall', runner.state['answer'])
         self.assertNotIn('Bibliographic identity was checked', runner.state['answer'])
-        self.assertIn('did not confirm', runner.state['answer'])
+        self.assertIn('online search was disabled', runner.state['answer'])
         self.assertFalse(runner.state['candidates'][0].get('bibliographic_recovery'))
 
     def test_explicit_request_limit_is_preserved(self):

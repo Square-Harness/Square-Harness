@@ -42,7 +42,7 @@ class SamplingTests(unittest.TestCase):
             self.assertEqual(ProofRunner(agent).resume(result['id'])['status'], 'budget_violation')
             client.stream.assert_called_once()
 
-    def test_resume_restores_sampling_and_advances_seed_after_charged_interruption(self):
+    def test_resume_restores_sampling_and_retries_empty_interruption(self):
         with tempfile.TemporaryDirectory() as temporary:
             client = InterruptedClient()
             agent = Agent(client, Workspace(temporary), ctx=16384, predict=512,
@@ -57,7 +57,7 @@ class SamplingTests(unittest.TestCase):
             resumed = ProofRunner(agent)
             resumed.resume(result['id'])
             self.assertEqual((agent.seed, agent.temperature, agent.top_p), (42, 0.4, 0.9))
-            self.assertEqual(client.requests[1]['options']['seed'], 43)
+            self.assertEqual(client.requests[1]['options']['seed'], 42)
             self.assertGreaterEqual(resumed.state['tokens_charged'], charged)
             client.backend = 'ollama'
             count = len(client.requests)

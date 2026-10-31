@@ -382,10 +382,6 @@ class CompileSafetyTests(unittest.TestCase):
         self.assertEqual(definitions[0], '\\newcommand{\\R}{\\mathbb{R}}')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class EffortTableTests(unittest.TestCase):
     def test_saved_maximum_effort_routes_keep_their_depth_without_inventing_token_caps(self):
         from types import SimpleNamespace
@@ -532,8 +528,9 @@ class LiteratureCheckTests(GuiCase):
         self.fake.replies = [tool('check_reference', {'statement': 'H^2 regularity for Neumann problems', 'guesses': guesses}),
                              text(json.dumps(RECALL)), text('Nothing to search.'), text(json.dumps(NOT_FOUND)),
                              text('Brezis is a likely source, but Theorem 9.26 is unverified.')]
-        self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Which theorem gives Neumann regularity?'})
-        self.wait_task(timeout=30)
+        with patch.object(LiteratureTools, '_request_once', side_effect=__import__('mathagent.literature', fromlist=['LiteratureError']).LiteratureError('Provider unavailable in fixture')):
+            self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Which theorem gives Neumann regularity?'})
+            self.wait_task(timeout=30)
         self.assertIn('check_reference', [t['function']['name'] for t in self.fake.requests[0]['tools']])
         nested = self.fake.requests[1]
         self.assertIn('already suggested', nested['messages'][1]['content'])
@@ -562,3 +559,7 @@ class OfflineLockTests(GuiCase):
         self.assertEqual(self.request('POST', '/api/chats', {'mode': 'critic', 'online': True})[0], 400)
         self.assertEqual(self.request('POST', '/api/research', {'kind': 'literature', 'goal': 'x', 'online': True})[0], 400)
         self.assertEqual(self.fake.requests, [])
+
+
+if __name__ == '__main__':
+    unittest.main()

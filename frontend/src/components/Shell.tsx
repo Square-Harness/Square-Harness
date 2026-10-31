@@ -89,14 +89,22 @@ export function Sidebar({ route }: { route: Route }) {
               <PanelLeftIcon />
             </button>
           </div>
+          <label className="field">
+            <span className="field-label">Notebook</span>
+            <select aria-label="Notebook" value={notebook(route.mode)} onChange={(event) => { window.location.hash = href(event.target.value as Mode) }}>
+              {(['free', 'prove', 'literature', 'referee', 'writeup'] as Mode[]).map((mode) => <option key={mode} value={mode}>{mode === 'free' ? 'Conversations' : mode === 'prove' ? 'Proofs' : mode === 'literature' ? 'Reading lists' : mode === 'referee' ? 'Reviews' : 'Write-ups'}</option>)}
+            </select>
+          </label>
           <p className="side-summary">{info.summary}</p>
-          <a className="btn btn-primary btn-block" href={href('free')}><PlusIcon size={16} /> {MODES.free.newLabel}</a>
+          <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
         </header>
         <div className="side-list">
+          <ErrorNote>{app.listError}</ErrorNote>
           <SideList route={route} app={app} />
         </div>
         <TaskPanel />
         <WorkspacePanel />
+        <p className="muted small" style={{ padding: '0.5rem 1rem' }}>Square Harness {app.status?.version || ''} · <a href="/LICENSE.txt" target="_blank" rel="noreferrer">Apache 2.0</a><br /><a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noreferrer">Third-party notices</a></p>
       </div>
     </aside>
   )

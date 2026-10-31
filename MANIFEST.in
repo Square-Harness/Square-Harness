@@ -1,5 +1,5 @@
 include CITATION.cff CHANGELOG.md CONTRIBUTING.md
-recursive-include docs *.md
+recursive-include docs *.md *.png
 prune examples
 prune benchmark-data
 prune benchmark-runs
@@ -7,9 +7,10 @@ recursive-include scripts *.py *.sh
 prune .mathagent
 global-exclude .env .env.* *.pem *.key
 recursive-include mathagent/gui/static *
-include frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/vite.config.ts frontend/index.html
+include frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.tests.json frontend/vite.config.ts frontend/index.html
 recursive-include frontend/src *
 recursive-include frontend/public *
 recursive-include frontend/scripts *.mjs
+recursive-include frontend/tests *.ts
 prune frontend/node_modules
 recursive-include deployment *.py *.json Dockerfile*

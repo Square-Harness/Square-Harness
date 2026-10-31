@@ -18,6 +18,7 @@ export type AppState = {
   proofs: ProofListItem[] | null
   research: ResearchListItem[] | null
   chats: ChatListItem[] | null
+  listError?: string
   ticks: Record<string, number>
 }
 
@@ -98,16 +99,20 @@ function resetChatDeletionCache() {
   ++listGeneration
 }
 export function refreshLists(delay = 0) {
-  window.clearTimeout(listTimer)
-  const generation = ++listGeneration
+  if (listTimer !== undefined) return
   listTimer = window.setTimeout(async () => {
-    try {
-      const [proofs, research, chats] = await Promise.all([api.proofs(), api.researches(), api.chats()])
-      if (generation !== listGeneration) return
-      set({ proofs: proofs.jobs, research: research.jobs, chats: chats.chats.filter((chat) => !deletedChats.has(chat.id)) })
-    } catch (error) {
-      if (!(error instanceof ApiError && error.status === 401)) console.warn(error)
-    }
+    listTimer = undefined
+    const generation = ++listGeneration
+    const results = await Promise.allSettled([api.proofs(), api.researches(), api.chats()])
+    if (generation !== listGeneration) return
+    const [proofs, research, chats] = results
+    const errors = results.filter((result) => result.status === 'rejected').map((result) => String((result as PromiseRejectedResult).reason?.message || 'Could not load saved work.'))
+    set({
+      ...(proofs.status === 'fulfilled' ? { proofs: proofs.value.jobs } : {}),
+      ...(research.status === 'fulfilled' ? { research: research.value.jobs } : {}),
+      ...(chats.status === 'fulfilled' ? { chats: chats.value.chats.filter((chat) => !deletedChats.has(chat.id)) } : {}),
+      listError: errors.join(' '),
+    })
   }, delay)
 }
 
@@ -192,6 +197,7 @@ function handle(event: ServerEvent) {
       if (['done', 'paused', 'error'].includes(event.task.state)) {
         refreshLists(150)
         bump(event.task.target)
+        if (event.task.state === 'error') refreshStatus()
       } else if (event.task.target) {
         bump(event.task.target)
         refreshLists(300)
@@ -297,8 +303,10 @@ export function refreshAll() {
   set((s) => ({ ticks: Object.fromEntries(Object.entries(s.ticks).map(([k, v]) => [k, v + 1])) }))
 }
 
+let unauthorizedListener: (() => void) | null = null
 export async function start() {
-  onUnauthorized(() => {
+  unauthorizedListener?.()
+  unauthorizedListener = onUnauthorized(() => {
     source?.close()
     set({ auth: 'needed' })
   })

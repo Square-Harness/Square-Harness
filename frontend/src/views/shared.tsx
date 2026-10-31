@@ -85,7 +85,16 @@ export const ROLES: Record<string, { active: string; name: string; structured?: 
   outline: { active: 'Planning the sections from your notes', name: 'Outline', structured: true },
   section: { active: 'Writing a section from your notes', name: 'Section' },
   repair: { active: 'Repairing the sections named in LaTeX errors', name: 'Repair' },
-  // Review variants (quick check, journal report, explanation): small structured calls.
+  screen: { active: 'Screening records for the reading list', name: 'Screen', structured: true },
+  organise: { active: 'Grouping the reading list by theme', name: 'Organise', structured: true },
+  annotate: { active: 'Annotating the reading list', name: 'Annotate', structured: true },
+  'pick-source': { active: 'Selecting the requested source', name: 'Source selection', structured: true },
+  recall: { active: 'Recalling candidate references', name: 'Recall', structured: true },
+  verify: { active: 'Verifying a reference', name: 'Verify', structured: true },
+  verdict: { active: 'Assessing the reference evidence', name: 'Verdict', structured: true },
+  discover: { active: 'Discovering references', name: 'Discover', structured: true },
+  reference_select: { active: 'Selecting relevant references', name: 'Selection', structured: true },
+  // The four manuscript review variants use structured calls.
   check: { active: 'A fresh verifier is checking one proof', name: 'Check', structured: true },
   confirm: { active: 'An independent re-check of an alleged issue', name: 'Re-check', structured: true },
   extract: { active: 'Finding the statement and the proof', name: 'Extract', structured: true },
@@ -287,7 +296,7 @@ export function ArtifactViewer({ job, id, name, onClose }: { job: 'proof' | 'res
     const load = job === 'proof' ? api.proofArtifact(id, name) : api.researchArtifact(id, name)
     load.then(setArtifact, (reason: Error) => setError(reason.message))
   }, [job, id, name])
-  const role = name.replace(/^\d+-/, '').replace(/(-request|-stream)?\.(md|jsonl)$/, '')
+  const role = name.replace(/^\d+-/, '').replace(/(-request|-stream)?(?:-[a-f0-9]{8})?\.(md|jsonl)$/, '')
   const json = artifact?.json as Record<string, unknown> | undefined
   return (
     <Modal title={name} onClose={onClose} wide>

@@ -1,7 +1,7 @@
 // Run with: npm test  (Node 22.18+ strips the TypeScript types itself)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeMath, snippet, splitBlocks } from '../src/mathtext.ts'
+import { normalizeMath, remarkCitations, snippet, splitBlocks } from '../src/mathtext.ts'
 
 const cases: [string, string, string][] = [
   ['inline dollars are untouched', 'Let $a_1$ and $b_2$ be even.', 'Let $a_1$ and $b_2$ be even.'],
@@ -31,4 +31,14 @@ test('snippets never end inside inline math', () => {
   assert.equal(snippet('The hypothesis states that $a$ and $b$ are even integers, which implies $a = 2m$', 40), 'The hypothesis states that $a$ and $b$…')
   assert.equal(snippet('Cut here $x + y = z$ inside the formula region please', 14), 'Cut here…')
   assert.equal(snippet('Short text', 40), 'Short text')
+})
+
+test('pasted proof, template and external locators become clickable citations', () => {
+  const tree = { type: 'root', children: [{ type: 'text', value: '[P1:L3-L7], [M1:L2], [T2:L1], [doc-ab12:L5-L9]' }] }
+  remarkCitations()(tree)
+  const nodes = tree.children as { type: string; data?: { hProperties?: { dataCite?: string } } }[]
+  assert.deepEqual(nodes.filter((node) => node.type === 'citation').map((node) => node.data?.hProperties?.dataCite), ['P1:L3-L7', 'M1:L2', 'T2:L1', 'doc-ab12:L5-L9'])
+  const code = { type: 'root', children: [{ type: 'code', value: '[P1:L3-L7]' }] }
+  remarkCitations()(code)
+  assert.equal(code.children[0].type, 'code')
 })

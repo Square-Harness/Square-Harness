@@ -10,7 +10,7 @@ import unicodedata
 from . import manuscript
 
 
-_FILE = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt))(?![\w.-])', re.I)
+_FILE = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
 _RESULT = re.compile(r'\b(?:theorem|lemma|proposition|corollary|proof|theoreme|lemme|demonstration|preuve)\b')
 _ARTICLE = re.compile(r'\b(?:article|paper|manuscript|document|preprint|papier|manuscrit)\b')
 _OVERVIEW = re.compile(r'\b(?:main results?|principal results?|key results?|overview|summary|novelty|contribution|'

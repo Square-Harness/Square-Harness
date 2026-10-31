@@ -20,7 +20,7 @@ const snapshot: TaskSnapshot = {
 }
 
 test('interleaved chat deltas and activity stay attached to their own task after reconnect', () => {
-  let current = { ...snapshot, tasks: JSON.parse(JSON.stringify(snapshot.tasks)) }
+  let current: TaskSnapshot = { ...snapshot, tasks: JSON.parse(JSON.stringify(snapshot.tasks)) }
   current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 2, kind: 'start' })
   current = reduceChat(current, { task: 'second', chat: 'chat-b', seq: 3, kind: 'start' })
   current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 4, kind: 'delta', text: 'Alpha' })

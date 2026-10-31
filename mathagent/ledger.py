@@ -32,6 +32,7 @@ class _VersionError(LedgerError):
 
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
+MAX_STREAM_BYTES = 64 * 1024 * 1024
 _ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 _ARTIFACT = re.compile(r"[0-9]{4,}-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.(?:md|jsonl)\Z")
 
@@ -73,16 +74,16 @@ def _regular(path: Path, *, optional: bool = False) -> None:
         raise LedgerError(f"Refusing non-regular proof file: {path}")
 
 
-def _read(path: Path) -> str:
+def _read(path: Path, limit=MAX_FILE_BYTES) -> str:
     _regular(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise LedgerError(f"Refusing non-regular proof file: {path}")
-            data = stream.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            raise LedgerError(f"Proof file exceeds {MAX_FILE_BYTES} bytes: {path}")
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise LedgerError(f"Proof file exceeds {limit} bytes: {path}")
         return data.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise LedgerError(f"Cannot read proof file {path}: {exc}") from exc
@@ -407,8 +408,8 @@ class ProofStore:
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise LedgerError(f"Unsafe proof stream: {path}")
-                if info.st_size + len(data) > MAX_FILE_BYTES:
-                    raise LedgerError(f"Proof stream exceeds {MAX_FILE_BYTES} bytes.")
+                if info.st_size + len(data) > MAX_STREAM_BYTES:
+                    raise LedgerError(f"Proof stream exceeds {MAX_STREAM_BYTES} bytes.")
                 remaining = memoryview(data)
                 while remaining:
                     written = os.write(fd, remaining)
@@ -425,7 +426,7 @@ class ProofStore:
         self._check_paths()
         if not isinstance(filename, str) or not _ARTIFACT.fullmatch(filename) or ".." in filename:
             raise LedgerError("Invalid proof artifact filename.")
-        return _read(self.directory / "artifacts" / filename)
+        return _read(self.directory / "artifacts" / filename, MAX_STREAM_BYTES if filename.endswith(".jsonl") else MAX_FILE_BYTES)
 
     def write_report(self, text: str) -> None:
         self._writable()

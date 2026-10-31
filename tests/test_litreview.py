@@ -199,8 +199,8 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('Offline', runner.state['draft'])
 
     def test_budget_exhaustion_still_lists_the_best_verified_candidates(self):
-        runner, result = self.run_review([response(json.dumps(SCOPE), count=3900)], max_tokens=4100)
-        self.assertIn(result['status'], ('budget_exhausted', 'partial'))
+        runner, result = self.run_review([response(json.dumps(SCOPE), count=1700)], max_tokens=2000)
+        self.assertEqual(result['status'], 'partial')
         report = (runner.directory / 'report.md').read_text()
         self.assertIn('## Candidates found (not organised)', report)
         self.assertIn('doi.org/10.1000/w', report)

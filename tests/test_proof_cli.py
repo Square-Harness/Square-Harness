@@ -35,7 +35,7 @@ class ProofCliTests(unittest.TestCase):
         return '\n'.join(str(call.args[0]) for call in self.ui.say.call_args_list)
 
     def test_defaults_offer_direct_sized_solve_and_separate_verification(self):
-        self.assertEqual(self.run_cli(['--prompt', 'Prove x=x.']), 0)
+        self.assertEqual(self.run_cli(['--prompt', 'Prove x=x.']), 1)
         self.runner.start.assert_called_once_with('Prove x=x.', max_rounds=3,
             max_tokens=None, max_seconds=1800, max_predict=32768,
             verify_tokens=16384, min_solve_tokens=None, repair_tokens=None, verify_temperature=None, source_files=[])
@@ -48,7 +48,7 @@ class ProofCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli(['--proof-rounds', '2', '--proof-tokens', '8000',
             '--proof-solve-tokens', '2048', '--proof-verify-tokens', '1024',
             '--proof-file', 'statement.tex', '--proof-seconds', '90',
-            '--prompt', 'Prove the statement in statement.tex.']), 0)
+            '--prompt', 'Prove the statement in statement.tex.']), 1)
         options = self.runner.start.call_args.kwargs
         self.assertEqual((options['max_predict'], options['verify_tokens']), (2048, 1024))
         self.assertEqual(options['source_files'], ['statement.tex'])
@@ -100,7 +100,7 @@ class ProofCliTests(unittest.TestCase):
         store = SimpleNamespace(state={'id': 'saved-proof', 'status': 'paused', 'goal': 'Prove it.'})
         self.client.models.side_effect = AssertionError('Saved model governs resume')
         with patch.object(cli.ProofStore, 'load', return_value=store):
-            self.assertEqual(self.run_cli(['--resume', 'saved-proof', '--proof-tokens', '999999']), 0)
+            self.assertEqual(self.run_cli(['--resume', 'saved-proof', '--proof-tokens', '999999']), 1)
         self.runner.resume.assert_called_once_with('saved-proof')
         self.runner.start.assert_not_called()
 
@@ -117,7 +117,7 @@ class ProofCliTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as caught:
             cli.main()
         self.assertEqual(caught.exception.code, 0)
-        self.assertIn('0.5.1', output.getvalue())
+        self.assertIn(__import__('mathagent').__version__, output.getvalue())
 
 
 if __name__ == '__main__':

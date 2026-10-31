@@ -526,9 +526,9 @@ class LiveUpdateTests(GuiCase):
 
     def test_event_stream_says_hello_and_replays_after_reconnect(self):
         received = []
-        reader = threading.Thread(target=lambda: received.extend(self.read_events(2)[0]), daemon=True)
+        reader = threading.Thread(target=lambda: self.read_events(2, sink=received), daemon=True)
         reader.start()
-        time.sleep(0.3)
+        self.wait_for(lambda: received, message='SSE hello')
         chat = self.ok('POST', '/api/chats', {'mode': 'critic'})
         reader.join(5)
         self.assertEqual(received[0]['type'], 'hello')
@@ -558,7 +558,7 @@ class LiveUpdateTests(GuiCase):
                 pass  # the test ends the stream by stopping the server
         reader = threading.Thread(target=listen, daemon=True)
         reader.start()
-        time.sleep(0.3)
+        self.wait_for(lambda: seen, message='watcher SSE hello')
         job.append_stream(stream, {'message': {'thinking': 'Consider n.'}, 'done': False})
         job.append_stream(stream, {'message': {'content': 'Let $n$ be even.'}, 'done': False})
         self.wait_for(lambda: any(e['type'] == 'stream' and 'Let $n$' in e['text'] for e in seen), message='a stream event')

@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 
+from .reporting import usage_footer
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID
@@ -293,7 +294,7 @@ class ResearchRunner:
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
 
-    def resume(self, job_id):
+    def resume(self, job_id, *, additional_seconds=0):
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
         if self.state['kind'] not in self.KINDS:
@@ -302,6 +303,16 @@ class ResearchRunner:
             raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
         if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
             raise ValueError('Resume with the original --backend')
+        if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
+            raise ValueError('Additional working time must be between 0 and 86400 seconds')
+        if additional_seconds:
+            with self._lock():
+                self.state = _read_state(self.directory, job_id)
+                self.state['settings']['max_seconds'] += additional_seconds
+                self.state.setdefault('time_extensions', []).append({'seconds': additional_seconds, 'time': _now()})
+                if self.state['status'] == 'budget_exhausted':
+                    self.state['status'] = 'paused'
+                self._save()
         for key in ('model', 'ctx', 'predict'):
             setattr(self.agent, key, self.state['settings'][key])
         self.agent.seed = self.state['settings'].get('seed')
@@ -396,8 +407,9 @@ class ResearchRunner:
             try:
                 self._recover()
                 while self.state['phase'] != 'done':
-                    self._check_time()
                     phase = self.state['phase']
+                    if not (self.state.get('pipeline') == 'reading-list-v1' and phase == 'write'):
+                        self._check_time()
                     self.emit('notice', 'Research phase: ' + phase)
                     self._step(phase)
                     self._save()
@@ -793,7 +805,7 @@ class ResearchRunner:
         issues, cited = [], set()
         if not any(ranges.values()):
             issues.append('No exact source passages were read; literature or manuscript assessment remains unsubstantiated')
-        pattern = r'\[((?:doc-[A-Za-z0-9_-]+|S[\w-]+|M\d+))(?::L(\d+)(?:-L?(\d+))?)?\]'
+        pattern = r'\[((?:doc-[A-Za-z0-9_-]+|S[\w-]+|[MPT]\d+))(?::L(\d+)(?:-L?(\d+))?)?\]'
         for match in re.finditer(pattern, text):
             sid, begin, end = match.groups()
             cited.add(sid)
@@ -855,12 +867,12 @@ class ResearchRunner:
             label = f'[{title}]({metadata["url"]})' if metadata.get('url') else title
             out.append(f'- [{sid}] {label}; read ranges: {ranges.get(sid, []) or "metadata only"}.')
         out += ['', '## Usage and saved evidence', '',
-                f'Generated tokens charged: {s["tokens_charged"]}/{s["settings"]["max_tokens"]}; input tokens charged: {s["input_tokens_charged"]}/{s["settings"]["max_input_tokens"]}; elapsed seconds: {s["seconds_used"]:.1f}/{s["settings"]["max_seconds"]}.', '',
+                usage_footer(s), '',
                 'state.json preserves the original scope, manuscript and skill snapshots, counters, exact tool results and working notes. artifacts/ preserves request payloads, streamed output and source evidence. Input usage is estimated before dispatch and corrected when the model provides actual usage. Interrupted calls retain their reservations.', '']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
     def _result(self):
-        result = {'id': self.state['id'], 'status': self.state['status'],
+        result = {'id': self.state['id'], 'status': self.state['status'], 'stop_reason': self.state.get('stop_reason', ''),
                   'report': _read(self.directory / 'report.md') if (self.directory / 'report.md').exists() else '', 'report_path': str(self.directory / 'report.md'), 'directory': str(self.directory)}
         if 'worker_error' in self.state:
             result['worker_error'] = self.state['worker_error']

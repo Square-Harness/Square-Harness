@@ -46,12 +46,12 @@ jobs:
           "$RUNNER_TEMP/wheel-smoke/bin/mathagent" --help
           "$RUNNER_TEMP/wheel-smoke/bin/python" -I - <<'PY'
           from importlib.resources import files
-          for skill in ('literature', 'referee'):
+          for skill in ('check', 'explain', 'literature', 'referee', 'review', 'review-quick', 'writeup'):
               resource = files('mathagent').joinpath('skills', skill, 'SKILL.md')
               assert resource.read_text(encoding='utf-8').strip(), skill
-          print('Both bundled skills are present in the installed wheel.')
+          print('All bundled skills are present in the installed wheel.')
           static = files('mathagent').joinpath('gui', 'static')
-          for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt'):
+          for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt', 'LICENSE.txt'):
               assert static.joinpath(name).is_file(), name
           assert any(item.name.endswith('.js') for item in static.joinpath('assets').iterdir())
           print('The visual interface is present in the installed wheel.')

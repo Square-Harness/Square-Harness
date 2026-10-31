@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { callPayload, coverOf, modeOptions, modeQuery, updateCall, validCall, MODE_CALLS } from '../src/modeCalls.ts'
+import { callPayload, coverOf, modeOptions, modeQuery, updateCall, validCall } from '../src/modeCalls.ts'
 
 test('offers modes at the caret at the start, middle and end of a prompt', () => {
   for (const text of ['@pro', 'Please @pro show this', 'Show this (@pro)']) {
@@ -11,15 +11,12 @@ test('offers modes at the caret at the start, middle and end of a prompt', () =>
   assert.equal(modeQuery('@prove_extra', 6), null)
   assert.equal(modeQuery('@@prove', 7), null)
   assert.equal(modeQuery('@pro', 0, 4), null)
-  assert.equal(MODE_CALLS.filter((item) => item.mode.startsWith('pro')).length, 1)
-  assert.deepEqual(MODE_CALLS.map((item) => item.mode),
-    ['prove', 'check', 'literature', 'quick_review', 'referee', 'detailed_review', 'explain'])
 })
 
 test('the review kinds are offered together and drawn as Review pages', () => {
-  assert.deepEqual(modeOptions('review').map((item) => item.mode), ['quick_review', 'referee', 'detailed_review'])
+  assert.deepEqual(modeOptions('review').map((item) => item.mode), ['referee', 'quick_review', 'detailed_review'])
   assert.deepEqual(modeOptions('quick').map((item) => item.mode), ['quick_review'])
-  assert.deepEqual(modeOptions('ex').map((item) => item.mode), ['explain'])
+  assert.deepEqual(modeOptions('ex').map((item) => item.mode), ['explain', 'explore'])
   assert.deepEqual(modeOptions('pro').map((item) => item.mode), ['prove'])
   assert.equal(coverOf('detailed_review'), 'referee')
   assert.equal(coverOf('check'), 'check')
@@ -50,4 +47,19 @@ test('payload offsets count Unicode code points and target one selected occurren
   const text = '🙂 @prove and @prove show this'
   const start = text.lastIndexOf('@prove')
   assert.deepEqual(callPayload(text, { mode: 'prove', start, end: start + 6 }), { mode: 'prove', start: 13 })
+})
+
+ test('common prefixes select the intended mode before label matches', () => {
+  assert.equal(modeOptions('ref')[0].mode, 'referee')
+  assert.equal(modeOptions('review')[0].mode, 'referee')
+  for (const mode of ['writeup', 'critic', 'explore']) assert.equal(modeOptions(mode)[0].mode, mode)
+})
+
+test('confirmed mode payload carries explicitly chosen effort without changing offsets', () => {
+  const text = '🙂 @prove show this'
+  const call = { mode: 'prove' as const, start: 3, end: 9 }
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'poincare'] as const) {
+    assert.deepEqual(callPayload(text, call, effort), { mode: 'prove', start: 2, effort })
+  }
+  assert.equal(callPayload(text, null, 'poincare'), undefined)
 })

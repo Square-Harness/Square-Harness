@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Restore the sidebar notebook selector and standalone job forms, saved-job
+  access, effort controls and write-up templates.
+- Add the MLX OpenAI-compatible profile and local protocol smoke test, improve
+  bounded reference retrieval and recovery from malformed tool calls.
+- Harden Assistant delegation, source selection, partial reports, interrupted
+  proof resumes and model response parsing, with regression coverage.
+
 - Review has four kinds, started with `@quick_review`, `@referee`, `@detailed_review`
   and `@explain` in the Assistant: a quick check of a proof (independent
   verifier passes through different lenses, each alleged error re-checked, a
@@ -10,7 +17,7 @@
   overview and its typos and presentation problems, without proof checks); a
   detailed review that then checks the proofs one at a time, main results first,
   from a map of the manuscript's statements, proofs and dependencies, at twice
-  the budget; and a precise explanation of a result and its proof. Independent
+  the working time; and a precise explanation of a result and its proof. Independent
   calls run concurrently on vLLM. The Assistant and the terminal start them as
   `quick_review`, `referee`, `detailed_review` and `explain`.
 - An independent research review that only announces what it will check no
@@ -24,14 +31,13 @@
 - Literature reports are rebuilt as verified, themed reading lists: code sweeps
   Crossref, arXiv, zbMATH and Semantic Scholar and follows citations, and the
   model scopes, screens, organises and annotates only records a source returned.
-  OpenAlex is no longer used.
 
 - Saved conversations can be deleted from the Assistant sidebar after
   confirmation. Active and queued work is protected, other open clients update
   immediately, and saved proof/report jobs and attached files are retained.
 
-- Visual interface (`square-harness --gui`): a local web app for proof, critic,
-  explore, literature and referee work, with typeset LaTeX, live model output,
+- Visual interface (`square-harness --gui`): a local web app for conversations,
+  proofs, reading lists, manuscript reviews and write-ups, with typeset LaTeX, live model output,
   proof candidates with their whole-proof reviews, citation checks, pausing and
   approval dialogs. The same code serves desktop and phone browsers; it listens
   on loopback by default and every request needs the workspace's access token.
@@ -73,10 +79,9 @@
   earlier critique and exploration conversations stay listed and readable there.
   Referee reports are called reviews in the interface (the engine mode is still
   `referee`).
-- Effort levels have fixed budgets instead of multiples of the launch defaults:
-  from Low (1 attempt, 1 minute, 30,000 tokens) through Medium (3 attempts) to
-  Poincaré (10 attempts, 2 hours, 200,000 tokens). A proof's per-call ceilings are
-  reduced when needed so one full solve and its review always fit the budget.
+- Effort levels set depth and working time, from Low to Poincaré. New jobs have
+  no cumulative token ceiling unless explicitly configured; advanced limits
+  remain available in the standalone forms.
 - Any job can be started while the model is busy: proof, report and write-up
   forms, suggestions and resume buttons add it to the queue instead of refusing.
 - Online search is on by default in the interface for new conversations and
@@ -84,7 +89,7 @@
   still locks it off. Write-ups never search.
 - The job list and a job page's overview (budget, candidates, checks) can slide
   away to a thin spine on wide screens; the choice is remembered per browser.
-- The logo opens an About page describing the harness.
+- The sidebar footer links the licence and bundled third-party notices.
 
 ## 0.5.1 — 2026-09-27
 

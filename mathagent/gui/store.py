@@ -4,6 +4,7 @@ Job views never write engine state. Chat sessions are the interface's own
 records: the terminal keeps chat in memory, while a browser tab or phone needs
 the conversation to survive a reload.
 """
+import errno
 import fcntl
 import hashlib
 import json
@@ -379,7 +380,10 @@ def research_pdf(root, job_id):
     _regular(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as stream:
-        return stream.read(UPLOAD_BYTES)
+        data = stream.read(UPLOAD_BYTES + 1)
+        if len(data) > UPLOAD_BYTES:
+            raise ValueError('Compiled PDF exceeds the 20 MB download limit')
+        return data
 
 
 def research_sources(root, job_id):
@@ -565,6 +569,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
+    calls = [call for call in calls if not call.get('discarded')]
     stamp, index, items = _now(), 0, []
     for message in history[start:]:
         if message['role'] == 'user' and not echo_user:
@@ -813,7 +818,19 @@ def save_upload(workspace, name, data):
             try:
                 os.link(temporary, target)  # link() never replaces an existing name
                 break
-            except FileExistsError:
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    if exc.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.EXDEV, errno.ENOSYS):
+                        raise
+                    try:
+                        exclusive = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except FileExistsError:
+                        target = workspace / f'{stem}-{number}{suffix}'
+                        number += 1
+                        continue
+                    with os.fdopen(exclusive, 'wb') as stream:
+                        stream.write(data)
+                    break
                 target = workspace / f'{stem}-{number}{suffix}'
                 number += 1
     finally:

@@ -13,6 +13,7 @@ import re
 import sys
 import subprocess
 import time
+import threading
 
 from .agent import Agent, AgentError
 from .backends import create_client, TokenBudgetError, openai_thinking_budget_policy
@@ -192,6 +193,9 @@ class GatedClient:
     def __init__(self, client, gate):
         self.client, self.request_gate = client, gate
         self.host, self.backend = client.host, client.backend
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
 
     @property
     def thinking_budget_policy(self):
@@ -437,9 +441,10 @@ def execute(args, data, plan):
             jobs.extend((problem, arm, rep, seed) for arm in args.arms)
     random.Random(args.seed).shuffle(jobs)
     records = []
-    # Each job makes at most one request at a time; workers bounds concurrency.
+    request_gate = threading.BoundedSemaphore(args.max_in_flight)
+    # All direct model calls share the configured admission gate.
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_job, job, output, args, None): job for job in jobs}
+        futures = {pool.submit(run_job, job, output, args, request_gate): job for job in jobs}
         with (output / 'outputs.jsonl').open('w', encoding='utf-8') as log:
             for future in as_completed(futures):
                 record = future.result()

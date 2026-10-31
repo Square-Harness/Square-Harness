@@ -97,7 +97,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
         onBlur={() => { queryRef.current = null; setQuery(null) }} onKeyDown={keys}
         rows={Math.min(8, Math.max(2, value.split('\n').length))}
         placeholder="Describe what you want to do; type @ to select a mode…" aria-label="Message"
-        aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
+        role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${active}` : undefined} />
     </div>
   )

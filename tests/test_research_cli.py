@@ -100,11 +100,22 @@ class ResearchCliTests(unittest.TestCase):
         proof = Mock()
         proof.start.return_value = dict(self.result, status='paused')
         with patch.object(cli, 'ProofRunner', return_value=proof):
-            self.assertEqual(self.run_cli(['--online', '--prompt', 'Prove x=x.']), 0)
+            self.assertEqual(self.run_cli(['--online', '--prompt', 'Prove x=x.']), 130)
             self.assertNotIn('allow_literature', proof.start.call_args.kwargs)
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.run_cli(['--online', '--proof-literature', '--prompt', 'Prove x=x.'])
 
+
+
+    def test_quick_and_explain_defaults_match_for_flags_and_slash_commands(self):
+        for mode in ('quick_review', 'explain'):
+            for options in (['--mode', mode, '--prompt', 'Explain the supplied proof.'],
+                            ['--prompt', '/' + mode + ' Explain the supplied proof.']):
+                with self.subTest(mode=mode, options=options):
+                    self.assertEqual(self.run_cli(options), 0)
+                    self.assertEqual(self.runner.start.call_args.kwargs['max_rounds'], 3)
+                    self.assertEqual(self.run_cli(['--research-rounds', '6', *options]), 0)
+                    self.assertEqual(self.runner.start.call_args.kwargs['max_rounds'], 6)
 
 
 class WriteupCliTests(unittest.TestCase):
@@ -126,7 +137,7 @@ class WriteupCliTests(unittest.TestCase):
 
     def test_writeup_pins_notes_and_template_and_names_the_output(self):
         self.assertEqual(self.run_cli(['--research-file', 'notes.md', '--template-file', 'macros.sty',
-                                      '--output', 'lemma.tex', '--prompt', '/writeup A short section.']), 0)
+                                      '--output', 'lemma.tex', '--prompt', '/writeup A short section.']), 1)
         call = self.runner.start.call_args
         self.assertEqual(call.args[0], 'A short section.')
         self.assertEqual((call.kwargs['source_files'], call.kwargs['template_files'], call.kwargs['output']),

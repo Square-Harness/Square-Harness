@@ -252,7 +252,8 @@ class QuickTests(ReviewTestCase):
         reject = lambda p, s: {'assessment': 'rejected', 'kind': 'invalid_inference', 'argument': 'Not in the proof.', 'suggestion': ''}
         runner = QuickReviewRunner(self.agent(FakeClient({'check': invented, 'confirm': reject})))
         result = runner.start(WRONG, max_rounds=1)
-        self.assertNotEqual(runner.state['verdict'], 'issues_found')
+        self.assertEqual(runner.state['verdict'], 'uncertain')
+        self.assertNotIn('**No issue found**', result['report'])
         self.assertIn('could not be located', result['report'])
 
     def test_statement_without_proof_is_refused(self):
