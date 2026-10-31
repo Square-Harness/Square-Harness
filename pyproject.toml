@@ -26,9 +26,9 @@ classifiers = [
 dependencies = ["rich>=13,<15", "prompt-toolkit>=3,<4"]
 
 [project.urls]
-Repository = "https://github.com/vincentboulard/Square-Harness"
-Documentation = "https://github.com/vincentboulard/Square-Harness#readme"
-Issues = "https://github.com/vincentboulard/Square-Harness/issues"
+Repository = "https://github.com/Square-Harness/Square-Harness"
+Documentation = "https://github.com/Square-Harness/Square-Harness#readme"
+Issues = "https://github.com/Square-Harness/Square-Harness/issues"
 
 [project.optional-dependencies]
 math = ["sympy>=1.12,<2", "numpy>=1.26,<3"]

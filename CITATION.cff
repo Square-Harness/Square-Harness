@@ -9,7 +9,7 @@ authors:
   - family-names: Carillo
     given-names: Louis
 version: 0.5.1
-repository-code: "https://github.com/vincentboulard/Square-Harness"
+repository-code: "https://github.com/Square-Harness/Square-Harness"
 license: Apache-2.0
 keywords:
   - mathematics

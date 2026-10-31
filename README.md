@@ -21,7 +21,7 @@ You need Python 3.10+, Linux or macOS, and a running model server. Models and th
 memory requirements are separate from the harness. Native Windows is not supported.
 
 ```bash
-git clone https://github.com/vincentboulard/Square-Harness.git
+git clone https://github.com/Square-Harness/Square-Harness.git
 cd Square-Harness
 python3 -m venv .venv
 source .venv/bin/activate
