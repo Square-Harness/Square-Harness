@@ -1,5 +1,7 @@
 // Markdown with typeset mathematics. Model and source text is untrusted:
-// no raw HTML, no images, KaTeX with trust disabled, and only http(s)/mailto links.
+// no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.
+// The one image source allowed is a figure of a sandbox run in this folder, which the
+// authenticated /api/experiments endpoint serves after validating its id and name.
 import { memo, useMemo, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -7,12 +9,13 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { normalizeMath, remarkCitations, snippet, splitBlocks } from '../mathtext'
+import { experimentFigure } from '../figures'
 
 const KATEX = { throwOnError: false, strict: 'ignore', trust: false, maxExpand: 500, maxSize: 20 } as const
 
 // -- rendering ---------------------------------------------------------------------
 
-const safeUrl = (url: string) => (/^(https?:|mailto:)/i.test(url) ? url : '')
+const safeUrl = (url: string) => (/^(https?:|mailto:)/i.test(url) ? url : experimentFigure(url))
 const inlineText = ({ children }: { children?: ReactNode }) => <>{children}</>
 
 type Props = {
@@ -28,7 +31,9 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
     a: ({ href, children: label }) => (
       <a href={href} target="_blank" rel="noopener noreferrer nofollow">{label}</a>
     ),
-    img: ({ alt }) => <span className="img-alt">(image{alt ? `: ${alt}` : ''} not loaded)</span>,
+    img: ({ src, alt }) => (typeof src === 'string' && src.startsWith('/api/experiments/')
+      ? <img className="experiment-inline" src={src} alt={alt || 'Sandbox figure'} loading="lazy" />
+      : <span className="img-alt">(image{alt ? `: ${alt}` : ''} not loaded)</span>),
     // Compact previews keep heading text and inline math without heading size.
     ...(inline ? { p: inlineText, h1: inlineText, h2: inlineText, h3: inlineText,
       h4: inlineText, h5: inlineText, h6: inlineText } : {}),

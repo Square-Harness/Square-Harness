@@ -482,6 +482,23 @@ def writeup_start(h, body):
     return {'task': task.summary(), 'id': task.target}
 
 
+@route('GET', r'/api/experiments/(?P<experiment>exp-\d{8}-\d{6}-[0-9a-f]{6})/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.png)')
+def experiment_figure(h, body, experiment, name):
+    from ..numerics.artifacts import ExperimentStore
+    path = ExperimentStore(h.server.hub.root).path(experiment, name)
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_000_000:
+            raise FileNotFoundError
+        data = path.read_bytes()
+    except OSError:
+        raise store.NotFound('No such figure in this folder') from None
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise store.NotFound('No such figure in this folder')
+    h.send_bytes(200, data, 'image/png', [('Cache-Control', 'private, max-age=86400'),
+                                          ('X-Content-Type-Options', 'nosniff')])
+    return Streamed
+
+
 @route('GET', '/api/research/' + UUID + '/pdf')
 def research_pdf(h, body, id):
     data = store.research_pdf(h.server.hub.root, id)

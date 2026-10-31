@@ -3,14 +3,15 @@
 ## Unreleased
 
 - Python sandbox (Docker) shared by two new skills. `/python-lab` runs requested
-  computations, simulations and plots (30 s, 1 GB, 2 CPUs by default; more only
+  computations, simulations and plots (30 s, 4 GB, 2 CPUs by default; more only
   with your approval). `numerical-sanity-check` lets critic/explore chats, the
   Assistant and its workers try to falsify nontrivial claims with small
-  experiments (5 s, 512 MB, 1 CPU, 3 runs per turn; `--no-numerical-checks`
+  experiments (5 s, 2 GB, 1 CPU, 3 runs per turn; `--no-numerical-checks`
   disables it; `/sanity-check` asks for it). Containers have no network, no host
   files or environment, a non-root user without capabilities, a read-only root
   and bounded output; policies are bound by the harness, never by tool
-  arguments. Runs are saved in `.mathagent/experiments/`. In the interface,
+  arguments. Runs are saved in `.mathagent/experiments/`, and the interface
+  shows their figures in the conversation. In the interface,
   `@python_lab` and `@sanity_check` start them from an Assistant conversation
   (the Assistant cannot choose them itself). See
   [docs/python-numerics.md](docs/python-numerics.md).

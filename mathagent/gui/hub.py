@@ -598,6 +598,21 @@ class Hub:
         agent.document_output_cap = getattr(args, 'specialist_output_tokens', None)
         return agent, library
 
+    def _show_experiments(self, workspace, root, chat_id):
+        """Append each sandbox run with figures to an Assistant conversation as it is saved."""
+        numerics = getattr(workspace, 'numerics', None)
+        if numerics is None:
+            return
+
+        def show(record):
+            item = store.experiment_item(record['id'], record['status'],
+                                         [a for a in record.get('artifacts', []) if a.get('kind') == 'figure'],
+                                         record.get('purpose', ''))
+            if item is not None:
+                store.append_items(root, chat_id, [item])
+                self.bus.publish('chat_saved', chat=chat_id)
+        numerics.on_record = show
+
     def _ensure_model(self, agent):
         models = agent.client.models()
         if agent.model not in models:
@@ -943,6 +958,7 @@ class Hub:
                 online = online and bool(previous.get('online', False))
             main, _ = self._engine(task, mode='explore', think=False, online=online)
             main.workspace.pin_files(files)
+            self._show_experiments(main.workspace, root, chat_id)
             self._ensure_model(main)
             checkpoint_lock = threading.RLock()
             parent = None
@@ -1100,6 +1116,7 @@ class Hub:
                                                                  approve=lambda preview: self._approve(task, preview))
                 except SandboxUnavailable as exc:
                     sandbox_error = f'@{mode} needs the Python sandbox on this computer. {exc}'
+        self._show_experiments(agent.workspace, root, chat_id)
         if mode in ('critic', 'explore') + USER_MODES:
             # These workers return analysis; file mutation belongs to Write-up,
             # whose durable runner already checkpoints approved tool actions.

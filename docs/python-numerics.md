@@ -57,10 +57,10 @@ python_lab> Run this unchanged:
 messages stay there until you choose another mode. The model writes complete,
 seeded scripts, runs them, reads errors, fixes genuine coding mistakes, and
 reports numbers, figures and the experiment id. When you ask for code to run
-unchanged, it is executed byte for byte. Default limits: **30 s, 1 GB, 2 CPUs,
+unchanged, it is executed byte for byte. Default limits: **30 s, 4 GB, 2 CPUs,
 20 runs per request**. If the model asks for more, the harness shows you the
 requested limits and runs only after you approve them, up to a configured
-ceiling (by default 300 s, 4 GB, 4 CPUs).
+ceiling (by default 300 s, 16 GB, 4 CPUs).
 
 In the visual interface, type `@` in an Assistant (∀) conversation and pick
 **`@python_lab`** (a flask on teal) or **`@sanity_check`** (¬∀ on vermilion),
@@ -81,8 +81,9 @@ It is **not** offered in proof jobs, reviews, literature work or write-ups,
 which keep their existing tool policy. The model decides whether a check is
 worth it: the skill tells it to skip immediate exact arguments (such as
 (x − y)² ≥ 0) and to look for violations rather than confirmations. Each check
-has **at most 3 runs** (one user turn), each **5 s, 512 MB, 1 CPU**, with no
-escalation: a heavier experiment needs your `/python-lab`.
+has **at most 3 runs** (one user turn), each **5 s, 2 GB, 1 CPU**, with no
+escalation: a heavier experiment needs your `/python-lab`. Memory limits are
+caps, not reservations: a run uses only what it allocates.
 
 - Disable automatic checks: `--no-numerical-checks` (terminal and interface).
   `/sanity-check` and `/python-lab` stay available.
@@ -148,15 +149,16 @@ square-harness --python-limits limits.json …
 
 ```json
 {
-  "sanity": {"limits": {"timeout_seconds": 5, "memory_mb": 512, "cpus": 1}, "max_runs": 3},
-  "lab": {"defaults": {"timeout_seconds": 30, "memory_mb": 1024, "cpus": 2},
-          "ceiling": {"timeout_seconds": 300, "memory_mb": 4096, "cpus": 4}, "max_runs": 20}
+  "sanity": {"limits": {"timeout_seconds": 5, "memory_mb": 2048, "cpus": 1}, "max_runs": 3},
+  "lab": {"defaults": {"timeout_seconds": 30, "memory_mb": 4096, "cpus": 2},
+          "ceiling": {"timeout_seconds": 300, "memory_mb": 16384, "cpus": 4}, "max_runs": 20}
 }
 ```
 
 Each policy also has `pids`, `tmpfs_mb`, `output_bytes` and `artifact_bytes`.
 Values are checked against built-in maxima. Automatic checks cannot exceed
-30 s, 2 GB, 2 CPUs or 10 runs, and nothing exceeds 600 s, 8 GB or 4 CPUs.
+30 s, 4 GB, 2 CPUs or 10 runs, and nothing exceeds 600 s, 32 GB or 4 CPUs.
+On a smaller machine, lower the memory values in this file.
 
 ## Experiments and artifacts
 
@@ -258,8 +260,8 @@ in the real sandbox.
 - Docker is required. Apptainer/Singularity (common on HPC clusters) and
   Podman are not supported backends yet; on a cluster without Docker, run the
   harness where Docker is available, or use `--no-python-sandbox`.
-- The interface does not show figures inline yet. Figures are saved under
-  `.mathagent/experiments/`, and the model reads their text summaries.
+- The terminal cannot show figures: it prints their saved paths. The interface
+  shows them under each run (click to open full size).
 - Each run is stateless: there is no persistent kernel between calls.
 - Whether a check is worthwhile is the model's judgment, guided by the skill;
   the harness enforces the budget, not the mathematics.

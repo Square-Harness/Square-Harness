@@ -291,6 +291,16 @@
 .review-note { margin: 10px 0; padding: 6px 0 6px 14px; border-left: 2px solid var(--red); }
 .review-label { margin: 0 0 2px; font: 700 13px/1.4 var(--font-ui); color: var(--red); }
 .tool-step { margin: 4px 0; }
+/* Sandbox figures: plots keep their white background in both themes. */
+.experiment { display: grid; gap: 14px; margin: 10px 0 16px; }
+.experiment-figure { margin: 0; }
+.experiment-figure img, .prose img.experiment-inline {
+  display: block; max-width: min(100%, 720px); height: auto; background: #fff;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.experiment-figure a:hover img { border-color: var(--ink); }
+.experiment-figure figcaption { margin-top: 5px; font: 13px/1.4 var(--font-ui); color: var(--text-3); }
+.experiment-id { font-family: var(--font-mono); font-size: 12px; }
 .tool-step > summary { font-weight: 400; }
 
 .composer { flex: none; padding: 12px 40px calc(12px + env(safe-area-inset-bottom)) var(--content-x); background: var(--paper); border-top: 1px solid var(--line); }

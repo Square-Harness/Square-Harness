@@ -24,6 +24,8 @@ cheap experiments. Numerical experiments guide reasoning; they never replace a p
   sampling, minimization of the margin. Respect every hypothesis.
 - A violation is a candidate until admissibility, conditioning and precision are
   checked (mpmath; exact SymPy values when possible).
+- Keep runs small: estimate memory (n x m x 8 bytes) and simulate step by step
+  rather than storing every path.
 - Report exactly one of: exact counterexample, numerically verified candidate,
   no counterexample detected, inconclusive. Passing tests never prove a claim; a
   failed or inconclusive run is not evidence against it.
@@ -72,7 +74,7 @@ until higher precision shows otherwise.
 
 ## Budget
 
-Each run: about 5 s, 512 MB, 1 CPU, no network or files; at most 3 runs per check;
+Each run: about 5 s, 2 GB, 1 CPU, no network or files; at most 3 runs per check;
 no escalation. Keep experiments small; a heavy computation is for `/python-lab`.
 
 ## Reporting

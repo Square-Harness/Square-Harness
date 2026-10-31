@@ -34,21 +34,22 @@ class Limits:
 
 
 # Absolute bounds. No configuration file, flag or approval goes beyond these.
-HARD_LIMITS = Limits(timeout_seconds=600, memory_mb=8192, cpus=4, pids=256, tmpfs_mb=512,
+HARD_LIMITS = Limits(timeout_seconds=600, memory_mb=32768, cpus=4, pids=256, tmpfs_mb=512,
                      output_bytes=1_000_000, artifact_bytes=16_000_000)
 FLOOR = Limits(timeout_seconds=0.5, memory_mb=128, cpus=0.25, pids=16, tmpfs_mb=8,
                output_bytes=1000, artifact_bytes=0)
 # Automatic checks may be configured, but only within these bounds.
-SANITY_BOUNDS = Limits(timeout_seconds=30, memory_mb=2048, cpus=2, pids=64, tmpfs_mb=128,
+SANITY_BOUNDS = Limits(timeout_seconds=30, memory_mb=4096, cpus=2, pids=64, tmpfs_mb=128,
                        output_bytes=50_000, artifact_bytes=4_000_000)
 MAX_SANITY_RUNS = 10
 MAX_LAB_RUNS = 50
 
-SANITY_DEFAULTS = Limits(timeout_seconds=5, memory_mb=512, cpus=1, pids=64, tmpfs_mb=64,
+# Memory is a cap, not a reservation: 2 GB lets a modest simulation run without crowding the host.
+SANITY_DEFAULTS = Limits(timeout_seconds=5, memory_mb=2048, cpus=1, pids=64, tmpfs_mb=64,
                          output_bytes=20_000, artifact_bytes=2_000_000)
-LAB_DEFAULTS = Limits(timeout_seconds=30, memory_mb=1024, cpus=2, pids=128, tmpfs_mb=256,
+LAB_DEFAULTS = Limits(timeout_seconds=30, memory_mb=4096, cpus=2, pids=128, tmpfs_mb=256,
                       output_bytes=200_000, artifact_bytes=8_000_000)
-LAB_CEILING = Limits(timeout_seconds=300, memory_mb=4096, cpus=4, pids=256, tmpfs_mb=512,
+LAB_CEILING = Limits(timeout_seconds=300, memory_mb=16384, cpus=4, pids=256, tmpfs_mb=512,
                      output_bytes=1_000_000, artifact_bytes=16_000_000)
 
 # The only resource fields a model may mention in a tool call.

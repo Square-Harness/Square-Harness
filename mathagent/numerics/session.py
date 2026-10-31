@@ -29,6 +29,11 @@ SANITY_NOTE = ('Numerical evidence only. Passing cases never prove a universal c
 LAB_NOTE = 'Report only what this output shows. The code, output and files are saved under experiment_id.'
 FAILED_NOTE = ('This run did not complete (status {status}): it verified nothing. Do not cite it as evidence; '
                'fix the code and rerun, or say the check is inconclusive.')
+MEMORY_HINT = (' It reached the {memory_mb} MB memory limit: estimate array sizes first (n x m x 8 bytes for '
+               'float64), keep only what you need (simulate step by step instead of storing every path, '
+               'accumulate statistics, use float32), or use fewer samples.')
+FIGURE_NOTE = (' The figures are shown to the user below this run; refer to them by name and describe what '
+               'they show instead of pasting image links.')
 
 
 def _excerpt(text, limit):
@@ -52,6 +57,8 @@ class NumericsSession:
         self.cancel = cancel
         self.runs = 0
         self._lock = threading.Lock()
+        # Set by an interface to show a saved run (its figures) in the conversation.
+        self.on_record = None
 
     def new_turn(self):
         """A new user turn starts a new check with a fresh run allowance."""
@@ -171,6 +178,11 @@ class NumericsSession:
         record = self.store.save(code=code, result=result, limits=limits, policy=self.policy.name, image=image,
                                  seed=seed, parameters=parameters, purpose=purpose, explicit=self.explicit,
                                  harness_version=__version__)
+        if self.on_record is not None:
+            try:
+                self.on_record(record)
+            except Exception:  # Display is best effort; the run and its record stand.
+                pass
         return self._summary(record, limits)
 
     def _summary(self, record, limits):
@@ -200,8 +212,12 @@ class NumericsSession:
             value['message'] = record['message']
         if record['status'] != 'ok':
             value['note'] = FAILED_NOTE.format(status=record['status'])
+            if record['status'] == 'memory':
+                value['note'] += MEMORY_HINT.format(memory_mb=limits.memory_mb)
         else:
             value['note'] = LAB_NOTE if self.policy.name == LAB else SANITY_NOTE
+        if figures:
+            value['note'] += FIGURE_NOTE
         return value
 
     def read_experiment(self, experiment_id, part='summary', offset=0):

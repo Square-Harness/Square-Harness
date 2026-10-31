@@ -110,10 +110,10 @@ class PythonLabSkillTests(unittest.TestCase):
         self.assertEqual(refused['status'], 'refused')
         self.assertEqual(executor.calls, [])
         approved = json.loads(session.execute('execute_python', {'code': 'x = 1', 'timeout_seconds': 120,
-                                                                 'memory_mb': 2048}))
+                                                                 'memory_mb': 8192}))
         self.assertEqual(approved['status'], 'ok')
         self.assertEqual((executor.calls[0]['limits'].timeout_seconds, executor.calls[0]['limits'].memory_mb),
-                         (120, 2048))
+                         (120, 8192))
         self.assertEqual(len(previews), 2)
         self.assertIn('MORE RESOURCES', previews[0])
         self.assertEqual(json.loads(session.execute('execute_python', {'code': 'x', 'cpus': 64}))['status'], 'refused')

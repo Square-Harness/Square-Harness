@@ -26,7 +26,42 @@ CHAT_MODES = ('critic', 'explore', 'free')
 # are both answers in the conversation, and the referee workflow is called Review.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
                'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
-               'writeup': 'Write-up', 'clarify': 'Question'}
+               'writeup': 'Write-up', 'clarify': 'Question', 'python_lab': 'Python Lab',
+               'sanity_check': 'Numerical sanity check'}
+_EXPERIMENT = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
+_FIGURE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.png$')
+
+
+def experiment_item(experiment_id, status, figures, purpose=''):
+    """A transcript item that shows a sandbox run's figures, or None when it has none.
+
+    ``figures`` are dicts with a ``name`` or a workspace ``path``, and optional width/height;
+    the interface loads them from /api/experiments/<id>/<name>, which validates both again.
+    """
+    if not isinstance(experiment_id, str) or not _EXPERIMENT.match(experiment_id):
+        return None
+    shown = []
+    for figure in figures or []:
+        name = figure.get('name') or str(figure.get('path', '')).rsplit('/', 1)[-1]
+        if _FIGURE.match(name):
+            shown.append({'name': name, 'width': figure.get('width'), 'height': figure.get('height')})
+    if not shown:
+        return None
+    return {'role': 'experiment', 'content': '', 'experiment': experiment_id, 'run_status': str(status or ''),
+            'purpose': str(purpose or '')[:300], 'figures': shown[:8], 'time': _now()}
+
+
+def _tool_experiment(message):
+    """The experiment item for a saved execute_python result, if it produced figures."""
+    if message.get('tool_name') != 'execute_python':
+        return None
+    try:
+        value = json.loads(message.get('content') or '')
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return experiment_item(value.get('experiment_id'), value.get('status'), value.get('figures'))
 UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -565,8 +600,12 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
-    stamp, index, items = _now(), 0, []
+    stamp, index, items, figures = _now(), 0, [], []
     for message in history[start:]:
+        if message['role'] != 'tool' and figures:
+            # Sandbox figures follow the whole block of tool results, keeping calls and results paired.
+            items.extend(figures)
+            figures = []
         if message['role'] == 'user' and not echo_user:
             continue  # Default mode already shows the message and its route card
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
@@ -580,7 +619,11 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
             index += 1
         elif message['role'] == 'tool':
             item['tool_name'] = message.get('tool_name', '')
+            experiment = _tool_experiment(message)
+            if experiment is not None:
+                figures.append(experiment)
         items.append(item)
+    items.extend(figures)
     if notices:
         items.append({'role': 'notice', 'content': '\n'.join(dict.fromkeys(notices)), 'time': stamp})
     # The model context may drop old turns to fit; the transcript never does.

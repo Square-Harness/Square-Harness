@@ -60,7 +60,7 @@ class FakeDockerTests(unittest.TestCase):
         command = executor.command('sqh-py-test', SANITY_DEFAULTS, runtime_nnp=True)
         joined = ' '.join(command)
         for expected in ('run --rm -i', '--network none', '--user 10001:10001', '--read-only', '--cap-drop ALL',
-                         '--security-opt no-new-privileges:true', '--memory 512m', '--memory-swap 512m',
+                         '--security-opt no-new-privileges:true', '--memory 2048m', '--memory-swap 2048m',
                          '--cpus 1', '--pids-limit 64', 'size=64m', '--pull never', '--log-driver none',
                          'OMP_NUM_THREADS=1'):
             self.assertIn(expected, joined)
@@ -72,7 +72,7 @@ class FakeDockerTests(unittest.TestCase):
                                                 'MKL_NUM_THREADS')
                             for k, v in zip(command, command[1:]) if k == '--env'))
         lab = ' '.join(executor.command('sqh-py-test', LAB_DEFAULTS, runtime_nnp=False))
-        self.assertIn('--memory 1024m', lab)
+        self.assertIn('--memory 4096m', lab)
         self.assertIn('--cpus 2', lab)
         self.assertNotIn('no-new-privileges', lab)
 
@@ -162,7 +162,7 @@ class FakeDockerTests(unittest.TestCase):
         sleepers = {}
         for name, age in (('sqh-py-orphan', 3600), ('sqh-py-active', 5)):
             proc = subprocess.Popen(['sleep', '60'])
-            self.addCleanup(proc.kill)
+            self.addCleanup(lambda p=proc: (p.kill(), p.wait()))
             pidfile = state / (name + '.pid')
             pidfile.write_text(str(proc.pid))
             os.utime(pidfile, (time.time() - age, time.time() - age))

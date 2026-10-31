@@ -328,7 +328,7 @@ export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' 
   | 'python_lab' | 'sanity_check'
 
 export type TranscriptItem = {
-  role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'
+  role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route' | 'experiment'
   content: string
   time: string
   thinking?: string
@@ -349,6 +349,11 @@ export type TranscriptItem = {
   effort?: string
   orchestrated?: boolean
   outcome?: string
+  // A sandbox run's figures (role 'experiment'), served by /api/experiments/<id>/<name>.
+  experiment?: string
+  run_status?: string
+  purpose?: string
+  figures?: { name: string; width?: number | null; height?: number | null }[]
 }
 
 export type Chat = {

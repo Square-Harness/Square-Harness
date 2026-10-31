@@ -12,6 +12,7 @@ import { callPayload, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
+import { figureUrl } from '../figures'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { go, href } from '../router'
@@ -163,7 +164,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
   const transcript = data?.transcript || []
-  const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route')
+  const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route' && item.role !== 'experiment')
   const canReview = !!id && !work.blocked && !paused && !sending && !resuming && !!last && last.role === 'assistant' && !!last.content
   const review = async () => {
     if (!id || !canReview || sending) return
@@ -392,6 +393,8 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
       blocks.push(<p key={index} className={'notice' + (item.discarded ? ' notice-discarded' : '')}>{item.content}</p>)
     } else if (item.role === 'tool') {
       blocks.push(<Collapse key={index} className="tool-step" summary={<span className="tool-line">{item.tool_name || 'tool'} result</span>}><pre className="plain">{item.content}</pre></Collapse>)
+    } else if (item.role === 'experiment') {
+      blocks.push(<ExperimentFigures key={index} item={item} />)
     }
   }
   flush(-1)
@@ -499,6 +502,25 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
         {item.outcome && item.outcome !== error && <p className="muted small">{item.outcome}</p>}
         <ErrorNote>{error}</ErrorNote>
       </div>
+    </div>
+  )
+}
+
+/** The figures of one sandbox run, shown where the run happened; click for full size. */
+function ExperimentFigures({ item }: { item: TranscriptItem }) {
+  const id = item.experiment
+  if (!id || !item.figures?.length) return null
+  return (
+    <div className="experiment">
+      {item.figures.map((figure) => (
+        <figure key={figure.name} className="experiment-figure">
+          <a href={figureUrl(id, figure.name)} target="_blank" rel="noopener noreferrer" title="Open the figure at full size">
+            <img src={figureUrl(id, figure.name)} alt={`${figure.name} from sandbox run ${id}`} loading="lazy"
+              width={figure.width ?? undefined} height={figure.height ?? undefined} />
+          </a>
+          <figcaption>{item.purpose ? `${item.purpose} · ` : ''}{figure.name} · <span className="experiment-id">{id}</span></figcaption>
+        </figure>
+      ))}
     </div>
   )
 }

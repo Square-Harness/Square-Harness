@@ -275,3 +275,95 @@ class WorkedMathematicsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# -- figures in the interface ------------------------------------------------------
+
+from mathagent.gui import store as gui_store
+from mathagent.numerics.executor import Artifact, ExperimentResult
+from test_python_executor import png
+
+
+def figure_run(status='ok'):
+    figure = Artifact('figure-1.png', 'figure', png(4, 3), {'axes': [{'title': 'Brownian paths'}]}, 4, 3)
+    return ExperimentResult(status, elapsed_seconds=0.2, wall_seconds=0.9, exit_code=0, stdout='mean 0.01\n',
+                            artifacts=[figure])
+
+
+class FigureTranscriptTests(unittest.TestCase):
+    def test_saved_turn_places_figures_after_the_tool_block(self):
+        figure = {'path': '.mathagent/experiments/exp-20261101-101010-abcdef/figure-1.png', 'width': 4, 'height': 3}
+        result = json.dumps({'experiment_id': 'exp-20261101-101010-abcdef', 'status': 'ok', 'figures': [figure]})
+        with tempfile.TemporaryDirectory() as root:
+            chat = gui_store.create_chat(root, 'critic')
+            history = [{'role': 'user', 'content': 'Simulate Brownian motion.'},
+                       {'role': 'assistant', 'content': '', 'tool_calls': [{'function': {'name': 'execute_python'}},
+                                                                            {'function': {'name': 'read_experiment'}}]},
+                       {'role': 'tool', 'tool_name': 'execute_python', 'content': result},
+                       {'role': 'tool', 'tool_name': 'read_experiment', 'content': '{}'},
+                       {'role': 'assistant', 'content': 'The paths are shown above.'}]
+            gui_store.commit_turn(root, chat['id'], history, [{'thinking': '', 'stats': {}}] * 2, [])
+            roles = [item['role'] for item in gui_store.load_chat(root, chat['id'])['transcript']]
+        self.assertEqual(roles, ['user', 'assistant', 'tool', 'tool', 'experiment', 'assistant'])
+
+    def test_experiment_items_accept_only_valid_ids_and_png_names(self):
+        self.assertIsNone(gui_store.experiment_item('../exp', 'ok', [{'name': 'figure-1.png'}]))
+        self.assertIsNone(gui_store.experiment_item('exp-20261101-101010-abcdef', 'ok', [{'name': 'data.csv'}]))
+        item = gui_store.experiment_item('exp-20261101-101010-abcdef', 'ok',
+                                         [{'name': 'figure-1.png'}, {'name': '../x.png'}, {'path': 'a/b/plot.png'}])
+        self.assertEqual([f['name'] for f in item['figures']], ['figure-1.png', 'plot.png'])
+
+    def test_memory_failures_tell_the_model_how_to_shrink_the_experiment(self):
+        sandbox, executor = fake_sandbox()
+        executor.results = [ExperimentResult('memory', exit_code=137, error={'type': 'MemoryError',
+                                              'message': 'Killed at the 2048 MB memory limit', 'traceback': ''})]
+        with tempfile.TemporaryDirectory() as root:
+            value = json.loads(sandbox.bind(SANITY, root, explicit=False).execute(
+                'execute_python', {'code': 'import numpy as np\nX = np.zeros((20000, 20000))'}))
+        self.assertIn('verified nothing', value['note'])
+        self.assertIn('2048 MB memory limit', value['note'])
+        self.assertIn('simulate step by step', value['note'])
+
+
+class InterfaceFigureTests(GuiCase):
+    extra_args = ('--ctx', '40960')
+
+    def setUp(self):
+        super().setUp()
+        self.hub.sandbox, self.executor = fake_sandbox()
+
+    def figure_items(self, chat):
+        return [item for item in self.ok('GET', f'/api/chats/{chat}')['transcript'] if item.get('role') == 'experiment']
+
+    def test_assistant_shows_figures_above_its_answer_and_serves_them(self):
+        self.executor.results = [figure_run()]
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        self.fake.replies = [tool('execute_python', {'code': 'plot()', 'purpose': 'Simulate Brownian paths'}),
+                             text('Five Brownian paths are shown above.')]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Simulate and plot Brownian motion.'})
+        self.wait_for(lambda: any(item.get('content') == 'Five Brownian paths are shown above.'
+                                  for item in self.ok('GET', f'/api/chats/{chat}')['transcript']), timeout=20,
+                      message='the answer')
+        transcript = self.ok('GET', f'/api/chats/{chat}')['transcript']
+        roles = [item['role'] for item in transcript]
+        self.assertLess(roles.index('experiment'), len(roles) - 1 - roles[::-1].index('assistant'))
+        [item] = self.figure_items(chat)
+        self.assertEqual((item['purpose'], item['run_status'], item['figures'][0]['name']),
+                         ('Simulate Brownian paths', 'ok', 'figure-1.png'))
+        path = f"/api/experiments/{item['experiment']}/figure-1.png"
+        status, body, headers = self.request('GET', path)
+        self.assertEqual((status, headers['Content-Type']), (200, 'image/png'))
+        self.assertTrue(body.startswith('\ufffdPNG'))  # the helper decodes bodies as text
+        self.assertEqual(self.request('GET', path, auth=False)[0], 401)
+        for bad in (f"/api/experiments/{item['experiment']}/missing.png", '/api/experiments/exp-1/figure-1.png',
+                    f"/api/experiments/{item['experiment']}/record.json", f"/api/experiments/{item['experiment']}/code.py"):
+            self.assertIn(self.request('GET', bad)[0], (404,), bad)
+
+    def test_critique_chat_saves_the_figures_with_the_turn(self):
+        self.executor.results = [figure_run()]
+        chat = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']
+        self.fake.replies = [tool('execute_python', {'code': 'plot()'}), text('See the figure.')]
+        self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Do Brownian paths look rough?'})
+        self.wait_task(timeout=30)
+        roles = [item['role'] for item in self.ok('GET', f'/api/chats/{chat}')['transcript']]
+        self.assertEqual(roles, ['user', 'assistant', 'tool', 'experiment', 'assistant'])

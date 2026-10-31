@@ -21,6 +21,8 @@ ordinary mathematical reasoning; quick falsification checks belong to
 - Each call is a fresh sandbox: send complete scripts, seed randomness, put the
   main numbers in `RESULT`. Open Matplotlib figures are saved automatically.
 - Fix genuine coding errors and rerun; report errors, limits and approximations.
+- Size arrays before allocating them (n x m x 8 bytes); stream large simulations
+  step by step. Figures are shown to the user automatically.
 - Never claim code ran or produced a value unless a tool result shows it.
 
 ## Execution

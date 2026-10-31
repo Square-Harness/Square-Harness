@@ -150,15 +150,16 @@ class PolicyEnforcementTests(unittest.TestCase):
         policies = load_policies()
         sanity, lab = policies[SANITY], policies[LAB]
         self.assertEqual((sanity.defaults.timeout_seconds, sanity.defaults.memory_mb, sanity.defaults.cpus,
-                          sanity.max_runs, sanity.escalation), (5, 512, 1, 3, False))
+                          sanity.max_runs, sanity.escalation), (5, 2048, 1, 3, False))
         self.assertEqual(sanity.ceiling, sanity.defaults)
         self.assertEqual((lab.defaults.timeout_seconds, lab.defaults.memory_mb, lab.defaults.cpus, lab.escalation),
-                         (30, 1024, 2, True))
+                         (30, 4096, 2, True))
+        self.assertEqual(lab.ceiling.memory_mb, 16384)
 
     def test_automatic_policy_never_escalates(self):
         policy = sanity_policy()
         approvals = []
-        for request in ({'timeout_seconds': 6}, {'memory_mb': 1024}, {'cpus': 2}):
+        for request in ({'timeout_seconds': 6}, {'memory_mb': 4096}, {'cpus': 2}):
             with self.assertRaises(PolicyError):
                 resolve(policy, request, approve=lambda preview: approvals.append(preview) or True)
         self.assertEqual(approvals, [], 'an automatic check must not even ask for more')
@@ -175,9 +176,9 @@ class PolicyEnforcementTests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyError, 'did not approve'):
             resolve(policy, {'timeout_seconds': 120}, approve=lambda preview: False)
         previews = []
-        limits = resolve(policy, {'timeout_seconds': 120, 'memory_mb': 2048},
+        limits = resolve(policy, {'timeout_seconds': 120, 'memory_mb': 8192},
                          approve=lambda preview: previews.append(preview) or True)
-        self.assertEqual((limits.timeout_seconds, limits.memory_mb), (120, 2048))
+        self.assertEqual((limits.timeout_seconds, limits.memory_mb), (120, 8192))
         self.assertIn('default 30', previews[0])
         with self.assertRaisesRegex(PolicyError, 'ceiling'):
             resolve(policy, {'timeout_seconds': 10_000}, approve=lambda preview: True)
