@@ -135,8 +135,8 @@ proof modes are not part of v0.5.
 | `/resume <id>` | Resume an interrupted v0.5 job |
 | `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
 | `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
-| `/python-lab <request>` | Run Python experiments and plots in an isolated Docker sandbox |
-| `/sanity-check <claim>` | Try to falsify a claim with cheap numerical experiments |
+| `/python-lab <request>` | Run Python experiments and plots in an isolated Docker sandbox (`@python_lab` in the interface) |
+| `/sanity-check <claim>` | Try to falsify a claim with cheap numerical experiments (`@sanity_check` in the interface) |
 | `/help` | Show commands |
 | `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 

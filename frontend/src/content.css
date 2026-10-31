@@ -341,6 +341,8 @@
 .route-cover { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 5px; color: #fff; font: 13px/1 var(--font-math); }
 .route-cover.mode-literature { font-size: 15px; }
 .route-cover.mode-check { font: 700 10px/1 var(--font-text); letter-spacing: -0.02em; }
+.route-cover.mode-python_lab { font-size: 15px; }
+.route-cover.mode-sanity_check { font-size: 11.5px; letter-spacing: -0.04em; }
 .route-request { width: 100%; padding: 10px 12px; resize: vertical; font: 16px/1.5 var(--font-text); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px; }
 .route-request:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
 .route-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
@@ -351,6 +353,8 @@
 .speaker-model.mode-free { font-size: 18px; }
 .speaker-model.mode-literature { font-size: 19px; }
 .speaker-model.mode-check { font: 700 12px/1 var(--font-text); letter-spacing: -0.02em; }
+.speaker-model.mode-python_lab { font-size: 19px; }
+.speaker-model.mode-sanity_check { font-size: 15px; letter-spacing: -0.04em; }
 
 /* Write-up */
 .notes-input { font-family: var(--font-mono); font-size: 14.5px; }
@@ -379,6 +383,8 @@
   .speaker-model.mode-explore, .speaker-model.mode-free { font-size: 14px; }
   .speaker-model.mode-literature { font-size: 15px; }
   .speaker-model.mode-check { font-size: 10px; }
+  .speaker-model.mode-python_lab { font-size: 15px; }
+  .speaker-model.mode-sanity_check { font-size: 12px; }
 }
 
 /* Effort: a thin ink line with square stops, like marks on squared paper. */

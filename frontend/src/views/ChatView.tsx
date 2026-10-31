@@ -6,7 +6,7 @@ import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, ErrorNote, Loading, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
-import { Glyph } from '../components/Glyph'
+import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { callPayload, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
@@ -52,8 +52,9 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
 // How a card names what the model started. Critic and explore are both an answer here;
 // a literature check also answers here, with its evidence.
 type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
+  | 'python_lab' | 'sanity_check'
 // `cover` names the mark (components/Glyph.tsx) and its colour class.
-const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check' | 'prove' | 'literature' | 'referee' | 'writeup' }> = {
+const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   answer: { noun: 'an answer', label: 'Answer', cover: 'free' },
   check: { noun: 'a literature check', label: 'Literature check', cover: 'check' },
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
@@ -63,12 +64,17 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check'
   quick_review: { noun: 'a quick review', label: 'Quick review', cover: 'referee' },
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
   writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
+  python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
+  sanity_check: { noun: 'a numerical sanity check', label: 'Numerical sanity check', cover: 'sanity_check' },
 }
 const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook.
-const pageOf = (mode: Exclude<RouteMode, 'check'>) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode)
+// Python Lab and sanity checks answer in the conversation: they have no notebook page.
+type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
+const paged = (mode: RouteMode): mode is Paged => mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
+const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
@@ -475,7 +481,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}

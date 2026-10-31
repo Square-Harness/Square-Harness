@@ -17,6 +17,12 @@ _SEARCH_ALLOWED = re.compile(
     r'cherche(?:z)? (?:en ligne|sur internet))\b')
 
 
+# Modes only the user can select with @ (python-lab binds larger sandbox limits). They are not
+# JOB_MODES, so the Assistant's delegate tool never offers them and rejects them unless the
+# turn's own user selection named exactly that mode.
+USER_MODES = ('python_lab', 'sanity_check')
+
+
 _REFERENCE_FOLLOWUP = re.compile(
     r'^(?:what about|how about|and (?:for|on|about|in)|et (?:pour|sur|en)|'
     r'qu.en est.il|et avec)\b')
@@ -72,7 +78,7 @@ def validated_mode_call(content, selection):
     if not isinstance(selection, dict) or set(selection) != {'mode', 'start'}:
         raise ValueError('A selected mode call requires mode and start')
     mode, start = selection['mode'], selection['start']
-    if not isinstance(mode, str) or mode not in JOB_MODES or type(start) is not int:
+    if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES or type(start) is not int:
         raise ValueError('Unknown selected mode call')
     token = '@' + mode
     end = start + len(token)
@@ -96,10 +102,20 @@ class ModeOrchestrator(Orchestrator):
     """
 
     def __init__(self, *args, required_mode=None, **kwargs):
-        if required_mode is not None and required_mode not in JOB_MODES:
+        if required_mode is not None and required_mode not in JOB_MODES + USER_MODES:
             raise ValueError('Unknown selected mode call')
         self.required_mode = required_mode
         super().__init__(*args, **kwargs)
+
+    def _validate_delegate(self, args):
+        mode = args.get('mode') if isinstance(args, dict) else None
+        if mode in USER_MODES:
+            # Only the user's own @ selection for this turn (saved in the state, so it survives a
+            # resume) can start these modes; a model-chosen delegate cannot.
+            if mode != (self.required_mode or (self.state or {}).get('required_mode')):
+                raise ValueError('Unknown worker mode')
+            return super()._validate_delegate({**args, 'mode': 'explore'})
+        return super()._validate_delegate(args)
 
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)

@@ -13,7 +13,18 @@ test('offers modes at the caret at the start, middle and end of a prompt', () =>
   assert.equal(modeQuery('@pro', 0, 4), null)
   assert.equal(MODE_CALLS.filter((item) => item.mode.startsWith('pro')).length, 1)
   assert.deepEqual(MODE_CALLS.map((item) => item.mode),
-    ['prove', 'check', 'literature', 'quick_review', 'referee', 'detailed_review', 'explain'])
+    ['prove', 'check', 'literature', 'quick_review', 'referee', 'detailed_review', 'explain', 'python_lab', 'sanity_check'])
+})
+
+test('the sandbox calls are offered by name and drawn with their own marks', () => {
+  assert.deepEqual(modeOptions('py').map((item) => item.mode), ['python_lab'])
+  assert.deepEqual(modeOptions('lab').map((item) => item.mode), ['python_lab'])
+  assert.deepEqual(modeOptions('sanity').map((item) => item.mode), ['sanity_check'])
+  assert.deepEqual(modeOptions('check').map((item) => item.mode), ['check', 'sanity_check'])
+  assert.equal(coverOf('python_lab'), 'python_lab')
+  assert.equal(coverOf('sanity_check'), 'sanity_check')
+  const text = '@python_lab plot sin'
+  assert.deepEqual(callPayload(text, { mode: 'python_lab', start: 0, end: 11 }), { mode: 'python_lab', start: 0 })
 })
 
 test('the review kinds are offered together and drawn as Review pages', () => {

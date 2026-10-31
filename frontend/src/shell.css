@@ -17,6 +17,8 @@
 .mode-literature { background: #a0660f; }
 .mode-check { background: #7c4a0a; } /* a literature check in Default: the Literature family, deeper */
 .mode-referee { background: #6c43a8; }
+.mode-python_lab { background: #0e6e86; } /* the sandbox: a laboratory teal */
+.mode-sanity_check { background: #b4461c; } /* falsification: Critique's red, warmer */
 /* Worker colours are shared by message marks and the @ picker. */
 .speaker-model svg, .route-cover svg { display: block; }
 .margin-glyph svg { display: inline-block; vertical-align: -0.12em; }

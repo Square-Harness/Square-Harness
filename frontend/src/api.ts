@@ -325,6 +325,7 @@ export type ChatListItem = {
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
 export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
+  | 'python_lab' | 'sanity_check'
 
 export type TranscriptItem = {
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'

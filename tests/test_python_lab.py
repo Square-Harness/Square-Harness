@@ -200,3 +200,107 @@ class PythonLabSandboxTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from mathagent.agent import Agent
+from mathagent.mode_calls import USER_MODES, ModeOrchestrator, validated_mode_call
+from mathagent.orchestrator import _delegate_schema
+from mathagent.tools import Workspace
+from test_gui import GuiCase, text, tool
+
+
+class InterfaceModeCallTests(GuiCase):
+    """@python_lab / @sanity_check typed by the user in an Assistant conversation."""
+    extra_args = ('--ctx', '40960')
+
+    def setUp(self):
+        super().setUp()
+        self.hub.sandbox, self.executor = fake_sandbox()
+
+    def call(self, mode, request, replies):
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        self.fake.replies = replies
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': f'@{mode} {request}',
+                                                     'mode_call': {'mode': mode, 'start': 0}})
+        final = replies[-1][0]['message']['content']
+        self.wait_for(lambda: any(item.get('content') == final for item in self.ok('GET', f'/api/chats/{chat}')['transcript']),
+                      timeout=20, message='the final answer')
+        return self.ok('GET', f'/api/chats/{chat}')['transcript']
+
+    def test_python_lab_mode_call_binds_the_lab_policy(self):
+        transcript = self.call('python_lab', 'Run this code:\n' + USER_CODE,
+                               [tool('execute_python', {'code': USER_CODE, 'purpose': 'run the user code'}),
+                                text('Eigenvalues 1 and 3.'), text('Python Lab result: eigenvalues 1 and 3.')])
+        self.assertEqual(self.executor.calls[0]['code'], USER_CODE)
+        self.assertEqual(self.executor.calls[0]['limits'], LAB_DEFAULTS)
+        worker_tools = self.fake.requests[0]['tools']
+        execute = next(t for t in worker_tools if t['function']['name'] == 'execute_python')['function']
+        self.assertIn('memory_mb', execute['parameters']['properties'])
+        self.assertNotIn('run_python', [t['function']['name'] for t in worker_tools])
+        [card] = [item for item in transcript if item.get('role') == 'route']
+        self.assertEqual((card['mode'], card['status'], card.get('job_id')), ('python_lab', 'done', None))
+        [record] = list((self.root / '.mathagent' / 'experiments').glob('exp-*/record.json'))
+        saved = json.loads(record.read_text())
+        self.assertEqual((saved['skill'], saved['invocation']), (LAB, 'explicit'))
+
+    def test_sanity_check_mode_call_uses_the_strict_policy(self):
+        self.call('sanity_check', 'Is x^4 - 3x^2 + 1 >= 0 for all real x?',
+                  [tool('execute_python', {'code': 'RESULT = 1.5**2 * 1.5**2 - 3 * 1.5**2 + 1'}),
+                   text('Counterexample near x = 1.22.'), text('False: f(sqrt(3/2)) = -5/4.')])
+        self.assertEqual(self.executor.calls[0]['limits'], SANITY_DEFAULTS)
+        [record] = list((self.root / '.mathagent' / 'experiments').glob('exp-*/record.json'))
+        self.assertEqual(json.loads(record.read_text())['invocation'], 'explicit')
+
+    def test_mode_call_without_a_sandbox_fails_with_an_explanation(self):
+        self.executor.unavailable = 'Docker is not installed (no docker command on PATH).'
+        self.hub.sandbox._failure = None
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        self.fake.replies = [text('The Python Lab could not run: Docker is missing.')]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@python_lab plot sin',
+                                                     'mode_call': {'mode': 'python_lab', 'start': 0}})
+        self.wait_for(lambda: any(item.get('role') == 'route' and item.get('status') == 'failed'
+                                  for item in self.ok('GET', f'/api/chats/{chat}')['transcript']),
+                      timeout=20, message='the failed card')
+        card = next(item for item in self.ok('GET', f'/api/chats/{chat}')['transcript'] if item.get('role') == 'route')
+        self.assertIn('needs the Python sandbox', card['outcome'])
+        self.assertIn('Docker is not installed', card['outcome'])
+        self.assertEqual(self.executor.calls, [])
+
+
+class UserOnlyModeTests(unittest.TestCase):
+    """The Assistant can never start python_lab or sanity_check by itself."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+
+    def test_selection_is_validated_and_absent_from_the_delegate_tool(self):
+        self.assertEqual(validated_mode_call('@python_lab plot sin', {'mode': 'python_lab', 'start': 0}),
+                         ('plot sin', 'python_lab'))
+        enum = _delegate_schema()['function']['parameters']['properties']['mode']['enum']
+        for mode in USER_MODES:
+            self.assertNotIn(mode, enum)
+
+    def test_model_delegations_to_user_only_modes_are_refused(self):
+        from numerics_support import ScriptedClient, calls, final, tool_call
+        action = {'mode': 'python_lab', 'request': 'Run a heavy simulation.', 'files': [], 'effort': 'high',
+                  'reason': 'More compute.'}
+        delegated = []
+        client = ScriptedClient([calls(tool_call('delegate', action, 'd1')), final('done')])
+        agent = Agent(client, Workspace(self.root), ctx=40960, predict=4096, think=False)
+        ModeOrchestrator(agent, lambda a, c, s: delegated.append(a['mode']) or {'status': 'complete'}).run(
+            'Simulate this SDE with a lot of paths.')
+        self.assertIn('Unknown worker mode', json.dumps(client.requests[-1]['messages']))
+        self.assertEqual(delegated, [])
+        # After a user's @sanity_check, the turn ends with a final answer (no further tools), and
+        # that selection never authorizes python_lab.
+        client = ScriptedClient([final('Sanity check reported.')])
+        agent = Agent(client, Workspace(self.root), ctx=40960, predict=4096, think=False)
+        runner = ModeOrchestrator(agent, lambda a, c, s: delegated.append(a['mode']) or {'status': 'complete'},
+                                  required_mode='sanity_check')
+        runner.run('Is AB+BA PSD for SPD A, B?')
+        self.assertEqual(delegated, ['sanity_check'])
+        self.assertNotIn('tools', client.requests[-1])
+        with self.assertRaisesRegex(ValueError, 'Unknown worker mode'):
+            runner._validate_delegate(dict(action, effort='low'))

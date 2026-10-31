@@ -28,6 +28,8 @@ export const FileIcon = (p: IconProps) => <Icon {...p}><path d="M7 3h7l4 4v14H7z
 export const PinIcon = (p: IconProps) => <Icon {...p}><path d="M9 4h6l-1 6 3 3H7l3-3z" /><path d="M12 13v7" /></Icon>
 export const CheckIcon = (p: IconProps) => <Icon {...p}><path d="M5 12.5l4.5 4.5L19 7" /></Icon>
 export const PhoneIcon = (p: IconProps) => <Icon {...p}><rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M11 18.5h2" /></Icon>
+// An Erlenmeyer flask with a liquid line and a bubble: the Python Lab's mark.
+export const FlaskIcon = (p: IconProps) => <Icon {...p}><path d="M8.5 3h7" /><path d="M10 3v6.2L4.6 18.4A1.7 1.7 0 0 0 6.1 21h11.8a1.7 1.7 0 0 0 1.5-2.6L14 9.2V3" /><path d="M7.3 14.5h9.4" /><circle cx="11.2" cy="17.7" r="0.9" /></Icon>
 // A magnifying glass: the Literature notebook's cover.
 export const SearchIcon = (p: IconProps) => <Icon {...p}><circle cx="10.5" cy="10.5" r="6" /><path d="M15 15l5.5 5.5" /></Icon>
 export const BackIcon = (p: IconProps) => <Icon {...p}><path d="M15 6l-6 6 6 6" /></Icon>

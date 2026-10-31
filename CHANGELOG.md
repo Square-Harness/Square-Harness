@@ -10,7 +10,9 @@
   disables it; `/sanity-check` asks for it). Containers have no network, no host
   files or environment, a non-root user without capabilities, a read-only root
   and bounded output; policies are bound by the harness, never by tool
-  arguments. Runs are saved in `.mathagent/experiments/`. See
+  arguments. Runs are saved in `.mathagent/experiments/`. In the interface,
+  `@python_lab` and `@sanity_check` start them from an Assistant conversation
+  (the Assistant cannot choose them itself). See
   [docs/python-numerics.md](docs/python-numerics.md).
 
 - Review has four kinds, started with `@quick_review`, `@referee`, `@detailed_review`

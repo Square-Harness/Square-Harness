@@ -4,11 +4,12 @@ Two skills share one local, Docker-based Python sandbox:
 
 - **`python-lab`** runs the computations you ask for: code, simulations,
   linear algebra, optimization, symbolic work and plots. It is **explicit**:
-  only your `/python-lab` command starts it.
+  only you start it, with `/python-lab` in the terminal or `@python_lab` in the
+  interface's Assistant.
 - **`numerical-sanity-check`** lets the model try to **falsify** a claim with a
   cheap experiment before relying on it: a negative value, a 2×2
   counterexample, a failing dimension. It is **automatic** in conversations,
-  and you can also ask for it with `/sanity-check`.
+  and you can also ask for it with `/sanity-check` or `@sanity_check`.
 
 Numerical evidence is reported as exactly one of: *exact counterexample*,
 *numerically verified candidate*, *no counterexample detected*, or
@@ -61,8 +62,12 @@ unchanged, it is executed byte for byte. Default limits: **30 s, 1 GB, 2 CPUs,
 requested limits and runs only after you approve them, up to a configured
 ceiling (by default 300 s, 4 GB, 4 CPUs).
 
-Python Lab is a terminal command. The visual interface uses automatic checks
-only (see below); it has no lab notebook yet.
+In the visual interface, type `@` in an Assistant (∀) conversation and pick
+**`@python_lab`** (a flask on teal) or **`@sanity_check`** (¬∀ on vermilion),
+then your request. The card shows the run; requests for more resources open the
+usual approval dialog. Only your selection starts these two: the Assistant's own
+`delegate` tool does not offer them, and the harness refuses them unless the
+turn's `@` selection named that mode.
 
 ## Automatic numerical sanity checks
 
@@ -253,9 +258,8 @@ in the real sandbox.
 - Docker is required. Apptainer/Singularity (common on HPC clusters) and
   Podman are not supported backends yet; on a cluster without Docker, run the
   harness where Docker is available, or use `--no-python-sandbox`.
-- The visual interface has no Python Lab notebook and does not show figures
-  inline. Figures are saved under `.mathagent/experiments/`, and the model
-  reads their text summaries.
+- The interface does not show figures inline yet. Figures are saved under
+  `.mathagent/experiments/`, and the model reads their text summaries.
 - Each run is stateless: there is no persistent kernel between calls.
 - Whether a check is worthwhile is the model's judgment, guided by the skill;
   the harness enforces the budget, not the mathematics.

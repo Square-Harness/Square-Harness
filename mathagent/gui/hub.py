@@ -31,10 +31,10 @@ from ..litreview import ReviewRunner
 from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state
 from ..research import ResearchRunner
-from ..mode_calls import ModeOrchestrator
+from ..mode_calls import USER_MODES, ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT
-from ..numerics import PythonSandbox
+from ..numerics import PythonSandbox, SandboxUnavailable
 from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
@@ -43,6 +43,8 @@ from .inference import InferencePool
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
+# Tool rounds for user-selected sandbox workers: write, run, fix and rerun; three checks.
+USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Task labels shown in the interface; the engine's kind stays 'referee'.
 LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'check': 'Literature check',
           'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
@@ -1085,7 +1087,20 @@ class Hub:
             save()
         agent, _ = self._engine(task, mode=mode, online=online)
         agent.workspace.pin_files(files)
-        if mode in ('critic', 'explore'):
+        sandbox_error = None
+        if mode in USER_MODES:
+            # The user typed @python_lab or @sanity_check for this turn: an explicit invocation.
+            # Failures are raised inside the worker's try below, so the card reports them.
+            if parent.state.get('required_mode') != mode:
+                sandbox_error = f'@{mode} runs only when you select it yourself'
+            else:
+                skill = 'python-lab' if mode == 'python_lab' else 'numerical-sanity-check'
+                try:
+                    agent.workspace.numerics = self.sandbox.bind(skill, root, explicit=True, cancel=task.cancel,
+                                                                 approve=lambda preview: self._approve(task, preview))
+                except SandboxUnavailable as exc:
+                    sandbox_error = f'@{mode} needs the Python sandbox on this computer. {exc}'
+        if mode in ('critic', 'explore') + USER_MODES:
             # These workers return analysis; file mutation belongs to Write-up,
             # whose durable runner already checkpoints approved tool actions.
             schemas = agent.workspace.schemas
@@ -1124,6 +1139,8 @@ class Hub:
             # As in a critique or exploration chat: check_reference, charged to this worker's share.
             agent.workspace.checker = nested_checker(agent, emit)
         try:
+            if sandbox_error:
+                raise ValueError(sandbox_error)
             if mode == 'prove':
                 if any(f.lower().endswith('.pdf') for f in files):
                     raise ValueError('The proof worker needs text sources. Read the required PDF passages before delegating the precise statement.')
@@ -1227,7 +1244,7 @@ class Hub:
                     agent.think = False
                 output_cap = FINAL_PREDICT if action['effort'] == 'low' else 16384
                 agent.predict = min(output_cap, agent.client.remaining_tokens)
-                agent.max_rounds = 0 if article_overview else level['tries']
+                agent.max_rounds = 0 if article_overview else USER_MODE_ROUNDS.get(mode, level['tries'])
                 answer = agent.run(goal, emit, fresh=True)
                 complete = (agent.last_stats.get('done_reason') in ('stop', 'tool_calls') and bool(answer.strip())
                             and all(type(agent.last_stats.get(key)) is int and agent.last_stats[key] >= 0
@@ -1243,7 +1260,7 @@ class Hub:
                 raise KeyboardInterrupt
             store.update_item(root, chat_id, index, status='done', outcome=outcome,
                               error=(result.get('error') or {}).get('message'),
-                              job_id=result['job_id'] if mode not in ('critic', 'explore') else None)
+                              job_id=result['job_id'] if mode not in ('critic', 'explore') + USER_MODES else None)
             self.bus.publish('chat_saved', chat=chat_id)
             return result
         except KeyboardInterrupt:

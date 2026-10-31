@@ -945,7 +945,8 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
-        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup')
+        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup',
+                                                'python_lab', 'sanity_check')
                 and result.get('mode') == self.state['required_mode'] and isinstance(value, dict)):
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead

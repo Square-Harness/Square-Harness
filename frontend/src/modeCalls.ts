@@ -1,8 +1,8 @@
 import type { RouteMode } from './api'
-import type { Mode } from './router'
+import type { Cover } from './components/Glyph'
 
-/** The notebook cover a mode call is drawn with: the review kinds are pages of the Review notebook. */
-export const coverOf = (mode: RouteMode): Mode | 'check' =>
+/** The cover a mode call is drawn with: the review kinds are pages of the Review notebook. */
+export const coverOf = (mode: RouteMode): Cover =>
   mode === 'quick_review' || mode === 'detailed_review' || mode === 'explain' ? 'referee' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
@@ -12,6 +12,9 @@ export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] =
   { mode: 'referee', label: 'Review', summary: 'Review a manuscript: overview of the paper, typos and presentation.' },
   { mode: 'detailed_review', label: 'Detailed review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
+  // Only you can start these two: the Assistant never chooses them on its own.
+  { mode: 'python_lab', label: 'Python Lab', summary: 'Run Python in an isolated sandbox: computations, simulations and plots.' },
+  { mode: 'sanity_check', label: 'Sanity check', summary: 'Try to falsify a claim with quick numerical experiments.' },
 ]
 /** The calls a typed @word offers: by mode, or by any word of the label (@review offers every review). */
 export const modeOptions = (query: string) => MODE_CALLS.filter((item) => item.mode.startsWith(query)
