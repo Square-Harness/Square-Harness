@@ -4,7 +4,7 @@ import type { EffortLevel } from './effort'
 
 /** The cover a mode call is drawn with: the review kinds are pages of the Review notebook. */
 export const coverOf = (mode: RouteMode): Cover =>
-  mode === 'quick_review' || mode === 'detailed_review' || mode === 'explain' ? 'referee' : mode
+  mode === 'quick_review' || mode === 'detailed_review' || mode === 'explain' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
   { mode: 'check', label: 'Literature check', summary: 'Find or verify a reference for a known result.' },
@@ -13,7 +13,8 @@ export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] =
   { mode: 'referee', label: 'Review', summary: 'Review a manuscript: overview of the paper, typos and presentation.' },
   { mode: 'detailed_review', label: 'Detailed review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
-  { mode: 'writeup', label: 'Write-up', summary: 'Turn notes into LaTeX using your templates and macros.' },
+  { mode: 'writeup', label: 'Write-up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
+  { mode: 'summarize', label: 'Summarize', summary: 'Summarize the important results obtained so far as a .tex file.' },
   { mode: 'critic', label: 'Critique', summary: 'Check an argument for unjustified steps and counterexamples.' },
   { mode: 'explore', label: 'Explore', summary: 'Explore approaches, with heuristics labelled.' },
   // User-only: the Assistant cannot start these itself.
@@ -34,6 +35,17 @@ export function validCall(text: string, call: ModeCall | null): call is ModeCall
   return !!call && text.slice(call.start, call.end) === '@' + call.mode
     && (!call.start || !word(text[call.start - 1]))
     && (call.end === text.length || !word(text[call.end]))
+}
+
+/** A mode name typed out in full, as if picked from the menu: followed by a space, or ending the text when `atEnd`. */
+export function typedCall(text: string, atEnd = false): ModeCall | null {
+  for (const match of text.matchAll(/@([a-z_]+)/g)) {
+    const start = match.index!, end = start + match[0].length
+    if (!MODE_CALLS.some((item) => item.mode === match[1]) || (start && word(text[start - 1]))) continue
+    if (end < text.length ? !/\s/.test(text[end]) : !atEnd) continue
+    return { mode: match[1] as RouteMode, start, end }
+  }
+  return null
 }
 
 export function modeQuery(text: string, caret: number, end = caret): ModeQuery | null {

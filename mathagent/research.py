@@ -648,7 +648,12 @@ class ResearchRunner:
             fixed += '\nCitation checks:\n' + json.dumps(self.state.get('citation_issues', []))
         return fixed, optional
 
-    def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None):
+    def _system(self, role):
+        """The system text of a call: the policy and the saved skill."""
+        return self.POLICY + '\n' + self.state['skill']
+
+    def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
+              sampling=None):
         self._check_time()
         settings = self.state['settings']
         remaining = remaining_limit(settings, 'max_tokens', self.state['tokens_charged'])
@@ -661,14 +666,14 @@ class ResearchRunner:
             raise ResearchBudget('Generated-token budget exhausted (including review and recovery calls)')
         fixed, optional = self._material(role)
         payload = {'model': self.agent.model, 'stream': True, 'think': think,
-                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0.2}}
+                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0.2, **(sampling or {})}}
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
         if tools:
             payload['tools'] = tools
         if format_schema:
             payload['format'] = format_schema
-        system = self.POLICY + '\n' + self.state['skill']
+        system = self._system(role)
         while True:
             payload['messages'] = [{'role': 'system', 'content': system}, {'role': 'user', 'content': instruction + '\n\n' + fixed + '\n\n' + '\n\n'.join(optional) + ('\n\n' + trailer if trailer else '')}]
             try:

@@ -31,6 +31,7 @@ from ..litreview import ReviewRunner
 from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state
 from ..research import ResearchRunner
+from ..style import StyleRunner, load_choice, style_path
 from ..mode_calls import USER_MODES, ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT, MAIN_PREDICT
@@ -46,7 +47,7 @@ RUNNING = ('starting', 'running', 'pausing')
 # Tool rounds for user-selected sandbox workers: write, run, fix and rerun; three checks.
 USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Task labels shown in the interface; the engine's kind stays 'referee'.
-LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'check': 'Literature check',
+LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
           'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
 # Assistant and router modes that run as review variants of the referee kind.
 REVIEW_MODES = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}
@@ -230,7 +231,11 @@ class ChatCapture:
 
         def mutate():
             if kind == 'start':
+                # New output: the progress line it follows ("Delegating…") is over.
+                steps[:] = [step for step in steps if not step.get('progress')]
                 steps.append({'type': 'call', 'thinking': '', 'text': ''})
+            elif kind == 'progress':
+                steps.append({'type': 'notice', 'text': data['text'], 'progress': True})
             elif kind == 'delta':
                 step = steps[-1] if steps and steps[-1]['type'] == 'call' else None
                 if step is not None:
@@ -262,6 +267,9 @@ class ChatCapture:
             if self.calls:
                 self.calls[-1]['stats'] = dict(self.agent.last_stats)
             self._publish('end')
+        elif kind == 'progress':  # shown while it lasts, never saved in the transcript
+            self._flush()
+            self._publish('progress', text=str(value)[:4000])
         else:
             self._flush()
             text = str(value)[:4000]
@@ -541,6 +549,9 @@ class Hub:
                     or (task.thread is not None and task.thread.is_alive())) for task in tasks):
                 raise Busy('This conversation is still running or queued. Pause it and wait for it to stop, or cancel its queued work before deleting it.')
             store.delete_chat(self.root, chat_id)
+            for item in chat['transcript']:
+                if item.get('role') == 'route' and item.get('mode') in ('writeup', 'summarize') and item.get('job_id'):
+                    store.discard_download(self.root, item['job_id'])
             if self.task and belongs(self.task):
                 self.task = None
         self.bus.publish('chat_deleted', chat=chat_id)
@@ -783,7 +794,7 @@ class Hub:
         return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
 
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
-                      notes='', output='', queue=False, on_update=None, **limits):
+                      notes='', output='', conversation='', variant=None, scoped=False, deliver='folder', queue=False, on_update=None, **limits):
         budgets = self._research_budgets(**limits)
         if budgets['max_requests'] is None:
             budgets['max_requests'] = 12
@@ -795,15 +806,32 @@ class Hub:
             # A write-up works from the pinned notes only; it never searches.
             agent, _ = self._engine(task, mode='writeup', online=False)
             self._ensure_model(agent)
-            runner = WriteupRunner(agent)
+            runner = WriteupRunner(agent, styles_root=self.base)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, source_files=list(source_files), template_files=list(template_files),
-                                template_texts=texts, notes=notes, output=output, **budgets)
-        return self._started(self._begin('research', None, LABELS['writeup'], goal, work, queue=queue, on_update=on_update))
+                                template_texts=texts, notes=notes, output=output, conversation=conversation,
+                                variant=variant, scoped=scoped, deliver=deliver, style_choice=load_choice(self.base), **budgets)
+        label = LABELS['summarize' if variant == 'summary' else 'writeup']
+        return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
+
+    def start_style(self, goal, *, name, source_files=(), template_files=(), queue=False, on_update=None, **limits):
+        budgets = self._research_budgets(**limits)
+        if budgets['max_requests'] is None:  # adaptive by default; a style never searches anyway
+            budgets['max_requests'] = 12
+        style_path(self.base, name)  # an invalid name fails before the job is queued
+
+        def work(task):
+            # A style is learnt from the pinned articles only; it never searches.
+            agent, _ = self._engine(task, mode='writeup', online=False)
+            self._ensure_model(agent)
+            runner = StyleRunner(agent, styles_root=self.base)
+            runner.emit = self._job_emit(task, runner, 'research')
+            return runner.start(goal, name=name, source_files=list(source_files), template_files=list(template_files), **budgets)
+        return self._started(self._begin('research', None, LABELS['style'], goal or name, work, queue=queue, on_update=on_update))
 
     def resume_research(self, job_id, queue=False, additional_seconds=0):
         state = store.research_state(self.root, job_id)
-        runner_class = (WriteupRunner if state['kind'] == 'writeup' else
+        runner_class = (WriteupRunner if state['kind'] == 'writeup' else StyleRunner if state['kind'] == 'style' else
                         ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else runner_for_state(state))
         # A job keeps the network choice it started with (never more, per the runner).
         online = bool(state['settings'].get('online')) and not self.online_locked
@@ -811,11 +839,13 @@ class Hub:
         def work(task):
             agent, _ = self._engine(task, mode=state['kind'], online=online)
             runner = (runner_class(agent, concurrency=self.review_concurrency()) if issubclass(runner_class, ReviewBase)
+                      else runner_class(agent, styles_root=self.base) if runner_class in (StyleRunner, WriteupRunner)
                       else runner_class(agent))
             runner.cancel = task.cancel
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id, additional_seconds=additional_seconds)
-        label = VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup'])
+        label = (LABELS['summarize'] if state.get('variant') == 'summary' else
+                 VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup']))
         task = self._begin('research', job_id, label, state['goal'], work, queue=queue)
         task.ready.set()
         return task
@@ -1052,7 +1082,7 @@ class Hub:
                     message = ('Delegating a mathematical task…' if name == 'delegate' else
                                'Reading web sources…' if name in ('open_url', 'read_page', 'search_page', 'read_references', 'search_web')
                                else 'Reading mathematical sources…')
-                    capture.emit('notice', message)
+                    capture.emit('progress', message)
                 elif kind != 'result':
                     capture.emit(kind, value)
                     if kind == 'end' and parent is not None and capture.calls:
@@ -1285,10 +1315,11 @@ class Hub:
                                       ([] if online else ['Online search was off; only cached sources were used.'])}
                 if references.get('lookup') == 'standard':
                     result['disposition'] = 'answer_with_qualification'
-            elif mode in ('literature', 'writeup') or mode in REVIEW_MODES:
+            elif mode in ('literature', 'writeup', 'summarize') or mode in REVIEW_MODES:
                 # Literature is the verified reading-list pipeline; the exact conversation sets its scope.
                 # Independent review calls use the same bounded global inference pool.
-                runner = (WriteupRunner(agent, emit) if mode == 'writeup' else ReviewRunner(agent, emit) if mode == 'literature'
+                runner = (WriteupRunner(agent, emit, styles_root=self.base) if mode in ('writeup', 'summarize')
+                          else ReviewRunner(agent, emit) if mode == 'literature'
                           else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=self.review_concurrency()))
                 runner.cancel = task.cancel
                 if child.get('job_id'):
@@ -1299,20 +1330,31 @@ class Hub:
                         max_seconds=max(0.1, seconds), max_requests=level['requests'], max_chars=level['chars'])
                     if mode == 'literature':
                         kwargs['kind'] = mode
-                    elif mode == 'writeup':
+                    elif mode in ('writeup', 'summarize'):
+                        # Attached .sty/.cls/.bib files and complete .tex documents are templates; the rest is material.
                         templates = [f for f in files if Path(f).suffix.lower() in ('.sty', '.cls', '.bib') or
                                      (f.lower().endswith('.tex') and '\\begin{document}' in agent.workspace.text(agent.workspace.path(f)))]
                         kwargs['template_files'] = templates
                         kwargs['source_files'] = [f for f in files if f not in templates]
-                        kwargs['notes'] = context['query'] if not kwargs['source_files'] else ''
-                    result = runner.start(action['request'], reference_context=context, **kwargs)
+                        # The results so far, as the user saw them, up to this request: a numbered source
+                        # that paragraphs cite, in place of the raw history (which would fill the context twice).
+                        kwargs.update(conversation=store.conversation_record(root, chat_id, before=self._turn_start(root, chat_id)),
+                                      variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
+                                      style_choice=load_choice(self.base))
+                    if mode not in ('writeup', 'summarize'):
+                        kwargs['reference_context'] = context
+                    result = runner.start(action['request'], **kwargs)
                 verdict = (runner.state or {}).get('verdict')
                 outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
                            + '; see the saved report.')
                 if result.get('stop_reason') and result['status'] in ('error', 'budget_violation'):
                     outcome = result['stop_reason']
                 worker_error = result.get('worker_error')
-                result = {'status': result['status'], 'answer': result['report'], 'job_id': result['id'],
+                if mode in ('writeup', 'summarize'):
+                    outcome = runner.ready_message() if runner.state else outcome
+                result = {'status': result['status'],
+                          'answer': runner.ready_message() if mode in ('writeup', 'summarize') and runner.state else result['report'],
+                          'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root))}
                 if runner.state.get('progress'):
                     result['progress'] = copy.deepcopy(runner.state['progress'])
@@ -1366,7 +1408,8 @@ class Hub:
                 save()
             store.update_item(root, chat_id, index, status='done', outcome=outcome,
                               error=(result.get('error') or {}).get('message'),
-                              job_id=result['job_id'] if mode not in ('critic', 'explore') + USER_MODES else None)
+                              job_id=result['job_id'] if mode not in ('critic', 'explore') + USER_MODES else None,
+                              **({'outputs': runner.state.get('outputs') or {}} if mode in ('writeup', 'summarize') and runner and runner.state else {}))
             self.bus.publish('chat_saved', chat=chat_id)
             return result
         except KeyboardInterrupt:
@@ -1392,6 +1435,12 @@ class Hub:
             return {'status': 'failed', 'answer': '', 'warnings': [str(exc)], 'error': error,
                     'job_id': child.get('job_id') or child['id']}
 
+    @staticmethod
+    def _turn_start(root, chat_id):
+        """Transcript index of the request being answered: the conversation before it is the material."""
+        transcript = store.load_chat(root, chat_id)['transcript']
+        return next((i for i in range(len(transcript) - 1, -1, -1) if transcript[i].get('role') == 'user'), len(transcript))
+
     def _outcome(self, root, item):
         job = item.get('job_id')
         if not job:
@@ -1402,7 +1451,7 @@ class Hub:
                 if detail['status'] == 'candidate_complete' and detail['answer']:
                     return 'the model review found no issue in this answer: ' + one_line(detail['answer'], 600)
                 return detail['status'] + (f'; {one_line(detail["stop_reason"], 300)}' if detail.get('stop_reason') else '')
-            if item['mode'] in ('literature', 'writeup') or item['mode'] in REVIEW_MODES:
+            if item['mode'] in ('literature', 'writeup', 'summarize') or item['mode'] in REVIEW_MODES:
                 state = store.research_state(root, job)
                 text = state.get('document') or state.get('draft') or ''
                 verdict = f' ({state["verdict"].replace("_", " ")})' if state.get('verdict') else ''
@@ -1420,7 +1469,7 @@ class Hub:
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
             raise ValueError('This suggestion has already started')
         if mode not in JOB_MODES:
-            raise ValueError('Choose prove, critic, explore, check, literature, referee, detailed_review, quick_review, explain or writeup')
+            raise ValueError('Choose prove, critic, explore, check, literature, referee, detailed_review, quick_review, explain, writeup or summarize')
         if not isinstance(request, str) or not request.strip():
             raise ValueError('The request cannot be empty')
         files = self.check_files(list(files))
@@ -1440,6 +1489,11 @@ class Hub:
                 fields['status'] = 'stopped'  # kept: a job resumes from its own page
             elif task.state == 'error' and not task.target:
                 fields.update(status='failed', error=task.error)
+            if task.state == 'done' and mode in ('writeup', 'summarize') and task.target:
+                try:
+                    fields['outputs'] = store.research_state(root, task.target).get('outputs') or {}
+                except (store.NotFound, OSError, ValueError):
+                    pass
             store.update_item(root, chat_id, index, **fields)
             self.bus.publish('chat_saved', chat=chat_id)
 
@@ -1460,8 +1514,9 @@ class Hub:
             elif mode == 'check':
                 task = self.check(chat_id, request, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
                                   queue=True, on_update=on_update)
-            elif mode == 'writeup':
-                task = self.start_writeup(request, source_files=files, notes='' if files else request,
+            elif mode in ('writeup', 'summarize'):
+                task = self.start_writeup(request, source_files=files, conversation=store.conversation_record(root, chat_id, before=index),
+                                          variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                           queue=True, on_update=on_update,
                                           **{k: v for k, v in limits.items() if k in ('tokens', 'input_tokens', 'seconds')})
             else:

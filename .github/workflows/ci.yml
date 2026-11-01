@@ -47,7 +47,7 @@ jobs:
           "$RUNNER_TEMP/wheel-smoke/bin/python" -I - <<'PY'
           from importlib.resources import files
           for skill in ('check', 'explain', 'literature', 'referee', 'review', 'review-quick', 'writeup',
-                        'python-lab', 'numerical-sanity-check'):
+                        'python-lab', 'numerical-sanity-check', 'style', 'summarize'):
               resource = files('mathagent').joinpath('skills', skill, 'SKILL.md')
               assert resource.read_text(encoding='utf-8').strip(), skill
           print('All bundled skills are present in the installed wheel.')

@@ -273,6 +273,22 @@
 .mode-free { background: #3b4256; }
 .mode-writeup { background: #0f7482; }
 .mode-writeup .mode-glyph { font-family: var(--font-text); font-weight: 700; font-size: 21px; }
+.mode-style { background: #6a4f8c; }
+.btn .history-mark { width: 22px; height: 22px; border-radius: 4px; font-size: 16px; }
+
+/* Writing style: a saved profile, one block per domain */
+.style-domain { margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--sheet); }
+.style-domain h3 { margin: 0 0 4px; }
+.style-domain ol, .style-domain ul { margin: 4px 0 10px; padding-left: 22px; }
+.style-phrases { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; padding: 0; list-style: none; }
+.style-phrases li { padding: 2px 8px; border-radius: 999px; background: var(--ink-soft); font-size: 13px; }
+.style-macros { width: 100%; border-collapse: collapse; font-size: 13px; }
+.style-macros td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line); vertical-align: top; }
+.style-macros code { overflow-wrap: anywhere; }
+.style-saved { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.style-template { margin: 4px 0 16px; padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 10px; }
+.style-template-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.style-ask { padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: 10px; background: var(--ink-soft); }
 
 /* Folder controls in the workspace footer */
 .workspace-switch { display: flex; align-items: center; gap: 8px; min-width: 0; }

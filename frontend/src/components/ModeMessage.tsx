@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { MODE_CALLS, coverOf, modeOptions, modeQuery, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
+import { MODE_CALLS, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'
 import { Glyph } from './Glyph'
 import { EFFORTS, type EffortLevel } from './Effort'
@@ -17,6 +17,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
   const [query, setQuery] = useState<ModeQuery | null>(null)
   const queryRef = useRef<ModeQuery | null>(null)
   const dismissed = useRef<{ text: string; start: number } | null>(null)
+  const declined = useRef<ModeCall | null>(null)  // a typed call the user cleared stays plain text
   const [active, setActive] = useState(0)
   // Hovering or focusing the selected mode opens its menu; a click keeps it open (touch screens).
   const [pinned, setPinned] = useState(false)
@@ -109,7 +110,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
             aria-haspopup="true" aria-expanded={pinned}>
             <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
             <strong>@{call.mode}</strong><span>{hasEffort ? (level ? `${level.label} effort` : 'Auto effort') : 'Selected for this message'}</span>
-            <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={(event) => { event.stopPropagation(); onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
+            <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={(event) => { event.stopPropagation(); declined.current = call; onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
           </div>
         </div>
       })()}
@@ -126,7 +127,10 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
       </div>}
       <textarea ref={input} value={value} onChange={(event) => {
         const next = event.target.value
-        onCall(updateCall(value, next, call))
+        // A mode typed out in full counts as picked, unless the user cleared that very call.
+        const typed = typedCall(next)
+        const declinedHere = typed && declined.current?.mode === typed.mode && declined.current.start === typed.start
+        onCall(updateCall(value, next, call) ?? (typed && !declinedHere ? typed : null))
         onChange(next)
         refresh(next, event.target.selectionStart, event.target.selectionEnd)
       }} onSelect={(event) => refresh(value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}

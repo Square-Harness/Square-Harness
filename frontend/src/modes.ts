@@ -5,7 +5,7 @@ export type ModeInfo = {
   label: string
   historyLabel: string
   glyph: string
-  kind: 'free' | 'proof' | 'chat' | 'research' | 'writeup'
+  kind: 'free' | 'proof' | 'chat' | 'research' | 'writeup' | 'style'
   summary: string
   newLabel: string
   empty: string
@@ -13,7 +13,7 @@ export type ModeInfo = {
 
 // Glyphs are the subject's own notation: ∀ any task, ⊢ proves, ⊥ contradiction,
 // ∃ search for existence, a magnifying glass for the literature (drawn: components/Glyph.tsx),
-// ¶ an edited manuscript, § a written section. A literature check in Default is marked [1], a citation.
+// ¶ an edited manuscript, § a written section, ≅ a style like yours. A literature check in Default is marked [1], a citation.
 export const MODES: Record<Mode, ModeInfo> = {
   free: {
     mode: 'free', label: 'Square Harness', historyLabel: 'Square Harness', glyph: '∀', kind: 'free',
@@ -50,5 +50,10 @@ export const MODES: Record<Mode, ModeInfo> = {
     mode: 'writeup', label: 'Write-up', historyLabel: 'Write-up history', glyph: '§', kind: 'writeup',
     summary: 'Turn notes, drafts or PDFs into clean LaTeX in your own template style.',
     newLabel: 'New write-up', empty: 'No write-ups yet.',
+  },
+  style: {
+    mode: 'style', label: 'Writing style', historyLabel: 'Writing styles', glyph: '≅', kind: 'style',
+    summary: 'Condense your earlier articles into a style per domain: macros, structure and how you explain.',
+    newLabel: 'New style', empty: 'No styles learnt yet.',
   },
 }

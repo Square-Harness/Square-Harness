@@ -43,7 +43,7 @@ def limits(mode, level, args):
     if mode == 'prove':
         tokens, solve, verify = _proof_ceilings(args, getattr(args, 'proof_tokens', None))
         return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds, solve_tokens=solve, verify_tokens=verify)
-    if mode == 'writeup':
+    if mode in ('writeup', 'summarize'):
         return dict(tokens=getattr(args, 'research_tokens', None),
                     input_tokens=getattr(args, 'research_input_tokens', None), seconds=seconds)
     if mode == 'check':

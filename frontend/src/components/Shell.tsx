@@ -32,7 +32,7 @@ export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
-    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Write') ? 'writeup' : 'literature'
+    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Writing style') ? 'style' : task.label.startsWith('Write') ? 'writeup' : 'literature'
   }
   const chat = app.chats?.find((item) => item.id === task.target)
   return chat ? chat.kind : null
@@ -90,6 +90,9 @@ export function Sidebar({ route }: { route: Route }) {
             </button>
           </div>
           <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
+          <a className="btn btn-quiet btn-block" href={href('style')} aria-current={route.mode === 'style' && !route.id ? 'page' : undefined}>
+            <span className="history-mark mode-style" aria-hidden="true"><Glyph mode="style" /></span> {route.mode === 'style' ? MODES.style.newLabel : 'Learn my writing style'}
+          </a>
         </header>
         <div className="side-list">
           <ErrorNote>{app.listError}</ErrorNote>

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -19,15 +20,16 @@ import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..research import _job_directory, _read_state as _read_research
-from ..tools import READ_GROUPS, SKIP, TEXT
-from ..writeup import TEMPLATE_SUFFIXES
+from ..tools import READ_GROUPS, SKIP, TEXT, Workspace
+from ..style import list_profiles, load_choice, public_profile, read_template, save_choice, set_template
+from ..writeup import TEMPLATE_SUFFIXES, download_name
 
 CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
 # are both answers in the conversation, and the referee workflow is called Review.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
                'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
-               'writeup': 'Write-up', 'clarify': 'Question', 'python_lab': 'Python Lab',
+               'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
                'sanity_check': 'Numerical sanity check'}
 _EXPERIMENT = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
 _ARTIFACT_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
@@ -414,8 +416,14 @@ def research_detail(root, job_id, active=None):
         'live': {'file': call['stream'], 'role': call['role']} if call else None,
         'artifacts': _artifacts(directory, _RESEARCH_ARTIFACT),
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
-                                        'outputs', 'macros', 'theorems', 'output_name')}
+                                        'outputs', 'macros', 'theorems', 'output_name', 'domain', 'style', 'scoped', 'deliver', 'notation',
+                                        'title', 'style_checked')}
            if s['kind'] == 'writeup' else {}),
+        # The parts hold the material itself: the page needs only how far the writing is.
+        **({'parts': [{'complete': bool(part.get('complete')), 'characters': len(part.get('text', ''))} for part in s['parts']]}
+           if s['kind'] == 'writeup' and isinstance(s.get('parts'), list) else {}),
+        **({key: s.get(key) for key in ('style_name', 'articles', 'domains', 'observations', 'profile', 'saved_to')}
+           if s['kind'] == 'style' else {}),
     }
 
 
@@ -431,6 +439,28 @@ def research_pdf(root, job_id):
         if len(data) > UPLOAD_BYTES:
             raise ValueError('Compiled PDF exceeds the 20 MB download limit')
         return data
+
+
+def research_tex(root, job_id):
+    """A write-up's LaTeX document and the file name to save it under."""
+    state = research_state(root, job_id)
+    if state['kind'] != 'writeup' or not state.get('document'):
+        raise NotFound('This write-up has no document yet')
+    name = (state.get('outputs') or {}).get('download') or download_name(state)
+    return name, state['document'].encode('utf-8')
+
+
+def discard_download(root, job_id):
+    """Delete a write-up kept for download (its conversation is gone); other jobs stay."""
+    try:
+        state = research_state(root, job_id)
+        directory = _job_directory(root, job_id)
+    except (NotFound, OSError, ValueError):
+        return False
+    if state['kind'] != 'writeup' or state.get('deliver') != 'download' or locked(directory):
+        return False
+    shutil.rmtree(directory)
+    return True
 
 
 def research_sources(root, job_id):
@@ -940,3 +970,108 @@ def load_template(root, name):
         raise NotFound('Unknown template')
     return [(p.name, _read(p)) for p in sorted(folder.iterdir())
             if p.is_file() and not p.is_symlink() and p.suffix.lower() in TEMPLATE_SUFFIXES]
+
+
+def list_styles(root):
+    """Saved writing styles; like templates, they are shared by every folder."""
+    return [public_profile(profile) for profile in list_profiles(root)]
+
+
+def set_style_template(root, workspace, name, paths):
+    """Give a saved style the LaTeX template made of these workspace files (none removes it)."""
+    try:
+        return set_template(root, name, read_template(Workspace(workspace), paths))
+    except FileNotFoundError:
+        raise NotFound('Unknown style') from None
+
+
+_RESULT_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'check': 'Literature check',
+                 'literature': 'Literature report', 'referee': 'Review', 'detailed_review': 'Detailed review',
+                 'quick_review': 'Quick review', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
+_PROOF_STATUS = {'candidate_complete': 'the model review found no issue', 'uncertain': 'the model review is uncertain',
+                 'review_unavailable': 'not reviewed'}
+
+
+def _saved_result(root, mode, job_id):
+    """A finished job's final text from its saved state: the selected proof, the document or the report."""
+    try:
+        if mode == 'prove':
+            detail = proof_detail(root, job_id)
+            return detail.get('answer') or '', _PROOF_STATUS.get(detail['status'], detail['status'])
+        state = research_state(root, job_id)
+        return state.get('document') or state.get('draft') or '', state['status']
+    except (NotFound, OSError, ValueError, KeyError):
+        return '', ''
+
+
+def conversation_record(root, chat_id, before=None):
+    """An Assistant conversation as one text source for a write-up or a summary.
+
+    In the order the user saw it: their messages, the answers, and the full final
+    text of each finished job (proofs with their review status, reports, documents).
+    Reading and web tools are left out: their output is source material, not a result.
+    `before` stops at that transcript index (the current request and its own card).
+    """
+    chat = load_chat(root, chat_id)
+    delegated, calls = {}, {}
+    for message in chat.get('history') or []:
+        for call in message.get('tool_calls') or []:
+            calls[call.get('id')] = call.get('function') or {}
+        if message.get('role') != 'tool' or message.get('tool_name') != 'delegate':
+            continue
+        try:
+            value = json.loads(message.get('content') or '')
+        except ValueError:
+            continue
+        arguments = (calls.get(message.get('tool_call_id')) or {}).get('arguments') or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = {}
+        if isinstance(value, dict) and isinstance(value.get('result'), dict):
+            delegated.setdefault(value.get('mode') or arguments.get('mode'), []).append(value)
+    parts = []
+    for item in chat['transcript'][:before]:
+        role, content = item.get('role'), (item.get('content') or '').strip()
+        if role == 'user' and content:
+            files = item.get('files') or []
+            parts.append('## User' + (f' (attached: {", ".join(files)})' if files else '') + '\n\n' + content)
+        elif role == 'assistant' and content:
+            parts.append('## Assistant\n\n' + content)
+        elif role == 'route' and item.get('status') == 'done':
+            mode = item.get('mode')
+            # The worker's own result when the Assistant ran it; a suggested job's saved state otherwise.
+            queue = delegated.get(mode, [])
+            value = next((v for v in queue if item.get('job_id') and v.get('job_id') == item['job_id']), None)
+            if value is None and not item.get('job_id') and queue:
+                value = queue[0]
+            if value is not None:
+                queue.remove(value)
+                result = value['result']
+                text = result.get('answer') or ''
+                status = _PROOF_STATUS.get(result.get('review_status'), result.get('status') or '')
+            elif item.get('job_id'):
+                text, status = _saved_result(root, mode, item['job_id'])
+            else:
+                text, status = '', ''
+            if mode in ('writeup', 'summarize'):
+                # A document about the results above, not a further result.
+                if text:
+                    parts.append(f'## {_RESULT_NAMES[mode]} saved\n\nA {_RESULT_NAMES[mode].lower()} of the results above was written.')
+            elif isinstance(text, str) and text.strip():
+                parts.append(f'## {_RESULT_NAMES.get(mode, mode)} result' + (f' ({status})' if status else '')
+                             + '\n\nTask: ' + ' '.join(str(item.get('request') or '').split())[:1500] + '\n\n' + text.strip())
+    return '\n\n'.join(parts)
+
+
+def style_choice(root):
+    """Which saved style write-ups use."""
+    return load_choice(root)
+
+
+def set_style_choice(root, mode, style=None, domain=None):
+    try:
+        return save_choice(root, mode, style, domain)
+    except FileNotFoundError:
+        raise NotFound('Unknown style') from None

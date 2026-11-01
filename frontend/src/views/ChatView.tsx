@@ -8,7 +8,7 @@ import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../component
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
-import { callPayload, type ModeCall } from '../modeCalls'
+import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -53,7 +53,7 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
 
 // How a card names what the model started. Critic and explore are both an answer here;
 // a literature check also answers here, with its evidence.
-type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
+type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 // `cover` names the mark (components/Glyph.tsx) and its colour class.
 const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
@@ -66,17 +66,18 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   quick_review: { noun: 'a quick review', label: 'Quick review', cover: 'referee' },
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
   writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
+  summarize: { noun: 'a summary', label: 'Summary', cover: 'writeup' },
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
   sanity_check: { noun: 'a numerical sanity check', label: 'Numerical sanity check', cover: 'sanity_check' },
 }
 const kindOf = (mode: RouteMode | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
-  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
-// Quick reviews and explanations are pages of the Review notebook.
+  mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
+// Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode): mode is Paged => mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
-const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode)
+const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
@@ -137,7 +138,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
     const raw = text ?? draft
-    const modeCall = free && text === undefined ? callPayload(raw, selectedCall, selectedEffort ?? undefined) : undefined
+    // A message that is only a mode name ("@summarize") is that call, picked from the menu or not.
+    const call = validCall(raw, selectedCall) ? selectedCall : raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null
+    const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     if (!content.trim() || sending || resuming || paused || work.blocked) return
     setSending(true)
@@ -489,6 +492,10 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
+          {item.job_id && item.outputs?.download && <>
+            <a className="btn btn-small btn-primary" href={api.researchTexUrl(item.job_id)} download={item.outputs.download}>Download .tex</a>
+            {item.outputs.pdf && <a className="btn btn-small" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
+          </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
