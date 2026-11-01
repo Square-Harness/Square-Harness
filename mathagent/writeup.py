@@ -70,6 +70,87 @@ def todo_comments(body):
     return [' '.join(part for part in item if part)[:500] for item in items]
 
 
+_REFERENCE = re.compile(r'\\(?:eqref|ref|cref|Cref|autoref|pageref|crefrange|Crefrange)\*?\s*\{([^{}]*)\}')
+_LABEL = re.compile(r'\\label\s*\{([^{}]*)\}')
+_POSITIONAL = re.compile(r'\b(?:the\s+(?:equation|display|formula|identity|inequality|estimate)\s+above|the\s+(?:above|previous|preceding)\s+'
+                         r'(?:equation|display|formula|identity|inequality|estimate)|(?:equation|formula|identity|inequality|estimate)s?'
+                         r'\s*~?\(\d+(?:\.\d+)*\))', re.I)
+
+
+def normalised_references(body):
+    """(\\ref{x}) and (\\eqref{x}) become \\eqref{x}: amsmath sets the parentheses."""
+    return re.sub(r'\(\s*\\(?:eq)?ref\s*\{([^{}]+)\}\s*\)', r'\\eqref{\1}', body)
+
+
+def reference_problems(body):
+    """(undefined, duplicated, positional): references to labels the body lacks, labels used twice, and
+    formulas referred to by position or by a hand-typed number."""
+    text = _uncommented(body)
+    labels = [label.strip() for label in _LABEL.findall(text)]
+    references = [key.strip() for match in _REFERENCE.finditer(text) for key in match.group(1).split(',') if key.strip()]
+    undefined = list(dict.fromkeys(key for key in references if key not in labels))
+    duplicated = list(dict.fromkeys(label for label in labels if labels.count(label) > 1))
+    positional = list(dict.fromkeys(' '.join(m.group(0).split()) for m in _POSITIONAL.finditer(text)))
+    return undefined, duplicated, positional
+
+
+_NUMBERED = ('equation', 'align', 'gather', 'multline', 'flalign', 'alignat')
+
+
+def _rows(content):
+    """The rows of a multi-line display: split at \\\\ outside braces and nested environments."""
+    rows, start, depth, nested, i = [], 0, 0, 0, 0
+    while i < len(content):
+        if content.startswith('\\begin{', i):
+            nested += 1
+        elif content.startswith('\\end{', i):
+            nested -= 1
+        elif content[i] == '\\' and i + 1 < len(content):
+            if content[i + 1] == '\\' and depth == 0 and nested == 0:
+                rows.append(content[start:i])
+                start = i + 2
+            i += 2
+            continue
+        elif content[i] == '{':
+            depth += 1
+        elif content[i] == '}':
+            depth -= 1
+        i += 1
+    return rows + [content[start:]]
+
+
+def tidy_numbering(body, protected=(), material=''):
+    """Number only the formulas the text refers to: a label nothing references (and that the author's
+    material does not have) is removed, the other rows of a multi-line display get \\notag, and a display
+    left without labels is unnumbered (starred), unless the author's material has that display as it is."""
+    from_material = lambda content: ' '.join(content.split()) in material
+    text = _uncommented(body)
+    referenced = {key.strip() for match in _REFERENCE.finditer(text) for key in match.group(1).split(',')}
+    keep = lambda label: label.strip() in referenced or label.strip() in protected
+    pattern = re.compile(r'\\begin\{(' + '|'.join(_NUMBERED) + r')\}(\{[^{}]*\})?(.*?)\\end\{\1\}', re.S)
+
+    def tidy(match):
+        name, argument, content = match.group(1), match.group(2) or '', match.group(3)
+        labels = _LABEL.findall(content)
+        if not labels:  # nothing can refer to it: unnumbered, unless it is the author's own display
+            if from_material(content) or re.search(r'\\tag\b', content):
+                return match.group(0)
+            return f'\\begin{{{name}*}}{argument}{content}\\end{{{name}*}}'
+        if all(keep(label) for label in labels):
+            return match.group(0)  # every label is used
+        content = _LABEL.sub(lambda m: m.group(0) if keep(m.group(1)) else '', content)
+        if not any(keep(label) for label in labels):
+            return f'\\begin{{{name}*}}{argument}{content}\\end{{{name}*}}'
+        if name in ('equation', 'multline'):
+            return f'\\begin{{{name}}}{argument}{content}\\end{{{name}}}'
+        rows = _rows(content)
+        rows = [row if _LABEL.search(row) or re.search(r'\\(?:notag|nonumber|tag)\b', row) or not row.strip()
+                else row.rstrip() + ' \\notag' for row in rows]
+        return f'\\begin{{{name}}}{argument}' + '\\\\'.join(rows) + f'\\end{{{name}}}'
+
+    return pattern.sub(tidy, body)
+
+
 def bibliography_entries(text):
     """(key, author, title, year) of each BibTeX entry, read loosely: enough to cite it by its key."""
     entries = []
@@ -105,6 +186,15 @@ MATH_RULES = ('Write mathematics that compiles and means what the source means: 
               '\\tau^{\\dt}, \\sqrt{\\dt}); every \\left with its \\right; only standard LaTeX and amsmath commands '
               'or those defined above; formulas copied from the source with their exact symbols, constants and '
               'quantifiers.')
+
+EQUATION_RULES = ('Number and refer as a careful author does: every displayed formula the text uses again later, and '
+                  'every key identity, estimate or definition, goes in an equation (or align) environment with '
+                  '\\label{eq:short-name}, and the text refers to it with \\eqref{eq:short-name} ("by \\eqref{eq:stopped}", '
+                  '"combining \\eqref{eq:upper} and \\eqref{eq:lower}"), never by position ("the equation above", "the '
+                  'previous display") or by a number typed by hand. A display referred to nowhere may stay unnumbered. '
+                  'Label the theorems, lemmas and sections the text cites and cite them with Theorem~\\ref{thm:...}. '
+                  'Turning a display of the material into a numbered equation changes no mathematics: do it. Keep the '
+                  'labels the material already has; every label unique.')
 
 CITATION_RULES = ("Cite only works of the author's bibliography (by their keys) or works the material gives with "
                   'an identifier (DOI, arXiv or zbMATH). Never cite a work the material marks as not found, only '
@@ -503,6 +593,19 @@ class WriteupRunner(ResearchRunner):
             out.append("THE AUTHOR'S BIBLIOGRAPHY (cite these works with \\cite{key}, by these keys only):\n" + listing[:6000])
         return '\n\n'.join(out)
 
+    def _material_labels(self):
+        """Labels of the author's material: the rest of their paper may refer to them, so they are kept."""
+        return {label.strip() for source in self.state['sources'] for label in _LABEL.findall(source['content'])}
+
+    def _material_text(self):
+        return ' '.join(' '.join(source['content'] for source in self.state['sources']).split())
+
+    def _equation_rules(self):
+        loaded = '\n'.join(_uncommented(t['content']) for t in self._templates_in(('.tex', '.sty', '.cls')))
+        if re.search(_LOADED % 'cleveref', loaded):
+            return EQUATION_RULES + ' The author loads cleveref: cite results and sections with \\cref{...} as they do.'
+        return EQUATION_RULES
+
     def _bibliography(self):
         """The entries of the template .bib files."""
         return [entry for source in self._templates_in(('.bib',)) for entry in bibliography_entries(source['content'])]
@@ -637,13 +740,14 @@ class WriteupRunner(ResearchRunner):
                        'define it with \\newcommand on its own line before \\title.\n'
                        'Keep the mathematics exactly as in the material: the same statements, hypotheses, constants and '
                        'quantifiers, and no new results. Where the material is unclear or incomplete, keep what it says '
-                       'and add a comment % TODO: ... describing the gap.\n' + CITATION_RULES + '\n' + MATH_RULES +
+                       'and add a comment % TODO: ... describing the gap.\n' + CITATION_RULES + '\n' + self._equation_rules() + '\n' + MATH_RULES +
                        '\n\n' + self._notation() + '\n\n' + self._style_note() +
                        '\n\nUSER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + part['text'])
         trailer = 'Write the document now: everything needed is above, and no tools are available.'
         result = self._call('writing', instruction, cap=cap, think=True, minimum_output=minimum, sampling=self.SAMPLING,
                             thinking_budget=min(self.THINK_TOKENS, cap // 2), trailer=trailer)
         title, definitions, body = split_body(result['text'])
+        body = normalised_references(body)
         if result['complete'] and announces_only(body) and not part.get('retried'):
             part['retried'] = True  # a reply that only says what it would do: once more, plainly
             self._save()
@@ -668,7 +772,7 @@ class WriteupRunner(ResearchRunner):
             self.state['title'] = title
         self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
         if all(p['complete'] for p in parts):
-            self.state['body'] = '\n\n'.join(p['body'] for p in parts)
+            self.state['body'] = tidy_numbering('\n\n'.join(p['body'] for p in parts), self._material_labels(), self._material_text())
             self.state['phase'] = 'assemble'
 
     def _assemble(self):
@@ -714,6 +818,10 @@ class WriteupRunner(ResearchRunner):
         if (re.search(r'\\begin\{(?:enumerate|itemize|description)\}\s*\[', text)
                 and not re.search(_LOADED % 'enumitem|enumerate|paralist', preamble)):
             lines.append('\\usepackage[shortlabels]{enumitem}')  # \begin{enumerate}[(i)] needs it
+        if re.search(r'\\eqref\b|\\begin\{(?:align|gather|multline)\*?\}', text) and not re.search(_LOADED % 'amsmath|mathtools', preamble):
+            lines.append('\\usepackage{amsmath}')
+        if re.search(r'\\[cC]ref\b', text) and not re.search(_LOADED % 'cleveref', preamble):
+            lines.append('\\usepackage{cleveref}')  # last in the preamble, after hyperref when there is one
         if _GRAPHIC.search(text):
             if not re.search(_LOADED % 'graphicx|graphics', preamble):
                 lines.append('\\usepackage{graphicx}')
@@ -733,6 +841,16 @@ class WriteupRunner(ResearchRunner):
             points.append(note)
             if note not in self.state['warnings']:
                 self.state['warnings'].append(note)
+        undefined, duplicated, positional = reference_problems(body)
+        undefined = [key for key in undefined if key not in self._material_labels()]  # the rest of the author's paper
+        if undefined:
+            points.append('References to labels neither this document nor your material defines (they print as ??): '
+                          + ', '.join(undefined[:20]) + '.')
+        if duplicated:
+            points.append('Labels defined twice: ' + ', '.join(duplicated[:20]) + '.')
+        if positional:
+            points.append('Formulas referred to by position or by a number typed by hand ("' + '", "'.join(positional[:6]) +
+                          '"): give them a label and refer with \\eqref.')
         missing = self.state.get('missing_figures') or []
         if missing:
             note = ('Figures not found next to the material (drawn as placeholders): ' + ', '.join(missing) +
@@ -916,7 +1034,8 @@ class WriteupRunner(ResearchRunner):
         cap = int(min(self.WRITE_TOKENS, remaining))
         instruction = ('This LaTeX document does not compile. Fix these errors and change nothing else: the same text, '
                        'mathematics and notation. Output the whole corrected body in the same form: \\title{...}, then '
-                       'the text, without preamble or \\begin{document}. ' + MATH_RULES + '\n\n' + self._notation() +
+                       'the text, without preamble or \\begin{document}. Keep every \\label and reference; a reference to a label '
+                       'that does not exist gets its label on the formula or result it means. ' + MATH_RULES + '\n\n' + self._notation() +
                        '\n\nERRORS (with the lines around them):\n' + '\n'.join(report) +
                        '\n\nDOCUMENT BODY:\n\\title{' + title + '}\n' + body)
         self._repairing = True
@@ -932,8 +1051,9 @@ class WriteupRunner(ResearchRunner):
         finally:
             self._repairing = False
         _, definitions, fixed = split_body(result['text'])
+        fixed = normalised_references(fixed)
         if result['complete'] and fixed and not announces_only(fixed) and len(fixed) >= 0.6 * len(body):
-            self.state['body'] = fixed
+            self.state['body'] = tidy_numbering(fixed, self._material_labels(), self._material_text())
             self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
             self._assemble()
             self.state['phase'] = 'compile'

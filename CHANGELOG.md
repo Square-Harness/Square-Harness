@@ -71,6 +71,13 @@
   reaches the writing call and whose used macros join the preamble; otherwise
   the usual style of the material's field. Write-up workers get the conversation
   once, as this source, instead of the raw history as reference context.
+- Write-ups number and reference their equations: displays the text uses again
+  and key identities get `equation`/`align` with `\label{eq:…}` and are cited with
+  `\eqref`, never "the equation above"; the controller then keeps a number only
+  where the text refers to it (labels and displays from the author's material are
+  never touched), turns `(\ref{x})` into `\eqref{x}`, and lists references to
+  undefined labels, duplicate labels and positional references among the points to
+  check. `cleveref` is used when the author's preamble loads it.
 - Write-up fixes found by live tests on Qwen 3.8 27B: figures the document
   includes are copied from the pinned files' folders (and `.png`/`.jpg` can be
   uploaded); a figure that is missing becomes a framed placeholder instead of a

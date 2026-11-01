@@ -103,7 +103,12 @@ class ConversationWriteupTests(GuiCase):
         (paper / 'notes.md').write_text('E[tau] ~ |Omega|/(4 eps) for a small disk window [HS04].')
         self.fake.replies = [text(r"""\title{Narrow escape}
 \section{Result}
-The mean exit time satisfies $\E[\tau]\sim|\Omega|/(4\varepsilon)$ \cite{HS04}, see also \cite{Invented13}.
+The mean exit time satisfies
+\begin{equation}\label{eq:exit}
+\E[\tau]\sim|\Omega|/(4\varepsilon)
+\end{equation}
+by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:missing}, the equation above holds.
+\begin{equation}\label{eq:unused} a = b \end{equation}
 % TODO: check the constant 4_x
 %  against the reference.
 \begin{enumerate}[(i)]
@@ -121,6 +126,7 @@ The mean exit time satisfies $\E[\tau]\sim|\Omega|/(4\varepsilon)$ \cite{HS04}, 
         prompt = self.fake.requests[0]['messages'][1]['content']
         self.assertIn('HS04: Holcman, D., Escape through a small opening (2004)', prompt)  # the author's .bib
         self.assertIn('never invent a bibliographic entry', prompt)
+        self.assertIn('\\eqref{eq:short-name}', prompt)  # numbering and references are asked for
         job = self.root / '.mathagent' / 'research' / started['id']
         state = json.loads((job / 'state.json').read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
@@ -137,6 +143,12 @@ The mean exit time satisfies $\E[\tau]\sim|\Omega|/(4\varepsilon)$ \cite{HS04}, 
         self.assertIn('Invented13', block)
         self.assertNotIn('HS04', block)
         self.assertIn('missing-plot', block)
+        self.assertIn('By \\eqref{eq:exit} and', document)  # (\\ref{...}) normalised
+        self.assertIn('eq:missing', block)
+        self.assertNotIn('eq:exit', block)
+        self.assertIn('the equation above', block)
+        self.assertIn('\\begin{equation*} a = b \\end{equation*}', document)  # numbered only when referred to
+        self.assertIn('\\begin{equation}\\label{eq:exit}', document)
         self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
 
 if __name__ == '__main__':
