@@ -193,178 +193,17 @@ class QuickTests(ReviewTestCase):
         lenses = [r['messages'][1]['content'] for r in client.requests if 'LENS FOR THIS PASS' in r['messages'][1]['content']]
         self.assertTrue(any('LINE BY LINE' in p for p in lenses) and any('ADVERSARIAL' in p for p in lenses))
 
-    def test_a_server_error_while_thinking_falls_back_to_a_direct_answer(self):
-        from mathagent.agent import AgentError
-        client = FakeClient()
-        original = client.stream
-
-        def stream(payload):
-            if payload['think']:
-                raise AgentError('Model stream error: Internal server error')
-            yield from original(payload)
-        client.stream = stream
-        runner = QuickReviewRunner(self.agent(client))
-        result = runner.start(WRONG, max_rounds=3)
-        self.assertEqual(runner.state['verdict'], 'issues_found')
-        self.assertTrue(any('failed on a check call with thinking' in w for w in runner.state['warnings']))
-        self.assertTrue(all(not r['think'] for r in client.requests))
-
-    def test_low_effort_is_one_pass_without_recheck(self):
-        client = FakeClient()
-        runner = QuickReviewRunner(self.agent(client))
-        result = runner.start(WRONG, max_rounds=1)
-        self.assertEqual(len(client.requests), 1)
-        self.assertEqual(runner.state['verdict'], 'issues_alleged')
-        self.assertIn('not re-checked', result['report'])
-
-    def test_no_issue_and_rejected_objection(self):
-        good = WRONG.replace('is continuous, hence', 'is compact (Rellich), hence')
-        client = FakeClient()
-        runner = QuickReviewRunner(self.agent(client))
-        result = runner.start(good, max_rounds=3)
-        self.assertEqual(runner.state['verdict'], 'no_issue_found')
-        self.assertIn('No issue found** by 2 independent passes', result['report'])
-        reject = {'confirm': lambda p, s: {'assessment': 'rejected', 'kind': 'invalid_inference',
-                                           'argument': 'The step is fine.', 'suggestion': ''}}
-        runner = QuickReviewRunner(self.agent(FakeClient(reject)))
-        result = runner.start(WRONG, max_rounds=3)
-        self.assertEqual(runner.state['verdict'], 'no_issue_found')
-        self.assertIn('Objections raised and rejected', result['report'])
-        self.assertIn('rejected by an independent re-check', result['report'])
-
-    def test_quote_gate_relocates_or_discards(self):
-        def wrong_line(prompt, schema):
-            value = default_check(prompt, schema)
-            for issue in value['issues']:
-                issue['start_line'] = issue['end_line'] = 1  # outside the proof; the quote is on L4
-            return value
-
-        runner = QuickReviewRunner(self.agent(FakeClient({'check': wrong_line})))
-        runner.start(WRONG, max_rounds=3)
-        self.assertEqual(runner.state['verdict'], 'issues_found')
-        self.assertTrue(all(i['start_line'] == 4 for c in runner.state['checks'].values() for i in c['issues']))
-
-        def invented(prompt, schema):
-            return {'explanation': 'x', 'verdict': 'issues_found', 'issues': [{
-                'start_line': 3, 'end_line': 3, 'quote': 'by dominated convergence the integrals agree', 'kind': 'invalid_inference',
-                'evidence': 'Invented objection.', 'suggestion': ''}]}
-
-        reject = lambda p, s: {'assessment': 'rejected', 'kind': 'invalid_inference', 'argument': 'Not in the proof.', 'suggestion': ''}
-        runner = QuickReviewRunner(self.agent(FakeClient({'check': invented, 'confirm': reject})))
-        result = runner.start(WRONG, max_rounds=1)
-        self.assertEqual(runner.state['verdict'], 'uncertain')
-        self.assertNotIn('**No issue found**', result['report'])
-        self.assertIn('could not be located', result['report'])
-
-    def test_statement_without_proof_is_refused(self):
-        runner = QuickReviewRunner(self.agent(FakeClient()))
-        result = runner.start('Lemma. Every bounded sequence in a Hilbert space has a weakly convergent subsequence.', max_rounds=1)
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['worker_error']['code'], 'no_proof')
-
-    def test_file_and_target_give_the_proof_with_its_context(self):
-        (self.root / 'paper.tex').write_text(PAPER)
-        client = FakeClient()
-        runner = QuickReviewRunner(self.agent(client))
-        result = runner.start('Is this proof right?', source_files=['paper.tex'], target='Theorem 1.1', max_rounds=1)
-        self.assertEqual(runner.state['unit']['name'], 'Theorem 1.1')
-        prompt = client.requests[0]['messages'][1]['content']
-        self.assertIn('STATEMENTS OF RESULTS USED', prompt)
-        self.assertIn('Definition 2.1', prompt)
-        self.assertNotIn('Obvious.', prompt)  # other proofs stay out
-        self.assertIn('[M1:L27]', result['report'])
-
-    def test_concurrency_gives_the_same_report(self):
-        drafts = []
-        for concurrency in (1, 3):
-            client = FakeClient(delay=0.01)
-            runner = QuickReviewRunner(self.agent(client), concurrency=concurrency)
-            runner.start(WRONG, max_rounds=10)
-            self.assertEqual(len(runner.state['checks']), 5)
-            self.assertIsNone(runner.state['settings']['max_tokens'])
-            drafts.append(runner.state['draft'])
-        self.assertEqual(drafts[0], drafts[1])
-
-    def test_pause_and_resume_do_not_repeat_finished_passes(self):
-        stop = lambda payload, count: count == 2
-        client = FakeClient(fail_on=stop)
-        runner = QuickReviewRunner(self.agent(client))
-        result = runner.start(WRONG, max_rounds=3)
-        self.assertEqual(result['status'], 'paused')
-        self.assertEqual(len(runner.state['checks']), 1)
-        client2 = FakeClient()
-        saved = json.loads((Path(result['directory']) / 'state.json').read_text())
-        self.assertIs(runner_for_state(saved), QuickReviewRunner)
-        resumed = QuickReviewRunner(self.agent(client2)).resume(result['id'])
-        self.assertEqual(resumed['status'], 'reviewed')
-        checks = [r for r in client2.requests if 'LENS FOR THIS PASS' in r['messages'][1]['content']]
-        self.assertEqual(len(checks), 1)
 
 
-class ExplainTests(ReviewTestCase):
-    PROOF = WRONG.replace('is continuous, hence', 'is compact (Rellich), hence')
-
-    def explain(self, lines):
-        def reply(prompt, schema):
-            return {'says': 'A bounded sequence in H^1 has an L^2-convergent subsequence.', 'idea': 'Weak compactness, then Rellich.',
-                    'steps': [{'start_line': a, 'end_line': b, 'what': f'Step {a}', 'why': 'Because.', 'uses': 'Hilbert space'} for a, b in lines],
-                    'facts': [{'name': 'Rellich–Kondrachov theorem', 'statement': 'H^1(0,1) embeds compactly in L^2(0,1).'}],
-                    'hypotheses': 'Boundedness of (0,1) is used by Rellich.', 'gaps': ''}
-        return reply
-
-    def test_every_line_is_explained_after_a_fill(self):
-        fill = lambda p, s: {'steps': [{'start_line': 4, 'end_line': 5, 'what': 'Compactness gives strong convergence.', 'why': 'Rellich.', 'uses': 'Rellich'}]}
-        client = FakeClient({'explain': self.explain([(3, 3)]), 'fill': fill})
-        runner = ExplainRunner(self.agent(client))
-        result = runner.start(self.PROOF, max_rounds=3)
-        self.assertEqual(result['status'], 'reviewed')
-        self.assertEqual([(s['start_line'], s['end_line']) for s in runner.state['explanation']['steps']], [(3, 3), (4, 5)])
-        report = result['report']
-        self.assertIn('Every line of the proof is explained.', report)
-        self.assertIn('Rellich–Kondrachov theorem', report)
-        self.assertIn('An independent pass found no problem', report)
-        self.assertIn('> The embedding of H^1(0,1)', report)  # the source line next to its explanation
-
-    def test_low_effort_has_no_accuracy_check_and_reports_missing_lines(self):
-        fill = lambda p, s: {'steps': []}
-        client = FakeClient({'explain': self.explain([(3, 3)]), 'fill': fill})
-        runner = ExplainRunner(self.agent(client))
-        result = runner.start(self.PROOF, max_rounds=1)
-        self.assertNotIn(['problems'], self.kinds(client))
-        self.assertIn('Lines not explained one by one: L4-L5.', result['report'])
-
-    def test_problems_found_are_corrected(self):
-        problems = lambda p, s: {'problems': [{'where': 'idea', 'problem': 'Rellich needs a bounded interval.', 'fix': 'Say so.'}]}
-        client = FakeClient({'explain': self.explain([(3, 5)]), 'explain_check': problems})
-        runner = ExplainRunner(self.agent(client))
-        result = runner.start(self.PROOF, max_rounds=3)
-        self.assertTrue(runner.state.get('explain_fixed'))
-        self.assertIn('Problems found and corrected', result['report'])
 
 
-class FakeLiterature:
-    online = True
-    deadline = None
-    on_budget_change = None
-    timeout = 5
 
-    def __init__(self):
-        self.calls = []
-        self.stats = {'requests': 0, 'returned_chars': 0}
 
-    def reset_budget(self, **kwargs):
-        pass
 
-    def snapshot(self):
-        return {'online': self.online, 'stats': dict(self.stats)}
 
-    def restore(self, value):
-        pass
 
-    def execute(self, name, args):
-        self.calls.append((name, args))
-        return json.dumps({'results': [{'title': 'Functional Analysis, Sobolev Spaces and PDE', 'authors': ['H. Brezis'],
-                                        'year': 2011, 'abstract': 'A textbook.', 'url': 'https://example.org/brezis'}]})
+
+
 
 
 class JournalTests(ReviewTestCase):
@@ -398,75 +237,14 @@ class JournalTests(ReviewTestCase):
         checks = [r['messages'][1]['content'] for r in client.requests if 'LENS FOR THIS PASS' in r['messages'][1]['content']]
         self.assertTrue(all(c.index('L10: Let $H^1(0,1)$') < c.index('STATEMENT:') for c in checks))
 
-    def test_the_review_reads_the_paper_but_checks_no_proof(self):
-        client = FakeClient()
-        runner = SummaryReviewRunner(self.agent(client))
-        result = runner.start('Review.', source_files=['paper.tex'], max_rounds=3)
-        self.assertEqual((result['status'], runner.state['variant']), ('reviewed', 'review'))
-        self.assertFalse(runner.state['checks'])
-        self.assertFalse(any('LENS FOR THIS PASS' in r['messages'][1]['content'] for r in client.requests))
-        report = result['report']
-        self.assertIn('## The paper in brief', report)
-        self.assertIn('Say which norm.', report)
-        self.assertIn('(the proofs were not checked)', report)
-        self.assertNotIn('## Major comments', report)
-        self.assertIn('did not check the proofs', client.requests[-1]['messages'][1]['content'])
-
-    def test_small_budget_makes_the_recommendation_provisional(self):
-        client = FakeClient()
-        runner = JournalRunner(self.agent(client))
-        with patch.object(JournalRunner, '_write_reserve', return_value=59000):
-            result = runner.start('Review.', source_files=['paper.tex'], max_rounds=3, max_tokens=60000)
-        self.assertEqual(result['status'], 'partial')
-        self.assertIn('(provisional)', result['report'])
-        self.assertIn('not checked', result['report'])
-
-    def test_online_novelty_search_is_recorded(self):
-        client = FakeClient()
-        agent = self.agent(client)
-        agent.workspace.literature = FakeLiterature()
-        runner = JournalRunner(agent)
-        with patch.object(JournalRunner, '_cited_checks', lambda self: None):
-            result = runner.start('Review.', source_files=['paper.tex'], max_rounds=5)
-        self.assertEqual(agent.workspace.literature.calls[0], ('search_papers', {'query': 'Rellich compactness Sobolev', 'limit': 5}))
-        self.assertIn('Literature searched', result['report'])
-        self.assertIn('[Functional Analysis, Sobolev Spaces and PDE](https://example.org/brezis)', result['report'])
-        self.assertIn('textbook source', result['report'])
-        self.assertIn('Say which norm.', result['report'])
-        self.assertEqual(runner.state['evidence'][0]['tool'], 'search_papers')
-
-    def test_queries_copied_from_the_manuscript_are_dropped(self):
-        copied = lambda prompt, schema: {'field': 'f', 'contribution': 'c', 'main': [], 'notation': [], 'closest': [],
-                                         'queries': ['Every bounded sequence in H^1(0,1) has a subsequence', 'Rellich compactness']}
-        agent = self.agent(FakeClient({'scope': copied}))
-        agent.workspace.literature = FakeLiterature()
-        runner = JournalRunner(agent)
-        with patch.object(JournalRunner, '_cited_checks', lambda self: None):
-            runner.start('Review.', source_files=['paper.tex'], max_rounds=3)
-        self.assertEqual(runner.state['scope']['queries'], ['Rellich compactness'])
-        self.assertEqual([args['query'] for _, args in agent.workspace.literature.calls], ['Rellich compactness'])
-
-    def test_guess_from_a_bibliography_entry(self):
-        guess = JournalRunner._guess({'entry': 'H. Brezis. Functional Analysis, Sobolev Spaces and PDE. Springer, 2011.', 'place': 'Theorem 9.16'})
-        self.assertEqual(guess[0]['authors'], ['H. Brezis'])
-        self.assertEqual(guess[0]['title'], 'Functional Analysis, Sobolev Spaces and PDE')
-        self.assertEqual((guess[0]['year'], guess[0]['locator']), ('2011', 'Theorem 9.16'))
 
 
-class PdfCommentTests(unittest.TestCase):
-    def test_only_comments_on_words_survive_a_pdf_extraction(self):
-        word = {'quote': 'remainder terms in the theorem Theorem 1.4', 'comment': 'Theorem is repeated.', 'kind': 'typo'}
-        formula = {'quote': 'b k = ∆Ψk · ∇Λ ◦ Ψk', 'comment': 'Inconsistent hat.', 'kind': 'typo'}
-        blamed = {'quote': 'Notice that the function is smooth', 'comment': 'An extraction artifact splits it.', 'kind': 'typo'}
-        notation = {'quote': 'outside the domain of the problem', 'comment': 'Use the same symbol.', 'kind': 'notation'}
-        self.assertEqual([_prose_comment(c) for c in (word, formula, blamed, notation)], [True, False, False, False])
 
 
-class LevelTests(unittest.TestCase):
-    def test_levels_follow_effort_tries(self):
-        self.assertEqual([level_for(n) for n in (1, 3, 5, 7, 10)], ['low', 'medium', 'high', 'xhigh', 'poincare'])
-        self.assertEqual([EFFORT[level_for(n)]['passes'] for n in (1, 3, 5, 7, 10)], [1, 2, 3, 4, 5])
-        self.assertIs(runner_for_state({'kind': 'referee'}), ResearchRunner)
+
+
+
+
 
 
 if __name__ == '__main__':

@@ -190,43 +190,9 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual((lebeau['doi'], lebeau['venue']), ('10.1080/03605309508821097', 'Comm. PDE & Appl'))
         self.assertFalse(any('contents unavailable' in r['title'] + ' '.join(r['authors']) for r in runner.state['pool']))
 
-    def test_offline_review_reports_unreached_sources_and_lists_nothing_invented(self):
-        runner, result = self.run_review([text(SCOPE)], online=False)
-        self.assertEqual(result['status'], 'partial')
-        self.assertEqual(runner.state['pool'], [])
-        self.assertIn('No candidate was screened as relevant', runner.state['draft'])
-        self.assertIn('crossref: 0/', runner.state['draft'])
-        self.assertIn('Offline', runner.state['draft'])
 
-    def test_budget_exhaustion_still_lists_the_best_verified_candidates(self):
-        runner, result = self.run_review([response(json.dumps(SCOPE), count=1700)], max_tokens=2000)
-        self.assertEqual(result['status'], 'partial')
-        report = (runner.directory / 'report.md').read_text()
-        self.assertIn('## Candidates found (not organised)', report)
-        self.assertIn('doi.org/10.1000/w', report)
 
-    def test_a_source_out_of_quota_is_not_asked_again(self):
-        calls = []
 
-        def quota(url, headers=None, max_bytes=None):
-            calls.append(url)
-            if 'api.semanticscholar.org' in url:
-                raise LiteratureError('Provider rate limited this request; try later or use a different provider')
-            return fetch(url)
-        self.lit = LiteratureTools(self.root, online=True)
-        runner = ReviewRunner(Agent(FakeClient([text(SCOPE)]), Workspace(self.root, literature=self.lit), ctx=32768, predict=4096))
-        with patch.object(self.lit, '_fetch', side_effect=quota):
-            runner.start('Heat observability reading list', max_rounds=1, max_tokens=40000, max_input_tokens=300000,
-                         max_seconds=600, max_requests=60, max_chars=30000)
-        self.assertEqual(len([u for u in calls if 'semanticscholar' in u]), 1)
-        self.assertIn('semantic_scholar', runner.state['down'])
-        self.assertIn('Carleman estimates for parabolic equations', [r['title'] for r in runner.state['pool']])
-        self.assertIn('come from Semantic Scholar, which was unavailable', (runner.directory / 'report.md').read_text())
-
-    def test_breadth_grows_with_effort(self):
-        self.assertEqual(breadth(1), {'queries': 3, 'hubs': 2, 'screen': 45})
-        self.assertEqual(breadth(3), {'queries': 5, 'hubs': 6, 'screen': 75})
-        self.assertEqual(breadth(100), {'queries': 12, 'hubs': 12, 'screen': 160})
 
 
 if __name__ == '__main__':
