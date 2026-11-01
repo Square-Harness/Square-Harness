@@ -151,5 +151,33 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
         self.assertIn('\\begin{equation}\\label{eq:exit}', document)
         self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
 
+        # Without a .bib, a bibliography is made from the identifiers the material gives; an entry without one is dropped.
+        (paper / 'notes2.md').write_text('E[tau] ~ |Omega|/(4 eps) [HS04], doi:10.1007/s10955-004-5712-8.')
+        self.fake.replies = [text(r"""\title{Without a bibliography}
+\section{Result}
+By \cite{HS04}, see also \cite{Fake99}.
+% BEGIN BIBTEX
+@article{HS04,
+  author = {Holcman, D. and Schuss, Z.},
+  title = {Escape through a small opening},
+  journal = {J. Stat. Phys.},
+  year = {2004},
+  doi = {10.1007/s10955-004-5712-8},
+}
+@misc{Fake99, author = {Nobody}, title = {Invented}, year = {1999}}
+% END BIBTEX""")]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'source_files': ['paper/notes2.md']})
+        made = self.root / '.mathagent' / 'research' / started['id'] / 'state.json'
+        self.wait_for(lambda: made.exists() and json.loads(made.read_text())['status'] in ('complete', 'partial'), timeout=240)
+        self.assertIn('There is no bibliography file', self.fake.requests[-1]['messages'][1]['content'])
+        state = json.loads(made.read_text())
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        document = state['document']
+        self.assertTrue(document.startswith('% The bibliography made'))  # embedded: the .tex compiles on its own
+        self.assertIn('doi = {10.1007/s10955-004-5712-8}', document)
+        self.assertIn('\\bibliography{', document)
+        self.assertNotIn('Invented', document)
+        self.assertIn('Fake99', document[document.index('Points to check'):document.index('\\section{Result}')])
+
 if __name__ == '__main__':
     unittest.main()

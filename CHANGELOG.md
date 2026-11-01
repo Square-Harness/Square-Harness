@@ -71,6 +71,13 @@
   reaches the writing call and whose used macros join the preamble; otherwise
   the usual style of the material's field. Write-up workers get the conversation
   once, as this source, instead of the raw history as reference context.
+- Write-up bibliographies: with a `.bib` attached, the text cites only its keys
+  (another work becomes `% TODO: reference: …`, and BibTeX the model writes is
+  removed); with none, the model gives entries only for works the material gives
+  with a DOI, arXiv or zbMATH identifier, an entry is kept only when that
+  identifier is in the material, and the kept ones are embedded in the `.tex`
+  (`filecontents*`) with `\bibliography` (or `\printbibliography` with biblatex),
+  so a downloaded file compiles on its own.
 - Write-ups number and reference their equations: displays the text uses again
   and key identities get `equation`/`align` with `\label{eq:…}` and are cited with
   `\eqref`, never "the equation above"; the controller then keeps a number only

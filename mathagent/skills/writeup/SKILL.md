@@ -22,6 +22,12 @@ Number and refer as a careful author does; turning a display of the material int
 - Label the theorems, lemmas, definitions and sections the text cites (`\label{thm:…}`, `\label{lem:…}`, `\label{sec:…}`) and cite them with `Theorem~\ref{thm:…}`, or with `\cref` when the author's preamble loads cleveref.
 - Keep the labels the material already has; every label is unique and every reference points to a label of the document (or of the author's draft it belongs to).
 
+## References
+
+- With the author's bibliography (a `.bib` file), cite only its keys. Where the text needs another work, write `% TODO: reference: authors, title, identifier` instead of citing it.
+- Without one, cite only works the material gives with a DOI, arXiv or zbMATH identifier, and give each cited work one BibTeX entry with that identifier, between the lines `% BEGIN BIBTEX` and `% END BIBTEX` after the text.
+- Never cite a work the material marks as not found, only remembered or unverified, and never invent a bibliographic detail.
+
 ## Notation
 
 - The notation required by the request comes first: use exactly those commands for those objects, never their expansions or another symbol. Then the template's macros, then the author's usual macros.

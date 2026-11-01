@@ -151,6 +151,40 @@ def tidy_numbering(body, protected=(), material=''):
     return pattern.sub(tidy, body)
 
 
+def bibtex_entries(body):
+    """(entries, rest): the BibTeX entries written in a body, commented or not, as (key, text), and the body
+    without them (nor the BEGIN/END BIBTEX lines)."""
+    lines, entries, rest, i = body.split('\n'), [], [], 0
+    while i < len(lines):
+        bare = re.sub(r'^\s*%\s?', '', lines[i])
+        head = re.match(r'\s*@\s*([A-Za-z]+)\s*\{\s*([^,\s{}]+)\s*,', bare)
+        if head and head.group(1).lower() not in ('comment', 'string', 'preamble'):
+            chunk, depth = [], 0
+            while i < len(lines):
+                bare = re.sub(r'^\s*%\s?', '', lines[i])
+                chunk.append(bare)
+                depth += bare.count('{') - bare.count('}')
+                i += 1
+                if depth <= 0:
+                    break
+            entries.append((head.group(2), '\n'.join(chunk).strip()))
+            continue
+        if not re.match(r'\s*%+\s*(?:BEGIN|END) BIBTEX\b', lines[i]):
+            rest.append(lines[i])
+        i += 1
+    return entries, re.sub(r'\n{3,}', '\n\n', '\n'.join(rest))
+
+
+def entry_identifiers(text):
+    """The DOI, arXiv and zbMATH identifiers an entry gives, lower-cased."""
+    found = set()
+    for pattern in (r'doi\s*=\s*[{"]\s*(?:https?://(?:dx\.)?doi\.org/)?([^}"\s]+)', r'eprint\s*=\s*[{"]\s*([^}"\s]+)',
+                    r'\b(10\.\d{4,9}/[^\s},"]+)', r'arxiv\.org/abs/([^\s},"]+)', r'zbmath\.org/\?q=an:([\d.]+)',
+                    r'zbmath\.org/(\d{4,})', r'zbl\s*=\s*[{"]\s*([^}"\s]+)'):
+        found |= {m.lower().rstrip('.') for m in re.findall(pattern, text, re.I)}
+    return found
+
+
 def bibliography_entries(text):
     """(key, author, title, year) of each BibTeX entry, read loosely: enough to cite it by its key."""
     entries = []
@@ -196,10 +230,18 @@ EQUATION_RULES = ('Number and refer as a careful author does: every displayed fo
                   'Turning a display of the material into a numbered equation changes no mathematics: do it. Keep the '
                   'labels the material already has; every label unique.')
 
-CITATION_RULES = ("Cite only works of the author's bibliography (by their keys) or works the material gives with "
-                  'an identifier (DOI, arXiv or zbMATH). Never cite a work the material marks as not found, only '
-                  'remembered or unverified, never attribute a result to a work the material does not connect it to, '
-                  'and never invent a bibliographic entry: where a reference is missing, write % TODO: reference.')
+CITATION_RULES = ("Cite only works of the author's bibliography, by their keys (listed below). Where the text needs "
+                  'another work, do not cite it: write a comment % TODO: reference: authors, title, identifier. Never cite '
+                  'a work the material marks as not found, only remembered or unverified, never attribute a result to a '
+                  'work the material does not connect it to, and never invent a bibliographic entry.')
+CITATION_RULES_NO_BIB = ('There is no bibliography file. Cite only works the material gives with an identifier (DOI, arXiv '
+                         'or zbMATH), with short keys such as \\cite{HolcmanSchuss2004}, and give each cited work one BibTeX '
+                         'entry with that identifier (doi = {...}, or eprint = {...} with archivePrefix = {arXiv}, or '
+                         'url = {https://zbmath.org/...}) and only the authors, title, venue and year the material states, '
+                         'on lines between % BEGIN BIBTEX and % END BIBTEX after the text. Never cite a work the material '
+                         'marks as not found, only remembered or unverified, never attribute a result to a work the material '
+                         'does not connect it to, and never invent a bibliographic entry: where a reference is missing, write '
+                         'a comment % TODO: reference.')
 
 
 _UNDEFINED = re.compile(r'Undefined control sequence\.\n(?P<block>(?:.*\n){0,6}?)l\.\d+ [^\n]*?\\(?P<name>[A-Za-z@]+)\s*\n')
@@ -606,6 +648,57 @@ class WriteupRunner(ResearchRunner):
             return EQUATION_RULES + ' The author loads cleveref: cite results and sections with \\cref{...} as they do.'
         return EQUATION_RULES
 
+    def _citation_rules(self):
+        return CITATION_RULES if self._templates_in(('.bib',)) else CITATION_RULES_NO_BIB
+
+    def _take_bibtex(self, body):
+        """The body without the BibTeX the model wrote. With the author's .bib it is dropped; without, an entry
+        is kept for the made bibliography only when the material gives its identifier and the text cites it."""
+        entries, body = bibtex_entries(body)
+        if not entries:
+            return body
+        if self._templates_in(('.bib',)):
+            note = ('The model wrote BibTeX entries for works outside your bibliography; they were removed: '
+                    + ', '.join(key for key, _ in entries) + '.')
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
+            return body
+        material = ' '.join(source['content'] for source in self._notes_in()).lower()
+        cited = {key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',')}
+        kept = {entry['key']: entry for entry in self.state.get('bibliography') or []}
+        dropped = []
+        for key, text in entries:
+            if key in cited and any(identifier in material for identifier in entry_identifiers(text)):
+                kept[key] = {'key': key, 'text': text}
+            elif key in cited:
+                dropped.append(key)
+        self.state['bibliography'] = list(kept.values())
+        if dropped:
+            note = ('BibTeX entries dropped because the material gives no identifier for them (their citations stay '
+                    'unresolved): ' + ', '.join(dropped) + '.')
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
+        return body
+
+    def _bibliography_file(self):
+        return download_name(self.state)[:-len('.tex')] + '-refs.bib'
+
+    def _made_bibliography(self, preamble, body):
+        """(before \\documentclass, preamble addition, before \\end{document}) for the bibliography made from the
+        material, embedded in the .tex so that a downloaded file compiles on its own."""
+        entries = self.state.get('bibliography') or []
+        if self._templates_in(('.bib',)) or not entries or not _CITE.search(_uncommented(body)):
+            return '', '', ''
+        name = self._bibliography_file()
+        head = (f'% The bibliography made from the identifiers in the material (check each entry).\n'
+                f'\\begin{{filecontents*}}[overwrite]{{{name}}}\n' + '\n\n'.join(e['text'] for e in entries) +
+                '\n\\end{filecontents*}\n')
+        if re.search(r'\\(?:printbibliography|bibliography)\b', body):
+            return head, '', ''
+        if re.search(_LOADED % 'biblatex', preamble):
+            return head, f'\n\\addbibresource{{{name}}}', '\n\\printbibliography\n'
+        return head, '', f'\n\\bibliographystyle{{amsplain}}\n\\bibliography{{{name[:-len(".bib")]}}}\n'
+
     def _bibliography(self):
         """The entries of the template .bib files."""
         return [entry for source in self._templates_in(('.bib',)) for entry in bibliography_entries(source['content'])]
@@ -740,7 +833,7 @@ class WriteupRunner(ResearchRunner):
                        'define it with \\newcommand on its own line before \\title.\n'
                        'Keep the mathematics exactly as in the material: the same statements, hypotheses, constants and '
                        'quantifiers, and no new results. Where the material is unclear or incomplete, keep what it says '
-                       'and add a comment % TODO: ... describing the gap.\n' + CITATION_RULES + '\n' + self._equation_rules() + '\n' + MATH_RULES +
+                       'and add a comment % TODO: ... describing the gap.\n' + self._citation_rules() + '\n' + self._equation_rules() + '\n' + MATH_RULES +
                        '\n\n' + self._notation() + '\n\n' + self._style_note() +
                        '\n\nUSER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + part['text'])
         trailer = 'Write the document now: everything needed is above, and no tools are available.'
@@ -772,7 +865,8 @@ class WriteupRunner(ResearchRunner):
             self.state['title'] = title
         self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
         if all(p['complete'] for p in parts):
-            self.state['body'] = tidy_numbering('\n\n'.join(p['body'] for p in parts), self._material_labels(), self._material_text())
+            body = self._take_bibtex('\n\n'.join(p['body'] for p in parts))
+            self.state['body'] = tidy_numbering(body, self._material_labels(), self._material_text())
             self.state['phase'] = 'assemble'
 
     def _assemble(self):
@@ -808,9 +902,10 @@ class WriteupRunner(ResearchRunner):
         preamble += self._style_preamble(preamble, body)
         preamble += self._model_preamble(preamble)
         preamble += self._package_preamble(preamble + '\n' + loaded, body)
-        document = preamble + '\n\n' + head + self._checks_block(body) + '\n'
+        before, addition, closing = self._made_bibliography(preamble + '\n' + loaded, body)
+        document = before + preamble + addition + '\n\n' + head + self._checks_block(body) + '\n'
         self.state['body_line'] = document.count('\n') + 1
-        self.state['document'] = self.state['draft'] = document + body + '\n\n\\end{document}\n'
+        self.state['document'] = self.state['draft'] = document + body + '\n' + closing + '\n\\end{document}\n'
 
     def _package_preamble(self, preamble, body):
         """Packages the text needs and the preamble lacks, and placeholders for figures that are not there."""
@@ -869,7 +964,8 @@ class WriteupRunner(ResearchRunner):
     def _unknown_citations(self, body):
         """Keys the text cites that neither the author's .bib nor the document's own bibliography defines."""
         cited = [key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',') if key.strip()]
-        known = {key for key, *_ in self._bibliography()} | set(re.findall(r'\\bibitem\s*(?:\[[^\]]*\])?\{([^}]+)\}', body))
+        known = ({key for key, *_ in self._bibliography()} | {e['key'] for e in self.state.get('bibliography') or []}
+                 | set(re.findall(r'\\bibitem\s*(?:\[[^\]]*\])?\{([^}]+)\}', body)))
         return list(dict.fromkeys(key for key in cited if key not in known))
 
     def _figure_folders(self):
@@ -1053,7 +1149,7 @@ class WriteupRunner(ResearchRunner):
         _, definitions, fixed = split_body(result['text'])
         fixed = normalised_references(fixed)
         if result['complete'] and fixed and not announces_only(fixed) and len(fixed) >= 0.6 * len(body):
-            self.state['body'] = tidy_numbering(fixed, self._material_labels(), self._material_text())
+            self.state['body'] = tidy_numbering(self._take_bibtex(fixed), self._material_labels(), self._material_text())
             self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
             self._assemble()
             self.state['phase'] = 'compile'
@@ -1142,6 +1238,9 @@ class WriteupRunner(ResearchRunner):
                f'- Document: ready to download as `{outputs["download"]}`' if outputs.get('download') else '- Document: not exported yet',
                f'- PDF: `{outputs["pdf"]}`' if isinstance(outputs.get('pdf'), str) else '- PDF: ' + ('ready' if outputs.get('pdf') else 'none'),
                f'- LaTeX: {compiled}', f'- TODO comments left for the author: {todo}',
+               '- Bibliography: your .bib' if self._templates_in(('.bib',)) else
+               f'- Bibliography: made from the material ({len(s.get("bibliography") or [])} entries, embedded in the .tex)'
+               if s.get('bibliography') else '- Bibliography: none',
                f'- Style: saved style "{style["label"]}"' if style else
                '- Style: no saved style fits; the usual style of the field' if s.get('style_checked') else '- Style: not chosen yet',
                '', '## Request', '', s['goal']]
