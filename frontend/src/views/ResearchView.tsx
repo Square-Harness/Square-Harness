@@ -127,7 +127,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       {data.stop_reason && !data.running && <p className="muted small">{data.stop_reason}</p>}
       <div className="job-actions">
         {ours ? (
-          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
+          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}>{pausing ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : resumable ? (
           <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, true, additionalSeconds))}>
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : additionalSeconds ? `${busy ? 'Queue resume' : 'Resume'} (+${extensionLabel} min)` : busy ? 'Queue resume' : 'Resume saved work'}

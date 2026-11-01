@@ -11,7 +11,7 @@ import { ErrorNote, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlayIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
 
@@ -89,13 +89,6 @@ export function Sidebar({ route }: { route: Route }) {
               <PanelLeftIcon />
             </button>
           </div>
-          <label className="field">
-            <span className="field-label">Notebook</span>
-            <select aria-label="Notebook" value={notebook(route.mode)} onChange={(event) => { window.location.hash = href(event.target.value as Mode) }}>
-              {(['free', 'prove', 'literature', 'referee', 'writeup'] as Mode[]).map((mode) => <option key={mode} value={mode}>{mode === 'free' ? 'Conversations' : mode === 'prove' ? 'Proofs' : mode === 'literature' ? 'Reading lists' : mode === 'referee' ? 'Reviews' : 'Write-ups'}</option>)}
-            </select>
-          </label>
-          <p className="side-summary">{info.summary}</p>
           <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
         </header>
         <div className="side-list">
@@ -104,7 +97,6 @@ export function Sidebar({ route }: { route: Route }) {
         </div>
         <TaskPanel />
         <WorkspacePanel />
-        <p className="muted small" style={{ padding: '0.5rem 1rem' }}>Square Harness {app.status?.version || ''} · <a href="/LICENSE.txt" target="_blank" rel="noreferrer">Apache 2.0</a><br /><a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noreferrer">Third-party notices</a></p>
       </div>
     </aside>
   )
@@ -314,7 +306,7 @@ function ActiveTaskPanel({ task, app }: { task: TaskSummary; app: AppState }) {
       <button type="button" className="btn btn-small" disabled={pausing}
         aria-label={`Pause ${task.label}: ${task.title}`}
         onClick={() => api.pause(task.id).catch((reason: Error) => setError(reason.message))}>
-        <PauseIcon size={15} /> Pause
+        {pausing ? <PlayIcon size={15} /> : <PauseIcon size={15} />} {pausing ? 'Pausing…' : 'Pause'}
       </button>
     </div>
   )
@@ -341,18 +333,33 @@ function QueuePanel() {
   )
 }
 
+/** The folder the harness works in, shown above the text window; click to open another. */
+export function WorkspaceSwitch() {
+  const { status } = useApp()
+  const [browsing, setBrowsing] = useState(false)
+  if (!status) return null
+  const folder = status.workspace.split('/').filter(Boolean).pop() || status.workspace
+  return (
+    <div className="workspace-switch">
+      <button type="button" className="workspace-open" title={status.workspace + ' (open another folder)'} onClick={() => setBrowsing(true)}>
+        <span className="folder-glyph" aria-hidden="true" />{folder}
+      </button>
+      {!status.online && <span className="pill" title="No external requests; local and cached sources only">Offline</span>}
+      {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
+    </div>
+  )
+}
+
 function WorkspacePanel() {
   const app = useApp()
   const { status } = app
   const limits = concurrencyLimits(app.snapshot, status)
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
-  const [browsing, setBrowsing] = useState(false)
   const [access, setAccess] = useState(false)
   if (!status) return null
   const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
   const readLabel = readable.length === 4 ? 'Reads all file types' : readable.length ? 'Reads ' + readable.join(', ') : 'Reads no files by itself'
-  const folder = status.workspace.split('/').filter(Boolean).pop() || status.workspace
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
   const ollama = status.backend === 'ollama'
@@ -362,14 +369,6 @@ function WorkspacePanel() {
     : ollama ? `Run ollama pull ${status.model}.` : `Serve ${status.model}, or restart with --model.`
   return (
     <footer className="workspace">
-      <div className="workspace-row">
-        <button type="button" className="workspace-name workspace-open" title={status.workspace + ' (open another folder)'} onClick={() => setBrowsing(true)}>
-          <span className="folder-glyph" aria-hidden="true" />{folder}
-        </button>
-        <span className={'pill' + (status.online ? ' pill-online' : '')} title={status.online ? 'Search queries and downloads can leave this computer' : 'No external requests; local and cached sources only'}>
-          {status.online ? 'Online' : 'Offline'}
-        </span>
-      </div>
       <div className="workspace-row">
         <span className={'model-dot' + (reachable && installed ? ' model-ok' : ' model-bad')} aria-hidden="true" />
         <span className="workspace-model" title={`${status.model} at ${status.host}: ${modelNote}`}>{status.model}</span>
@@ -387,7 +386,6 @@ function WorkspacePanel() {
         Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
       </button>
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
-      {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}
       {pairing && (

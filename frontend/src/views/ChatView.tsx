@@ -8,12 +8,13 @@ import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../component
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
-import { callPayload, validCall, type ModeCall } from '../modeCalls'
+import { callPayload, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
+import { WorkspaceSwitch } from '../components/Shell'
 import { go, href } from '../router'
 import { useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
@@ -91,9 +92,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const routing = work.routing
   const [draft, setDraft] = useState('')
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
-  const [selectedEffort, setSelectedEffort] = useState<EffortLevel>('medium')
+  // null: no effort named, so the harness picks its default for the mode.
+  const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
   const selectCall = (next: ModeCall | null) => {
-    if (next?.mode !== selectedCall?.mode) setSelectedEffort(next?.mode === 'detailed_review' ? 'high' : 'medium')
+    if (next?.mode !== selectedCall?.mode) setSelectedEffort(null)
     setSelectedCall(next)
   }
   const [attachments, setAttachments] = useState<string[]>([])
@@ -102,14 +104,17 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const createdChat = useRef<string | null>(null)
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
-  // Online search is on for new conversations unless the interface was launched --offline.
-  const [online, setOnline] = useState<boolean>(app.status ? app.status.online : true)
+  // Online search is always on, unless the interface was launched --offline.
   const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
 
   useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]))
-  useEffect(() => { if (data) { setThink(data.settings.think); setOnline(!!data.settings.online) } }, [data?.id])
+  useEffect(() => { if (data) setThink(data.settings.think) }, [data?.id])
+  // Conversations saved with search off (earlier versions) get it back.
+  useEffect(() => {
+    if (id && data && !locked && !data.settings.online) api.chatSettings(id, { online: true }).catch(() => undefined)
+  }, [id, data?.settings.online, locked])
 
   // Follow new output while the reader is at the bottom; never yank them back up.
   const liveSize = live ? live.steps.reduce((n, step) => n + (step.type === 'call' ? step.text.length + step.thinking.length : 1), 0) : 0
@@ -123,14 +128,14 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
     const raw = text ?? draft
-    const modeCall = free && text === undefined ? callPayload(raw, selectedCall, selectedEffort) : undefined
+    const modeCall = free && text === undefined ? callPayload(raw, selectedCall, selectedEffort ?? undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     if (!content.trim() || sending || resuming || paused || work.blocked) return
     setSending(true)
     setSendError('')
     try {
       let chatId = id || createdChat.current
-      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : online)).id; createdChat.current = chatId }
+      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall)
       else await api.send(chatId, content, attachments)
       setDraft('')
@@ -151,10 +156,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const changeThink = (value: boolean) => {
     setThink(value)
     if (id) api.chatSettings(id, { think: value }).catch((reason: Error) => setSendError(reason.message))
-  }
-  const changeOnline = (value: boolean) => {
-    setOnline(value)
-    if (id) api.chatSettings(id, { online: value }).catch((reason: Error) => { setOnline(!value); setSendError(reason.message) })
   }
   const resume = async () => {
     if (!id || resuming) return
@@ -205,19 +206,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
-        {attachments.length > 0 && (
-          <div className="attachments composer-attachments">
-            {attachments.map((path) => (
-              <span key={path} className="chip">
-                <FileIcon size={14} /><span>{path}</span>
-                <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
-                  onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
-              </span>
-            ))}
-          </div>
-        )}
+        <div className="composer-top">
+          <WorkspaceSwitch />
+          {attachments.map((path) => (
+            <span key={path} className="chip">
+              <FileIcon size={14} /><span>{path}</span>
+              <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
+                onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
+            </span>
+          ))}
+        </div>
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
+            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !!effortKind(selectedCall.mode)}
             onSend={() => { send() }} disabled={blocked || sending || resuming} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -225,7 +226,11 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             aria-label="Message" />}
           {ours ? (
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
-              <PauseIcon size={16} /> {free ? 'Pause' : 'Stop'}
+              {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
+            </button>
+          ) : paused ? (
+            <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending} onClick={resume}>
+              <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
           ) : work.queued ? (
             <button type="button" className="btn composer-send" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
@@ -238,25 +243,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           )}
         </div>
         <div className="composer-bar">
-          {free ? validCall(draft, selectedCall) ? (
-            <label className="composer-effort">Effort
-              <select aria-label="Effort for selected mode" value={selectedEffort} disabled={blocked || sending || resuming}
-                onChange={(event) => setSelectedEffort(event.target.value as EffortLevel)}>
-                {EFFORTS.map((effort) => <option key={effort.id} value={effort.id}>{effort.label}</option>)}
-              </select>
-            </label>
-          ) : <span className="muted small" title="Short questions get a direct answer; harder tasks receive more effort as needed.">Adaptive effort</span>
-            : <Toggle label="Thinking" checked={think} onChange={changeThink} />}
-          <span title={locked ? 'Launched with --offline: online search stays off' : online ? 'Search queries leave this computer' : 'Local and cached sources only'}>
-            <Toggle label="Search online" checked={online && !locked} onChange={changeOnline} disabled={locked} />
-          </span>
-          {free && assistantResumable(data) && (
-            <button type="button" className="btn btn-quiet btn-small" disabled={work.blocked || resuming || sending} onClick={resume}>
-              <PlayIcon size={14} /> {resuming ? 'Resuming…' : 'Resume assistant'}
-            </button>
-          )}
+          {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           {free && budgetDisplay && (
-            <span className="muted small" title={budgetDisplay.title}>
+            <span className="muted small composer-budget" title={budgetDisplay.title}>
               {budgetDisplay.output}
               {budgetDisplay.reserved && <> {' · '}{budgetDisplay.reserved}</>}
               {budgetDisplay.context && <> {' · '}{budgetDisplay.context}</>}
@@ -268,7 +257,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               Fresh review of the last answer
             </button>
           )}
-          <span className="composer-hint">Enter sends · Shift+Enter adds a line · @ selects a mode</span>
+          {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}

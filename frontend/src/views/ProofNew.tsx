@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { api, type WorkspaceFile } from '../api'
+import { WorkspaceSwitch } from '../components/Shell'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { Markdown } from '../components/Markdown'
@@ -100,6 +101,7 @@ export function ProofNew() {
   return (
     <div className="sheet paper">
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
+        <div className="entry"><span className="in-margin" /><WorkspaceSwitch /></div>
         <div className="entry">
           <span className="in-margin margin-glyph" aria-hidden="true">⊢</span>
           <div>
