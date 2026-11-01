@@ -5,7 +5,7 @@ from .orchestrator import Orchestrator
 from .router import JOB_MODES, EFFORTS
 from .source_tasks import automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
-from .writeup import SUMMARY_REQUEST
+from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
 
 
 _NO_SEARCH = re.compile(
@@ -71,7 +71,7 @@ def _word(char):
     return char.isalnum() or char in '_@.+/-'
 
 
-def validated_mode_call(content, selection):
+def validated_mode_call(content, selection, files=()):
     if selection is None:
         return content, None
     if not isinstance(selection, dict) or not {'mode', 'start'} <= set(selection) or set(selection) - {'mode', 'start', 'effort'}:
@@ -88,6 +88,8 @@ def validated_mode_call(content, selection):
             or (end < len(content) and _word(content[end]))):
         raise ValueError('The selected mode call no longer matches the message')
     query = (content[:start] + content[end:]).strip()
+    if not query and mode == 'writeup' and files:
+        return ATTACHED_REQUEST, 'writeup'  # a bare @writeup with files: write them up
     if not query and mode in ('writeup', 'summarize'):
         # Nothing narrows the write-up: summarize what the conversation obtained.
         return SUMMARY_REQUEST, 'summarize'

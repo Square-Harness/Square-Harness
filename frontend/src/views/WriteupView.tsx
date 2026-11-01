@@ -267,15 +267,12 @@ function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; 
       <section className="aside-section">
         <h3 className="aside-title">Checks</h3>
         <p className="small">{todo ? `${todo} TODO comment${todo === 1 ? '' : 's'} left for you to settle.` : data.document ? 'No TODO comments.' : 'Checks run once the document is assembled.'}</p>
-        {data.notation && <p className="small">{data.notation.conventions.length
-          ? <>Notation made consistent ({data.notation.conventions.map((c) => c.notation).slice(0, 8).join(', ')}) in {data.notation.fixed} section{data.notation.fixed === 1 ? '' : 's'}{data.notation.rejected ? `; ${data.notation.rejected} change${data.notation.rejected === 1 ? '' : 's'} not made (a bare letter, your own macro, or an undefined symbol)` : ''}.</>
-          : data.notation.rejected ? `Notation checked; ${data.notation.rejected} change${data.notation.rejected === 1 ? '' : 's'} not made (a bare letter, your own macro, or an undefined symbol).` : 'Notation checked: consistent.'}</p>}
         {issues.length > 0 && <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
       </section>
       <section className="aside-section">
         <h3 className="aside-title">Style</h3>
         <p className="small">{data.style ? <>Your saved style <strong>{data.style.label}</strong>.</>
-          : data.style_checked || data.domain ? <>No saved style fits: the usual style of {data.domain || 'the field'}. <a href="#/style">Learn your style</a>.</>
+          : data.style_checked ? <>No saved style fits: the usual style of the field. <a href="#/style">Learn your style</a>.</>
           : 'Chosen before writing.'}</p>
       </section>
       <section className="aside-section">

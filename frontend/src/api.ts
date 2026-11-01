@@ -337,9 +337,7 @@ export type ResearchDetail = {
   title?: string
   style_checked?: boolean
   parts?: { complete: boolean; characters: number }[]
-  domain?: string
   style?: { label: string; profile: string; domain: string } | null
-  notation?: { fixed: number; rejected: number; complete: boolean; conventions: { object: string; notation: string; variants: string[] }[] } | null
   articles?: { id: string; path: string; title: string; abstract: string; headings: string[]; environments: Record<string, number>; inputs: string[]; lines: number }[]
   domains?: { name: string; description: string; articles: string[]; complete: boolean }[]
   observations?: Record<string, { aim: string; structure: string[]; habits: string[]; phrases: string[]; complete: boolean }>

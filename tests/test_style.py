@@ -99,7 +99,6 @@ class StyleJobTests(GuiCase):
         self.assertNotIn(r'\norm', prompt)  # only the macros that domain's articles use
         self.assertNotIn('Schemes with proofs', prompt)
         self.assertLessEqual(len(style.style_prompt(profile)), style.PROMPT_CHARS)
-        self.assertIn(r'\newtheorem{lemma}[theorem]{Lemma}', style.style_sty(profile, 'Numerical analysis'))
         self.assertEqual([f['name'] for f in profile['template']], ['scheme.tex', 'mymacros.sty'])
         self.assertEqual(profile['template'][0]['content'], NUMERICS)  # kept whole: the style file is self-contained
         listed = self.ok('GET', '/api/styles')['styles']

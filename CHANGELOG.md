@@ -71,6 +71,12 @@
   reaches the writing call and whose used macros join the preamble; otherwise
   the usual style of the material's field. Write-up workers get the conversation
   once, as this source, instead of the raw history as reference context.
+- Write-ups also: say when an attached complete `.tex` was used as a template
+  (its preamble), and how to write from it instead; count the results finished
+  earlier in the same Assistant turn as material; write up the attached files
+  when `@writeup` is sent alone with attachments; move multi-line definitions
+  whole; and resume jobs saved by the earlier section-by-section pipeline by
+  writing them again.
 - Write-up bibliographies: with a `.bib` attached, the text cites only its keys
   (another work becomes `% TODO: reference: …`, and BibTeX the model writes is
   removed); with none, the model gives entries only for works the material gives

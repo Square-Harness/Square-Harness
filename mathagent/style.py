@@ -315,16 +315,6 @@ def _domain(profile, domain):
     return next((d for d in profile['domains'] if d['name'].lower() == str(domain or '').lower()), None)
 
 
-def style_sty(profile, domain=None):
-    """The profile's macros (and theorem environments) as a .sty a write-up can load."""
-    chosen = _domain(profile, domain)
-    articles = set(chosen['articles']) if chosen else None
-    lines = [f'% Macros condensed by Square Harness from {len(profile["articles"])} articles ({profile["name"]})']
-    lines += [m['definition'] for m in profile['macros'] if articles is None or articles & set(m['articles'])]
-    lines += [e['definition'] for e in profile.get('environments', [])]
-    return '\n'.join(lines) + '\n'
-
-
 def style_prompt(profile, domain=None, limit=PROMPT_CHARS):
     """Compact style guidance for a write-up: one domain's description, then its macros."""
     chosen = _domain(profile, domain)

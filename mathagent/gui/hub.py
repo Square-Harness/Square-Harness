@@ -1336,9 +1336,10 @@ class Hub:
                                      (f.lower().endswith('.tex') and '\\begin{document}' in agent.workspace.text(agent.workspace.path(f)))]
                         kwargs['template_files'] = templates
                         kwargs['source_files'] = [f for f in files if f not in templates]
-                        # The results so far, as the user saw them, up to this request: a numbered source
-                        # that paragraphs cite, in place of the raw history (which would fill the context twice).
-                        kwargs.update(conversation=store.conversation_record(root, chat_id, before=self._turn_start(root, chat_id)),
+                        kwargs['explain_templates'] = any(f.lower().endswith('.tex') for f in templates)
+                        # The results so far, as the user saw them (this turn's finished jobs included, the
+                        # request itself left out), in place of the raw history (which would fill the context twice).
+                        kwargs.update(conversation=store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
                                       variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                       style_choice=load_choice(self.base))
                     if mode not in ('writeup', 'summarize'):

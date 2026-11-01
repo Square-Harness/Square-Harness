@@ -11,6 +11,7 @@ gets one repair call on the whole text. Nothing reviews the mathematics: the use
 they have checked, and the document is theirs to read.
 """
 from .reporting import usage_footer
+import copy
 import hashlib
 import os
 from pathlib import Path
@@ -202,7 +203,13 @@ THEOREM = re.compile(r'\\(?:newtheorem|declaretheorem)\*?\s*(?:\[[^\]]*\]\s*)?\{
 FILE_ERROR = re.compile(r'^(?:\./)?([^\s:/]+\.(?:tex|sty|cls)):(\d+): (.+)$', re.M)
 DEFAULT_THEOREMS = ('theorem', 'lemma', 'proposition', 'corollary', 'definition', 'remark')
 SUMMARY_REQUEST = 'Summarize the important results obtained so far in this conversation.'
+ATTACHED_REQUEST = 'Write up the attached material as a clean LaTeX document.'
 _LEGACY_PHASES = ('plan', 'section', 'notation', 'review')  # jobs saved by the section-by-section pipeline
+_STATE_DEFAULTS = {'macros': [], 'theorems': [], 'definitions': [], 'style': None, 'style_checked': False, 'parts': [],
+                   'title': '', 'body': '', 'model_definitions': '', 'document': '', 'compile': None, 'repaired': False,
+                   'outputs': {}, 'supplied_macros': {}, 'supplied_environments': {}, 'request_macros': {},
+                   'request_environments': {}, 'style_choice': {'mode': 'auto'}, 'variant': None, 'scoped': False,
+                   'deliver': 'folder', 'output_name': ''}
 
 _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| should)|Let me|First,? I|Before (?:writing|fixing)|"
                        r"To (?:fix|write|verify)|I'm going to)\b", re.I)
@@ -286,11 +293,16 @@ def undefined_environments(log):
 
 def _hoist_definitions(text):
     """(definitions, rest): the top-level definition lines of a body, and the body without them."""
-    kept, moved, depth = [], [], 0
+    kept, moved, depth, open_definition = [], [], 0, 0
     for line in text.split('\n'):
         code = re.sub(r'(?<!\\)%.*', '', line)
+        if open_definition > 0:  # the rest of a definition spread over several lines
+            moved[-1] += '\n' + line
+            open_definition += code.count('{') - code.count('}')
+            continue
         if depth == 0 and _HOISTED_LINE.match(code):
             moved.append(line.strip())
+            open_definition = code.count('{') - code.count('}')
         else:
             kept.append(line)
         depth = max(0, depth + len(re.findall(r'\\begin\s*\{', code)) - len(re.findall(r'\\end\s*\{', code)))
@@ -377,7 +389,7 @@ def split_material(blocks, room):
 
 def download_name(state):
     """A file name for a write-up kept for download: its title, made safe."""
-    title = (state.get('title') or (state.get('outline') or {}).get('title') or '').lower()
+    title = (state.get('title') or '').lower()
     stem = re.sub(r'[^a-z0-9]+', '-', re.sub(r'\\[a-zA-Z]+|[$^_{}]', ' ', title)).strip('-')[:60].rstrip('-')
     prefix = 'summary' if state.get('variant') == 'summary' else 'writeup'
     return (prefix + '-' + stem if stem and not stem.startswith(prefix) else stem or prefix) + '.tex'
@@ -479,7 +491,8 @@ class WriteupRunner(ResearchRunner):
         super()._check_time()
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
-              conversation='', variant=None, scoped=False, deliver='folder', style_choice=None, **budgets):
+              conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
+              explain_templates=False, **budgets):
         if variant not in (None, 'summary'):
             raise ValueError('Unknown write-up variant')
         if deliver not in ('folder', 'download'):
@@ -511,6 +524,7 @@ class WriteupRunner(ResearchRunner):
         self._notes, self._output, self._conversation = notes, output, conversation
         self._variant, self._scoped, self._deliver = variant, bool(scoped or variant), deliver
         self._style_choice = dict(style_choice or {'mode': 'auto'})
+        self._explain_templates = bool(explain_templates)
         # Notation the user defines in the request (\newcommand...) outranks templates and saved styles.
         self._request_macros, self._request_environments = macro_definitions(goal), environment_definitions(goal)
         return super().start(goal.strip() or SUMMARY_REQUEST, kind='writeup', source_files=source_files, **budgets)
@@ -535,6 +549,7 @@ class WriteupRunner(ResearchRunner):
         return {'phase': 'style', 'output_name': self._output, 'variant': self._variant, 'scoped': self._scoped,
                 'deliver': self._deliver, 'request_macros': self._request_macros,
                 'request_environments': self._request_environments, 'style_choice': self._style_choice,
+                'explain_templates': self._explain_templates,
                 'macros': [], 'theorems': [], 'definitions': [],
                 'style': None, 'style_checked': False, 'parts': [], 'title': '', 'body': '', 'model_definitions': '',
                 'document': '', 'compile': None, 'repaired': False, 'outputs': {}, 'supplied_macros': {},
@@ -568,8 +583,6 @@ class WriteupRunner(ResearchRunner):
 
     def _material(self, role):
         """Each call carries what it needs; write-up calls have no tools, so none are named."""
-        if 'reference_context' in self.state:
-            return super()._material(role)
         return '', []
 
     # -- sources, notation and style ------------------------------------------------------
@@ -713,8 +726,11 @@ class WriteupRunner(ResearchRunner):
     # -- workflow -------------------------------------------------------------------------
 
     def _step(self, phase):
-        if phase in _LEGACY_PHASES:
-            self.state['phase'] = 'style'  # a job saved by the earlier pipeline is written again from its sources
+        if phase in _LEGACY_PHASES or (phase in ('draft', 'assemble', 'compile', 'repair', 'export') and 'parts' not in self.state):
+            # A job saved by the earlier pipeline is written again from its sources.
+            for key, value in _STATE_DEFAULTS.items():
+                self.state.setdefault(key, copy.deepcopy(value))
+            self.state['phase'] = 'style'
         elif phase == 'style':
             self._prepare()
         elif phase == 'draft':
@@ -928,7 +944,7 @@ class WriteupRunner(ResearchRunner):
 
     def _checks_block(self, body):
         """What the author must settle, printed at the top of the document: comments alone are invisible in the PDF."""
-        points = todo_comments(body)
+        points = todo_comments(body) + self._template_notes()
         unknown = self._unknown_citations(body)
         if unknown:
             note = (f'Cites works that are not in your bibliography: {", ".join(unknown)}. Check that they exist and say '
@@ -960,6 +976,14 @@ class WriteupRunner(ResearchRunner):
                 '% delete this block once they are settled.\n'
                 '\\begin{quote}\\small\\textbf{Points to check before using this draft.}\n'
                 f'\\begin{{enumerate}}\n{items}\n\\end{{enumerate}}\n\\end{{quote}}\n')
+
+    def _template_notes(self):
+        """Attached complete .tex files used as templates (their preamble), and how to write from one instead."""
+        if not self.state.get('explain_templates'):
+            return []
+        names = [Path(s['path']).name for s in self._templates_in(('.tex',)) if '\\begin{document}' in s['content']]
+        return [f'{name} was used as a template (its preamble and layout), not as material. To write from it, attach '
+                'it without \\begin{document}, or as .md or .pdf.' for name in names]
 
     def _unknown_citations(self, body):
         """Keys the text cites that neither the author's .bib nor the document's own bibliography defines."""
@@ -1212,6 +1236,7 @@ class WriteupRunner(ResearchRunner):
         todo = len(re.findall(r'%\s*TODO', s.get('document', '')))
         if todo:
             parts.append(f'{todo} TODO comment{"s" if todo > 1 else ""} mark{"" if todo > 1 else "s"} points to settle.')
+        parts += self._template_notes()
         return ' '.join(parts)
 
     def _progress(self):

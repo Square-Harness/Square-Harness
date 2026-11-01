@@ -417,7 +417,7 @@ def research_detail(root, job_id, active=None):
         'live': {'file': call['stream'], 'role': call['role']} if call else None,
         'artifacts': _artifacts(directory, _RESEARCH_ARTIFACT),
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
-                                        'outputs', 'macros', 'theorems', 'output_name', 'domain', 'style', 'scoped', 'deliver', 'notation',
+                                        'outputs', 'macros', 'theorems', 'output_name', 'style', 'scoped', 'deliver',
                                         'title', 'style_checked')}
            if s['kind'] == 'writeup' else {}),
         # The parts hold the material itself: the page needs only how far the writing is.
@@ -1005,13 +1005,14 @@ def _saved_result(root, mode, job_id):
         return '', ''
 
 
-def conversation_record(root, chat_id, before=None):
+def conversation_record(root, chat_id, before=None, skip=None):
     """An Assistant conversation as one text source for a write-up or a summary.
 
     In the order the user saw it: their messages, the answers, and the full final
     text of each finished job (proofs with their review status, reports, documents).
     Reading and web tools are left out: their output is source material, not a result.
-    `before` stops at that transcript index (the current request and its own card).
+    `before` stops at that transcript index; `skip` leaves out one item (the current request, so that
+    results finished earlier in the same turn still count).
     """
     chat = load_chat(root, chat_id)
     delegated, calls = {}, {}
@@ -1033,7 +1034,9 @@ def conversation_record(root, chat_id, before=None):
         if isinstance(value, dict) and isinstance(value.get('result'), dict):
             delegated.setdefault(value.get('mode') or arguments.get('mode'), []).append(value)
     parts = []
-    for item in chat['transcript'][:before]:
+    for index, item in enumerate(chat['transcript'][:before]):
+        if index == skip:
+            continue
         role, content = item.get('role'), (item.get('content') or '').strip()
         if role == 'user' and content:
             files = item.get('files') or []

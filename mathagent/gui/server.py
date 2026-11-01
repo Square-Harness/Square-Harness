@@ -408,7 +408,7 @@ def chat_message(h, body, id):
 
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
-    content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'))
+    content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
     h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode, required_effort=(body.get('mode_call') or {}).get('effort'))
     return {'ok': True}
 
