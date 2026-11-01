@@ -62,7 +62,7 @@ export function normalizeMath(source: string): string {
 
 // -- citations such as [M1:L3-L6] or [doc-0123abcd:L12-L28] -----------------------
 
-const CITE = /\[((?:doc-[A-Za-z0-9_-]+|S[\w-]+|M\d+)(?::L\d+(?:-L?\d+)?)?)\]/g
+const CITE = /\[((?:doc-[A-Za-z0-9_-]+|S[\w-]+|[MPT]\d+)(?::L\d+(?:-L?\d+)?)?)\]/g
 type MdNode = { type: string; value?: string; children?: MdNode[]; data?: Record<string, unknown> }
 
 function splitCitations(node: MdNode): MdNode[] {

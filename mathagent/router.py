@@ -5,6 +5,7 @@ user before anything runs: it is a suggestion, never a permission, and it
 cannot change network, Python or file-access settings. A message may ask for
 several separate jobs; each becomes its own suggestion with a suggested effort.
 """
+from .jsonutil import loads, repair_latex
 import json
 import re
 
@@ -82,17 +83,6 @@ FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a resul
                      'write a literature report or a review of a manuscript, or write up notes in LaTeX?')
 
 
-# In JSON, "\frac" written with one backslash reads as a form feed and "rac"; small models
-# often forget to double the backslash of TeX commands. Restore the command when a letter
-# follows the control character (and, for a newline, only known commands).
-_CONTROL = {'\f': 'f', '\b': 'b', '\t': 't', '\r': 'r'}
-_AFTER_N = ('abla', 'eq', 'otin', 'ot', 'mid', 'geq', 'leq', 'ewline', 'oindent', 'subseteq')
-
-
-def repair_latex(text):
-    text = re.sub('[\f\b\t\r](?=[A-Za-z])', lambda m: '\\' + _CONTROL[m.group()], text)
-    return re.sub('\n(?=(?:' + '|'.join(_AFTER_N) + r')\b)', r'\\n', text)
-
 
 def clarify(message, files=(), question='', reason=''):
     """A suggestion that asks one question instead of starting anything."""
@@ -120,7 +110,7 @@ def parse(text, message, files=()):
     (the earlier answer shape) is accepted as a list of one.
     """
     try:
-        value = json.loads(text)
+        value = loads(text)
     except ValueError:
         value = None
     if isinstance(value, dict) and 'tasks' not in value and 'mode' in value:

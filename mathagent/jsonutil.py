@@ -1,0 +1,80 @@
+"""Decode model JSON without depending on provider grammar support.
+
+Extraction tolerates prose, Markdown fences and thinking blocks. Consumers
+still validate their own schemas; incomplete JSON is never invented.
+"""
+import json
+import re
+
+
+def loads(text):
+    if not isinstance(text, str):
+        raise TypeError('Expected JSON text')
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.S).strip()
+    decoder = json.JSONDecoder(strict=False)
+    error = None
+    for candidate in _objects(text):
+        for value in (candidate, _repair_latex(candidate)):
+            try:
+                result = decoder.decode(value)
+                if isinstance(result, (dict, list)):
+                    return _repair_values(result)
+            except ValueError as exc:
+                error = exc
+    raise ValueError('No complete JSON value in model response') from error
+
+
+def _objects(text):
+    """Yield complete outer candidates, never salvage an unfinished child."""
+    offset = 0
+    while match := re.search(r'[\{\[]', text[offset:]):
+        start = offset + match.start()
+        stack, quoted, escaped = [], False, False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+                continue
+            if char == '"':
+                quoted = True
+            elif char in '{[':
+                stack.append(char)
+            elif char in '}]':
+                if not stack or stack.pop() != ('{' if char == '}' else '['):
+                    offset = index + 1
+                    break
+                if not stack:
+                    yield text[start:index + 1]
+                    offset = index + 1
+                    break
+        else:
+            # A nested object may be complete while the containing JSON is not.
+            # Its fields must never be promoted to a standalone verdict.
+            return
+
+
+def _repair_latex(text):
+    # Leave JSON escapes intact, including escaped quotes and backslashes.
+    return re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', text)
+
+
+def repair_latex(text):
+    controls = {'\f': 'f', '\b': 'b', '\t': 't', '\r': 'r'}
+    suffixes = ('abla', 'eq', 'otin', 'ot', 'mid', 'geq', 'leq', 'ewline', 'oindent', 'subseteq', 'otag', 'onumber')
+    text = re.sub('[\f\b\t\r](?=[A-Za-z])', lambda m: '\\' + controls[m.group()], text)
+    return re.sub('\n(?=(?:' + '|'.join(suffixes) + r')(?![A-Za-z]))', r'\\n', text)
+
+
+def _repair_values(value):
+    if isinstance(value, str):
+        return repair_latex(value)
+    if isinstance(value, list):
+        return [_repair_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _repair_values(item) for key, item in value.items()}
+    return value

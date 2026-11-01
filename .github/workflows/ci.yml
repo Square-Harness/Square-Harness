@@ -46,12 +46,14 @@ jobs:
           "$RUNNER_TEMP/wheel-smoke/bin/mathagent" --help
           "$RUNNER_TEMP/wheel-smoke/bin/python" -I - <<'PY'
           from importlib.resources import files
-          for skill in ('literature', 'referee'):
+          for skill in ('check', 'explain', 'literature', 'referee', 'review', 'review-quick', 'writeup',
+                        'python-lab', 'numerical-sanity-check'):
               resource = files('mathagent').joinpath('skills', skill, 'SKILL.md')
               assert resource.read_text(encoding='utf-8').strip(), skill
-          print('Both bundled skills are present in the installed wheel.')
+          print('All bundled skills are present in the installed wheel.')
+          assert files('mathagent').joinpath('numerics', 'docker', 'requirements.lock').is_file()
           static = files('mathagent').joinpath('gui', 'static')
-          for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt'):
+          for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt', 'LICENSE.txt'):
               assert static.joinpath(name).is_file(), name
           assert any(item.name.endswith('.js') for item in static.joinpath('assets').iterdir())
           print('The visual interface is present in the installed wheel.')
@@ -77,7 +79,7 @@ jobs:
         run: git status --porcelain -- mathagent/gui/static && git diff --exit-code -- mathagent/gui/static && test -z "$(git status --porcelain -- mathagent/gui/static)"
 
   sandbox:
-    name: Python sandbox (Docker) security and skill tests
+    name: Python sandbox (Docker)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,8 +92,7 @@ jobs:
         run: python -m mathagent.numerics build
       - name: Check Docker, the image and a tiny run
         run: python -m mathagent.numerics doctor
-      - name: Executor, isolation, python-lab and numerical-sanity-check tests in real containers
-        run: python -m unittest -v test_python_executor test_python_security test_python_lab test_numerical_sanity_check
-        working-directory: tests
+      - name: Sandbox tests in real containers
+        run: python -m unittest -v tests.test_python_sandbox
       - name: No sandbox container is left behind
         run: test -z "$(docker ps --all --quiet --filter label=org.squareharness.sandbox.run)"

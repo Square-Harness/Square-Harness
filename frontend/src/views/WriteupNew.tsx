@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type Template } from '../api'
+import { WorkspaceSwitch } from '../components/Shell'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { useDropTarget } from '../drop'
@@ -86,6 +87,7 @@ export function WriteupNew() {
   return (
     <div className="sheet paper">
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
+        <div className="entry"><span className="in-margin" /><WorkspaceSwitch /></div>
         <div className="entry">
           <span className="in-margin margin-glyph" aria-hidden="true">§</span>
           <div>

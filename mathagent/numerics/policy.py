@@ -1,10 +1,8 @@
-"""Execution policies for the Python sandbox, enforced by trusted harness code.
+"""Per-skill limits of the Python sandbox, enforced by harness code.
 
-The controller that binds the sandbox tool chooses the policy: an explicit user
-command (``/python-lab``) binds ``python-lab``; every automatic context binds
-``numerical-sanity-check``. Tool arguments can only *lower* limits, or, for
-python-lab only, request more up to a configured ceiling after the user approves.
-Nothing a model writes selects a policy, an image, a mount or a container flag.
+The controller that binds the tool chooses the policy: the user's own command binds
+python-lab, automatic contexts bind numerical-sanity-check. Tool arguments can only
+lower limits, except that python-lab may ask for more, up to a ceiling, with approval.
 """
 from dataclasses import asdict, dataclass, fields, replace
 import json

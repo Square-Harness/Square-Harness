@@ -11,7 +11,7 @@ export function parse(hash: string): Route {
   const [first, second, third] = path.split('/')
   const requestedMode = (MODE_ORDER as string[]).includes(first) ? (first as Mode) : 'free'
   const id = second && UUID.test(second) ? second : null
-  const mode = id ? requestedMode : 'free'
+  const mode = id || ['prove', 'literature', 'referee', 'writeup'].includes(requestedMode) ? requestedMode : 'free'
   const origin = new URLSearchParams(search).get('from')
   const from = id && origin && UUID.test(origin) ? origin : null
   return { mode, id, tab: id && third ? third : null, from }

@@ -41,7 +41,7 @@ square-harness --online --workspace ~/research/my-paper --mode literature \
   --output literature-review.md
 ```
 
-For a manuscript review, see [Reviews](#reviews-quick-check-journal-report-explanation) below.
+For a manuscript review, see [Reviews](#reviews-quick-check-manuscript-review-detailed-review-explanation) below.
 
 Repeat `--research-file` for additional sources. These files are pinned on job
 creation. `--output` is relative to the workspace and does not silently overwrite
@@ -49,8 +49,8 @@ an existing file. Without it, the report remains in the saved job directory.
 An offline report can use local and cached sources only. External research
 requires `--online`; model output cannot grant network access.
 
-The bundled `literature` and `referee` skills guide bounded investigation,
-report drafting and model review. They require source identifiers and passage
+The bundled check, explain, literature, referee, review, review-quick and
+writeup skills guide bounded investigation, report drafting and model review. They require source identifiers and passage
 locations. Search hits and abstracts are leads, not evidence that a theorem
 supports the requested assertion. PDF extraction can corrupt formulas; inspect
 important passages in the original source.
@@ -62,13 +62,13 @@ discovery uses Brave Search. Optional keys are `SEMANTIC_SCHOLAR_API_KEY` and
 manuscripts. No key is required to begin with arXiv; service limits still apply.
 Cached sources live under `.mathagent/literature/`.
 
-## Reviews: quick check, journal report, explanation
+## Reviews: quick check, manuscript review, detailed review, explanation
 
 Review comes in four kinds. In the interface, type `@` in an Assistant message and
 confirm `@quick_review`, `@referee`, `@detailed_review` or `@explain` (attach the file,
 and name the result for a quick review or an explanation); the Assistant can also choose
 them itself. In the terminal they are `/quick_review`, `/referee`, `/detailed_review` and
-`/explain`:
+`/explain`.
 
 An article overview, its main results or its authors' claimed contribution uses
 Explore, with a source index and selected exact excerpts. Explain handles one
@@ -177,16 +177,23 @@ template files can be remembered under a name and reused in any folder.
 Reports live under `.mathagent/research/<id>/`, with state, `report.md` and
 artifacts; write-ups are saved there too. Use `/researches`, `/research-report <id>`
 and `/research-resume <id>` to inspect or continue. Inspection needs no running model. Ctrl+C saves progress;
-resume uses the original remaining allowance.
+resume uses the original remaining allowance. A normal resume never increases a
+saved cap. Near the time limit, the interface explicitly offers **Resume (+N min)**,
+which adds the displayed time allowance. The terminal equivalent is
+`--resume-add-seconds <seconds>` when resuming a saved research job. Extra time
+does not increase token or request caps.
 
 | Option | Default |
 | --- | ---: |
-| `--research-rounds` | 6 |
+| `--research-rounds` | 3 for quick review and Explain, 6 otherwise |
 | `--research-tokens` | no cumulative cap; optional generated-token limit |
 | `--research-input-tokens` | no cumulative cap; optional cumulative input-token limit |
 | `--research-seconds` | 900 seconds |
-| `--research-requests` | 12 external retrieval requests |
+| `--research-requests` | Derived from the reading-list search plan, 12 otherwise |
 | `--research-chars` | 30,000 returned evidence characters |
+
+Explicit request caps accept 0 to 1,000 retrievals. For review variants, round
+values 1, 3, 4, 6 and 10 select Low, Medium, High, Extra high and Poincaré effort.
 
 Planning, research, drafting and review share working time and any explicit caps.
 Effort sets depth and a finite work plan, not a fixed cumulative token allowance.

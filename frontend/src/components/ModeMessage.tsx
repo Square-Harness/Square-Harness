@@ -1,12 +1,14 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { coverOf, modeOptions, modeQuery, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
+import { MODE_CALLS, coverOf, modeOptions, modeQuery, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'
 import { Glyph } from './Glyph'
+import { EFFORTS, type EffortLevel } from './Effort'
 import './ModeMessage.css'
 
-export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }: {
+export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, hasEffort, onSend, disabled }: {
   value: string; onChange: (value: string) => void
   call: ModeCall | null; onCall: (call: ModeCall | null) => void
+  effort: EffortLevel | null; onEffort: (effort: EffortLevel | null) => void; hasEffort: boolean
   onSend: () => void; disabled: boolean
 }) {
   const input = useRef<HTMLTextAreaElement>(null)
@@ -16,6 +18,15 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
   const queryRef = useRef<ModeQuery | null>(null)
   const dismissed = useRef<{ text: string; start: number } | null>(null)
   const [active, setActive] = useState(0)
+  // Hovering or focusing the selected mode opens its menu; a click keeps it open (touch screens).
+  const [pinned, setPinned] = useState(false)
+  const chip = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!pinned) return
+    const close = (event: MouseEvent) => { if (!chip.current?.contains(event.target as Node)) setPinned(false) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [pinned])
   const options = query ? modeOptions(query.query) : []
   const open = !disabled && options.length > 0
   useLayoutEffect(() => {
@@ -72,11 +83,36 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
   }
   return (
     <div className="mode-message">
-      {validCall(value, call) && <div className="selected-mode" role="status">
-        <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
-        <strong>@{call.mode}</strong><span>Selected for this message</span>
-        <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={() => { onCall(null); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
-      </div>}
+      {validCall(value, call) && (() => {
+        const info = MODE_CALLS.find((item) => item.mode === call.mode)
+        const level = EFFORTS.find((item) => item.id === effort)
+        const choose = (next: EffortLevel | null) => { onEffort(next); input.current?.focus() }
+        return <div className={'selected-mode-wrap' + (pinned ? ' selected-mode-open' : '')} ref={chip}>
+          <div className="selected-mode-menu" role="group" aria-label={`@${call.mode} options`}>
+            <p className="selected-mode-title"><strong>@{call.mode}</strong>{info && info.label !== call.mode && <span> · {info.label}</span>}</p>
+            {info && <p className="selected-mode-about">{info.summary}</p>}
+            {hasEffort ? <>
+              <p className="selected-mode-label">Effort</p>
+              <div role="radiogroup" aria-label="Effort for this message" className="effort-menu">
+                {[{ id: null, label: 'Auto', hint: 'Not set: the harness picks the effort for this mode' }, ...EFFORTS].map((item) => (
+                  <button key={item.id ?? 'auto'} type="button" role="radio" aria-checked={item.id === effort}
+                    className={'effort-menu-item' + (item.id === effort ? ' effort-menu-current' : '')}
+                    disabled={disabled} onClick={() => choose(item.id)}>
+                    <span className="effort-menu-name">{item.label}</span><span className="effort-menu-hint">{item.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </> : <p className="selected-mode-label">No effort setting for this mode.</p>}
+          </div>
+          <div className="selected-mode" role="status" tabIndex={0} onClick={() => setPinned((on) => !on)}
+            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setPinned((on) => !on) } else if (event.key === 'Escape') setPinned(false) }}
+            aria-haspopup="true" aria-expanded={pinned}>
+            <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
+            <strong>@{call.mode}</strong><span>{hasEffort ? (level ? `${level.label} effort` : 'Auto effort') : 'Selected for this message'}</span>
+            <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={(event) => { event.stopPropagation(); onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
+          </div>
+        </div>
+      })()}
       {open && <div className="mode-picker">
         <div className="mode-picker-title">Modes <span>↑ ↓ to browse · Enter or Tab to select · Esc to dismiss</span></div>
         <div id={listId} role="listbox" aria-label="Choose a mode">
@@ -97,7 +133,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
         onBlur={() => { queryRef.current = null; setQuery(null) }} onKeyDown={keys}
         rows={Math.min(8, Math.max(2, value.split('\n').length))}
         placeholder="Describe what you want to do; type @ to select a mode…" aria-label="Message"
-        aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
+        role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${active}` : undefined} />
     </div>
   )

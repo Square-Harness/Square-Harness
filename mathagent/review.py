@@ -1,4 +1,4 @@
-"""Three review workflows on one page: a quick proof check, a journal referee report and an explanation.
+"""Four review workflows: a quick proof check, paper review, detailed review and explanation.
 
 The controller does the systematic work. It maps the manuscript (manuscript.py), picks
 the proofs to check, gives each model call one proof with exactly what it needs, runs
@@ -25,11 +25,13 @@ from . import review_policy as P
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _read
-from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion
+from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion, _job_directory, _read_state
 from .call_policy import allocate_call, CallContextError
 from .proof import count_input
 from .router import repair_latex
 from .worker_errors import WorkerInputError
+from .jsonutil import loads as json_loads
+from .reporting import usage_footer
 
 # 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
 VARIANTS = ('quick', 'review', 'journal', 'explain')
@@ -96,7 +98,7 @@ def loads(text):
     control characters are accepted, and TeX commands read as \\t, \\f, \\b, \\r are restored."""
     for attempt in (text, _ESCAPE.sub(lambda m: m.group(0) if m.group(1) or m.group(2) else '\\\\', text)):
         try:
-            value = json.loads(attempt, strict=False)
+            value = json_loads(attempt)
         except ValueError:
             continue
         return _repair(value) if isinstance(value, dict) else None
@@ -162,9 +164,13 @@ def _span(ranges):
     return ', '.join(f'L{a}' if a == b else f'L{a}-L{b}' for a, b in ranges)
 
 
+class PhaseBudget(ResearchBudget):
+    """An optional phase stopped in time to preserve the report-writing share."""
+
+
 class ReviewBase(ResearchRunner):
     KINDS = ('referee',)
-    TERMINAL = ('reviewed', 'partial', 'budget_exhausted', 'budget_violation')
+    TERMINAL = ('reviewed', 'budget_violation')
     POLICY = P.POLICY
     VARIANT = None
 
@@ -173,6 +179,34 @@ class ReviewBase(ResearchRunner):
         self.concurrency = max(1, min(4, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
+        self._phase_limit = None
+
+    def resume(self, job_id, *, additional_seconds=0):
+        self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
+        self.state = _read_state(self.directory, job_id)
+        # Reject an invalid resume before changing its saved phase or report.
+        if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
+            raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
+        if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
+            raise ValueError('Resume with the original --backend')
+        if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
+            raise ValueError('Additional working time must be between 0 and 86400 seconds')
+        if self.state['status'] in ('partial', 'budget_exhausted'):
+            if self.VARIANT in MANUSCRIPT_VARIANTS:
+                phase = 'read' if self._unread_parts() else 'scope'
+                self.state['write'] = None
+            elif self.VARIANT == 'quick':
+                phase = 'verify'
+            else:
+                phase = 'explain'
+            self.state.update(status='paused', phase=phase, active_checkpoint_wall=None)
+            self._save()
+        return super().resume(job_id, additional_seconds=additional_seconds)
+
+    def _check_time(self):
+        super()._check_time()
+        if self._phase_limit is not None and self._elapsed() >= self._phase_limit:
+            raise PhaseBudget('The phase working-time share is used; remaining time is reserved for the report.')
 
     @property
     def emit(self):
@@ -193,7 +227,8 @@ class ReviewBase(ResearchRunner):
         self._target = str(target or '').strip()[:200]
         self._reference = _reference_snapshot(reference_context)[0] if reference_context is not None else None
         self._conversation_sources = False
-        if not source_files and self.VARIANT not in MANUSCRIPT_VARIANTS:
+        has_paste = bool(manuscript.checkable(manuscript.build(goal, 'pasted-text.md')))
+        if not source_files and not has_paste and self.VARIANT not in MANUSCRIPT_VARIANTS:
             # "Check Lemma 2 in notes.md": a named workspace file is the source, not the pasted text.
             named = re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', goal)
             source_files = [n for n in dict.fromkeys(named) if (self.agent.workspace.root / n).is_file()]
@@ -215,20 +250,22 @@ class ReviewBase(ResearchRunner):
         # Keep each native message separate so repeated theorem numbers in a chat do not
         # get merged by the manuscript parser. The selected message stays byte-for-byte.
         mapping = manuscript.build(content, 'pasted-text.md')
-        has_proof = bool(manuscript.checkable(mapping)) or bool(re.search(
-            r'(?im)^\s*[*_#]*\s*(?:proof|preuve|démonstration)\b', content))
+        has_proof = bool(manuscript.checkable(mapping)) or bool(manuscript.INLINE_PROOF.search(content))
         has_source = has_proof or (self.VARIANT == 'explain' and bool(mapping['units']))
         if self._reference is not None and not has_source:
             sources = []
-            for index, message in enumerate(self._reference['messages'], 1):
+            history = self._reference.get('history')
+            messages = list(history) if isinstance(history, list) else []
+            messages += [m for m in self._reference['messages'] if m not in messages]
+            for index, message in enumerate(messages, 1):
                 text = message.get('content')
                 if not isinstance(text, str) or not text.strip():
                     continue
                 parsed = manuscript.build(text, 'conversation.md')
                 candidates = manuscript.checkable(parsed) if self.VARIANT == 'quick' else parsed['units']
-                if candidates:
+                if candidates or manuscript.INLINE_PROOF.search(text):
                     sources.append({'id': f'M{index}', 'path': f'conversation-message-{index}.md',
-                                    'content': text, 'sha256': hashlib.sha256(text.encode()).hexdigest()})
+                                    'role': message['role'], 'content': text, 'sha256': hashlib.sha256(text.encode()).hexdigest()})
             if sources:
                 self._conversation_sources = True
                 return sources
@@ -264,7 +301,7 @@ class ReviewBase(ResearchRunner):
             total, unit = len(plan), 'reading parts'
         return {'phase': s['phase'], 'completed': completed, 'total': total, 'unit': unit,
                 'scope': s['goal'], 'partial': s['status'] in ('partial', 'error', 'budget_exhausted'),
-                'resumable': s['status'] in ('running', 'paused')}
+                'resumable': s['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -288,7 +325,8 @@ class ReviewBase(ResearchRunner):
         if mark:
             with self._mutex:
                 self.state['manuscript_ranges'].setdefault(source_id, []).append([a, b])
-        return '\n'.join(f'L{n}: {lines[n - 1].rstrip()}' for n in range(a, b + 1))
+        tex = self._source(source_id)['path'].lower().endswith('.tex')
+        return '\n'.join(f'L{n}: {(manuscript._strip_comment(lines[n - 1]) if tex else lines[n - 1]).rstrip()}' for n in range(a, b + 1))
 
     def _cap(self, wanted):
         """The output ceiling a call really gets (the same rule as _ask)."""
@@ -325,8 +363,11 @@ class ReviewBase(ResearchRunner):
         s = self.state
         return remaining_limit(s['settings'], 'max_input_tokens', s['input_tokens_charged']) - reserve
 
-    def _affordable(self, cap, input_tokens, reserve_out=0, reserve_in=0, share=.8):
-        return (self._time_left(share) and self._tokens_left(reserve_out) >= min(cap, self._cap(cap))
+    def _affordable(self, cap, input_tokens, reserve_out=0, reserve_in=0, share=.8, jobs=1):
+        durations = [call['seconds'] for call in self.state['calls'] if call.get('seconds', 0) > 0]
+        projected = (sum(durations) / len(durations) * math.ceil(jobs / self.concurrency)) if durations else 0
+        return (self._elapsed() + projected < self.state['settings']['max_seconds'] * share
+                and self._tokens_left(reserve_out) >= jobs * self._cap(cap)
                 and self._input_left(reserve_in) >= input_tokens)
 
     @contextmanager
@@ -334,7 +375,8 @@ class ReviewBase(ResearchRunner):
         client = self.agent.client
         old = getattr(client, 'timeout', None)
         if old is not None:
-            client.timeout = max(.1, min(old, self.state['settings']['max_seconds'] - self._elapsed()))
+            deadline = min(self.state['settings']['max_seconds'], self._phase_limit or self.state['settings']['max_seconds'])
+            client.timeout = max(.1, min(old, deadline - self._elapsed()))
         try:
             yield
         finally:
@@ -351,7 +393,7 @@ class ReviewBase(ResearchRunner):
             try:
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
             except AgentError as exc:
-                if isinstance(exc, ResearchBudget):
+                if isinstance(exc, (ResearchBudget, TokenBudgetError)):
                     raise
                 # Some servers fail on thinking plus structured output for a given input (vLLM answered 500).
                 self._warn(f'The model server failed on a {role} call with thinking ({str(exc)[:120]}); it was asked again without thinking.')
@@ -418,6 +460,7 @@ class ReviewBase(ResearchRunner):
             self.state['input_tokens_charged'] += estimated
             self._save()
         text, done, stats, stream = '', False, {}, None
+        started = self._elapsed()
         try:
             fd = os.open(self.directory / 'artifacts' / stream_name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
             with os.fdopen(fd, 'w', encoding='utf-8') as output:
@@ -453,6 +496,7 @@ class ReviewBase(ResearchRunner):
                 self._save()
             raise
         finally:
+            call['seconds'] = max(0, self._elapsed() - started)
             if stream is not None and hasattr(stream, 'close'):
                 stream.close()
         value = loads(text) if schema and complete else None
@@ -469,6 +513,8 @@ class ReviewBase(ResearchRunner):
         with self._timeout():
             if self.concurrency <= 1 or len(jobs) == 1:
                 for _, fn in jobs:
+                    if self._phase_limit is not None and self._elapsed() >= self._phase_limit:
+                        raise PhaseBudget('The phase working-time share is used; pending parts were retained for resume.')
                     fn()
                 self._report()
                 return
@@ -498,6 +544,31 @@ class ReviewBase(ResearchRunner):
             self._select_pinned_source()
         source = self.state['sources'][0]
         mapping = manuscript.build(source['content'], source['path'])
+        if source['path'].lower().endswith('.tex'):
+            inputs = re.findall(r'\\(?:input|include|subfile)\s*\{([^}]+)\}', source['content'])
+            if inputs:
+                mapping['warnings'].append('External TeX inputs were not expanded: ' + ', '.join(dict.fromkeys(inputs)) + '. Their proofs are outside this review.')
+                self.state['source_incomplete'] = True
+            bibliography_sources = [s for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() in ('.bib', '.bbl')]
+            names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'])
+            for name in (n.strip() for group in names for n in group.split(',')):
+                name = str(Path(source['path']).parent / (name if Path(name).suffix else name + '.bib'))
+                try:
+                    path = self.agent.workspace.path(name)
+                    if path.is_file() and path.stat().st_size <= 2_000_000:
+                        bibliography_sources.append({'path': name, 'content': path.read_text(encoding='utf-8')})
+                except (ValueError, OSError, UnicodeError):
+                    self._warn('The bibliography source could not be read: ' + name)
+            for bib_source in bibliography_sources:
+                if bib_source['path'].lower().endswith('.bbl'):
+                    mapping['bibliography'].update(manuscript.build(bib_source['content'], 'references.tex')['bibliography'])
+                else:
+                    for entry in re.split(r'(?m)(?=@[A-Za-z]+\s*\{)', bib_source['content']):
+                        match = re.match(r'@\w+\s*\{\s*([^,\s]+)\s*,', entry)
+                        if match:
+                            mapping['bibliography'][match.group(1)] = re.sub(r'\s+', ' ', entry).strip()[:1500]
+            if re.search(r'\\(?:cite\w*|bibliography|addbibresource)\b', source['content']) and not mapping['bibliography']:
+                mapping['warnings'].append('No bibliography entries were loaded; external BibTeX/biblatex references cannot be checked.')
         mapping.pop('labels', None)
         self.state['map'] = mapping
         for warning in mapping['warnings'][:6]:
@@ -507,16 +578,20 @@ class ReviewBase(ResearchRunner):
 
     def _select_pinned_source(self):
         sources = self.state['sources']
+        manuscripts = [s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.pdf', '.md', '.txt')]
+        selectable = manuscripts if self.VARIANT in MANUSCRIPT_VARIANTS and manuscripts else sources
         request = '\n'.join((self.state.get('goal', ''), self.state.get('target', ''),
                               (self.state.get('reference_context') or {}).get('query', '')))
         def named(path):
             return bool(re.search(r'(?<![\w./-])' + re.escape(path) + r'(?![\w/-]|\.[\w-])', request))
-        matches = [source for source in sources if named(source['path'])]
+        matches = [source for source in selectable if named(source['path'])]
         if not matches:
-            matches = [source for source in sources if named(Path(source['path']).name)]
+            matches = [source for source in selectable if named(Path(source['path']).name)]
         if not matches and self.VARIANT in ('quick', 'explain'):
             matches = [source for source in sources if manuscript.resolve(
                 manuscript.build(source['content'], source['path']), self.state.get('target') or request)]
+        if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
+            matches = [next((s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.pdf', '.md', '.txt')), sources[0])]
         if len(matches) != 1:
             raise WorkerInputError('Which source should I use: ' + ', '.join(source['path'] for source in sources) + '?',
                 code='ambiguous_source', scope='input', details={'sources': [source['path'] for source in sources]})
@@ -530,6 +605,12 @@ class ReviewBase(ResearchRunner):
         request = self.state.get('target') or self.state['goal']
         matches = [source for source in sources
                    if manuscript.resolve(manuscript.build(source['content'], source['path']), request)]
+        if re.search(r'(?i)\b(?:previous|last|above|corrected|you gave|your proof|précédent|corrigé)\b', request):
+            assistant_sources = [source for source in (matches or sources) if source.get('role') == 'assistant']
+            if assistant_sources:
+                chosen = assistant_sources[-1]
+                self.state['sources'] = [chosen] + [s for s in sources if s is not chosen]
+                return
         if len(matches) == 1:
             chosen = matches[0]
         else:
@@ -564,7 +645,7 @@ class ReviewBase(ResearchRunner):
             unit = self._ask_unit(mapping)
         if unit is not None:
             chosen = {k: unit[k] for k in ('id', 'name', 'statement', 'proofs', 'refs', 'statement_refs', 'equations', 'title')}
-        elif self._is_pasted():
+        elif self._is_pasted() or self.state.get('conversation_sources'):
             chosen = self._split_pasted()
         else:
             names = ', '.join(u['name'] for u in mapping['units'][:12])
@@ -591,17 +672,21 @@ class ReviewBase(ResearchRunner):
         return manuscript.unit(mapping, uid)
 
     def _split_pasted(self):
-        lines = self._lines('P1')
-        proof_line = next((n for n, line in enumerate(lines, 1) if re.match(r'^\s*[*_#]*\s*(?:proof|preuve|démonstration)\b', line, re.I)), None)
+        sid = self.state['sources'][0]['id']
+        lines = self._lines(sid)
+        proof_line = next((n for n, line in enumerate(lines, 1) if manuscript.INLINE_PROOF.search(line)), None)
         nonblank = [n for n, line in enumerate(lines, 1) if line.strip()]
         if not nonblank:
             raise WorkerInputError('Paste the statement and its proof.', code='invalid_worker_input')
         if proof_line:
             before = [n for n in nonblank if n < proof_line]
+            match = manuscript.INLINE_PROOF.search(lines[proof_line - 1])
+            if lines[proof_line - 1][:match.start()].strip():
+                before.append(proof_line)
             statement = [before[0], before[-1]] if before else None
             proofs = [[proof_line, nonblank[-1]]]
         else:
-            result = self._ask('extract', P.EXTRACT_POLICY + '\n\nTEXT:\n' + self._numbered('P1', 1, len(lines), mark=False),
+            result = self._ask('extract', P.EXTRACT_POLICY + '\n\nTEXT:\n' + self._numbered(sid, 1, len(lines), mark=False),
                                cap=200, schema=P.EXTRACT_SCHEMA, key='extract')
             value = result['value'] or {}
             s0, s1 = _int(value.get('statement_start')), _int(value.get('statement_end'))
@@ -611,7 +696,7 @@ class ReviewBase(ResearchRunner):
             if statement is None and not proofs:
                 statement = [nonblank[0], nonblank[-1]]
                 self._warn('The statement and the proof could not be told apart; the whole text is treated as the statement.')
-        return {'id': 'P', 'name': 'the pasted result', 'statement': statement, 'proofs': proofs, 'refs': [],
+        return {'id': 'P', 'name': 'the supplied result', 'statement': statement, 'proofs': proofs, 'refs': [],
                 'statement_refs': [], 'equations': [], 'title': ''}
 
     def _proof_lines(self, unit):
@@ -642,7 +727,7 @@ class ReviewBase(ResearchRunner):
         core = ''
         if unit.get('statement'):
             a, b = unit['statement']
-            core += f'\nSTATEMENT: {unit["name"]}' + (f' ({unit["title"]})' if unit.get('title') else '') + '\n' + self._numbered(sid, a, b, mark=False) + '\n'
+            core += f'\nSTATEMENT: {unit["name"]}' + (f' ({unit["title"]})' if unit.get('title') and unit['title'] not in unit['name'] else '') + '\n' + self._numbered(sid, a, b, mark=False) + '\n'
             ranges.append([a, b])
         else:
             core += '\nSTATEMENT: not identified in the source; judge the argument on its own terms.\n'
@@ -754,7 +839,7 @@ class ReviewBase(ResearchRunner):
                                              context=True)
             packet_sizes.append(len(packet.encode()))
             previous = self.state['checks'].get(key)
-            if previous is not None and (segment is None or previous.get('segment') == segment):
+            if previous is not None and previous.get('usable') and (segment is None or previous.get('segment') == segment):
                 continue
             jobs.append((key, self._check_job(key, unit, item['lens'], packet, ranges, segment, journal,
                                               item['pass_index'], item['part'], item['parts'])))
@@ -912,7 +997,9 @@ class ReviewBase(ResearchRunner):
                      'located': best['located'], 'unlocated': bool(cluster.get('unlocated'))}
             if any('severity' in i for i in cluster['items']):
                 entry['severity'] = 'major' if any(i.get('severity') == 'major' for i in cluster['items']) or kind == 'invalid_inference' else 'minor'
-            entry['key'] = f'{unit_id}:L{entry["start_line"]}-L{entry["end_line"]}:{kind}' + (':u' if entry['unlocated'] else '')
+            entry['key'] = f'{unit_id}:L{entry["start_line"]}-L{entry["end_line"]}:{kind}'
+            if entry['unlocated'] or any(e['key'] == entry['key'] for e in out):
+                entry['key'] += ':' + hashlib.sha256((entry['quote'] + entry['evidence']).encode()).hexdigest()[:12]
             out.append(entry)
         return out
 
@@ -923,7 +1010,16 @@ class ReviewBase(ResearchRunner):
         def run():
             self.emit('notice', f'Re-checking an alleged issue in {unit["name"]} (lines {cluster["start_line"]}-{cluster["end_line"]})')
             room = self._room(cap, P.confirm_prompt(cluster, ''))
-            packets = self._segments(unit, room, notation)
+            try:
+                packets = self._segments(unit, room, notation, prompt=lambda packet: P.confirm_prompt(cluster, packet),
+                                         cap=cap, output_schema=P.CONFIRM_SCHEMA)
+            except WorkerInputError as exc:
+                if exc.code != 'context_overflow':
+                    raise
+                self._warn(f'The alleged issue in {unit["name"]} could not be re-checked: {exc}')
+                self.state['confirms'][key] = {'assessment': 'unavailable', 'kind': cluster['kind'],
+                                               'argument': str(exc), 'suggestion': ''}
+                return
             # The part of a long proof that holds the alleged issue.
             _, text, ranges = next((p for p in packets if p[0] is None or any(a <= cluster['start_line'] <= b for a, b in p[0])), packets[0])
             self._mark(unit['source'], ranges)
@@ -957,12 +1053,16 @@ class ReviewBase(ResearchRunner):
             confirm = self.state['confirms'].get(cluster['key'])
             if confirm and confirm['assessment'] == 'valid':
                 cluster['kind'] = confirm['kind']
+                if 'severity' in cluster:
+                    cluster['severity'] = 'major' if cluster['kind'] == 'invalid_inference' else 'minor'
         statuses = {c['status'] for c in clusters if not (c['unlocated'] and c['status'] != 'confirmed')}
         if 'confirmed' in statuses:
             verdict = 'issues_found'
         elif 'unconfirmed' in statuses:
             verdict = 'issues_alleged'
         elif (statuses & {'undecided', 'uncertainty'} or any(c['verdict'] == 'uncertain' for c in usable)
+              or any(c['unlocated'] and c['status'] != 'rejected' for c in clusters)
+              or any(c['verdict'] == 'issues_found' for c in usable) and not clusters
               or not self._checks_complete(unit_id)):
             verdict = 'uncertain'
         else:
@@ -1001,12 +1101,11 @@ class ReviewBase(ResearchRunner):
 
     def _usage(self):
         s = self.state
-        return (f'Generated tokens: {s["tokens_charged"]}/{s["settings"]["max_tokens"]}; input tokens: '
-                f'{s["input_tokens_charged"]}/{s["settings"]["max_input_tokens"]}; time: {s["seconds_used"]:.0f}/'
-                f'{s["settings"]["max_seconds"]:.0f} s; model calls: {len(s["calls"])}; concurrency: {s.get("concurrency", 1)}.')
+        return usage_footer(s) + f' Model calls: {len(s["calls"])}; concurrency: {s.get("concurrency", 1)}.'
 
     def _write_report(self, body, appendix):
         s = self.state
+        previous_draft = s.get('draft')
         head = [f'# {TITLES[self.VARIANT]}', '',
                 '**Model draft — a fallible review by a language model, not a certificate.**', '',
                 f'Status: `{s["status"]}`. Phase: `{s["phase"]}`. Effort: {s.get("level")}. Job ID: `{s["id"]}`.', '']
@@ -1014,7 +1113,7 @@ class ReviewBase(ResearchRunner):
             head += [s['stop_reason'], '']
         if getattr(self, '_headline', ''):
             head += [self._headline, '']
-        s['draft'] = '\n'.join(body)
+        s['draft'] = '\n'.join(([self._headline, ''] if getattr(self, '_headline', '') else []) + body + ['', *appendix])
         notes = list(dict.fromkeys(s.get('warnings', []) + s.get('citation_issues', [])))
         tail = ['', '---', '']
         if notes:
@@ -1022,6 +1121,8 @@ class ReviewBase(ResearchRunner):
         tail += appendix + ['', '## Usage', '', self._usage(), '',
                             'state.json keeps the pinned source, the map, every check and re-check; artifacts/ keeps each request and streamed answer.']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(head + body + tail)))
+        if s['draft'] != previous_draft:
+            self._save()  # GUI detail reads state.json, including after the final report is assembled.
 
     def _report(self):
         try:
@@ -1031,8 +1132,8 @@ class ReviewBase(ResearchRunner):
         self._write_report(body, appendix)
 
     def _finish(self):
-        body, _ = self._render()
-        self.state['draft'] = '\n'.join(body)
+        body, appendix = self._render()
+        self.state['draft'] = '\n'.join(([self._headline, ''] if getattr(self, '_headline', '') else []) + body + ['', *appendix])
         self.state['citation_issues'] = [i for i in self._citation_issues(self.state['draft'])
                                          if not i.startswith('Report does not cite')]
         complete = self._complete()
@@ -1053,6 +1154,18 @@ class QuickReviewRunner(ReviewBase):
         return list(P.LENS_ORDER[:self.effort['passes']])
 
     def _step(self, phase):
+        old = self._phase_limit
+        shares = {'verify': .75, 'confirm': .92}
+        self._phase_limit = self.state['settings']['max_seconds'] * shares[phase] if phase in shares else None
+        try:
+            self._step_work(phase)
+        except PhaseBudget as exc:
+            self._warn(f'{phase.capitalize()} stopped with saved partial findings: {exc}')
+            self.state['phase'] = 'confirm' if phase == 'verify' else 'done'
+        finally:
+            self._phase_limit = old
+
+    def _step_work(self, phase):
         if phase == 'plan':
             self._map()
             self.state['phase'] = 'extract'
@@ -1064,7 +1177,7 @@ class QuickReviewRunner(ReviewBase):
             jobs, estimate = self._check_jobs(unit, self._lenses())
             affordable = []
             for key, fn in jobs:
-                if not affordable or self._affordable(self._check_cap() * (len(affordable) + 1), estimate * (len(affordable) + 1), share=.75):
+                if not affordable or self._affordable(self._check_cap(), estimate * (len(affordable) + 1), share=.75, jobs=len(affordable) + 1):
                     affordable.append((key, fn))
             if len(affordable) < len(jobs):
                 self._warn(f'Only {len(affordable)} of {len(jobs)} pending proof-part checks fit the budget; coverage is incomplete.')
@@ -1078,7 +1191,7 @@ class QuickReviewRunner(ReviewBase):
                 for cluster in sorted(clusters, key=lambda c: (-RANK[c['kind']], c['unlocated'], -c['passes']))[:6]:
                     if cluster['key'] in self.state['confirms']:
                         continue
-                    if not self._affordable(1500 * (len(jobs) + 1), 3000 * (len(jobs) + 1), share=.92):
+                    if not self._affordable(4096 if self._thinks(4096) else 1500, 3000 * (len(jobs) + 1), share=.92, jobs=len(jobs) + 1):
                         self._warn('Some alleged issues were not re-checked: the budget ran out.')
                         break
                     jobs.append(self._confirm_job(cluster, unit))
@@ -1192,7 +1305,11 @@ class ExplainRunner(ReviewBase):
                 'explain_plan': [], 'explain_parts': {}}
 
     def _mechanism(self):
-        return bool(re.search(r'\b(?:mechanism|strategy|architecture|mecanisme|mécanisme|stratégie|strategie)\b', self.state['goal'], re.I))
+        request = self.state.get('target') or self.state['goal']
+        if self._is_pasted():
+            match = manuscript.TEXT_STATEMENT.search(request)
+            request = request[:match.start()] if match else request.split('Proof.', 1)[0]
+        return bool(re.search(r'\b(?:explain|describe|expliquer|décrire)\b[^\n.]{0,50}\b(?:mechanism|strategy|architecture|mecanisme|mécanisme|stratégie|strategie)\b', request, re.I))
 
     def _fine(self):
         unit = self.state['unit']
@@ -1200,6 +1317,14 @@ class ExplainRunner(ReviewBase):
 
     def _explain_cap(self):
         return self._cap(16384 if self._thinks(16384) else 8000)
+
+    def _optional(self, fn, phase):
+        try:
+            fn()
+        except WorkerInputError as exc:
+            if exc.code != 'context_overflow':
+                raise
+            self._warn(f'The explanation {phase} did not fit the model context; the saved explanation is retained and this phase remains unchecked.')
 
     def _step(self, phase):
         if phase == 'plan':
@@ -1214,7 +1339,7 @@ class ExplainRunner(ReviewBase):
         elif phase == 'fill':
             missing = self._missing()
             if missing and self.state['fills'] < self.effort['fills'] and self._affordable(3000, 4000, share=.85):
-                self._fill(missing)
+                self._optional(lambda: self._fill(missing), 'fill')
                 self.state['fills'] += 1
                 return
             if missing:
@@ -1222,11 +1347,13 @@ class ExplainRunner(ReviewBase):
             self.state['phase'] = 'check' if self.effort['explain_check'] else 'done'
         elif phase == 'check':
             if self._affordable(1500, 6000, share=.8):
-                self._check_explanation()
+                self._optional(self._check_explanation, 'accuracy check')
+            else:
+                self._warn('The explanation accuracy check was not run within the remaining budget.')
             self.state['phase'] = 'fix' if self.state.get('explain_problems') else 'done'
         elif phase == 'fix':
             if self._affordable(self._explain_cap(), 8000, share=.95):
-                self._fix()
+                self._optional(self._fix, 'correction')
             else:
                 self._warn('The accuracy check found problems that could not be corrected within the budget; they are listed below.')
             self.state['phase'] = 'done'
@@ -1359,7 +1486,11 @@ class ExplainRunner(ReviewBase):
         problems, checked = [], True
         for item in plan:
             part = self.state.get('explain_parts', {}).get(item['key'])
-            value = part.get('value') if part else self.state['explanation']
+            value = self.state['explanation'] if len(plan) == 1 else (part.get('value') if part else self.state['explanation'])
+            if len(plan) > 1 and value:
+                allowed = {n for a, b in (item['segment'] or unit['proofs']) for n in range(a, b + 1)}
+                value = dict(value, steps=[step for step in self.state['explanation']['steps']
+                                          if set(range(step['start_line'], step['end_line'] + 1)) <= allowed])
             if not value:
                 checked = False
                 continue
@@ -1397,11 +1528,13 @@ class ExplainRunner(ReviewBase):
         if fixed is None:
             self._warn('The corrected explanation was not usable; the first version is kept and the problems are listed.')
             return
-        before = len(self._missing())
+        before = sum(b - a + 1 for a, b in self._missing())
         previous = self.state['explanation']
         self.state['explanation'] = fixed
-        if len(self._missing()) > before:
-            self.state['explanation'] = dict(fixed, steps=previous['steps'])
+        if sum(b - a + 1 for a, b in self._missing()) > before:
+            self.state['explanation'] = previous
+            self._warn('The proposed correction lost proof-line coverage and was not applied; accuracy concerns remain unresolved.')
+            return
         self.state['explain_fixed'] = True
 
     def _complete(self):
@@ -1437,7 +1570,8 @@ class ExplainRunner(ReviewBase):
                     body += [f'*Uses:* {step["uses"]}', '']
             missing = self._missing()
             body += [('Every line of the proof is explained.' if not missing else f'Lines not explained one by one: {_span(missing)}.')
-                     if self._fine() else 'The proof is long: lines are grouped into steps.']
+                     if self._fine() else ('The requested proof mechanism is explained in grouped steps.' if self._mechanism()
+                                          else 'The proof is long: lines are grouped into steps.')]
         if value['facts']:
             body += ['', '### Standard facts used', '']
             body += [f'- **{f["name"]}** — {f["statement"]}' for f in value['facts']]
@@ -1476,13 +1610,13 @@ class JournalRunner(ReviewBase):
 
     def _units(self):
         mapping = self.state['map']
-        if mapping['units'] and manuscript.checkable(mapping):
+        if mapping['units']:
             return mapping['units']
         # Nothing recognised: check the text in fixed-size excerpts.
         return [{'id': f'C{i}', 'type': 'excerpt', 'name': f'Lines {a}–{b}', 'number': '', 'label': '', 'title': '',
                  'statement': None, 'proofs': [[a, b]], 'refs': [], 'statement_refs': [], 'cites': [], 'equations': [],
-                 'section': None, 'appendix': False, 'main': i == 1}
-                for i, (a, b) in enumerate(manuscript.chunks(mapping['lines'], 120), 1)]
+                 'section': None, 'appendix': False, 'main': False}
+                for i, (a, b) in enumerate(self._read_parts(), 1)]
 
     def _unit(self, uid):
         unit = next((u for u in self._units() if u['id'] == uid), None)
@@ -1493,12 +1627,34 @@ class JournalRunner(ReviewBase):
         return scope.get('main') or [u['id'] for u in self._units() if u['main']]
 
     def _step(self, phase):
+        shares = {'read': .45 if self.CHECK_PROOFS else .8,
+                  'scope': .6 if self.CHECK_PROOFS else .9,
+                  'check': .65, 'confirm': .78, 'literature': .88}
+        old = self._phase_limit
+        self._phase_limit = self.state['settings']['max_seconds'] * shares[phase] if phase in shares else None
+        try:
+            self._step_work(phase)
+        except PhaseBudget as exc:
+            self._warn(f'{phase.capitalize()} stopped before report synthesis: {exc}')
+            if phase == 'check':
+                self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
+            self.state['phase'] = {'read': 'scope', 'scope': 'check' if self.CHECK_PROOFS else 'literature',
+                                   'check': 'confirm', 'confirm': 'literature', 'literature': 'write'}[phase]
+            if phase == 'scope' and self.CHECK_PROOFS:
+                self._plan_units()
+        finally:
+            self._phase_limit = old
+
+    def _step_work(self, phase):
         if phase == 'plan':
             if not self.state['sources']:
                 raise WorkerInputError('Pin the manuscript to review.', code='invalid_worker_input')
             if len(self.state['sources']) > 1:
                 self._warn('Only the first pinned file is reviewed as the manuscript; the others were not read.')
             self._map()
+            if self.CHECK_PROOFS and not manuscript.checkable(self.state['map']):
+                self._warn('No proofs were recognised in the manuscript map. Excerpt checks cannot establish complete proof coverage.')
+                self.state['source_incomplete'] = True
             self.state['read_parts'] = self._read_parts()
             self.state['phase'] = 'read'
         elif phase == 'read':
@@ -1558,31 +1714,41 @@ class JournalRunner(ReviewBase):
         probe = {'model': self.agent.model, 'messages': [{'role': 'system', 'content': self.POLICY + '\n' + self.state['skill']},
                               {'role': 'user', 'content': prompt + self._reference_material()}],
                  'format': P.SCOPE_SCHEMA, 'options': {'num_ctx': self.agent.ctx}}
+        self.state['scope_incomplete'] = False
         try:
-            allocate_call(self.agent.client, probe, self._cap(cap), minimum=min(512, self._cap(cap)),
+            allocate_call(self.agent.client, probe, self._cap(cap), minimum=min(1500, self._cap(cap)),
                           explicit_cap=getattr(self.agent, 'document_output_cap', None))
             scope_fits = True
         except CallContextError:
             scope_fits = False
         if not scope_fits:
-            # Retain complete source blocks and locators. An oversized synthesis
-            # stays explicitly partial instead of silently cutting a hypothesis.
-            self.state['scope_incomplete'] = True
-            self._warn('All reading notes did not fit one overview synthesis. Complete part notes remain in the report; the global overview is partial.')
-            parts = [p for p in parts if not p.startswith('THE PAPER PART BY PART')]
-            kept = []
-            for note in summaries:
-                candidate = 'THE PAPER PART BY PART (partial working notes):\n' + '\n\n'.join(kept + [note])
-                if len((P.SCOPE_POLICY + '\n\n' + '\n\n'.join(parts + [candidate])).encode()) > self._room(cap):
-                    break
-                kept.append(note)
-            if kept:
-                parts.append('THE PAPER PART BY PART (partial working notes; omitted notes are not premises):\n' + '\n\n'.join(kept))
-            while len((P.SCOPE_POLICY + '\n\n' + '\n\n'.join(parts)).encode()) > self._room(cap):
-                optional = next((i for i, p in enumerate(parts) if p.startswith(('INTRODUCTION', 'BIBLIOGRAPHY', 'THE PAPER PART BY PART'))), None)
-                if optional is None:
-                    break
-                parts.pop(optional)
+            # Keep the part-by-part understanding ahead of optional source excerpts.
+            # The same full-request allocator is used for every fallback candidate.
+            def fits(blocks):
+                probe['messages'][1]['content'] = P.SCOPE_POLICY + '\n\n' + '\n\n'.join(blocks) + self._reference_material()
+                try:
+                    allocate_call(self.agent.client, probe, self._cap(cap), minimum=min(1500, self._cap(cap)),
+                                  explicit_cap=getattr(self.agent, 'document_output_cap', None))
+                    return True
+                except CallContextError:
+                    return False
+            parts = [p for p in parts if not p.startswith(('INTRODUCTION', 'BIBLIOGRAPHY'))]
+            if not fits(parts):
+                parts = [p for p in parts if not p.startswith('THE PAPER PART BY PART')]
+                kept = []
+                for note in summaries:
+                    abbreviated = note if len(note) <= 600 else note[:600] + ' [reading note abbreviated; full note retained in report]'
+                    candidate = 'THE PAPER PART BY PART (working notes):\n' + '\n\n'.join(kept + [abbreviated])
+                    if fits(parts + [candidate]):
+                        kept.append(abbreviated)
+                if kept:
+                    parts.append('THE PAPER PART BY PART (working notes):\n' + '\n\n'.join(kept))
+                self.state['scope_incomplete'] = len(kept) != len(summaries)
+                if self.state['scope_incomplete']:
+                    self._warn('Some reading notes did not fit the overview synthesis; full notes remain in the report and the overview is partial.')
+            else:
+                self.state['scope_incomplete'] = False
+            self._warn('The overview prioritises reading notes; optional introduction and bibliography excerpts were omitted to fit the model context.')
             prompt = P.SCOPE_POLICY + '\n\n' + '\n\n'.join(parts)
         with self._timeout():
             result = self._judge('scope', prompt, cap=cap, schema=P.SCOPE_SCHEMA, key='scope')
@@ -1593,7 +1759,13 @@ class JournalRunner(ReviewBase):
         for r in value.get('notation') or []:
             a, b = _int(r.get('start_line')), _int(r.get('end_line'))
             if 1 <= a <= b <= len(lines):
-                notation.append([a, b])
+                used = sum(y - x + 1 for x, y in notation)
+                stop = min(b, a + 59, a + 119 - used)
+                if stop >= a:
+                    notation.append([a, stop])
+                if stop < b:
+                    self._warn('Setting and notation ranges were bounded to 60 lines each and 120 lines overall; additional context remains in the pinned source.')
+                    self.state['scope_incomplete'] = True
         queries = [re.sub(r'\s+', ' ', str(q)).strip()[:100] for q in value.get('queries') or [] if str(q).strip()]
         queries = [' '.join(q.split()[:10]) for q in queries][:6]
         # Search queries are public topic words: a query copied from the manuscript never leaves the machine.
@@ -1643,16 +1815,22 @@ class JournalRunner(ReviewBase):
         for uid in self.state['plan_units']:
             unit = self._unit(uid)
             if unit:
-                jobs, estimate = self._check_jobs(unit, self._lenses(uid), journal=True, notation=self._notation())
+                try:
+                    jobs, estimate = self._check_jobs(unit, self._lenses(uid), journal=True, notation=self._notation())
+                except WorkerInputError as exc:
+                    if exc.code != 'context_overflow':
+                        raise
+                    self._warn(f'{unit["name"]} remains unchecked because its complete context does not fit: {exc}')
+                    continue
                 pending += [(key, fn, estimate) for key, fn in jobs]
         batch_size = max(1, self.concurrency * 2)
         index = 0
         while index < len(pending):
             batch = []
             for key, fn, estimate in pending[index:index + batch_size]:
-                need_out = self._check_cap() * (len(batch) + 1)
+                need_out = self._check_cap()
                 need_in = estimate * (len(batch) + 1)
-                if not self._affordable(need_out, need_in, reserve_out=self._write_reserve(), reserve_in=12000, share=.65):
+                if not self._affordable(need_out, need_in, reserve_out=self._write_reserve(), reserve_in=12000, share=.65, jobs=len(batch) + 1):
                     break
                 batch.append((key, fn))
             if not batch:
@@ -1677,7 +1855,7 @@ class JournalRunner(ReviewBase):
         for cluster in clusters[:12 if self.state['level'] in ('low', 'medium') else 24]:
             if cluster['key'] in self.state['confirms']:
                 continue
-            if not self._affordable(1500 * (len(jobs) + 1), 4000 * (len(jobs) + 1), reserve_out=self._write_reserve(), reserve_in=12000, share=.78):
+            if not self._affordable(4096 if self._thinks(4096) else 1500, 4000 * (len(jobs) + 1), reserve_out=self._write_reserve(), reserve_in=12000, share=.78, jobs=len(jobs) + 1):
                 self._warn('Some alleged issues were not re-checked: the budget ran out.')
                 break
             jobs.append(self._confirm_job(cluster, self._unit(cluster['unit']), self._notation()))
@@ -1697,18 +1875,26 @@ class JournalRunner(ReviewBase):
         self._novelty()
 
     def _cited_checks(self):
-        wanted = self.effort['cited'] - len(self.state['cited_checks'])
+        concluded = [c for c in self.state['cited_checks'] if c['level'] != 'not_checked']
+        wanted = self.effort['cited'] - len(concluded)
         if wanted <= 0:
             return
         bibliography = self.state['map']['bibliography']
         main = set(self._main_ids())
-        candidates, seen = [], {(c['key'], c['place']) for c in self.state['cited_checks']}
+        candidates, seen = [], {(c['key'], c['place']) for c in concluded}
         for key in sorted(self.state['checks'], key=lambda k: (self.state['checks'][k].get('unit') not in main, k)):
             for item in self.state['checks'][key].get('external') or []:
                 bib_key = item['key'].strip('[] ')
                 if bib_key in bibliography and item['place'] and item['used_for'] and (bib_key, item['place']) not in seen:
                     seen.add((bib_key, item['place']))
                     candidates.append(dict(item, key=bib_key, entry=bibliography[bib_key]))
+        for unit in sorted(self._units(), key=lambda u: u['id'] not in main):
+            for citation in unit.get('cites', []):
+                bib_key, place = citation['key'], citation.get('note', '').strip()
+                if bib_key in bibliography and place and (bib_key, place) not in seen:
+                    seen.add((bib_key, place))
+                    candidates.append({'key': bib_key, 'place': place, 'entry': bibliography[bib_key],
+                                       'used_for': 'The result cited at this place; no separate applicability claim was extracted.'})
         from .refcheck import CheckRunner
         from .agent import Agent
         from .literature import LiteratureTools
@@ -1737,12 +1923,17 @@ class JournalRunner(ReviewBase):
             used = checker.state or {}
             self.state['tokens_charged'] += used.get('tokens_charged', 0)
             self.state['input_tokens_charged'] += used.get('input_tokens_charged', 0)
+            if result.get('status') == 'paused':
+                raise KeyboardInterrupt
             refs = result.get('references') or []
-            best = refs[0] if refs else {}
+            contradicted = [ref for ref in refs + (result.get('not_confirmed') or []) if ref.get('level') == 'contradicted']
+            best = contradicted[0] if contradicted else refs[0] if refs else {}
+            stopped = result.get('status') in ('error', 'budget_exhausted', 'budget_violation')
+            self.state['cited_checks'] = [c for c in self.state['cited_checks'] if (c['key'], c['place']) != (item['key'], item['place'])]
             self.state['cited_checks'].append({'key': item['key'], 'place': item['place'], 'used_for': item['used_for'],
-                                               'entry': item['entry'][:300], 'level': best.get('level', 'not_found'),
+                                               'entry': item['entry'][:300], 'level': 'not_checked' if stopped else best.get('level', 'not_found'),
                                                'found_place': best.get('place'), 'statement_found': best.get('statement_found'),
-                                               'check_id': result.get('check_id'), 'error': result.get('error')})
+                                               'check_id': result.get('check_id'), 'error': result.get('error') or (result.get('stop_reason') if stopped else None)})
             self._save()
 
     @staticmethod
@@ -1811,7 +2002,8 @@ class JournalRunner(ReviewBase):
                     re.search(r'\\begin\{thebibliography\}|\\bibliography\{|\\printbibliography', line):
                 end = n - 1
                 break
-        starts = sorted({1} | {sec['line'] for sec in mapping['sections'] if 1 < sec['line'] <= end})
+        begin = next((n for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 1) if mapping['format'] == 'tex' else 1
+        starts = sorted({begin} | {sec['line'] for sec in mapping['sections'] if begin < sec['line'] <= end})
         parts = []
         part_bytes = min(14000, max(512, self._room(3000, P.READ_POLICY) - 1500))
         for index, a in enumerate(starts):
@@ -1861,8 +2053,8 @@ class JournalRunner(ReviewBase):
         for start in range(0, len(jobs), size):
             batch = []
             for key, fn in jobs[start:start + size]:
-                if not self._affordable(3000 * (len(batch) + 1), 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
-                                        reserve_in=20000, share=.45):
+                if not self._affordable(3000, 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
+                                        reserve_in=20000, share=.45 if self.CHECK_PROOFS else .8, jobs=len(batch) + 1):
                     break
                 batch.append((key, fn))
             if not batch:
@@ -1878,6 +2070,12 @@ class JournalRunner(ReviewBase):
             value = result['value'] or {}
             usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                       and isinstance(value.get('comments'), list))
+            if not usable and self._affordable(3000, 6000, share=.45 if self.CHECK_PROOFS else .8):
+                self._warn(f'Reading lines {a}-{b} produced an unusable answer; one fresh attempt was made on the same exact source.')
+                result = self._ask('read', prompt, cap=3000, schema=P.READ_SCHEMA, key=key + ':retry', temperature=.4)
+                value = result['value'] or {}
+                usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
+                          and isinstance(value.get('comments'), list))
             found, dropped = [], 0
             for item in value.get('comments') or [] if usable else []:
                 if not isinstance(item, dict):
@@ -1938,6 +2136,7 @@ class JournalRunner(ReviewBase):
                     'proofs_checked': [{'name': self._unit(u)['name'], 'main': u in set(self._main_ids()),
                                         'verdict': v.replace('_', ' '), 'coverage': self._check_coverage(u)} for u, v in verdicts.items()],
                     'proofs_not_checked': [self._unit(u)['name'] for u in self.state['unchecked']],
+                    'main_results_without_located_proof': self._provisional()[1],
                     'major': [{'n': n, 'where': c['unit_name'], 'kind': KIND_LABEL[c['kind']], 'status': c['status'],
                                'issue': c['evidence'][:400]} for n, c in enumerate(major, 1)],
                     'minor': [{'n': n, 'where': c['unit_name'], 'issue': c['evidence'][:200]} for n, c in enumerate(minor, 1)],
@@ -1982,10 +2181,10 @@ class JournalRunner(ReviewBase):
         self._warn_reading_gaps()
         read_complete = not self._unread_parts()
         if not self.CHECK_PROOFS:
-            return bool(self.state.get('write')) and read_complete and not self.state.get('scope_incomplete')
+            return bool(self.state.get('write')) and read_complete and not self.state.get('scope_incomplete') and not self.state.get('source_incomplete')
         missing, no_proof = self._provisional()
         return (bool(self.state.get('write')) and read_complete and not missing
-                and not no_proof and not self.state.get('scope_incomplete')
+                and not no_proof and not self.state.get('scope_incomplete') and not self.state.get('source_incomplete')
                 and all(self._checks_complete(uid) for uid in self.state['plan_units']))
 
     def _render(self):
@@ -2047,12 +2246,17 @@ class JournalRunner(ReviewBase):
             for k, cluster in enumerate(questions, 1):
                 body += _item(f'{k}. *{cluster["unit_name"]}.* ', self._issue_lines(cluster, sid, show_passes=False), '   ')
         recommendation = P.RECOMMENDATIONS.get(write.get('recommendation'), 'No recommendation')
-        body += ['## Recommendation', '', f'**{recommendation}**' + (' (provisional)' if (missing or s['unchecked'] or unread) and write else '')]
-        if missing or s['unchecked'] or unread:
+        context_gap = s.get('scope_incomplete') or s.get('source_incomplete')
+        body += ['## Recommendation', '', f'**{recommendation}**' + (' (provisional)' if (missing or no_proof or s['unchecked'] or unread or context_gap) and write else '')]
+        if missing or no_proof or s['unchecked'] or unread or context_gap:
             gaps = []
             if missing or s['unchecked']:
                 gaps.append('the proofs of ' + ', '.join(missing) + ' were not checked' if missing else
                             f'{len(s["unchecked"])} planned proof(s) were not checked')
+            if no_proof:
+                gaps.append('no proof was located for ' + ', '.join(no_proof))
+            if context_gap:
+                gaps.append('the manuscript setting or external source coverage is incomplete')
             if unread:
                 gaps.append(f'{len(unread)} part(s) were not read for understanding and presentation')
             body += ['', 'Provisional: ' + '; '.join(gaps) + '; see the scope below.']
@@ -2098,6 +2302,8 @@ class JournalRunner(ReviewBase):
             for c in s['cited_checks']:
                 found = f' (found at {c["found_place"]})' if c.get('found_place') and c['found_place'] != c['place'] else ''
                 appendix += [f'- [{c["key"]}] {c["entry"][:160]} — {c["place"]}: **{c["level"].replace("_", " ")}**{found}. Used for: {c["used_for"]}']
+                if c.get('error'):
+                    appendix += ['  Check stopped: ' + str(c['error'])]
         if s.get('novelty') is not None or s['search_results']:
             appendix += ['', '### Literature searched (titles and abstracts only)', '']
             appendix += [f'Queries: ' + '; '.join(f'"{q}"' for q in dict.fromkeys(r['query'] for r in s['search_results']))]
@@ -2123,7 +2329,7 @@ class SummaryReviewRunner(JournalRunner):
                  '### Presentation', '', write.get('presentation') or '—', '',
                  '### Correctness', '', 'The proofs were not checked in this review; a detailed review checks them.', '']
         recommendation = P.RECOMMENDATIONS.get(write.get('recommendation'), 'No recommendation')
-        provisional = ' (provisional)' if self._unread_parts() and write else ''
+        provisional = ' (provisional)' if (self._unread_parts() or s.get('scope_incomplete') or s.get('source_incomplete')) and write else ''
         body += ['## Recommendation', '', f'**{recommendation}**{provisional} (the proofs were not checked)', '', write.get('reasons') or '',
                  '', '## Confidential comments to the editor', '', write.get('confidential') or '—']
         read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]

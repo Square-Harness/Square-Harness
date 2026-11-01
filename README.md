@@ -11,8 +11,8 @@ workflow. A model's approval is not a mathematical certificate; independent
 checking remains necessary.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/interface-dark.png">
-  <img alt="The Square Harness visual interface with a conversation notebook and the Prove, Literature, Review and Write-up notebooks in the left rail" src="docs/images/interface-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-dark.png">
+  <img alt="The Square Harness visual interface with a conversation and a sidebar notebook selector" src="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-light.png">
 </picture>
 
 ## Quick start
@@ -25,7 +25,7 @@ git clone https://github.com/Square-Harness/Square-Harness.git
 cd Square-Harness
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e '.[research]'
 
 ollama pull qwen3.8:27b
 mkdir -p ~/research/square-workspace
@@ -59,8 +59,8 @@ The same harness also runs as a local web app:
 square-harness --gui --workspace ~/research/square-workspace
 ```
 
-Your browser opens on `http://127.0.0.1:8765`. Each mode is a notebook in the left
-rail. The **Assistant** answers short questions directly and can delegate focused
+Your browser opens on `http://127.0.0.1:8765`. The sidebar notebook selector opens Conversations, Proofs, Reading lists, Reviews
+and Write-ups, including their saved jobs and new-job forms. The **Assistant** answers short questions directly and can delegate focused
 proof, critique, exploration, literature, review or writing tasks when needed.
 It reads their results and continues the conversation, within a shared budget.
 For simple web requests it can open a supplied URL and read its page, links or
@@ -134,6 +134,10 @@ proof modes are not part of v0.5.
 | `/proofs` / `/proof-report <id>` | List jobs or inspect one without inference |
 | `/resume <id>` | Resume an interrupted v0.5 job |
 | `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
+| `/check <statement>` | Find or verify a precise reference |
+| `/literature <topic>` | Build a verified reading list |
+| `/referee <request>` / `/detailed_review <request>` | Review a manuscript, with optional proof checks |
+| `/quick_review <statement and proof>` / `/explain <request>` | Check or explain a result and its proof |
 | `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
 | `/python-lab <request>` | Run Python experiments and plots in an isolated Docker sandbox (`@python_lab` in the interface) |
 | `/sanity-check <claim>` | Try to falsify a claim with cheap numerical experiments (`@sanity_check` in the interface) |

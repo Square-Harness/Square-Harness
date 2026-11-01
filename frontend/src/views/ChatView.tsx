@@ -5,7 +5,7 @@ import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, ErrorNote, Loading, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
-import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
+import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { callPayload, type ModeCall } from '../modeCalls'
@@ -15,6 +15,7 @@ import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
+import { WorkspaceSwitch } from '../components/Shell'
 import { go, href } from '../router'
 import { useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
@@ -24,7 +25,7 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Reference check for citations, Literature for reading lists, Quick review to check a proof, Review and Detailed review for manuscripts, Explain for a result and its proof, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
+    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Literature check for citations, Literature for reading lists, Quick review to check a proof, Review and Detailed review for manuscripts, Explain for a result and its proof, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
       'Find a reference on the $H^2$ regularity of elliptic problems with Neumann boundary conditions.',
@@ -68,7 +69,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
   sanity_check: { noun: 'a numerical sanity check', label: 'Numerical sanity check', cover: 'sanity_check' },
 }
-const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
+const kindOf = (mode: RouteMode | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook.
@@ -100,19 +101,29 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const routing = work.routing
   const [draft, setDraft] = useState('')
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
+  // null: no effort named, so the harness picks its default for the mode.
+  const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
+  const selectCall = (next: ModeCall | null) => {
+    if (next?.mode !== selectedCall?.mode) setSelectedEffort(null)
+    setSelectedCall(next)
+  }
   const [attachments, setAttachments] = useState<string[]>([])
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
+  const createdChat = useRef<string | null>(null)
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
-  // Online search is on for new conversations unless the interface was launched --offline.
-  const [online, setOnline] = useState<boolean>(app.status ? app.status.online : true)
+  // Online search is always on, unless the interface was launched --offline.
   const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
 
   useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]))
-  useEffect(() => { if (data) { setThink(data.settings.think); setOnline(!!data.settings.online) } }, [data])
+  useEffect(() => { if (data) setThink(data.settings.think) }, [data?.id])
+  // Conversations saved with search off (earlier versions) get it back.
+  useEffect(() => {
+    if (id && data && !locked && !data.settings.online) api.chatSettings(id, { online: true }).catch(() => undefined)
+  }, [id, data?.settings.online, locked])
 
   // Follow new output while the reader is at the bottom; never yank them back up.
   const liveSize = live ? live.steps.reduce((n, step) => n + (step.type === 'call' ? step.text.length + step.thinking.length : 1), 0) : 0
@@ -126,14 +137,14 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
     const raw = text ?? draft
-    const modeCall = free && text === undefined ? callPayload(raw, selectedCall) : undefined
+    const modeCall = free && text === undefined ? callPayload(raw, selectedCall, selectedEffort ?? undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     if (!content.trim() || sending || resuming || paused || work.blocked) return
     setSending(true)
     setSendError('')
     try {
-      let chatId = id
-      if (!chatId) chatId = (await api.createChat(mode, think, locked ? undefined : online)).id
+      let chatId = id || createdChat.current
+      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall)
       else await api.send(chatId, content, attachments)
       setDraft('')
@@ -155,16 +166,13 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setThink(value)
     if (id) api.chatSettings(id, { think: value }).catch((reason: Error) => setSendError(reason.message))
   }
-  const changeOnline = (value: boolean) => {
-    setOnline(value)
-    if (id) api.chatSettings(id, { online: value }).catch((reason: Error) => { setOnline(!value); setSendError(reason.message) })
-  }
   const resume = async () => {
     if (!id || resuming) return
     setResuming(true)
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
+  const taskError = app.snapshot.task?.target === id && app.snapshot.task.state === 'error' ? app.snapshot.task.error : ''
   const transcript = data?.transcript || []
   const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route' && item.role !== 'experiment')
   const canReview = !!id && !work.blocked && !paused && !sending && !resuming && !!last && last.role === 'assistant' && !!last.content
@@ -207,19 +215,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
-        {attachments.length > 0 && (
-          <div className="attachments composer-attachments">
-            {attachments.map((path) => (
-              <span key={path} className="chip">
-                <FileIcon size={14} /><span>{path}</span>
-                <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
-                  onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
-              </span>
-            ))}
-          </div>
-        )}
+        <div className="composer-top">
+          <WorkspaceSwitch />
+          {attachments.map((path) => (
+            <span key={path} className="chip">
+              <FileIcon size={14} /><span>{path}</span>
+              <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
+                onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
+            </span>
+          ))}
+        </div>
         <div className="composer-box">
-          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={setSelectedCall}
+          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
+            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !!effortKind(selectedCall.mode)}
             onSend={() => { send() }} disabled={blocked || sending || resuming} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -227,7 +235,11 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             aria-label="Message" />}
           {ours ? (
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
-              <PauseIcon size={16} /> {free ? 'Pause' : 'Stop'}
+              {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
+            </button>
+          ) : paused ? (
+            <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending} onClick={resume}>
+              <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
           ) : work.queued ? (
             <button type="button" className="btn composer-send" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
@@ -240,18 +252,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           )}
         </div>
         <div className="composer-bar">
-          {free ? <span className="muted small" title="Short questions get a direct answer; harder tasks receive more effort as needed.">Adaptive effort</span>
-            : <Toggle label="Thinking" checked={think} onChange={changeThink} />}
-          <span title={locked ? 'Launched with --offline: online search stays off' : online ? 'Search queries leave this computer' : 'Local and cached sources only'}>
-            <Toggle label="Search online" checked={online && !locked} onChange={changeOnline} disabled={locked} />
-          </span>
-          {free && assistantResumable(data) && (
-            <button type="button" className="btn btn-quiet btn-small" disabled={work.blocked || resuming || sending} onClick={resume}>
-              <PlayIcon size={14} /> {resuming ? 'Resuming…' : 'Resume assistant'}
-            </button>
-          )}
+          {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           {free && budgetDisplay && (
-            <span className="muted small" title={budgetDisplay.title}>
+            <span className="muted small composer-budget" title={budgetDisplay.title}>
               {budgetDisplay.output}
               {budgetDisplay.reserved && <> {' · '}{budgetDisplay.reserved}</>}
               {budgetDisplay.context && <> {' · '}{budgetDisplay.context}</>}
@@ -263,11 +266,11 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               Fresh review of the last answer
             </button>
           )}
-          <span className="composer-hint">Enter sends · Shift+Enter adds a line · @ selects a mode</span>
+          {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
-        <ErrorNote>{sendError}</ErrorNote>
+        <ErrorNote>{sendError || taskError}</ErrorNote>
       </form>
     </div>
   )
@@ -284,7 +287,7 @@ function Intro({ mode, onPick }: { mode: ChatMode; onPick: (text: string) => voi
         {mode === 'free' && <p className="lede">
           To force a worker, type <code>@</code> anywhere in your prompt and confirm a choice in the popup.
           The available calls are <code>@prove</code>, <code>@check</code>, <code>@literature</code>, <code>@quick_review</code>,
-          {' '}<code>@referee</code> (a review), <code>@detailed_review</code> and <code>@explain</code>.
+          {' '}<code>@referee</code> (a review), <code>@detailed_review</code>, <code>@explain</code>, <code>@writeup</code>, <code>@critic</code>, <code>@explore</code>, and the sandbox calls <code>@python_lab</code> (run Python) and <code>@sanity_check</code> (test a claim numerically).
           Unconfirmed <code>@</code> text stays part of your message.
         </p>}
         <div className="examples">

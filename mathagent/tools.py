@@ -33,9 +33,7 @@ class Workspace:
             raise ValueError('Workspace must be a directory')
         self.approve = approve
         self.allow_python = allow_python
-        # Sandboxed Python (mathagent.numerics): a NumericsSession chosen by controller
-        # code for this context (automatic sanity checks or an explicit python-lab command).
-        self.numerics = numerics
+        self.numerics = numerics  # A sandbox session bound by controller code (mathagent.numerics).
         self.literature = literature
         self.web = None
         if literature is not None:
@@ -248,7 +246,6 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
             if self.numerics is not None and name in self.numerics.tool_names:
-                # Bounded JSON from the bound session; its policy is fixed by the controller.
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:
                 return self.web.execute(name, arguments, on_result=on_result)

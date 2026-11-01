@@ -139,7 +139,14 @@ Inspection works without a running model. Ctrl+C preserves completed artifacts
 and recorded usage. Resume keeps the original settings and remaining budgets;
 it does not grant a new allowance or change the pinned problem. Use the original
 `--backend` and `--host` when they differ from the defaults. Interrupted
-requests with uncertain usage must not become free retries.
+requests with uncertain usage must not become free retries. Resume compatibility
+uses the saved execution-policy version and proof-policy digest. Controller and
+transport source hashes remain provenance, so routine code changes do not strand
+compatible paused jobs. Backend, API profile, host and pinned sources stay fixed.
+
+For scripts, a completed one-shot job exits with status 0. An unsuccessful job
+exits with status 1, and a paused or interrupted job exits with status 130. Inspect
+the saved report to distinguish an operational stop from a mathematical verdict.
 
 ## Model servers
 
@@ -162,6 +169,18 @@ For an OpenAI-compatible local server, including HyperQwen:
 square-harness --workspace ~/research/my-paper \
   --backend openai --host http://127.0.0.1:18020 --model qwen3.8-27b
 ```
+
+For MLX on Apple Silicon, use an OpenAI-compatible MLX server and select its profile:
+
+```bash
+square-harness --workspace ~/research/my-paper \
+  --backend openai --host http://127.0.0.1:8000 --model <served-model-id> \
+  --api-profile mlx
+```
+
+`SQUARE_OPENAI_PROFILE=mlx` also selects it. The profile uses textual JSON
+instructions where the server lacks grammar support. Run `scripts/test-local-mlx.py`
+against the actual endpoint to check its protocol before a long job.
 
 Match `--ctx` to the actual server capacity. An adapter's existence is not evidence
 that every model/server supports thinking and structured verification correctly.
@@ -222,16 +241,17 @@ The launch options apply as in the terminal: the model server (`--backend`,
 [Budgets](#budgets).
 
 The browser opens automatically; `--no-browser` prevents it and `--gui-port`
-changes the port (default 8765, or the next free one). The left rail holds one
-notebook per mode, and the list beside it shows that mode's saved jobs or
-conversations. The logo above the notebooks opens an About page.
+changes the port (default 8765, or the next free one). The sidebar's notebook
+selector opens Conversations, Proofs, Reading lists, Reviews and Write-ups. Each
+notebook shows its saved work and a button for a new conversation or job. The
+sidebar footer shows the version, licence and third-party notices.
 
 | Mode | What the page shows |
 | --- | --- |
 | Assistant | A mathematical conversation with direct answers and focused tasks when needed. The assistant reads their results and decides how to continue, within a shared budget (see below) |
 | Prove | The selected answer and its review status; each attempt with its written answer (and thinking), the verifier's verdict, explanation and located issues, and the exact model calls; live model output while a call runs; a side panel with budgets and every retained candidate |
 | Literature | The report with clickable citations that open the exact passage read, the controller's citation checks, evidence, plan, notes and budgets |
-| Review | Four kinds, started from the Assistant with `@quick_review` (is a proof correct: verdict and located issues), `@referee` (a review of a manuscript: overview, typos and presentation), `@detailed_review` (the review plus a check of the proofs) and `@explain` (a result and its proof, step by step); the page shows the verdict or report, with links to the lines each comment or step concerns (see [Reviews](research.md#reviews-quick-check-journal-report-explanation)) |
+| Review | Four kinds, started from the Assistant with `@quick_review` (is a proof correct: verdict and located issues), `@referee` (a review of a manuscript: overview, typos and presentation), `@detailed_review` (the review plus a check of the proofs) and `@explain` (a result and its proof, step by step); the page shows the verdict or report, with links to the lines each comment or step concerns (see [Reviews](research.md#reviews-quick-check-manuscript-review-detailed-review-explanation)) |
 | Write-up | The LaTeX document with source marks that open the note lines each paragraph came from, compile errors, the PDF, TODOs and template macros (see [LaTeX write-ups](research.md#latex-write-ups)) |
 
 On a wide screen, the job list and a job's side panel (budgets, candidates,
@@ -296,11 +316,15 @@ task is active. Queued tasks do not spend their active-time budget.
 New Assistant turns and focused jobs have no cumulative generated- or input-token
 ceiling by default. Per-request context and output limits still apply. Focused
 workers retain finite plans, checking depth and working-time allowances. Active time starts at 15 minutes
-and adapts to the highest delegated effort, up to two hours. Explicit
+and adapts to the highest delegated effort, up to 14,700 seconds: four hours
+for a Poincaré detailed review plus five minutes reserved for synthesis. Explicit
 `--assistant-tokens`, `--assistant-input-tokens` and `--assistant-seconds`
 values are hard caps and are never raised. Parallel workers share an explicitly
 limited allowance, with room reserved for the final answer. Resume keeps the
 saved ceilings and spent allowance, including older adaptive token ceilings.
+Standalone research pages offer **Resume (+N min)** near the time limit, making
+any requested time increase explicit. Ordinary resumes preserve the cap; terminal
+users can opt in with `--resume-add-seconds <seconds>`.
 The **Output** counter shows settled charged usage, including thinking;
 temporary reservations for calls in progress appear separately. The settled
 counter therefore does not jump by the full reservation when a new call starts.
@@ -378,16 +402,14 @@ one short answer.
 
 For a known result, the assistant can delegate a **literature check**. An ordinary
 request such as "give me a classical reference for the tubular neighborhood
-theorem" uses a standard lookup: the worker checks its best candidate with one
-bounded bibliographic lookup, using directly available chapter information as
-a lead when present. The controller queries the work's record once and grades
-that evidence; no verifier model round, citation-chain verification or discovery
-phase is required. A useful book reference is enough to answer even when its
-precise chapter or theorem cannot be verified. The answer labels that limitation
-explicitly: "I could not verify the precise location. My recollection suggests
-Chapter X, but that chapter attribution remains unconfirmed." If the lookup
-found no confirming source, a useful suggestion may still be returned as coming
-from model memory, clearly marked unverified.
+theorem" uses a standard lookup. The worker recalls candidate works, matches
+bibliographic records, then assesses their relevance without claiming a theorem
+has been read. The search is bounded to 12 requests and 5, 8 or 12 minutes
+according to effort. These are ceilings, not targets. A verified record remains
+available if relevance selection cannot finish, clearly labelled as not assessed.
+A useful book reference can answer the request even when its precise chapter or
+theorem cannot be verified. The answer states that limitation and distinguishes
+model recollection from located records.
 
 An explicit request for an exact theorem, section, page or edition, or to verify
 a given citation ("is Theorem 9.26 of Brezis about this?"), opts into precise
@@ -417,8 +439,10 @@ to remove that uncertainty. This stops the reference lookup branch; independent
 proof or other work requested in the same message can continue.
 
 The check card is marked [1] and its log is saved in `.mathagent/checks/`. A
-check sees only the delegated statement, never the conversation or workspace
-files, so its queries stay public words. A request for a reading list or survey
+check receives the delegated statement and relevant conversation context, with
+large earlier tool results elided. It does not pin workspace files. Online
+queries must use public bibliographic terms; pasted private text can influence
+what the model searches for. A request for a reading list or survey
 of a topic goes to the Literature worker instead, which builds the same verified
 reading list as the Literature notebook.
 
@@ -429,6 +453,11 @@ without links are retained, and pagination and extraction coverage are reported
 separately. Retrieved pages are reference data, not instructions. Opening a
 supplied URL needs no search key; general web search still needs the configured
 search provider. Uncached pages cannot be fetched when online access is off.
+
+After confirming an `@mode`, the composer's **Effort** picker sets its effort
+from Low to Poincaré. Detailed review starts at High and other explicit calls at
+Medium. Selecting Poincaré explicitly requests maximum effort; a launch-time cap
+still takes precedence. Clearing the selected mode returns to adaptive effort.
 
 Each delegated task has a card with its request, effort and returned status.
 Proofs and reports open in their own notebooks, where their live output, sources,

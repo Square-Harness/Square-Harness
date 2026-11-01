@@ -1,10 +1,9 @@
 """Bind the shared sandbox to one skill and policy, and expose it as model tools.
 
-Trust boundary: ``PythonSandbox.bind`` is called by controller code only. The
-skill (and therefore the policy) is fixed for the life of a session; a model
-can call ``execute_python`` with code and optional *lower* limits, but cannot
-choose another skill, policy, image or flag. ``python-lab`` is an explicit skill:
-binding it without ``explicit=True`` (the user's own command) is refused.
+Only controller code calls ``PythonSandbox.bind``. The skill, and therefore the
+policy, is fixed for the session: a model sends code and may lower the limits,
+but cannot choose a skill, policy, image or container flag. ``python-lab`` is an
+explicit skill, bound only with ``explicit=True`` (the user's own command).
 """
 import json
 import threading
@@ -20,129 +19,106 @@ from .policy import LAB, SANITY, PolicyError, load_policies, resolve
 TOOL_NAMES = ('execute_python', 'read_experiment', 'read_skill_reference')
 RESULT_CHARS = 5600
 PAGE_CHARS = 5000
-# Automatic checks add tool schemas (~1k tokens) and results to every call: offer them
-# only when the model context has room to spare. Explicit commands are not gated.
+# Automatic checks add ~1k tokens of tool schema to every call: only offer them with room to spare.
 MIN_AUTOMATIC_CONTEXT = 32768
-SANITY_NOTE = ('Numerical evidence only. Passing cases never prove a universal claim. A violation is a '
-               'candidate counterexample until admissibility, conditioning and precision are checked '
-               '(exactly with SymPy, or at higher precision with mpmath).')
-LAB_NOTE = 'Report only what this output shows. The code, output and files are saved under experiment_id.'
-FAILED_NOTE = ('This run did not complete (status {status}): it verified nothing. Do not cite it as evidence; '
-               'fix the code and rerun, or say the check is inconclusive.')
-MEMORY_HINT = (' It reached the {memory_mb} MB memory limit: estimate array sizes first (n x m x 8 bytes for '
-               'float64), keep only what you need (simulate step by step instead of storing every path, '
-               'accumulate statistics, use float32), or use fewer samples.')
-FIGURE_NOTE = (' The figures are shown to the user below this run; refer to them by name and describe what '
-               'they show instead of pasting image links.')
+NOTES = {
+    SANITY: ('Numerical evidence only. Passing cases never prove a universal claim; a violation is a candidate '
+             'counterexample until admissibility, conditioning and precision are checked (SymPy, mpmath).'),
+    LAB: 'Report only what this output shows. The code, output and files are saved under experiment_id.',
+    'failed': ('This run did not complete (status {status}): it verified nothing. Do not cite it as evidence; '
+               'fix the code and rerun, or say the check is inconclusive.'),
+    'memory': (' It reached the {memory_mb} MB memory limit: estimate array sizes first (n x m x 8 bytes), '
+               'simulate step by step instead of storing every path, accumulate statistics, or use float32.'),
+    'files': ' The files are shown to the user with this run; describe them instead of pasting links.',
+}
 
 
 def _excerpt(text, limit):
     if len(text) <= limit:
         return text
-    if limit <= 40:
-        return '[omitted]'
     head = limit // 3
     return text[:head] + f'\n[... {len(text) - limit} characters omitted ...]\n' + text[-(limit - head):]
 
 
+def _page(text, offset, **fields):
+    if type(offset) is not int or offset < 0:
+        raise ValueError('offset must be a nonnegative integer')
+    value = {**fields, 'offset': offset, 'length': len(text), 'text': text[offset:offset + PAGE_CHARS]}
+    if offset + PAGE_CHARS < len(text):
+        value['next_offset'] = offset + PAGE_CHARS
+    return value
+
+
 class NumericsSession:
-    """One controller-chosen binding: a skill, its policy, a workspace store and a run counter."""
+    """A controller-chosen binding: one skill, its policy, a workspace store and a run counter."""
 
     tool_names = TOOL_NAMES
 
     def __init__(self, executor, store, policy, skill, *, explicit, approve=None, cancel=None):
         self.executor, self.store, self.policy, self.skill = executor, store, policy, skill
-        self.explicit = explicit
-        self.approve = approve
-        self.cancel = cancel
+        self.explicit, self.approve, self.cancel = explicit, approve, cancel
         self.runs = 0
+        self.on_record = None  # Set by the interface to show each saved run in the conversation.
         self._lock = threading.Lock()
-        # Set by an interface to show a saved run (its figures) in the conversation.
-        self.on_record = None
 
     def new_turn(self):
-        """A new user turn starts a new check with a fresh run allowance."""
         with self._lock:
             self.runs = 0
 
     def instructions(self):
-        """Level 1 of the skill (description, core rules, budget), sent with the execute_python tool.
-
-        The full SKILL.md body and its references stay one read_skill_reference call away,
-        so ordinary chats pay for a few hundred tokens, not the whole skill.
-        """
+        """The skill's description, core rules and budget; the full skill is one tool call away."""
         d = self.policy.defaults
-        budget = (f'Sandbox budget: {self.policy.max_runs} runs for this turn; each run at most '
-                  f'{d.timeout_seconds:g} s, {d.memory_mb} MB, {d.cpus:g} CPU; no network, no files, no installs.')
+        budget = (f'Sandbox budget: {self.policy.max_runs} runs this turn, each at most {d.timeout_seconds:g} s, '
+                  f'{d.memory_mb} MB, {d.cpus:g} CPU; no network, no files, no installs.')
         if self.policy.escalation:
             c = self.policy.ceiling
-            budget += (f' Larger requests (up to {c.timeout_seconds:g} s, {c.memory_mb} MB, {c.cpus:g} CPU) '
-                       'ask the user for approval.')
-        how = ('The user invoked this skill.' if self.explicit else
-               'This skill is available automatically: decide whether a check is worthwhile.')
+            budget += f' More (up to {c.timeout_seconds:g} s, {c.memory_mb} MB, {c.cpus:g} CPU) needs the user\'s approval.'
+        how = 'The user invoked this skill.' if self.explicit else 'Decide whether a check is worthwhile.'
         core = self.skill.section('Core rules') or self.skill.body.strip()
-        more = ', '.join(('skill',) + self.skill.references)
+        refs = ', '.join(('skill',) + self.skill.references)
         return (f'SKILL {self.skill.name}: {self.skill.description} {how}\n{core}\n{budget}\n'
-                f'Full procedure and worked examples: read_skill_reference with name {more}.')
+                f'Full procedure and worked examples: read_skill_reference with name {refs}.')
 
     def schemas(self):
         d = self.policy.defaults
-        timeout = (f'Lower time limit in seconds (default and maximum {d.timeout_seconds:g}).'
-                   if not self.policy.escalation else
-                   f'Time limit in seconds (default {d.timeout_seconds:g}; more needs the user\'s approval).')
         properties = {
             'code': {'type': 'string', 'description': 'Complete Python 3.12 script (NumPy, SciPy, SymPy, mpmath, '
-                     'Matplotlib). Print results or assign a JSON-friendly RESULT. Open figures are saved; '
-                     'extra .png/.csv/.txt/.json files go in OUTPUT_DIR.'},
+                     'Matplotlib). Print results or assign a JSON-friendly RESULT. Saved files and open figures '
+                     'are returned.'},
             'purpose': {'type': 'string', 'description': 'One sentence: the claim tested or the computation requested.'},
-            'seed': {'type': 'integer', 'description': 'Seeds random and numpy.random before the run (also SEED).'},
+            'seed': {'type': 'integer', 'description': 'Seeds random and numpy.random (also SEED).'},
             'parameters': {'type': 'object', 'description': 'Small JSON object available to the code as PARAMS.'},
-            'timeout_seconds': {'type': 'number', 'description': timeout},
+            'timeout_seconds': {'type': 'number', 'description': f'Time limit in seconds (default {d.timeout_seconds:g}'
+                                + ('; more needs the user\'s approval).' if self.policy.escalation else ', the maximum).')},
         }
         if self.policy.escalation:
-            properties['memory_mb'] = {'type': 'integer', 'description': f'Memory in MB (default {d.memory_mb}; '
-                                       'more needs approval).'}
-            properties['cpus'] = {'type': 'number', 'description': f'CPU cores (default {d.cpus:g}; more needs approval).'}
-        # The skill travels with its tool, so every model loop (terminal chat, interface
-        # workers, the Assistant) receives the same instructions without a prompt hook.
-        description = ('Run Python in an isolated local sandbox (no network, no access to your files) for '
-                       + ('the computation the user requested.' if self.skill.name == LAB else
-                          'a cheap numerical check that could falsify a mathematical claim.')
-                       + ' Returns stdout, errors, RESULT, figure summaries and an experiment_id.\n\n'
-                       + self.instructions())
-        tools = [schema('execute_python', description, properties, ['code']),
-                 schema('read_experiment', 'Read more of a saved sandbox experiment.',
-                        {'experiment_id': {'type': 'string'},
-                         'part': {'type': 'string', 'enum': ['summary', 'code', 'stdout', 'stderr', 'result']},
-                         'offset': {'type': 'integer'}},
-                        ['experiment_id'])]
-        tools.append(schema('read_skill_reference', f'Read the {self.skill.name} skill ("skill") or a reference.',
-                            {'name': {'type': 'string', 'enum': ['skill', *self.skill.references]},
-                             'offset': {'type': 'integer'}}, ['name']))
-        return tools
-
-    # -- tool calls ----------------------------------------------------------
+            properties['memory_mb'] = {'type': 'integer', 'description': f'Memory in MB (default {d.memory_mb}).'}
+            properties['cpus'] = {'type': 'number', 'description': f'CPU cores (default {d.cpus:g}).'}
+        purpose = ('the computation the user requested' if self.skill.name == LAB
+                   else 'a cheap numerical check that could falsify a mathematical claim')
+        # The skill travels with its tool, so every model loop gets the same instructions.
+        description = (f'Run Python in an isolated local sandbox (no network, no access to your files) for {purpose}. '
+                       'Returns stdout, errors, RESULT, file summaries and an experiment_id.\n\n' + self.instructions())
+        return [schema('execute_python', description, properties, ['code']),
+                schema('read_experiment', 'Read more of a saved sandbox experiment.',
+                       {'experiment_id': {'type': 'string'},
+                        'part': {'type': 'string', 'enum': ['summary', 'code', 'stdout', 'stderr', 'result']},
+                        'offset': {'type': 'integer'}}, ['experiment_id']),
+                schema('read_skill_reference', f'Read the {self.skill.name} skill ("skill") or a reference.',
+                       {'name': {'type': 'string', 'enum': ['skill', *self.skill.references]},
+                        'offset': {'type': 'integer'}}, ['name'])]
 
     def execute(self, name, arguments):
-        """Run one tool call and return bounded JSON text (never raises for model errors)."""
+        """One tool call as bounded JSON text; model errors are returned, never raised."""
         try:
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
-            if not isinstance(arguments, dict):
-                raise ValueError('Tool arguments must be an object')
-            if name == 'execute_python':
-                value = self.execute_python(**arguments)
-            elif name == 'read_experiment':
-                value = self.read_experiment(**arguments)
-            elif name == 'read_skill_reference':
-                value = self.read_skill_reference(**arguments)
-            else:
-                raise ValueError(f'Unknown sandbox tool {name}')
+            if not isinstance(arguments, dict) or name not in TOOL_NAMES:
+                raise ValueError('Unknown sandbox tool or arguments')
+            value = getattr(self, name)(**arguments)
         except PolicyError as exc:
             value = {'status': 'refused', 'message': str(exc)}
-        except TypeError as exc:
-            value = {'status': 'invalid_arguments', 'message': str(exc)}
-        except (ValueError, OSError) as exc:
+        except (TypeError, ValueError, OSError) as exc:
             value = {'status': 'invalid_arguments', 'message': str(exc)}
         return self._render(value)
 
@@ -150,31 +126,29 @@ class NumericsSession:
                        memory_mb=None, cpus=None):
         if not isinstance(purpose, str) or len(purpose) > 600:
             raise ValueError('purpose must be a sentence of at most 600 characters')
-        if not self.policy.escalation and (memory_mb is not None or cpus is not None):
-            raise PolicyError(f'{self.policy.name} runs use fixed memory and CPU limits; automatic checks cannot '
-                              'request more. Ask the user to use /python-lab for heavier computations.')
         if not isinstance(code, str) or not code.strip():
             raise ValueError('Provide nonempty Python source code')
+        if not self.policy.escalation and (memory_mb is not None or cpus is not None):
+            raise PolicyError('Automatic checks use fixed memory and CPU limits; heavier computations are for '
+                              'the user\'s /python-lab.')
         limits = resolve(self.policy, {'timeout_seconds': timeout_seconds, 'memory_mb': memory_mb, 'cpus': cpus},
                          self.approve)
         with self._lock:
             if self.runs >= self.policy.max_runs:
                 return {'status': 'budget_exhausted', 'runs_left': 0,
-                        'message': f'This check has used its {self.policy.max_runs} sandbox runs. Reason from the '
-                                   'results obtained, or report the check as inconclusive.'}
+                        'message': f'This check has used its {self.policy.max_runs} runs. Reason from the results '
+                                   'obtained, or report the check as inconclusive.'}
             self.runs += 1
         try:
             image = self.executor.probe()
             result = self.executor.run(code, limits, seed=seed, parameters=parameters, cancel=self.cancel)
-        except (SandboxUnavailable, OSError) as exc:
+        except (SandboxUnavailable, OSError, ValueError) as exc:
             with self._lock:
                 self.runs -= 1
-            return {'status': 'sandbox_unavailable', 'message': str(exc) +
-                    ' Continue without numerical evidence and say that no computation was run.'}
-        except ValueError:
-            with self._lock:
-                self.runs -= 1
-            raise
+            if isinstance(exc, ValueError):
+                raise
+            return {'status': 'sandbox_unavailable',
+                    'message': f'{exc} Continue without numerical evidence and say that no computation was run.'}
         record = self.store.save(code=code, result=result, limits=limits, policy=self.policy.name, image=image,
                                  seed=seed, parameters=parameters, purpose=purpose, explicit=self.explicit,
                                  harness_version=__version__)
@@ -186,16 +160,10 @@ class NumericsSession:
         return self._summary(record, limits)
 
     def _summary(self, record, limits):
-        value = {'experiment_id': record['id'], 'status': record['status'],
-                 'elapsed_seconds': record['elapsed_seconds'],
-                 'limits': {'timeout_seconds': limits.timeout_seconds, 'memory_mb': limits.memory_mb,
-                            'cpus': limits.cpus},
+        value = {'experiment_id': record['id'], 'status': record['status'], 'elapsed_seconds': record['elapsed_seconds'],
+                 'limits': {'timeout_seconds': limits.timeout_seconds, 'memory_mb': limits.memory_mb, 'cpus': limits.cpus},
                  'runs_left': max(self.policy.max_runs - self.runs, 0)}
-        for key in ('stdout', 'stderr'):
-            if record[key]:
-                value[key] = record[key]
-        if record['error']:
-            value['error'] = dict(record['error'])
+        value.update({key: record[key] for key in ('stdout', 'stderr', 'error', 'warnings', 'message') if record[key]})
         if record['result'] is not None:
             value['result'] = record['result']
         figures = [{'path': a['path'], 'width': a.get('width'), 'height': a.get('height'),
@@ -206,28 +174,21 @@ class NumericsSession:
             value['figures'] = figures
         if files:
             value['files'] = files
-        if record['warnings']:
-            value['warnings'] = record['warnings']
-        if record['message']:
-            value['message'] = record['message']
-        if record['status'] != 'ok':
-            value['note'] = FAILED_NOTE.format(status=record['status'])
-            if record['status'] == 'memory':
-                value['note'] += MEMORY_HINT.format(memory_mb=limits.memory_mb)
+        if record['status'] == 'ok':
+            value['note'] = NOTES[self.policy.name]
         else:
-            value['note'] = LAB_NOTE if self.policy.name == LAB else SANITY_NOTE
-        if figures:
-            value['note'] += FIGURE_NOTE
+            value['note'] = NOTES['failed'].format(status=record['status'])
+            if record['status'] == 'memory':
+                value['note'] += NOTES['memory'].format(memory_mb=limits.memory_mb)
+        if record['artifacts']:
+            value['note'] += NOTES['files']
         return value
 
     def read_experiment(self, experiment_id, part='summary', offset=0):
         record = self.store.load(experiment_id)
-        if type(offset) is not int or offset < 0:
-            raise ValueError('offset must be a nonnegative integer')
         if part == 'summary':
-            value = {k: record.get(k) for k in ('id', 'created', 'skill', 'invocation', 'purpose', 'status',
-                                                'seed', 'parameters', 'limits', 'elapsed_seconds', 'error',
-                                                'warnings', 'message')}
+            value = {k: record.get(k) for k in ('id', 'created', 'skill', 'invocation', 'purpose', 'status', 'seed',
+                                                'parameters', 'limits', 'elapsed_seconds', 'error', 'warnings', 'message')}
             value['image'] = {k: (record.get('image') or {}).get(k) for k in ('image', 'id', 'architecture')}
             value['artifacts'] = [{k: a.get(k) for k in ('path', 'kind', 'bytes', 'width', 'height')}
                                   for a in record.get('artifacts', [])]
@@ -236,38 +197,27 @@ class NumericsSession:
             raise ValueError('part must be summary, code, stdout, stderr or result')
         text = record.get(part)
         text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, indent=1)
-        return {'experiment_id': experiment_id, 'part': part, 'offset': offset, 'length': len(text),
-                'text': text[offset:offset + PAGE_CHARS],
-                **({'next_offset': offset + PAGE_CHARS} if offset + PAGE_CHARS < len(text) else {})}
+        return _page(text, offset, experiment_id=experiment_id, part=part)
 
     def read_skill_reference(self, name, offset=0):
-        if type(offset) is not int or offset < 0:
-            raise ValueError('offset must be a nonnegative integer')
-        text = self.skill.reference(name)
-        return {'skill': self.skill.name, 'reference': name, 'offset': offset, 'length': len(text),
-                'text': text[offset:offset + PAGE_CHARS],
-                **({'next_offset': offset + PAGE_CHARS} if offset + PAGE_CHARS < len(text) else {})}
+        return _page(self.skill.reference(name), offset, skill=self.skill.name, reference=name)
 
     @staticmethod
     def _render(value):
-        """Compact JSON within RESULT_CHARS, shrinking the long fields first instead of cutting the JSON."""
+        """Compact JSON within RESULT_CHARS: long fields are shortened, the JSON is never cut."""
         text = json.dumps(value, ensure_ascii=False, default=str)
-        budget = 3000
-        while len(text) > RESULT_CHARS and budget >= 0:
-            shrunk = dict(value)
-            for key in ('stdout', 'stderr', 'text'):
-                if isinstance(shrunk.get(key), str):
-                    shrunk[key] = _excerpt(shrunk[key], budget if key != 'stderr' else budget // 2)
-            if isinstance(shrunk.get('error'), dict):
-                shrunk['error'] = {**shrunk['error'], 'traceback': _excerpt(shrunk['error'].get('traceback', ''),
-                                                                            budget // 2)}
-            if 'result' in shrunk and len(json.dumps(shrunk['result'], default=str)) > budget:
-                shrunk['result'] = _excerpt(json.dumps(shrunk['result'], default=str), budget)
-            for figure in shrunk.get('figures', []):
-                if budget < 1500:
-                    figure.pop('summary', None)
-            text = json.dumps(shrunk, ensure_ascii=False, default=str)
-            budget = budget // 2 if budget > 50 else -1
+        if len(text) <= RESULT_CHARS:
+            return text
+        value = dict(value)
+        for key, limit in (('stdout', 1500), ('stderr', 600), ('text', 3000)):
+            if isinstance(value.get(key), str):
+                value[key] = _excerpt(value[key], limit)
+        if isinstance(value.get('error'), dict):
+            value['error'] = {**value['error'], 'traceback': _excerpt(value['error'].get('traceback', ''), 800)}
+        if 'result' in value and len(json.dumps(value['result'], default=str)) > 1200:
+            value['result'] = _excerpt(json.dumps(value['result'], default=str), 1200)
+        value['figures'] = [{k: v for k, v in f.items() if k != 'summary'} for f in value.get('figures', [])] or None
+        text = json.dumps({k: v for k, v in value.items() if v is not None}, ensure_ascii=False, default=str)
         if len(text) > RESULT_CHARS:
             text = json.dumps({k: value[k] for k in ('experiment_id', 'status') if k in value}
                               | {'message': 'Result too large to show; use read_experiment.'})
@@ -275,10 +225,9 @@ class NumericsSession:
 
 
 class PythonSandbox:
-    """Process-wide configuration of the sandbox: one executor, the policies, availability."""
+    """Process-wide sandbox configuration: one executor, the policies and availability."""
 
-    def __init__(self, *, enabled=True, automatic=True, image=IMAGE, limits_file=None, executor=None,
-                 policies=None):
+    def __init__(self, *, enabled=True, automatic=True, image=IMAGE, limits_file=None, executor=None, policies=None):
         self.enabled, self.automatic = enabled, automatic
         self.policies = policies or load_policies(limits_file)
         self.executor = executor or DockerExecutor(image)
@@ -293,7 +242,7 @@ class PythonSandbox:
                    limits_file=getattr(args, 'python_limits', None))
 
     def unavailable(self):
-        """None when the sandbox can run, else the reason (rechecked after 30 s)."""
+        """None when the sandbox can run, else why (a failure is rechecked after 30 s)."""
         if not self.enabled:
             return 'The Python sandbox is disabled (--no-python-sandbox).'
         with self._lock:
@@ -301,36 +250,30 @@ class PythonSandbox:
                 return self._failure[1]
         try:
             self.executor.probe()
+            failure = None
         except SandboxUnavailable as exc:
-            with self._lock:
-                self._failure = (time.monotonic(), str(exc))
-            return str(exc)
+            failure = (time.monotonic(), str(exc))
         with self._lock:
-            self._failure = None
-        return None
+            self._failure = failure
+        return failure and failure[1]
 
     def bind(self, skill_name, workspace_root, *, explicit, approve=None, cancel=None):
-        """A session for ``skill_name``; only controller code that reacts to the user passes explicit=True."""
+        """A session for ``skill_name``; only code reacting to the user's own command passes explicit=True."""
         skill = skill_catalog.load(skill_name)
         if skill.name not in self.policies:
             raise ValueError(f'{skill.name} does not use the Python sandbox')
         if skill.invocation == 'explicit' and explicit is not True:
-            raise PermissionError(f'{skill.name} runs only when the user invokes it explicitly')
-        reason = self.unavailable()
-        if reason:
-            raise SandboxUnavailable('unavailable', reason)
+            raise PermissionError(f'{skill.name} runs only when the user invokes it')
+        if reason := self.unavailable():
+            raise SandboxUnavailable(reason)
         return NumericsSession(self.executor, ExperimentStore(workspace_root), self.policies[skill.name], skill,
-                               explicit=bool(explicit), approve=approve if skill.name == LAB else None,
-                               cancel=cancel)
+                               explicit=bool(explicit), approve=approve if skill.name == LAB else None, cancel=cancel)
 
     def automatic_session(self, workspace_root, cancel=None, ctx=None):
-        """The sanity-check binding for ordinary chat, or None when disabled, unavailable or too small."""
-        if not (self.enabled and self.automatic):
-            return None
-        if ctx is not None and ctx < MIN_AUTOMATIC_CONTEXT:
+        """The sanity-check binding for ordinary chat, or None when off, unavailable or the context is small."""
+        if not (self.enabled and self.automatic) or (ctx is not None and ctx < MIN_AUTOMATIC_CONTEXT):
             return None
         try:
             return self.bind(SANITY, workspace_root, explicit=False, cancel=cancel)
         except (SandboxUnavailable, OSError, ValueError):
-            # Automatic checks are optional: a missing engine, image or skill file must not stop a chat.
-            return None
+            return None  # Optional: a missing engine, image or skill file never stops a chat.

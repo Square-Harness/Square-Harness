@@ -113,9 +113,9 @@ HELP = '''Commands
                                       result of the --research-file manuscript, e.g. "Lemma 3.2"
   /explain [result + proof]           Precise step-by-step explanation of a result and its proof
   /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
-  /python-lab [request or code]       Run Python experiments, plots, simulations in the Docker sandbox
+  /python-lab [request or code]       Run Python computations and plots in the Docker sandbox
   /sanity-check [claim]               Try to falsify a claim with cheap numerical experiments
-  /experiments                       List saved sandbox experiments (.mathagent/experiments/)
+  /experiments                       List saved sandbox experiments
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
   /research-resume <id>               Resume a research job with its saved budgets
@@ -123,7 +123,7 @@ HELP = '''Commands
   /resume [proof-id]                  Resume a saved proof with its remaining budget
   /proof-report [proof-id]            Read its saved report (works offline; /ledger alias)
   /proofs                            List saved proof jobs (works offline)
-  /review                            Fresh-context critique of the last answer/debrief
+  /review                            Fresh-context critique of the last answer
   /think on|off                      Toggle chat reasoning; proof work always uses thinking
   /context N                         Change context allocation (e.g. 16384)
   /clear                             Clear conversation history
@@ -133,9 +133,8 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Sandboxed Python (Docker, no network, no file access): /python-lab on request; critic/explore
-chats may run small automatic numerical checks (--no-numerical-checks disables them).
-Unsandboxed Python is separate: opt-in (--allow-python), approved per call.
+Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in critic/explore.
+Unsandboxed Python is opt-in (--allow-python) and approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
 Offline is the default: a loopback model server and cached/local sources only.
@@ -144,7 +143,6 @@ Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
 
 
-# Hyphenated skill names as typed commands.
 COMMAND_ALIASES = {'/python-lab': 'python_lab', '/sanity-check': 'sanity_check',
                    '/numerical-sanity-check': 'sanity_check'}
 
@@ -173,7 +171,7 @@ def parser():
                    help='Simultaneous Assistant workers on vLLM/OpenAI-compatible servers (1–4; other backends use 1)')
     p.add_argument('--assistant-tokens', type=int, help='Optional hard shared generated-token ceiling (default: no cumulative ceiling)')
     p.add_argument('--assistant-input-tokens', type=int, help='Optional hard shared input-token ceiling (default: no cumulative ceiling)')
-    p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort, 900–7200 seconds)')
+    p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort, 900–14700 seconds)')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification (default: no cumulative ceiling)')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
@@ -195,11 +193,12 @@ def parser():
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Maximum investigation rounds per new report')
+    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/4/6/10 rounds map to Low/Medium/High/Extra high/Poincaré (default: 3 for Quick review/Explain, 6 otherwise)')
     p.add_argument('--research-tokens', type=int, help='Optional cumulative generated-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
+    p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')
     p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
-    p.add_argument('--research-requests', type=int, default=12, help='Maximum external HTTP requests per new research or assisted-proof job')
+    p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: sized to reading-list breadth, otherwise 12)')
     p.add_argument('--research-chars', type=int, default=30000, help='Maximum literature-tool response characters per job')
     p.add_argument('--output', metavar='PATH', help='Export the research/referee Markdown report inside the workspace')
     p.add_argument('--mode', choices=MODES, default='prove')
@@ -278,8 +277,8 @@ def main():
             or args.assistant_input_tokens is not None and args.assistant_input_tokens < 4096
             or args.assistant_seconds is not None and (not math.isfinite(args.assistant_seconds) or args.assistant_seconds <= 0)):
         p.error('Use assistant-concurrency 1–4, assistant token budgets >= 4096, and finite assistant-seconds > 0')
-    if args.ctx < 2048 or not 0 < args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
-        p.error('Use ctx >= 2048, 0 < predict < ctx - 1024, and 1 <= max-rounds <= 32')
+    if args.ctx < 2048 or not 128 <= args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
+        p.error('Use ctx >= 2048, 128 <= predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if args.specialist_output_tokens is not None and args.specialist_output_tokens < 128:
         p.error('Use specialist-output-tokens >= 128')
     if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens is not None and args.proof_tokens < 512
@@ -293,11 +292,14 @@ def main():
     if args.proof_verify_temperature is not None and (not math.isfinite(args.proof_verify_temperature)
                                                       or not 0 <= args.proof_verify_temperature <= 2):
         p.error('--proof-verify-temperature must be between 0 and 2')
+    if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= 86400:
+        p.error('Use resume-add-seconds between 0 and 86400')
+    research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens is not None and args.research_tokens < 1024
             or args.research_input_tokens is not None and args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
-            or args.research_seconds <= 0 or not 0 <= args.research_requests <= 100
+            or args.research_seconds <= 0 or args.research_requests is not None and not 0 <= args.research_requests <= 1000
             or not 1000 <= args.research_chars <= 1_000_000):
-        p.error('Use research-rounds 1–50, research-tokens >= 1024, research-input-tokens >= 2048, positive finite research-seconds, research-requests 0–100, and research-chars 1000–1000000')
+        p.error('Use research-rounds 1–50, research-tokens >= 1024, research-input-tokens >= 2048, positive finite research-seconds, research-requests 0–1000, and research-chars 1000–1000000')
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         p.error('--host must be an http(s) model URL without credentials, query or fragment')
@@ -324,7 +326,7 @@ def main():
     ui = UI(args.show_thinking)
     try:
         literature = LiteratureTools(args.workspace, online=args.online,
-            max_requests=args.research_requests, max_chars=args.research_chars)
+            max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
         sandbox = PythonSandbox.from_args(args)
         client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
@@ -349,6 +351,7 @@ def main():
     research_running = False
     last_proof_id = ''
     last_research_id = ''
+    last_job_status = None
     one_shot = args.prompt is not None or args.resume is not None or args.research_resume is not None
 
     def fresh_library():
@@ -356,7 +359,7 @@ def main():
         # offline resume or another job's exhausted budget alter later jobs.
         nonlocal literature
         literature = LiteratureTools(workspace.root, online=args.online,
-            max_requests=args.research_requests, max_chars=args.research_chars)
+            max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
         workspace.literature = literature
 
     def ensure_model():
@@ -382,7 +385,8 @@ def main():
         return found
 
     def proof_result(result):
-        nonlocal last_proof_id
+        nonlocal last_proof_id, last_job_status
+        last_job_status = result['status']
         last_proof_id = result['id']
         ui.say(f'\nProof {result["id"]} · {result["status"]}')
         if result.get('answer'):
@@ -402,7 +406,8 @@ def main():
         return args.assistant_concurrency if args.backend == 'openai' else 1
 
     def research_result(result, export=True):
-        nonlocal last_research_id
+        nonlocal last_research_id, last_job_status
+        last_job_status = result['status']
         last_research_id = result['id']
         ui.say(f'\nResearch {result["id"]} · {result["status"]}')
         ui.say(result['report'])
@@ -426,12 +431,11 @@ def main():
     sandbox_noted = False
 
     def bind_numerics(mode):
-        """The sandbox binding for this turn, chosen here and never by the model."""
+        """This turn's sandbox binding, chosen here, never by the model."""
         nonlocal sandbox_noted
         skill = SANDBOX_MODES.get(mode)
         if skill:
-            # The user typed /python-lab or /sanity-check: an explicit invocation.
-            try:
+            try:  # The user's own /python-lab or /sanity-check.
                 return sandbox.bind(skill, workspace.root, explicit=True, approve=ui.approve)
             except SandboxUnavailable as exc:
                 raise ValueError(f'{skill} needs the Python sandbox. {exc}') from None
@@ -488,9 +492,9 @@ def main():
                 variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
             result = runner.start(query, kind=kind,
-                source_files=args.research_file, max_rounds=args.research_rounds,
+                source_files=args.research_file, max_rounds=(args.research_rounds if research_rounds_explicit or agent.mode not in ('quick_review', 'explain') else 3),
                 max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
-                max_seconds=args.research_seconds, max_requests=args.research_requests,
+                max_seconds=args.research_seconds, max_requests=args.research_requests if args.research_requests is not None or agent.mode == 'literature' else 12,
                 max_chars=args.research_chars)
             research_running = False
             research_result(result)
@@ -514,7 +518,7 @@ def main():
                 template_files=args.template_file, output=args.output or '',
                 max_rounds=args.research_rounds, max_tokens=args.research_tokens,
                 max_input_tokens=args.research_input_tokens, max_seconds=args.research_seconds,
-                max_requests=args.research_requests, max_chars=args.research_chars)
+                max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
             research_running = False
             research_result(result, export=False)
         else:
@@ -544,7 +548,7 @@ def main():
                     agent.history = []
                     ui.say('Conversation cleared.')
                 elif command == '/skills':
-                    for name in ('literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
+                    for name in ('check', 'literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
                         how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in critic/explore, or /sanity-check'
@@ -573,15 +577,18 @@ def main():
                     research_running = True
                     fresh_library()
                     job_id = rest or last_research_id
-                    saved = ResearchRunner.inspect(workspace.root, job_id)
+                    check_job = (workspace.root / '.mathagent' / 'checks' / job_id).is_dir()
+                    saved = (CheckRunner if check_job else ResearchRunner).inspect(workspace.root, job_id)
                     writeup = saved.get('kind') == 'writeup'
                     variant = variant_for_state(saved)
-                    if variant:
+                    if check_job:
+                        runner = CheckRunner(agent, ui.emit)
+                    elif variant:
                         runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
                     else:
                         runner = (WriteupRunner if writeup else ReviewRunner if saved.get('pipeline') == ReviewRunner.PIPELINE
                                   else ResearchRunner)(agent, ui.emit)
-                    result = runner.resume(job_id)
+                    result = runner.resume(job_id, additional_seconds=args.resume_add_seconds) if args.resume_add_seconds else runner.resume(job_id)
                     research_running = False
                     model_checked = False
                     research_result(result, export=not writeup)
@@ -606,7 +613,9 @@ def main():
                     fresh_library()
                     # The runner restores the saved model/settings; do not
                     # validate an unrelated CLI default model before resuming.
-                    result = ProofRunner(agent, ui.emit).resume(last_proof_id)
+                    resume_agent = copy.copy(agent)
+                    resume_agent.client = copy.copy(agent.client)
+                    result = ProofRunner(resume_agent, ui.emit).resume(last_proof_id)
                     proof_running = False
                     model_checked = False
                     proof_result(result)
@@ -672,7 +681,9 @@ def main():
             else:
                 run_query(query)
             if one_shot:
-                return 0
+                if last_job_status in ('paused', 'interrupted'):
+                    return 130
+                return 0 if last_job_status in (None, 'candidate_complete', 'complete', 'reviewed', 'listed', 'answered') else 1
         except KeyboardInterrupt:
             ui.stop()
             if proof_running:

@@ -55,6 +55,8 @@ def _safe_error(exc):
         code = 'offline_uncached'
     elif 'brave_search_api_key' in lower:
         code = 'missing_search_provider'
+    elif 'unsupported' in lower or 'no readable' in lower or 'extraction' in lower:
+        code = 'unsupported_document'
     elif 'url' in lower or 'nonpublic' in lower or 'hostname resolves' in lower:
         code = 'invalid_url'
     elif 'timed out' in lower or 'timeout' in lower:
@@ -132,6 +134,17 @@ class _HTMLPage(HTMLParser):
         self.nodes = 1
 
     def handle_starttag(self, tag, attrs):
+        implied = {'p': {'p'}, 'li': {'li'}, 'dt': {'dt', 'dd'}, 'dd': {'dt', 'dd'},
+                   'tr': {'tr'}, 'td': {'td', 'th'}, 'th': {'td', 'th'}, 'option': {'option'}}
+        stops = {'li': {'ul', 'ol'}, 'dt': {'dl'}, 'dd': {'dl'},
+                 'tr': {'table'}, 'td': {'tr', 'table'}, 'th': {'tr', 'table'}}
+        for index in range(len(self.stack) - 1, 0, -1):
+            ancestor = self.stack[index].tag
+            if ancestor in implied.get(tag, set()):
+                del self.stack[index:]
+                break
+            if ancestor in stops.get(tag, set()):
+                break
         if self.nodes >= 100000 or len(self.stack) >= 128:
             raise WebError('HTML structure exceeds the bounded reader limits.', code='unsupported_document')
         node = _Node(tag, attrs, self.stack[-1])

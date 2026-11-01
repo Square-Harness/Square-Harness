@@ -1,10 +1,14 @@
 import type { WorkProgress } from './api'
 import { count } from './format.ts'
 
-const PHASES: Record<string, string> = {
+export const PHASES: Record<string, string> = {
+  verify: 'Verifying', fix: 'Correcting', literature: 'Checking references', sweep: 'Searching scholarly records',
+  graph: 'Following citations', screen: 'Screening records', organise: 'Organising the reading list', annotate: 'Annotating entries',
+  recall: 'Recalling candidate references', verdict: 'Assessing evidence', discover: 'Discovering references',
+  standard_discover: 'Discovering references', standard_select: 'Selecting references', reference_select: 'Selecting references',
   plan: 'Planning', read: 'Reading sources', reading: 'Reading sources', investigate: 'Investigating',
   scope: 'Preparing the overview', extract: 'Finding the result and proof', pick: 'Finding the result',
-  check: 'Checking proofs', confirm: 'Rechecking an objection', explain: 'Writing the explanation',
+  check: 'Checking the argument', confirm: 'Rechecking an objection', explain: 'Writing the explanation',
   fill: 'Completing the explanation', 'explain-check': 'Checking the explanation',
   'explain-fix': 'Correcting the explanation', write: 'Writing the report', draft: 'Writing the report',
   review: 'Reviewing the draft', revise: 'Revising the draft', section: 'Writing sections',

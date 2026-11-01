@@ -6,6 +6,7 @@ provides a synchronous worker adapter; it must resume a child with an existing
 before executing it and persists its result before returning it to the model.
 Worker results are evidence with their own status, never proof certificates.
 """
+from .jsonutil import loads
 import copy
 import hashlib
 import json
@@ -143,7 +144,7 @@ def _ends_with_work_plan(text):
     explanation such as 'Let me check ...' followed by an answer is unaffected.
     """
     tail = text.strip().split('\n\n')[-1]
-    if len(tail) > 600:
+    if len(tail) > 600 or re.search(r'[:=0-9]', tail):
         return False
     return re.search(
         r"\b(?:let me|i will|i'll|je vais|laissez-moi)\s+"
@@ -292,9 +293,10 @@ class Orchestrator:
             raise ValueError('Resume must use the original query and attached sources')
         if any(type(state.get(key)) is not int or state[key] < 0 for key in ('actions', 'main_calls')):
             raise ValueError('Malformed assistant checkpoint accounting')
-        if state.get('limits') != {'actions': self.max_actions, 'children': self.max_children,
-                                   'concurrency': self.concurrency}:
+        limits = state.get('limits', {})
+        if limits.get('actions') != self.max_actions or limits.get('children') != self.max_children:
             raise ValueError('Resume must preserve the assistant action and child limits')
+        state['limits']['concurrency'] = self.concurrency
         self.state = state
         self.state.setdefault('blockers', [])
         self.state.setdefault('force_final', False)
@@ -422,7 +424,7 @@ class Orchestrator:
                     READ_ONLY_TOOLS - {'list_files'}) | {'execute_python'}:
                 continue
             try:
-                result = json.loads(message.get('content', ''))
+                result = loads(message.get('content', ''))
             except (TypeError, ValueError):
                 continue
             if isinstance(result, dict) and result and not result.get('error'):
@@ -629,7 +631,7 @@ class Orchestrator:
             arguments = function.get('arguments', {})
             if isinstance(arguments, str):
                 try:
-                    arguments = json.loads(arguments)
+                    arguments = loads(arguments)
                 except (ValueError, TypeError) as exc:
                     raise AgentError('Malformed JSON main-agent tool arguments') from exc
             if not isinstance(arguments, dict):
@@ -655,7 +657,7 @@ class Orchestrator:
         if args['effort'] == 'poincare':
             from .source_tasks import _instruction_text
             human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
-            if not any(re.search(r'poincar[eé]|\b(?:maximum|maximal|max) effort\b|\beffort (?:maximal|maximum)\b', text, re.I)
+            if (getattr(self, 'required_effort', None) != 'poincare' and self.state.get('required_effort') != 'poincare') and not any(re.search(r'poincar[eé]|\b(?:maximum|maximal|max) effort\b|\beffort (?:maximal|maximum)\b', text, re.I)
                        for text in map(_instruction_text, human)):
                 raise ValueError('Poincaré effort requires the user to request maximum effort; fix the failed operation instead of escalating its label.')
         for key, maximum in (('request', 8000), ('reason', 400)):
@@ -671,6 +673,12 @@ class Orchestrator:
             if workspace is not None and hasattr(workspace, 'path'):
                 path = workspace.path(filename, pdf=True)
                 workspace._readable(path)
+                if not path.is_file():
+                    raise ValueError(filename + ' is not a file in this folder')
+                if args['mode'] in ('referee', 'detailed_review', 'quick_review', 'explain', 'writeup'):
+                    human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
+                    if filename not in self.state['files'] and not any(filename in text for text in human):
+                        raise ValueError('Use only attached files or files named by the user: ' + filename)
 
     def _child(self, pending, args):
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
@@ -703,6 +711,10 @@ class Orchestrator:
                         'messages': copy.deepcopy(self.state['messages'][:-1])},
         }
         child['action']['files'] = list(dict.fromkeys(self.state['files'] + args['files']))
+        if args['mode'] == 'prove':
+            child['action']['files'] = [f for f in child['action']['files'] if not f.lower().endswith('.pdf')]
+        elif args['mode'] == 'check':
+            child['action']['files'] = []
         self.state['children'].append(child)
         pending['child_id'] = child['id']
         self._save()
@@ -736,7 +748,15 @@ class Orchestrator:
                     self._save()
                 # Operational worker failures are resumable exceptions, not
                 # evidence that the model chose malformed tool arguments.
-                value = self.delegate(copy.deepcopy(child['action']), child, self._save)
+                try:
+                    value = self.delegate(copy.deepcopy(child['action']), child, self._save)
+                except (ValueError, OSError) as exc:
+                    if child.get('job_id'):
+                        raise
+                    child['status'] = 'complete'
+                    child['result'] = {'status': 'invalid_action', 'error': str(exc)}
+                    self._save()
+                    return copy.deepcopy(child['result'])
                 if not isinstance(value, dict):
                     raise AgentError('Worker adapter must return a result object')
                 if not isinstance(value.get('status'), str) or not value['status']:

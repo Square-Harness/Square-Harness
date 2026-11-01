@@ -2,7 +2,7 @@
 import re
 
 from .orchestrator import Orchestrator
-from .router import JOB_MODES
+from .router import JOB_MODES, EFFORTS
 from .source_tasks import automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
 
@@ -17,9 +17,7 @@ _SEARCH_ALLOWED = re.compile(
     r'cherche(?:z)? (?:en ligne|sur internet))\b')
 
 
-# Modes only the user can select with @ (python-lab binds larger sandbox limits). They are not
-# JOB_MODES, so the Assistant's delegate tool never offers them and rejects them unless the
-# turn's own user selection named exactly that mode.
+# Selectable with @ by the user only: not JOB_MODES, so the Assistant cannot delegate to them.
 USER_MODES = ('python_lab', 'sanity_check')
 
 
@@ -75,8 +73,10 @@ def _word(char):
 def validated_mode_call(content, selection):
     if selection is None:
         return content, None
-    if not isinstance(selection, dict) or set(selection) != {'mode', 'start'}:
+    if not isinstance(selection, dict) or not {'mode', 'start'} <= set(selection) or set(selection) - {'mode', 'start', 'effort'}:
         raise ValueError('A selected mode call requires mode and start')
+    if selection.get('effort') is not None and selection['effort'] not in EFFORTS:
+        raise ValueError('Unknown selected effort')
     mode, start = selection['mode'], selection['start']
     if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES or type(start) is not int:
         raise ValueError('Unknown selected mode call')
@@ -101,17 +101,19 @@ class ModeOrchestrator(Orchestrator):
     worker adapters, shared budget, transcript, cancellation and resume logic.
     """
 
-    def __init__(self, *args, required_mode=None, **kwargs):
+    def __init__(self, *args, required_mode=None, required_effort=None, **kwargs):
         if required_mode is not None and required_mode not in JOB_MODES + USER_MODES:
             raise ValueError('Unknown selected mode call')
+        if required_effort is not None and required_effort not in EFFORTS:
+            raise ValueError('Unknown selected effort')
         self.required_mode = required_mode
+        self.required_effort = required_effort
         super().__init__(*args, **kwargs)
 
     def _validate_delegate(self, args):
         mode = args.get('mode') if isinstance(args, dict) else None
         if mode in USER_MODES:
-            # Only the user's own @ selection for this turn (saved in the state, so it survives a
-            # resume) can start these modes; a model-chosen delegate cannot.
+            # Only this turn's own @ selection (saved in the state for resume) may start them.
             if mode != (self.required_mode or (self.state or {}).get('required_mode')):
                 raise ValueError('Unknown worker mode')
             return super()._validate_delegate({**args, 'mode': 'explore'})
@@ -120,7 +122,7 @@ class ModeOrchestrator(Orchestrator):
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)
         action = ({'mode': self.required_mode, 'request': query, 'files': list(files),
-                   'effort': 'medium', 'reason': 'User explicitly selected @' + self.required_mode + '.'}
+                   'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'), 'reason': 'User explicitly selected @' + self.required_mode + '.'}
                   if self.required_mode is not None else
                   automatic_source_action(query, files) or automatic_reference_action(query, files, history))
         if action is None:
@@ -128,6 +130,7 @@ class ModeOrchestrator(Orchestrator):
         self._validate_delegate(action)
         if self.required_mode is not None:
             self.state['required_mode'] = self.required_mode
+            self.state['required_effort'] = action['effort']
         else:
             self.state['automatic_source_mode'] = action['mode']
             if action['mode'] == 'check':

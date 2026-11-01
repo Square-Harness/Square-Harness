@@ -32,13 +32,4 @@ export const displayOf = (mime: string): 'image' | 'page' | 'document' | 'data' 
   mime === 'image/png' || mime === 'image/svg+xml' ? 'image' : mime === 'text/html' ? 'page'
     : mime === 'application/pdf' ? 'document' : 'data'
 
-/** The artifacts of an experiment item, including items saved before artifacts existed (PNG figures). */
-export function artifactsOf(item: TranscriptItem): Artifact[] {
-  const run = item.experiment
-  if (!run) return []
-  if (item.artifacts?.length) return item.artifacts
-  return (item.figures || []).map((figure) => ({
-    artifact_id: `${run}/${figure.name}`, filename: figure.name, mime_type: 'image/png',
-    url: artifactUrl(run, figure.name), width: figure.width, height: figure.height,
-  }))
-}
+export const artifactsOf = (item: TranscriptItem): Artifact[] => item.artifacts || []

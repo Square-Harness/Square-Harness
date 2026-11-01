@@ -8,6 +8,7 @@ It reads TeX sources and plain text (Markdown, or the text extracted from a PDF)
 the text heuristics can miss structure, and the map then says so in `warnings`.
 """
 import re
+import unicodedata
 
 KNOWN = ('theorem', 'lemma', 'proposition', 'corollary', 'definition', 'assumption', 'hypothesis',
          'remark', 'claim', 'conjecture', 'example', 'notation', 'condition', 'problem', 'question')
@@ -18,11 +19,23 @@ DEFAULT_ENVS.update({'thm': 'theorem', 'lem': 'lemma', 'prop': 'proposition', 'c
                      'defn': 'definition', 'defi': 'definition', 'dfn': 'definition', 'rem': 'remark',
                      'rmk': 'remark', 'ass': 'assumption', 'hyp': 'hypothesis', 'conj': 'conjecture',
                      'ex': 'example', 'exa': 'example', 'clm': 'claim'})
-TYPE_WORDS = '|'.join(name.capitalize() for name in KNOWN)
+LOCAL_TYPES = {'theoreme': 'theorem', 'satz': 'theorem', 'lemme': 'lemma', 'lem': 'lemma',
+               'corollaire': 'corollary', 'definition': 'definition', 'proposition': 'proposition'}
+
+
+def _kind(name, fallback=''):
+    words = re.findall(r'[a-z]+', unicodedata.normalize('NFKD', name.lower()).encode('ascii', 'ignore').decode())
+    return next((LOCAL_TYPES.get(w, w) for w in words if w in KNOWN or w in LOCAL_TYPES),
+                DEFAULT_ENVS.get(fallback, fallback or name.lower()))
+
+
+TYPE_WORDS = '|'.join(name.capitalize() for name in KNOWN) + '|Théorème|Theoreme|Lemme|Corollaire|Définition|Satz'
 NUMBER = r'(?:[A-Z]\.\d+(?:\.\d+)*|\d+(?:\.\d+)*|[A-Z])'
 TEXT_STATEMENT = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(' + TYPE_WORDS + r')(?:\s+(' + NUMBER + r'))?'
-                            r'(?:[*_]{0,2}\s*(\([^()]{0,90}(?:\([^()]*\)[^()]{0,40})?\))[*_]{0,2}\s*[.:]?|\.|:|[*_]{2})[*_]{0,2}(?=\s|$)')
-TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*Proof\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})')
+                            r'(?:[*_]{0,2}\s*(\([^()]{0,90}(?:\([^()]*\)[^()]{0,40})?\))[*_]{0,2}\s*[.:]?|\.|:|[*_]{2})[*_]{0,2}(?=\s|$)', re.I)
+PROOF_WORD = r'(?:proof|preuve|démonstration|demonstration)'
+TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*' + PROOF_WORD + r'\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})', re.I)
+INLINE_PROOF = re.compile(r'(?<!\w)[*_]{0,2}' + PROOF_WORD + r'\b[*_]{0,2}\s*[.:](?=\s*\S)', re.I)
 TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{2,90})$')
 TEXT_SUBSECTION = re.compile(r'^\s*((?:\d+|[A-Z])(?:\.\d+)+)\.?\s+([A-Z][^.]{1,90})\.(?:\s|$)')
 MD_HEADING = re.compile(r'^\s*(#{1,6})\s+(.*\S)')
@@ -122,14 +135,13 @@ def _tex_theorems(clean):
     envs = {}
     text = '\n'.join(clean)
     for star, env, shared, name, within in TEX_NEWTHEOREM.findall(text):
-        kind = name.strip().strip('\\').lower()
-        kind = next((k for k in KNOWN if kind.startswith(k)), kind.split()[0] if kind.split() else env)
+        kind = _kind(name, env)
         envs[env.strip()] = {'type': kind, 'name': name.strip(), 'counter': (shared or env).strip(),
                              'within': (within or '').strip(), 'numbered': not star}
     for options, env in TEX_DECLARE.findall(text):
         opts = dict(re.findall(r'(\w+)\s*=\s*([^,]+)', options or ''))
         name = opts.get('name', env).strip()
-        kind = next((k for k in KNOWN if name.lower().startswith(k)), name.lower())
+        kind = _kind(name, env)
         counter = (opts.get('sibling') or opts.get('numberlike') or env).strip()
         envs[env.strip()] = {'type': kind, 'name': name, 'counter': counter,
                              'within': (opts.get('numberwithin') or opts.get('parent') or '').strip(),
@@ -181,6 +193,8 @@ def _parse_tex(lines):
                 abstract_start = number
             elif env in EQUATION_ENVS:
                 equation_start = number
+            elif env == 'proof' and open_proof is not None:
+                open_env.append('proof')
             elif env == 'proof' and open_unit is None:
                 tail = line[line.find('\\begin{proof}') + len('\\begin{proof}'):]
                 option = tail[tail.find('[') + 1:tail.find(']')] if tail.lstrip().startswith('[') else ''
@@ -229,7 +243,10 @@ def _parse_tex(lines):
             for note, note2, keys in TEX_CITE.findall(line):
                 for key in keys.split(','):
                     proof_owner['cites'].append({'key': key.strip(), 'note': (note2 or note).strip(), 'line': number})
-            if '\\end{proof}' in line:
+            for _ in re.finditer(r'\\end\{proof\}', line):
+                if open_env:
+                    open_env.pop()
+            if not open_env:
                 open_proof[1] = number
                 proof_owner['proofs'].append(open_proof)
                 open_proof = None
@@ -269,14 +286,14 @@ def _owner_by_name(units, text):
     match = re.search(r'(' + TYPE_WORDS + r')\s*~?\s*(' + NUMBER + r')', text)
     if not match:
         return None
-    kind, number = match.group(1).lower(), match.group(2)
+    kind, number = _kind(match.group(1)), match.group(2)
     return next((u for u in units if u['type'] == kind and u['number'] == number), None)
 
 
 def _pending_owner(units, last_owner):
     """The statement a bare 'Proof' belongs to: the latest provable statement without a proof."""
     for unit in reversed(units):
-        if unit['type'] in PROVABLE:
+        if unit['type'] in PROVABLE or (unit['number'] and unit['type'] not in KNOWN):
             return unit if not unit['proofs'] else None
         if unit['type'] in ('remark', 'example', 'definition', 'notation'):
             continue
@@ -302,6 +319,9 @@ def _parse_text(lines, fmt):
         if statement:
             events.append(('statement', number, statement))
             boundaries.add(number)
+            inline = INLINE_PROOF.search(line, statement.end())
+            if inline:
+                events.append(('proof', number, TEXT_PROOF.match(line[inline.start():])))
             continue
         if proof:
             events.append(('proof', number, proof))
@@ -366,7 +386,7 @@ def _parse_text(lines, fmt):
         if kind == 'subsection':
             continue
         if kind == 'statement':
-            word, num, title = data.group(1).lower(), data.group(2) or '', (data.group(3) or '').strip('() ')
+            word, num, title = _kind(data.group(1)), data.group(2) or '', (data.group(3) or '').strip('() ')
             if num and any(u['type'] == word and u['number'] == num for u in units):
                 continue  # a sentence starting with "Lemma 2.3." refers to it; the statement came first
             name = f'{word.capitalize()} {num}' if num else word.capitalize() + (f' ({title})' if title else '')
@@ -396,6 +416,22 @@ def _parse_text(lines, fmt):
             units.append(target)
         end = next_boundary(number) - 1
         stop = next((n for n in range(number, end + 1) if END_MARK.search(lines[n - 1])), None)
+        if stop is None:
+            # A claim with its own proof does not close the enclosing proof.
+            # Extend only when matching end marks establish the nesting.
+            depth = 1
+            proof_starts = {n for event, n, _ in events if event == 'proof' and n > number}
+            section_starts = {n for event, n, _ in events if event in ('section', 'references') and n > number}
+            for n in range(number + 1, len(lines) + 1):
+                if n in section_starts:
+                    break
+                if n in proof_starts:
+                    depth += 1
+                if END_MARK.search(lines[n - 1]):
+                    depth -= 1
+                    if depth == 0:
+                        stop = n
+                        break
         target['proofs'].append([number, stop or end])
         owner = target
     if references_line:
@@ -504,7 +540,7 @@ def resolve(mapping, target):
             return u
     match = re.search(r'\b(' + TYPE_WORDS + r'|Thm|Lem|Prop|Cor)\.?\s*~?\s*(' + NUMBER + r')\b', target, re.I)
     if match:
-        word = match.group(1).lower()
+        word = _kind(match.group(1))
         word = {'thm': 'theorem', 'lem': 'lemma', 'prop': 'proposition', 'cor': 'corollary'}.get(word, word)
         found = [u for u in units if u['number'] == match.group(2) and u['type'] == word]
         if found:

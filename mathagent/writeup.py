@@ -7,6 +7,7 @@ were actually read. When latexmk is installed the result is compiled in a
 temporary folder without shell escape and with TeX's paranoid file access.
 The output is a draft: the mathematics still needs the author's check.
 """
+from .reporting import usage_footer
 import hashlib
 import json
 import os
@@ -524,7 +525,5 @@ class WriteupRunner(ResearchRunner):
             out.append(f'- {source["id"]} ({kind}): `{source["path"]}`; read ranges: {s["manuscript_ranges"].get(source["id"], [])}.')
         if s.get('document'):
             out += ['', '## Document', '', '```latex', s['document'], '```']
-        out += ['', f'Generated tokens charged: {s["tokens_charged"]}/{s["settings"]["max_tokens"]}; input tokens charged: '
-                    f'{s["input_tokens_charged"]}/{s["settings"]["max_input_tokens"]}; elapsed seconds: '
-                    f'{s["seconds_used"]:.1f}/{s["settings"]["max_seconds"]}.', '']
+        out += ['', usage_footer(s), '']
         _atomic_write(self.directory / 'report.md', '\n'.join(out).encode('utf-8'))

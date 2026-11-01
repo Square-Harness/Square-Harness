@@ -6,12 +6,12 @@ import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago, count, firstLine } from '../format'
 import { isPanelHidden } from '../panels'
-import { go } from '../router'
-import { capacityFull, taskForJob } from '../concurrency'
+import { go, href, useRoute } from '../router'
+import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
-import { VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS } from '../review'
+import { VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review builds a reading list: code searches and follows citations, the model screens and organises.
@@ -25,14 +25,15 @@ type Sources = { id: string; path: string; sha256: string; content: string }[]
 export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
   const tick = useTick(id)
   const app = useApp()
+  const route = useRoute()
   const { data, error } = useLoad(() => api.research(id), [id, tick])
-  const sources = useLoad(() => api.researchSources(id), [id])
+  const sources = useLoad(() => api.researchSources(id), [id, tick])
   const [artifact, setArtifact] = useState<string | null>(null)
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'report'
   const jobClass = useJobClass()
-  const task = taskForJob(app.snapshot, 'research', id)?.task
-  const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
+  const task = taskForJob(app.snapshot, 'research', id)?.task || data?.owner_task || (data?.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
+  const ours = !!data?.running && !!task && ['starting', 'running', 'pausing'].includes(task.state)
 
   const openCite = useCallback((ref: string) => {
     setCite(ref)
@@ -63,7 +64,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'review' && <Markdown>{data.review}</Markdown>}
           {active === 'notes' && <Notes data={data} />}
           {active === 'evidence' && <EvidenceList evidence={data.evidence} />}
-          {active === 'sources' && <SourcesTab data={data} sources={sources.data?.sources || null} />}
+          {active === 'sources' && <>{sources.error ? <><ErrorNote>{sources.error}</ErrorNote><button type="button" className="btn" onClick={sources.reload}>Retry loading sources</button></> : <SourcesTab data={data} sources={sources.data?.sources || null} />}</>}
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
@@ -89,9 +90,13 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const app = useApp()
   const [error, setError] = useState('')
   const busy = capacityFull(app.snapshot, app.status)
-  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task
+  const route = useRoute()
+  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task || data.owner_task || (data.running && route.from ? activeTasks(app.snapshot).find((entry) => entry.task.kind === 'chat' && entry.task.target === route.from)?.task : undefined)
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
-  const resumable = data.progress?.resumable ?? researchResumable(data.status)
+  const additionalSeconds = resumeAdditionalSeconds(data.budget.seconds)
+  const additionalMinutes = additionalSeconds / 60
+  const extensionLabel = Number.isInteger(additionalMinutes) ? additionalMinutes : additionalMinutes.toFixed(1)
+  const resumable = (data.progress?.resumable ?? researchResumable(data.status)) || (data.status === 'budget_exhausted' && additionalSeconds > 0)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const steps = data.variant ? VARIANT_STEPS[data.variant] : data.pipeline ? LIST_STEPS : STEPS
   const names = data.variant ? VARIANT_STEP_NAMES : STEP_NAMES
@@ -107,7 +112,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       <ol className="phases phases-wide" aria-label="Workflow">
         {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
-          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{names[step]}</li>
+          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
         })}
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} />
@@ -122,13 +127,14 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       {data.stop_reason && !data.running && <p className="muted small">{data.stop_reason}</p>}
       <div className="job-actions">
         {ours ? (
-          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
+          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}>{pausing ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : resumable ? (
-          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, true))}>
-            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, true, additionalSeconds))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : additionalSeconds ? `${busy ? 'Queue resume' : 'Resume'} (+${extensionLabel} min)` : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
-        {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
+        {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
+        {data.running && !ours && !route.from && ownTask?.kind !== 'chat' && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
       {!ours && busy && resumable && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>
@@ -139,7 +145,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
 function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
   return (
     <div className="report">
-      {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} />}
+      {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}
       {issues.length > 0 && (
         <div className="checks-note">
           <p className="objection-label">{data.variant ? 'Notes from the controller' : data.pipeline ? 'The self-check found gaps' : 'The controller could not confirm every citation'}</p>
@@ -152,12 +158,12 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
           <Square variant={VERDICTS[data.verdict].variant} size={20} /> {VERDICTS[data.verdict].label}
         </p>
       )}
-      {data.draft ? (
+      {(data.draft || data.report) ? (
         <>
           <p className="caveat">{data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline
             ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
             : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
-          <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft}</Markdown>
+          <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft || data.report}</Markdown>
         </>
       ) : (
         <p className="empty-note">No draft yet. {data.running ? (data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.') : 'The plan and working notes are under Plan and notes.'}</p>
@@ -166,15 +172,15 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
   )
 }
 
-function LiveResearch({ id, role, file }: { id: string; role: string; file: string }) {
+function LiveResearch({ id, role, file, pipeline, owner }: { id: string; role: string; file: string; pipeline?: string | null; owner?: ResearchDetail['owner_task'] }) {
   const stream = useLiveStream('research', id, file)
   const app = useApp()
-  const task = taskForJob(app.snapshot, 'research', id)?.task
-  const ours = !!task && task.kind === 'research' && task.target === id
+  const task = taskForJob(app.snapshot, 'research', id)?.task || owner
+  const ours = !!task
   return (
     <div className="live" id="live">
-      <p className="live-head"><Square variant="running" size={14} /> {ROLES[role]?.active || role}</p>
-      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
+      <p className="live-head"><Square variant="running" size={14} /> {role === 'scope' && pipeline === 'reading-list-v1' ? 'Defining the scope of the reading list' : ROLES[role]?.active || role}</p>
+      {ours && <ActivityLog items={activeTasks(app.snapshot).find((entry) => entry.task.id === task?.id)?.activity || []} />}
       <StreamBody stream={stream} role={role} live />
     </div>
   )
@@ -192,7 +198,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
         {issues.length ? (
           <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
         ) : (
-          <p className="muted small">{data.draft ? 'Every citation points to lines the harness recorded as read.' : 'Checks run when the draft is written.'}</p>
+          <p className="muted small">{data.pipeline === 'reading-list-v1' ? 'Entries are checked against returned bibliographic records. This does not verify their mathematical claims or full text.' : data.draft ? 'No invalid source locators were detected. This checks locations, not mathematical correctness.' : 'Checks run when the draft is written.'}</p>
         )}
       </section>
       {data.sources.length > 0 && (
@@ -207,7 +213,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
       <section className="aside-section">
         <h3 className="aside-title">Usage</h3>
         <UsageMeters budget={b} />
-        {!data.variant && <Meter label="Rounds" used={b.rounds.used} limit={b.rounds.limit} />}
+        {!data.variant && <Meter label={data.pipeline ? "Model calls" : "Rounds"} used={b.rounds.used} limit={b.rounds.limit} />}
         {(!data.variant || data.variant === 'journal') && <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />}
         {(!data.variant || data.variant === 'journal') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
       </section>

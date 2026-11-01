@@ -5,7 +5,7 @@ import unicodedata
 from .worker_errors import WorkerInputError
 
 
-_NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
+_NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt|sty|cls|bib))(?![\w-]|\.\w)', re.I)
 
 
 def conversation_sources(query, supplied, transcript):
@@ -16,9 +16,20 @@ def conversation_sources(query, supplied, transcript):
     """
     if supplied:
         return list(supplied)
-    named = list(dict.fromkeys(_NAMED.findall(query)))
+    # Pasted source text and generated-proof follow-ups select their own text.
+    proof = re.search(r'(?i)\b(?:proof|preuve|démonstration)\s*[.:]', query)
+    statement = re.search(r'(?i)\b(?:lemma|theorem|proposition|lemme|théorème)\b', query)
+    corrected = re.search(r'(?i)\b(?:corrected (?:proof|argument)|your (?:proof|argument)|(?:proof|argument) you (?:gave|wrote)|preuve corrigée?|ta preuve|votre preuve)\b', query)
+    if proof and statement:
+        return []
+    instruction = re.sub(r'```.*?```|`[^`]*`|\\(?:input|include|includegraphics|addbibresource)\{[^}]*\}', '', query, flags=re.S)
+    named = list(dict.fromkeys(_NAMED.findall(instruction)))
     if named:
         return named
+    if corrected:
+        return []
+    if re.search(r'(?i)\b(?:previous|last|above|précédente?|ci-dessus)\s+(?:proof|result|preuve|résultat)\b', query):
+        return []
     text = ''.join(c for c in unicodedata.normalize('NFKD', query).casefold()
                    if not unicodedata.combining(c))
     target = bool(re.search(r'\b(?:theorem|lemma|proposition|corollary|theoreme|lemme)\s+(?:\d+(?:\.\d+)*|[a-z])\b', text))

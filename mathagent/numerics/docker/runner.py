@@ -1,16 +1,10 @@
-"""In-container driver: run one untrusted experiment and report one framed JSON result.
+"""In-container driver: run one untrusted experiment, report one framed JSON result.
 
-Protocol (the host side is ``mathagent.numerics.executor``):
-
-* stdin: one JSON object ``{code, nonce, timeout, seed, parameters, limits}``.
-* stdout: ``<<<SQH-START nonce>>>`` when the code is about to run, then
-  ``<<<SQH-RESULT nonce>>>``, one JSON line and ``<<<SQH-END nonce>>>``.
-
-The experiment's own stdout/stderr (file descriptors 1 and 2) are redirected to
-files on the container's size-limited tmpfs and returned as bounded head+tail
-excerpts, so a flood of output cannot reach the protocol stream or host memory.
-This script is not a security boundary: the container is (no network, non-root,
-read-only root, no capabilities, cgroup limits), and the host kills it on overrun.
+stdin: ``{code, nonce, timeout, seed, parameters, limits}``. stdout (the protocol):
+``<<<SQH-START nonce>>>`` before the code runs, then ``<<<SQH-RESULT nonce>>>``, one
+JSON line and ``<<<SQH-END nonce>>>``. The code's own stdout/stderr go to files on
+the size-limited tmpfs and come back as head+tail excerpts. This script is not the
+security boundary; the container is, and the host kills it on overrun.
 """
 import base64
 import io
@@ -31,8 +25,8 @@ MAX_INPUT = 512 * 1024
 WORK = '/tmp/.sqh'
 OUTPUT_DIR = '/tmp/outputs'
 MPL_TEMPLATE = '/opt/sandbox/mplconfig'
-# Files a run may return (validated again by the host). Relative paths land in OUTPUT_DIR,
-# the working directory; files saved directly in /tmp are collected too.
+# Files a run may return, validated again by the host. The code runs in OUTPUT_DIR;
+# files saved there (one subfolder deep) or directly in /tmp are collected.
 KINDS = {'.png': 'figure', '.svg': 'figure', '.pdf': 'document', '.html': 'page',
          '.csv': 'data', '.txt': 'data', '.json': 'data'}
 MAX_FIGURES = 8
@@ -43,7 +37,7 @@ SOURCE = '<experiment>'
 
 
 class ExperimentTimeout(BaseException):
-    """Raised by the alarm; a BaseException so `except Exception` in user code cannot swallow it."""
+    """A BaseException, so `except Exception` in user code cannot swallow it."""
 
 
 def _alarm(signum, frame):
@@ -141,25 +135,25 @@ def track_saved_figures():
     Figure.savefig = savefig
 
 
+def _entries(folder):
+    try:
+        return sorted(os.scandir(folder), key=lambda e: e.name)
+    except OSError:
+        return []
+
+
 def output_files():
-    """Candidate files: OUTPUT_DIR (and its subfolders, one level) and /tmp itself, by name."""
+    """(name, entry) of the files in OUTPUT_DIR, its subfolders (as folder-name) and /tmp."""
     found = []
-    for folder, prefix in ((OUTPUT_DIR, ''), ('/tmp', '')):
-        try:
-            entries = sorted(os.scandir(folder), key=lambda e: e.name)
-        except OSError:
-            continue
-        for entry in entries:
+    for folder in (OUTPUT_DIR, '/tmp'):
+        for entry in _entries(folder):
             if entry.name.startswith('.') or entry.path in (OUTPUT_DIR, WORK):
                 continue
-            if entry.is_dir(follow_symlinks=False) and folder == OUTPUT_DIR:
-                try:
-                    found += [(f'{entry.name}-{inner.name}', inner) for inner in sorted(os.scandir(entry.path), key=lambda e: e.name)
-                              if inner.is_file(follow_symlinks=False)]
-                except OSError:
-                    pass
-            elif entry.is_file(follow_symlinks=False):
-                found.append((prefix + entry.name, entry))
+            if entry.is_file(follow_symlinks=False):
+                found.append((entry.name, entry))
+            elif folder == OUTPUT_DIR and entry.is_dir(follow_symlinks=False):
+                found += [(f'{entry.name}-{inner.name}', inner) for inner in _entries(entry.path)
+                          if inner.is_file(follow_symlinks=False)]
     return found
 
 
@@ -180,15 +174,16 @@ def collect(limits, warnings):
         artifacts.append({'name': name, 'kind': kind, 'b64': base64.b64encode(data).decode('ascii'),
                           'summary': summary})
 
-    files = [(name, entry) for name, entry in output_files() if os.path.splitext(name)[1].lower() in KINDS]
-    ignored = [name for name, entry in output_files() if os.path.splitext(name)[1].lower() not in KINDS]
+    candidates = output_files()
+    files = [(name, entry) for name, entry in candidates if os.path.splitext(name)[1].lower() in KINDS]
+    ignored = [name for name, _ in candidates if os.path.splitext(name)[1].lower() not in KINDS]
     if ignored:
         warnings.append('Ignored files of unsupported types: ' + ', '.join(ignored[:5])[:200])
     saved_paths = {os.path.abspath(entry.path) for _, entry in files}
     plt = sys.modules.get('matplotlib.pyplot')
     if plt is not None:
-        numbers = [n for n in plt.get_fignums()
-                   if not set(getattr(plt.figure(n), '_sqh_paths', ())) & saved_paths]  # already a file
+        # Figures already saved to a collected file are not captured again.
+        numbers = [n for n in plt.get_fignums() if not set(getattr(plt.figure(n), '_sqh_paths', ())) & saved_paths]
         if len(numbers) > MAX_FIGURES:
             warnings.append(f'Only the first {MAX_FIGURES} of {len(numbers)} open figures were saved')
         for index, number in enumerate(numbers[:MAX_FIGURES], 1):
@@ -220,10 +215,10 @@ def collect(limits, warnings):
 
 
 def forbid_privilege_gain():
-    """prctl(PR_SET_NO_NEW_PRIVS): irreversible and inherited by every child, set before user code.
+    """prctl(PR_SET_NO_NEW_PRIVS) before any user code: irreversible and inherited.
 
-    The harness also asks Docker for no-new-privileges when the engine supports it;
-    this keeps the guarantee on engines where that flag breaks exec (snap Docker).
+    Docker's own no-new-privileges option breaks exec on some engines (snap Docker);
+    this keeps the guarantee everywhere.
     """
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
@@ -244,8 +239,7 @@ def main():
     timeout = float(request['timeout'])
     seed = request.get('seed')
     limits = request.get('limits') or {}
-    # Backstop if the host session dies: busy code is killed by the kernel (SIGXCPU) even
-    # when it ignores the alarm. Each process gets this many CPU seconds.
+    # Backstop if the host session dies: busy code that ignores the alarm still gets SIGXCPU.
     cpu = int(math.ceil(timeout * max(1.0, float(limits.get('cpus', 1))))) + 2
     resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 2))
     output_bytes = int(limits.get('output_bytes', 20000))
