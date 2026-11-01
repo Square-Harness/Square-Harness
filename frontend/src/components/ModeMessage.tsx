@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { coverOf, modeOptions, modeQuery, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
+import { coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'
 import { Glyph } from './Glyph'
 import './ModeMessage.css'
@@ -15,6 +15,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
   const [query, setQuery] = useState<ModeQuery | null>(null)
   const queryRef = useRef<ModeQuery | null>(null)
   const dismissed = useRef<{ text: string; start: number } | null>(null)
+  const declined = useRef<ModeCall | null>(null)  // a typed call the user cleared stays plain text
   const [active, setActive] = useState(0)
   const options = query ? modeOptions(query.query) : []
   const open = !disabled && options.length > 0
@@ -75,7 +76,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
       {validCall(value, call) && <div className="selected-mode" role="status">
         <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
         <strong>@{call.mode}</strong><span>Selected for this message</span>
-        <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={() => { onCall(null); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
+        <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={() => { declined.current = call; onCall(null); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
       </div>}
       {open && <div className="mode-picker">
         <div className="mode-picker-title">Modes <span>↑ ↓ to browse · Enter or Tab to select · Esc to dismiss</span></div>
@@ -90,7 +91,10 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, disabled }:
       </div>}
       <textarea ref={input} value={value} onChange={(event) => {
         const next = event.target.value
-        onCall(updateCall(value, next, call))
+        // A mode typed out in full counts as picked, unless the user cleared that very call.
+        const typed = typedCall(next)
+        const declinedHere = typed && declined.current?.mode === typed.mode && declined.current.start === typed.start
+        onCall(updateCall(value, next, call) ?? (typed && !declinedHere ? typed : null))
         onChange(next)
         refresh(next, event.target.selectionStart, event.target.selectionEnd)
       }} onSelect={(event) => refresh(value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}

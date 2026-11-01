@@ -46,7 +46,7 @@ class ModeCallValidationTests(unittest.TestCase):
 class ModeCallControllerTests(unittest.TestCase):
     def test_every_mode_executes_before_synthesis_without_a_routing_inference(self):
         for mode in ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review',
-                     'quick_review', 'explain', 'writeup'):
+                     'quick_review', 'explain', 'writeup', 'summarize'):
             calls = []
             def worker(action, child, save):
                 calls.append(copy.deepcopy(action))
@@ -58,8 +58,12 @@ class ModeCallControllerTests(unittest.TestCase):
             self.assertEqual(result['status'], 'complete')
             self.assertEqual([call['mode'] for call in calls], [mode])
             self.assertEqual(calls[0]['request'], 'Use the exact hypothesis H.')
-            self.assertEqual(len(client.requests), 1)
             self.assertEqual(result['actions'], 1)
+            if mode in ('writeup', 'summarize'):
+                # The worker's ready message is the reply: no second pass assesses the document.
+                self.assertEqual((len(client.requests), result['answer']), (0, 'Worker findings'))
+            else:
+                self.assertEqual(len(client.requests), 1)
 
     def test_resume_keeps_the_same_forced_child_and_does_not_repeat_it(self):
         children = []
@@ -142,3 +146,18 @@ class ReviewEffortTests(unittest.TestCase):
         args = SimpleNamespace(research_tokens=12000, research_input_tokens=50000)
         caps = effort.limits('detailed_review', 'high', args)
         self.assertEqual((caps['tokens'], caps['input_tokens'], caps['seconds']), (12000, 50000, 3600))
+
+
+class WriteupEndsTheTurnTests(unittest.TestCase):
+    def test_a_writeup_the_assistant_chose_is_the_reply_and_nothing_follows(self):
+        from tests.test_orchestrator import action, call, calls as scripted
+        calls = []
+        def worker(action, child, save):
+            calls.append(action['mode'])
+            return {'status': 'complete', 'answer': 'Write-up ready: `note.tex`.'}
+        client = Client([scripted(call(args=action('writeup', 'write up the proof'))), final('A critique would follow here.')])
+        runner = ModeOrchestrator(Agent(client, Workspace('/tmp'), ctx=32768, predict=8192), worker)
+        result = runner.run('@writeup the proof, as plain text')
+        self.assertEqual(calls, ['writeup'])
+        self.assertEqual(result['answer'], 'Write-up ready: `note.tex`.')
+        self.assertEqual(len(client.requests), 1)  # no second model pass, so no critique

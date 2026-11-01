@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+- The style page sets which saved style write-ups use: automatic (default), none,
+  a style (its best-fitting domain, never none), or one domain of a style
+  (`POST /api/styles/choice`, kept in `.mathagent/style-choice.json`). A chosen
+  style is used without a style call when it leaves one domain; a style that is no
+  longer saved falls back to the automatic choice with a warning.
+- Writing styles can carry a LaTeX template (a preamble `.tex`, such as one of the
+  author's articles, and/or `.sty`, `.cls`, `.bib` files), chosen when learning a
+  style or set and removed later on the Style page (`POST /api/styles/template`).
+  It is stored inside the style file. A write-up that picks the style builds on
+  it unless given its own template; the template's `\title` is replaced by the
+  document's. A template `.tex` without `\begin{document}` now joins the preamble
+  as written (before, only its macros reached the prompt).
+- Write-ups are rebuilt around one writing call: all the material, the request,
+  the user's notation and a short style digest in one prompt, with reasoning on
+  (Qwen's sampling, temperature 0.6, top-p 0.95, at most 8,192 reasoning tokens of
+  24,576) and the write-up skill as the only system text. The outline call,
+  section-by-section writing, `% src` provenance marks, the notation pass and
+  per-section repairs are gone; material too long for one call is written in
+  consecutive parts. The controller builds the preamble (user's notation first,
+  braced multi-token macros, the model's own definitions never over the user's),
+  supplies undefined commands and environments, and makes one repair call on the
+  whole document if it does not compile. A saved style is chosen by a short call
+  of its own and contributes explanation habits, phrasings and macros, not the
+  structure of the author's papers. On the replayed test proposition: two calls
+  instead of nine, compiled at the first attempt, the user's notation throughout.
+- A mode typed out in full (`@writeup ` followed by a space, or a message that is
+  only `@summarize`) is the call, as if picked from the menu; clearing its chip
+  keeps it as text. A write-up or summary ends the Assistant's turn even when the
+  Assistant chose it: its ready message is the reply, with no critique or second
+  version, and the Assistant is told to pass the user's own words as its request.
+- Write-ups follow the user's notation: `\newcommand` definitions in the request
+  are required notation, join the preamble and outrank template and style macros
+  (a style macro with the same name or meaning is dropped). Multi-token macros are
+  defined braced so scripts and arguments keep their meaning. Commands the sources
+  use without defining them are supplied at compile time from saved styles or
+  their names (`\bbP`, `\rmd`, `\cL`) and reported. Notation fixes are exact
+  substitutions inside mathematics (named commands only, never the user's).
+  Write-up calls no longer mention tools, and an answer that only announces what it
+  would do is retried, never kept as a section or repair; the outline keeps one
+  version of each result.
+- Write-ups and summaries no longer get a model review: they are for results the
+  user has checked. A notation check replaces it: one pass settles one symbol per
+  object across the document (plain-text answer, reasoning on), and only the
+  sections where another symbol occurs are rewritten, each kept only if its
+  comments and its prose outside mathematics are unchanged.
+- `@writeup` and `@summarize` deliver by download: the conversation card offers
+  the `.tex` (and the PDF when it compiled), nothing is written into the folder,
+  and the kept copy is deleted with its conversation. The reply is a one-line
+  ready message from the controller, not a second model pass.
+- Progress lines such as "Delegating a mathematical task…" disappear when the next
+  output starts and are no longer saved in the conversation.
+- `@writeup` and `@summarize` in Assistant conversations. A write-up's material
+  is the conversation so far (messages, answers and the full results of finished
+  proof, review and literature jobs, as `conversation.md`) plus any attached
+  draft; the instructions after `@writeup` set its goal and scope, and the
+  outline no longer has to cover every line. `@summarize`, or a bare `@writeup`,
+  writes `summary.tex` with each result's statement, recorded status, proof idea,
+  references and open questions. The outline names the material's domain and
+  picks a fitting saved writing style, whose guidance reaches every section and
+  whose used macros and environments join the preamble; otherwise the usual
+  style of that domain. Write-up workers get the conversation once, as this
+  source, instead of the raw history as reference context.
+- Writing styles: a Style page in the interface (`#/style`, "Learn my writing
+  style" in the sidebar) condenses the .tex sources of the author's earlier
+  articles into one small JSON file per name, shared by every folder like saved
+  templates. The controller keeps the macros the articles actually use and their
+  theorem environments; the model sorts the articles by domain and describes, per
+  domain, the papers' aim, usual structure, explanation habits and phrasings,
+  which are kept only when found verbatim. `style_prompt` renders one domain in
+  about 2,000 characters for a later write-up. The page asks for example articles
+  when the folder has none.
 - Review has four kinds, started with `@quick_review`, `@referee`, `@detailed_review`
   and `@explain` in the Assistant: a quick check of a proof (independent
   verifier passes through different lenses, each alleged error re-checked, a

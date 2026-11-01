@@ -109,3 +109,13 @@ test('pause, limits, sends and reviews use explicit task identity and automatic 
     ])
   } finally { globalThis.fetch = original }
 })
+
+test('a progress line disappears when the next output starts and is kept apart from notices', () => {
+  const texts = (value: TaskSnapshot) => value.tasks.find((item) => item.task.id === 'first')!.live!.steps
+    .map((step) => step.type === 'call' ? 'call' : step.text)
+  let current = reduceChat(snapshot, { task: 'first', chat: 'chat-a', seq: 2, kind: 'progress', text: 'Delegating a mathematical task…' })
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 3, kind: 'notice', text: 'A kept notice' })
+  assert.deepEqual(texts(current), ['Delegating a mathematical task…', 'A kept notice'])
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 4, kind: 'start' })
+  assert.deepEqual(texts(current), ['A kept notice', 'call'])
+})

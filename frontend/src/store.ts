@@ -26,7 +26,7 @@ type ServerEvent =
   | { type: 'task'; seq: number; task: TaskSummary }
   | ({ type: 'activity'; seq: number; task: string; job: string; id: string | null } & Activity)
   | { type: 'approval'; seq: number; state: 'pending' | 'approved' | 'denied'; approval: Approval | { id: string; task: string } }
-  | { type: 'chat'; seq: number; chat: string; task: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice'; thinking?: string; text?: string }
+  | { type: 'chat'; seq: number; chat: string; task: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice' | 'progress'; thinking?: string; text?: string }
   | { type: 'chat_saved'; seq: number; chat: string }
   | { type: 'chat_deleted'; seq: number; chat: string }
   | { type: 'job'; seq: number; job: 'proof' | 'research'; id: string; status: string; phase: string | null }

@@ -5,6 +5,7 @@ from .orchestrator import Orchestrator
 from .router import JOB_MODES
 from .source_tasks import automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
+from .writeup import SUMMARY_REQUEST
 
 
 _NO_SEARCH = re.compile(
@@ -81,6 +82,9 @@ def validated_mode_call(content, selection):
             or (end < len(content) and _word(content[end]))):
         raise ValueError('The selected mode call no longer matches the message')
     query = (content[:start] + content[end:]).strip()
+    if not query and mode in ('writeup', 'summarize'):
+        # Nothing narrows the write-up: summarize what the conversation obtained.
+        return SUMMARY_REQUEST, 'summarize'
     if not query:
         raise ValueError('Add a request after selecting a mode')
     if len(query) > 8000:

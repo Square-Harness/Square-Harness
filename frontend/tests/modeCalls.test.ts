@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { callPayload, coverOf, modeOptions, modeQuery, updateCall, validCall, MODE_CALLS } from '../src/modeCalls.ts'
+import { callPayload, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, MODE_CALLS } from '../src/modeCalls.ts'
 
 test('offers modes at the caret at the start, middle and end of a prompt', () => {
   for (const text of ['@pro', 'Please @pro show this', 'Show this (@pro)']) {
@@ -13,7 +13,14 @@ test('offers modes at the caret at the start, middle and end of a prompt', () =>
   assert.equal(modeQuery('@pro', 0, 4), null)
   assert.equal(MODE_CALLS.filter((item) => item.mode.startsWith('pro')).length, 1)
   assert.deepEqual(MODE_CALLS.map((item) => item.mode),
-    ['prove', 'check', 'literature', 'quick_review', 'referee', 'detailed_review', 'explain'])
+    ['prove', 'check', 'literature', 'quick_review', 'referee', 'detailed_review', 'explain', 'writeup', 'summarize'])
+})
+
+test('write-ups and summaries are offered by their words and drawn as Write-up pages', () => {
+  assert.deepEqual(modeOptions('write').map((item) => item.mode), ['writeup'])
+  assert.deepEqual(modeOptions('sum').map((item) => item.mode), ['summarize'])
+  assert.equal(coverOf('summarize'), 'writeup')
+  assert.equal(coverOf('writeup'), 'writeup')
 })
 
 test('the review kinds are offered together and drawn as Review pages', () => {
@@ -50,4 +57,14 @@ test('payload offsets count Unicode code points and target one selected occurren
   const text = '🙂 @prove and @prove show this'
   const start = text.lastIndexOf('@prove')
   assert.deepEqual(callPayload(text, { mode: 'prove', start, end: start + 6 }), { mode: 'prove', start: 13 })
+})
+
+test('a mode typed out in full counts as the call', () => {
+  assert.deepEqual(typedCall('@writeup write the proof'), { mode: 'writeup', start: 0, end: 8 })
+  assert.deepEqual(typedCall('Please @summarize now'), { mode: 'summarize', start: 7, end: 17 })
+  assert.equal(typedCall('@writeup'), null)  // still typing: the menu offers it
+  assert.deepEqual(typedCall('@summarize', true), { mode: 'summarize', start: 0, end: 10 })
+  assert.equal(typedCall('@write the proof'), null)  // not a mode name
+  assert.equal(typedCall('mail@prove.com and more'), null)
+  assert.equal(typedCall('@Writeup the proof'), null)
 })

@@ -8,7 +8,7 @@ several separate jobs; each becomes its own suggestion with a suggested effort.
 import json
 import re
 
-JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup')
+JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
 MAX_TASKS = 4
@@ -57,11 +57,13 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   must contain the statement and its proof word for word, or name the file and the result.
 - explain: a precise, step-by-step explanation of a given lemma, theorem or proof for a mathematician from
   another field, e.g. "explain this lemma", "walk me through the proof of Theorem 2 in notes.md".
-- writeup: turn notes, a draft or a PDF the user names or attaches into a clean LaTeX document.
+- writeup: turn notes, a draft or a PDF the user names or attaches, or results obtained earlier in the
+  conversation, into a clean LaTeX document in the user's saved style.
+- summarize: a LaTeX summary of the important results obtained so far in the conversation.
 A question (why, what, how, is it true that) is answered with critic or explore. A request for a
 reference or citation to a known result is a check, not a literature report. A given proof to verify is
 a quick_review; a whole manuscript to referee is a referee report (detailed_review when its proofs should be
-checked too). Choose prove, literature, referee, detailed_review, quick_review, explain or writeup only when the message asks for that kind of work;
+checked too). Choose prove, literature, referee, detailed_review, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
 statement or request is exactly one task. Give several (at most 4) only when the message

@@ -60,6 +60,7 @@ export function researchLook(status: string, running = false): Look {
     case 'reviewed': return { variant: 'reviewed', label: 'Reviewed by the model' }
     case 'complete': return { variant: 'complete', label: 'Compiled and checked' }
     case 'listed': return { variant: 'complete', label: 'Reading list checked' }
+    case 'saved': return { variant: 'complete', label: 'Style saved' }
     case 'partial': return { variant: 'partial', label: 'Partial result, work pending' }
     case 'failed': return { variant: 'error', label: 'Work stopped' }
     case 'budget_exhausted': return { variant: 'spent', label: 'Budget used up' }

@@ -74,6 +74,25 @@ export type FolderListing = {
 
 export type Template = { name: string; files: string[] }
 
+/** Which saved style write-ups use: chosen automatically, none, one style (its best domain), or one domain. */
+export type StyleChoice = { mode: 'auto' | 'none' | 'style' | 'domain'; style?: string; domain?: string }
+
+/** A saved writing style (mathagent/style.py): one JSON file per name, shared by every folder. */
+export type DomainStyle = { name: string; description: string; articles: string[]; aim: string; structure: string[]; habits: string[]; phrases: string[] }
+export type StyleProfile = {
+  format: 'square-style'
+  version: 1
+  name: string
+  created_at: string
+  updated_at: string
+  articles: { path: string; sha256: string; title: string; domain: string }[]
+  macros: { name: string; definition: string; uses: number; articles: string[] }[]
+  environments: { name: string; definition: string; uses: number }[]
+  domains: DomainStyle[]
+  /** The LaTeX template write-ups in this style build on: names and sizes when listed, contents in a job. */
+  template?: { name: string; size?: number; content?: string }[]
+}
+
 export type TaskState = 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'done' | 'error' | 'cancelled'
 
 export type TaskSummary = {
@@ -101,7 +120,7 @@ export type Approval = {
 
 export type LiveStep =
   | { type: 'call'; thinking: string; text: string }
-  | { type: 'tool' | 'result' | 'notice'; text: string }
+  | { type: 'tool' | 'result' | 'notice'; text: string; progress?: boolean }
 
 export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' | 'free' | 'check' }
 
@@ -240,7 +259,7 @@ export type Evidence = {
 
 export type ResearchListItem = {
   id: string
-  kind: 'literature' | 'referee' | 'writeup'
+  kind: 'literature' | 'referee' | 'writeup' | 'style'
   status: string
   phase: string
   title: string
@@ -269,7 +288,7 @@ export type CompileResult = {
 
 export type ResearchDetail = {
   id: string
-  kind: 'literature' | 'referee' | 'writeup'
+  kind: 'literature' | 'referee' | 'writeup' | 'style'
   goal: string
   status: string
   phase: string
@@ -306,10 +325,22 @@ export type ResearchDetail = {
   document?: string
   section_lines?: [number, number][]
   compile?: CompileResult | null
-  outputs?: { tex?: string; pdf?: string }
+  outputs?: { tex?: string; pdf?: string | boolean; download?: string }
   macros?: string[]
   theorems?: string[]
   output_name?: string
+  style_name?: string
+  title?: string
+  style_checked?: boolean
+  parts?: { complete: boolean; characters: number }[]
+  domain?: string
+  style?: { label: string; profile: string; domain: string } | null
+  notation?: { fixed: number; rejected: number; complete: boolean; conventions: { object: string; notation: string; variants: string[] }[] } | null
+  articles?: { id: string; path: string; title: string; abstract: string; headings: string[]; environments: Record<string, number>; inputs: string[]; lines: number }[]
+  domains?: { name: string; description: string; articles: string[]; complete: boolean }[]
+  observations?: Record<string, { aim: string; structure: string[]; habits: string[]; phrases: string[]; complete: boolean }>
+  profile?: StyleProfile | null
+  saved_to?: string | null
 }
 
 export type ChatListItem = {
@@ -324,7 +355,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
+export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
 
 export type TranscriptItem = {
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'
@@ -342,6 +373,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
+  outputs?: { download?: string; pdf?: boolean; tex?: string }
   task?: string
   error?: string | null
   missing?: string[]
@@ -471,7 +503,13 @@ export const api = {
   },
   templates: () => get<{ templates: Template[] }>('/api/templates'),
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
+  styles: () => get<{ styles: StyleProfile[]; choice: StyleChoice }>('/api/styles'),
+  setStyleChoice: (choice: StyleChoice) => post<{ choice: StyleChoice }>('/api/styles/choice', choice),
+  startStyle: (body: Record<string, unknown>) => post<StartResult>('/api/style', body),
+  setStyleTemplate: (name: string, files: string[]) => post<{ style: StyleProfile }>('/api/styles/template', { name, template_files: files }),
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
+  researchPdfDownloadUrl: (id: string) => `/api/research/${id}/pdf?download=1`,
+  researchTexUrl: (id: string) => `/api/research/${id}/tex`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),

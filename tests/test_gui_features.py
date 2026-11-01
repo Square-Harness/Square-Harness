@@ -18,7 +18,7 @@ from mathagent.agent import Agent
 from mathagent.gui import store
 from mathagent.literature import LiteratureTools
 from mathagent.tools import Workspace
-from mathagent.writeup import WriteupRunner, compile_latex, template_vocabulary, untraced_paragraphs
+from mathagent.writeup import WriteupRunner, compile_latex, split_body, split_material, template_vocabulary
 
 
 class WorkspaceReadTests(unittest.TestCase):
@@ -248,12 +248,9 @@ class LegacyRouteTests(GuiCase):
 
 
 
-OUTLINE = {'title': 'Compactness notes', 'sections': [
-    {'title': 'Setting', 'sources': ['M1:L1-L2'], 'goal': 'State the setting.'},
-    {'title': 'Main result', 'sources': ['M1:L3-L4'], 'goal': 'State and prove the embedding.'}]}
-SECTION_ONE = '\\section{Setting}\n% src: [M1:L1-L2]\nLet $u_n$ be bounded in $H^1(0,1)$ with values in $\\R$.'
-SECTION_TWO = ('\\section{Main result}\n% src: [M1:L3-L4]\n\\begin{lemma}The embedding is compact.\\end{lemma}\n'
-               '% TODO: the notes do not say which theorem gives compactness.')
+BODY = ('\\title{Compactness notes}\n\\section{Setting}\nLet $u_n$ be bounded in $H^1(0,1)$ with values in $\\R$.\n'
+        '\\section{Main result}\n\\begin{lemma}The embedding into $L^2(0,1;\\R)$ is compact.\\end{lemma}\n'
+        '% TODO: the notes do not say which theorem gives compactness.')
 NOTES = 'u_n bounded in H^1(0,1)\nvalues real\nembedding H^1 -> L^2 compact\nproof: ??\n'
 
 
@@ -263,12 +260,8 @@ class WriteupTests(GuiCase):
         (self.root / 'notes.md').write_text(NOTES)
         (self.root / 'mymacros.sty').write_text('\\newcommand{\\R}{\\mathbb{R}}\n\\newtheorem{lemma}{Lemma}\n')
 
-    def replies(self):
-        return [text(json.dumps(OUTLINE)), text(SECTION_ONE), text(SECTION_TWO),
-                text('Setting is faithful.'), text('Main result is faithful; one TODO remains.')]
-
-    def test_write_up_without_latex_is_exported_and_traced(self):
-        self.fake.replies = self.replies()
+    def test_one_reasoned_call_writes_the_whole_document(self):
+        self.fake.replies = [text(BODY)]
         with patch('mathagent.writeup.shutil.which', return_value=None):
             started = self.ok('POST', '/api/writeup', {'goal': 'Write up my notes as a short article.',
                                                        'source_files': ['notes.md'], 'template_files': ['mymacros.sty'],
@@ -280,30 +273,56 @@ class WriteupTests(GuiCase):
         self.assertFalse(detail['settings']['online'])  # a write-up never searches, whatever the default
         self.assertEqual(detail['status'], 'partial')  # not compiled: never reported complete
         self.assertEqual(detail['outputs'], {'tex': 'notes-clean.tex'})
+        self.assertEqual(len(self.fake.requests), 1)  # no outline, no sections, no review: one writing call
+        request = self.fake.requests[0]
+        self.assertTrue(request['think'])
+        self.assertEqual((request['options']['temperature'], request['options']['top_p']), (0.6, 0.95))
+        system, prompt = request['messages'][0]['content'], request['messages'][1]['content']
+        self.assertTrue(system.startswith('You write LaTeX documents for a mathematician'))
+        self.assertIn('# Mathematical write-up', system)
+        self.assertNotIn('Search using short public', system)  # not the research assistant's policy
+        self.assertIn(NOTES.strip(), prompt)  # the whole material, as written: no line prefixes
+        self.assertIn('\\newcommand{\\R}{\\mathbb{R}}', prompt)
+        self.assertNotIn('read_manuscript', prompt)
+        self.assertNotIn('% src', prompt)
         document = (self.root / 'notes-clean.tex').read_text()
         self.assertIn('\\usepackage{mymacros}', document)
-        self.assertIn('\\begin{lemma}', document)
+        self.assertIn('\\title{Compactness notes}', document)
+        self.assertIn('\\begin{lemma}The embedding into $L^2(0,1;\\R)$ is compact.\\end{lemma}', document)
         self.assertNotIn('\\newtheorem{theorem}', document)  # the template defines its own environments
-        self.assertEqual(detail['citation_issues'], [])
-        self.assertIn('R', detail['macros'])
+        self.assertEqual(document.count('\\title'), 1)
         self.assertFalse(detail['compile']['available'])
-        plan_request = self.fake.requests[0]
-        self.assertEqual(plan_request['format']['required'], ['title', 'sections'])
-        self.assertIn('\\newcommand{\\R}{\\mathbb{R}}', plan_request['messages'][1]['content'])
-        self.assertIn('M1 L3: embedding H^1 -> L^2 compact', self.fake.requests[2]['messages'][1]['content'])
         self.assertEqual(self.request('GET', f'/api/research/{started["id"]}/pdf')[0], 404)
-        reviews = [request['messages'][1]['content'] for request in self.fake.requests[3:]]
-        self.assertEqual(len(reviews), 2)  # the complete source for each section gets its own fidelity pass
-        self.assertTrue(all('WRITE-UP TO REVIEW:' in review for review in reviews))
-        self.assertTrue(all(review.rstrip().endswith('Do not reproduce the document.') for review in reviews))
-        self.assertIn('\\begin{lemma}', reviews[1])
-        self.assertIn('M1 L3:', reviews[1])
-        self.assertTrue(detail['review_complete'])
-        self.assertNotIn('review_context_issues', {k for k, v in detail.items() if v})
+
+    def test_the_answer_is_cleaned_and_cannot_redefine_the_users_macros(self):
+        answer = ('```latex\n\\documentclass{article}\n\\usepackage{amsmath}\n\\newcommand{\\R}{\\mathbf{R}}\n'
+                  '\\newcommand{\\Hone}{H^1(0,1)}\n\\begin{document}\n\\title{Notes}\n\\maketitle\n'
+                  '\\section{A}\nIn $\\Hone$, values in $\\R$.\n\\end{document}\n```')
+        self.fake.replies = [text(answer)]
+        with patch('mathagent.writeup.shutil.which', return_value=None):
+            started = self.ok('POST', '/api/writeup', {'goal': 'Write up.', 'source_files': ['notes.md'],
+                                                       'template_files': ['mymacros.sty'], 'tokens': 12000})
+            self.wait_task(timeout=30)
+        document = self.ok('GET', f'/api/research/{started["id"]}')['document']
+        self.assertIn('\\newcommand{\\Hone}{{H^1(0,1)}}', document)  # its own macro joins the preamble, braced
+        self.assertNotIn('\\mathbf{R}', document)  # the template's \\R stays the template's
+        self.assertEqual((document.count('\\documentclass'), document.count('\\begin{document}'), document.count('```')), (1, 1, 0))
+
+    def test_a_template_tex_without_a_document_is_preamble(self):
+        (self.root / 'preamble.tex').write_text('\\usepackage{mathtools}\n\\newcommand{\\Hone}{H^1(0,1)}\n')
+        self.fake.replies = [text('\\title{T}\n\\section{A}\nIn $\\Hone$.')]
+        with patch('mathagent.writeup.shutil.which', return_value=None):
+            started = self.ok('POST', '/api/writeup', {'goal': 'Write up.', 'source_files': ['notes.md'],
+                                                       'template_files': ['preamble.tex'], 'tokens': 12000})
+            self.wait_task(timeout=30)
+        document = self.ok('GET', f'/api/research/{started["id"]}')['document']
+        head = document.split('\\begin{document}')[0]
+        self.assertIn('\\usepackage{mathtools}\n\\newcommand{\\Hone}{H^1(0,1)}', head)
+        self.assertTrue(head.startswith('\\documentclass{amsart}'))
 
     def test_existing_output_is_never_replaced_and_inputs_are_checked(self):
         (self.root / 'notes-clean.tex').write_text('mine')
-        self.fake.replies = self.replies()
+        self.fake.replies = [text(BODY)]
         with patch('mathagent.writeup.shutil.which', return_value=None):
             started = self.ok('POST', '/api/writeup', {'goal': 'Write up.', 'source_files': ['notes.md'],
                                                        'output': 'notes-clean.tex', 'tokens': 12000})
@@ -316,43 +335,36 @@ class WriteupTests(GuiCase):
             self.assertEqual(status, 400, (body, value))
 
     def test_saved_template_is_reused_and_typed_notes_are_a_source(self):
-        self.fake.replies = [text(json.dumps({'title': 'T', 'sections': [{'title': 'A', 'sources': ['M0:L1-L2'], 'goal': 'g'}]})),
-                             text('\\section{A}\n% src: [M0:L1-L2]\n$\\R$'), text('Fine.')]
+        self.fake.replies = [text('\\title{T}\n\\section{A}\n$\\R$')]
         with patch('mathagent.writeup.shutil.which', return_value=None):
             self.ok('POST', '/api/writeup', {'goal': 'Clean up.', 'notes': 'line one\nline two\n', 'template_files': ['mymacros.sty'],
                                              'save_template': 'My style', 'tokens': 12000})
             self.wait_task(timeout=30)
         self.assertEqual(self.ok('GET', '/api/templates')['templates'], [{'name': 'My style', 'files': ['mymacros.sty']}])
-        self.fake.replies = [text(json.dumps({'title': 'T', 'sections': [{'title': 'A', 'sources': ['M0:L1-L1'], 'goal': 'g'}]})),
-                             text('\\section{A}\n% src: [M0:L1-L1]\nText.'), text('Fine.')]
+        self.fake.replies = [text('\\title{T}\n\\section{A}\nText.')]
         with patch('mathagent.writeup.shutil.which', return_value=None):
             started = self.ok('POST', '/api/writeup', {'goal': 'Again.', 'notes': 'only line\n', 'template': 'My style', 'tokens': 12000})
             self.wait_task(timeout=30)
         detail = self.ok('GET', f'/api/research/{started["id"]}')
         self.assertEqual([s['path'] for s in detail['sources']], ['typed-notes.md', 'saved-template/mymacros.sty'])
         self.assertIn('\\usepackage{mymacros}', detail['document'])
-
-    def test_a_review_that_copies_the_document_does_not_count(self):
-        copied = text('\\documentclass{amsart}\n\\begin{document}copied\\end{document}')
-        self.fake.replies = self.replies()[:3] + [copied, copied]
-        with patch('mathagent.writeup.shutil.which', return_value=None):
-            started = self.ok('POST', '/api/writeup', {'goal': 'Write up.', 'source_files': ['notes.md'], 'tokens': 12000})
-            self.wait_task(timeout=30)
-        detail = self.ok('GET', f'/api/research/{started["id"]}')
-        self.assertEqual((detail['review'], detail['review_complete']), ('', False))
-        self.assertIn('The reviewer returned LaTeX instead of a review; the write-up is unreviewed.', detail['warnings'])
+        self.assertIn('=== NOTES TYPED BY THE USER ===\nonly line', self.fake.requests[-1]['messages'][1]['content'])
 
     @unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
-    def test_compiles_with_the_template_macros_and_repairs_errors(self):
-        broken = SECTION_TWO.replace('\\end{lemma}', '\\end{lemma}\n\\undefinedmacro')
-        self.fake.replies = [text(json.dumps(OUTLINE)), text(SECTION_ONE), text(broken),
-                             text(SECTION_TWO), text('Setting is faithful.'), text('Main result is faithful.')]
+    def test_compiles_supplies_environments_and_repairs_the_whole_document(self):
+        broken = BODY.replace('\\end{lemma}', '\\end{lemma}\n\\begin{hypothesis}H.\\end{hypothesis}\n\\undefinedmacro')
+        self.fake.replies = [text(broken), text(broken.replace('\\undefinedmacro', ''))]
         started = self.ok('POST', '/api/writeup', {'goal': 'Write up.', 'source_files': ['notes.md'],
-                                                   'template_files': ['mymacros.sty'], 'tokens': 16000, 'seconds': 240})
+                                                   'template_files': ['mymacros.sty'], 'tokens': 30000, 'seconds': 240})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
         detail = self.ok('GET', f'/api/research/{started["id"]}')
         self.assertTrue(detail['compile']['ok'], detail['compile'])
-        self.assertIn('Fix the LaTeX compile errors', self.fake.requests[3]['messages'][1]['content'])
+        repair = self.fake.requests[1]['messages'][1]['content']
+        self.assertIn('This LaTeX document does not compile', repair)
+        self.assertIn('Not defined anywhere: \\undefinedmacro', repair)
+        self.assertTrue(self.fake.requests[1]['think'])
+        self.assertIn('\\newtheorem{hypothesis}{Hypothesis}', detail['document'])  # supplied without a model call
+        self.assertIn('the environment hypothesis', ' '.join(detail['warnings']))
         self.assertEqual(detail['outputs'], {'tex': 'notes-writeup.tex', 'pdf': 'notes-writeup.pdf'})
         self.assertTrue((self.root / 'notes-writeup.pdf').read_bytes().startswith(b'%PDF'))
         status, body, headers = self.request('GET', f'/api/research/{started["id"]}/pdf')
@@ -370,10 +382,18 @@ class CompileSafetyTests(unittest.TestCase):
         result = compile_latex('\\documentclass{article}\\begin{document}\\input{/etc/hostname}\\end{document}')
         self.assertFalse(result['ok'])
 
-    def test_untraced_paragraphs_are_counted(self):
-        latex = ('\\section{A}\nNo source here.\n\n% src: [M1:L1-L2]\nTraced.\n\n% TODO: only a note\n\n'
-                 '% src: [M1:L3-L3]\n\\begin{lemma}x\\end{lemma}')
-        self.assertEqual(untraced_paragraphs(latex), 1)
+    def test_an_answer_is_split_into_title_definitions_and_body(self):
+        title, definitions, body = split_body('Some words?\n\\newcommand{\\x}{y}\n\\title[Short]{A {nested} title}\n\\author{Me}\n'
+                                              '\\maketitle\n\\section{A}\nText.\n\\end{document}\ntrailing')
+        self.assertEqual((title, definitions, body), ('A {nested} title', '\\newcommand{\\x}{y}', 'Some words?\n\n\\section{A}\nText.'))
+
+    def test_long_material_is_packed_into_parts_at_headings(self):
+        blocks = ['=== CONVERSATION ===\n' + '\n'.join(f'## User\n\nquestion {i}\n\n## Assistant\n\n' + 'x' * 300 for i in range(20))]
+        parts = split_material(blocks, 2000)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 2000 for part in parts))
+        self.assertTrue(all(part.startswith('## ') for part in parts[1:]))
+        self.assertEqual(split_material(['short'], 2000), ['short'])
 
     def test_template_vocabulary(self):
         macros, theorems, definitions = template_vocabulary([{'content': '\\newcommand{\\R}{\\mathbb{R}}\n'

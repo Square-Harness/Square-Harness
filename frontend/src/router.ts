@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
-export type Mode = 'free' | 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup'
-export const MODE_ORDER: Mode[] = ['free', 'prove', 'critic', 'explore', 'literature', 'referee', 'writeup']
+export type Mode = 'free' | 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup' | 'style'
+export const MODE_ORDER: Mode[] = ['free', 'prove', 'critic', 'explore', 'literature', 'referee', 'writeup', 'style']
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 
 export type Route = { mode: Mode; id: string | null; tab: string | null; from: string | null }
@@ -11,7 +11,8 @@ export function parse(hash: string): Route {
   const [first, second, third] = path.split('/')
   const requestedMode = (MODE_ORDER as string[]).includes(first) ? (first as Mode) : 'free'
   const id = second && UUID.test(second) ? second : null
-  const mode = id ? requestedMode : 'free'
+  // Other notebooks start their work from Default; the Style page is opened directly.
+  const mode = id || requestedMode === 'style' ? requestedMode : 'free'
   const origin = new URLSearchParams(search).get('from')
   const from = id && origin && UUID.test(origin) ? origin : null
   return { mode, id, tab: id && third ? third : null, from }

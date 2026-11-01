@@ -11,12 +11,11 @@ import { capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
-import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, Thinking, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['plan', 'section', 'assemble', 'compile', 'review', 'export'] as const
+const STEPS = ['style', 'draft', 'compile', 'export'] as const
 const STEP_NAMES: Record<string, string> = {
-  plan: 'Outline', section: 'Sections', assemble: 'Assemble', compile: 'Compile', repair: 'Repair',
-  review: 'Review', export: 'Export', done: 'Done',
+  style: 'Style', draft: 'Writing', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
 }
 
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
@@ -49,7 +48,7 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
             { id: 'checks', label: 'Checks', badge: issues.length || undefined, narrowOnly: true },
             { id: 'compile', label: 'Compile', badge: data.compile?.errors.length || undefined },
             { id: 'review', label: 'Model review', hidden: !data.review },
-            { id: 'outline', label: 'Outline' },
+            { id: 'outline', label: 'Outline', hidden: !data.outline },
             { id: 'sources', label: 'Sources', badge: data.sources.length || undefined },
             { id: 'files', label: 'Files', badge: data.artifacts.length || undefined },
           ]} />
@@ -77,14 +76,14 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const phase = data.phase === 'repair' ? 'compile' : data.phase
+  const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile' : data.phase
   const current = STEPS.indexOf(phase as typeof STEPS[number])
   return (
     <header className="job-head">
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">Write-up</span>
+        <span className="job-stop">{String(data.variant) === 'summary' ? 'Summary' : 'Write-up'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
@@ -99,10 +98,14 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
         <span>{String(data.settings.model)}</span>
         <span>Started {ago(data.created_at)}</span>
       </div>
-      {(data.outputs?.tex || data.compile?.pdf) && (
+      {(data.outputs?.tex || data.outputs?.download || data.compile?.pdf) && (
         <div className="outputs">
-          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{data.outputs.pdf && <> and <code>{data.outputs.pdf}</code></>} in your folder</span>}
-          {data.compile?.pdf && <a className="btn btn-small" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a>}
+          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <> and <code>{data.outputs.pdf}</code></>} in your folder</span>}
+          {data.outputs?.download && <>
+            <a className="btn btn-small btn-primary" href={api.researchTexUrl(data.id)} download={data.outputs.download}>Download .tex</a>
+            {data.compile?.pdf && <a className="btn btn-small" href={api.researchPdfDownloadUrl(data.id)} download>Download PDF</a>}
+          </>}
+          {data.compile?.pdf && <a className="btn btn-small btn-quiet" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a>}
         </div>
       )}
       <div className="job-actions">
@@ -128,7 +131,9 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
       {data.running && data.live && <LiveWriteup id={data.id} role={data.live.role} file={data.live.file} ours={ours} />}
       {data.document ? (
         <>
-          <p className="caveat">Model draft. Each <code>% src</code> mark opens the note lines a paragraph came from; red ones cite lines that were never read. TODO comments are left for you.</p>
+          <p className="caveat">{data.document.includes('% src:')
+            ? <>Model draft. Each <code>% src</code> mark opens the note lines a paragraph came from; red ones cite lines that were never read. TODO comments are left for you.</>
+            : <>Model draft: read it before using it. <code>% TODO</code> comments mark points for you to settle.</>}</p>
           <TexSource text={data.document} onCite={onCite} flagged={flagged} errorLines={errorLines} />
         </>
       ) : data.sections?.some((s) => s.complete) ? (
@@ -139,7 +144,8 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
           ))}
         </>
       ) : (
-        <p className="empty-note">No section written yet.{data.running ? (data.phase === 'plan' ? ' The outline comes first.' : ' The first one is being written.') : ''}</p>
+        <p className="empty-note">Nothing written yet.{data.running ? (data.phase === 'style' ? ' Choosing the style first.'
+          : data.parts && data.parts.length > 1 ? ` Writing part ${data.parts.filter((p) => p.complete).length + 1} of ${data.parts.length}.` : ' The document is being written.') : ''}</p>
       )}
     </div>
   )
@@ -154,7 +160,10 @@ function LiveWriteup({ id, role, file, ours }: { id: string; role: string; file:
       {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
       {role === 'plan' ? <StreamBody stream={stream} role="outline" live />
         : role === 'fidelity' ? <StreamBody stream={stream} role="fidelity" live />
-        : <pre className="source tex live-tex">{stream.text || 'Waiting for the first tokens…'}</pre>}
+        : <>
+          <Thinking text={stream.thinking} live={!stream.text} />
+          <pre className="source tex live-tex">{stream.text || (stream.thinking ? 'Thinking before writing…' : 'Waiting for the first tokens…')}</pre>
+        </>}
     </div>
   )
 }
@@ -255,7 +264,16 @@ function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; 
       <section className="aside-section">
         <h3 className="aside-title">Checks</h3>
         <p className="small">{todo ? `${todo} TODO comment${todo === 1 ? '' : 's'} left for you to settle.` : data.document ? 'No TODO comments.' : 'Checks run once the document is assembled.'}</p>
+        {data.notation && <p className="small">{data.notation.conventions.length
+          ? <>Notation made consistent ({data.notation.conventions.map((c) => c.notation).slice(0, 8).join(', ')}) in {data.notation.fixed} section{data.notation.fixed === 1 ? '' : 's'}{data.notation.rejected ? `; ${data.notation.rejected} change${data.notation.rejected === 1 ? '' : 's'} not made (a bare letter, your own macro, or an undefined symbol)` : ''}.</>
+          : data.notation.rejected ? `Notation checked; ${data.notation.rejected} change${data.notation.rejected === 1 ? '' : 's'} not made (a bare letter, your own macro, or an undefined symbol).` : 'Notation checked: consistent.'}</p>}
         {issues.length > 0 && <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
+      </section>
+      <section className="aside-section">
+        <h3 className="aside-title">Style</h3>
+        <p className="small">{data.style ? <>Your saved style <strong>{data.style.label}</strong>.</>
+          : data.style_checked || data.domain ? <>No saved style fits: the usual style of {data.domain || 'the field'}. <a href="#/style">Learn your style</a>.</>
+          : 'Chosen before writing.'}</p>
       </section>
       <section className="aside-section">
         <h3 className="aside-title">Template</h3>

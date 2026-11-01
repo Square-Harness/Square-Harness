@@ -482,12 +482,58 @@ def writeup_start(h, body):
     return {'task': task.summary(), 'id': task.target}
 
 
+@route('GET', '/api/styles')
+def styles(h, body):
+    return {'styles': store.list_styles(h.server.hub.base), 'choice': store.style_choice(h.server.hub.base)}
+
+
+@route('POST', '/api/styles/choice')
+def styles_choice(h, body):
+    values = [body.get(key) for key in ('mode', 'style', 'domain')]
+    if any(value is not None and not isinstance(value, str) for value in values):
+        raise ValueError('mode, style and domain must be text')
+    return {'choice': store.set_style_choice(h.server.hub.base, *values)}
+
+
+@route('POST', '/api/styles/template')
+def style_template(h, body):
+    name = body.get('name')
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError('Name the style')
+    return {'style': store.set_style_template(h.server.hub.base, h.server.hub.root, name.strip(), _files(body, 'template_files'))}
+
+
+@route('POST', '/api/style')
+def style_start(h, body):
+    name, goal = body.get('name'), body.get('goal') or ''
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError('Name the style')
+    if not isinstance(goal, str) or len(goal) > 20000:
+        raise ValueError('goal must be text of at most 20000 characters')
+    task = h.server.hub.start_style(
+        goal, name=name.strip(), source_files=_files(body), template_files=_files(body, 'template_files'),
+        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
+        queue=bool(_flag(body, 'queue')))
+    return {'task': task.summary(), 'id': task.target}
+
+
 @route('GET', '/api/research/' + UUID + '/pdf')
 def research_pdf(h, body, id):
     data = store.research_pdf(h.server.hub.root, id)
+    download = (h.query.get('download') or [''])[0] == '1'
+    name = store.research_tex(h.server.hub.root, id)[0][:-4] + '.pdf' if download else 'writeup.pdf'
     # A top-level PDF view: the browser's viewer must not be blocked by the page CSP.
-    h.send_bytes(200, data, 'application/pdf', [('Content-Disposition', 'inline; filename="writeup.pdf"'),
+    h.send_bytes(200, data, 'application/pdf', [('Content-Disposition', f'{"attachment" if download else "inline"}; filename="{name}"'),
                                                 ('Cache-Control', 'no-store')], csp=False)
+    return Streamed
+
+
+@route('GET', '/api/research/' + UUID + '/tex')
+def research_tex(h, body, id):
+    name, data = store.research_tex(h.server.hub.root, id)
+    h.send_bytes(200, data, 'application/x-tex; charset=utf-8', [('Content-Disposition', f'attachment; filename="{name}"'),
+                                                                 ('Cache-Control', 'no-store')])
     return Streamed
 
 

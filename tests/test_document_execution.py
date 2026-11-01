@@ -118,24 +118,6 @@ class DocumentExecutionTests(ReviewTestCase):
         self.assertNotIn('Old report. Old report.', rendered)
         self.assertEqual(len(reference['messages'][1]['content']), len('Old report. ' * 4000))
 
-    def test_writeup_outline_does_not_drop_source_after_24_sections(self):
-        runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
-        with patch.object(ResearchRunner, '_run', return_value={}):
-            runner.start('Write these notes.', notes='\n'.join(f'Exact note {n}.' for n in range(2200)))
-        outline = runner._outline('{}')
-        self.assertGreater(len(outline['sections']), 24)
-        self.assertTrue(any('L2200' in ref for section in outline['sections'] for ref in section['sources']))
-
-    def test_writeup_source_range_past_200_lines_is_not_silently_cut(self):
-        runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
-        with patch.object(ResearchRunner, '_run', return_value={}):
-            runner.start('Write these notes.', notes='\n'.join(f'Exact note {n}.' for n in range(1, 301)))
-        text, clipped = runner._excerpt(['M0:L1-L300'], 20000)
-        self.assertIn('L300: Exact note 300.', text)
-        self.assertFalse(clipped)
-        with self.assertRaises(WorkerInputError):
-            runner._excerpt(['M0:L1-L300'], 30)
-
     def test_literature_unusable_json_is_not_a_relevance_exclusion(self):
         runner = LiteratureRunner(self.agent(FakeClient(), ctx=40960))
         with patch.object(ResearchRunner, '_run', return_value={}):
@@ -247,31 +229,66 @@ class DocumentExecutionTests(ReviewTestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(runner.state['calls'][-1]['status'], 'incomplete')
 
-    def test_writeup_recovery_grows_from_the_actual_first_allocation(self):
+    def test_writeup_of_long_notes_is_written_in_parts_that_cover_every_line(self):
         runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
+        notes = '\n'.join(f'Exact note {n}.' for n in range(9000))
         with patch.object(ResearchRunner, '_run', return_value={}):
-            runner.start('Write the notes.', notes='Exact source line.')
-        runner.state['sections'] = [{'title': 'Section', 'sources': ['M0:L1-L1'], 'goal': 'Preserve the source.',
-                                     'complete': False, 'latex': ''}]
-        calls = []
-        def call(role, prompt, *, cap, **kwargs):
-            calls.append(kwargs)
-            runner.state['calls'].append({'reserved_tokens': 512 if len(calls) == 1 else 1024})
-            return {'text': '\\section{Section}\n% src: [M0:L1]\nExact source line.',
-                    'complete': len(calls) > 1, 'output_limit': 512 if len(calls) == 1 else 1024}
-        with patch.object(runner, '_call', side_effect=call):
-            runner._section()
-        self.assertEqual(calls[1]['minimum_output'], 513)
-        self.assertTrue(runner.state['sections'][0]['complete'])
+            runner.start('Write these notes.', notes=notes)
+        runner._prepare()
+        parts = runner.state['parts']
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part['text']) <= runner._room() for part in parts))
+        written = '\n'.join(part['text'] for part in parts)
+        self.assertTrue(all(f'Exact note {n}.' in written for n in (0, 4500, 8999)))
 
-    def test_copying_a_single_section_is_not_a_fidelity_review(self):
+    def test_a_writeup_too_long_for_one_call_is_written_in_two_halves(self):
+        runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
+        with patch.object(ResearchRunner, '_run', return_value={}):
+            runner.start('Write the notes.', notes='\n\n'.join(f'Paragraph {n}. ' + 'x' * 400 for n in range(40)))
+        runner._prepare()
+        self.assertEqual(len(runner.state['parts']), 1)
+        replies = iter([{'text': '\\title{T}\n\\section{A}\ncut', 'complete': False},
+                        {'text': '\\title{T}\n\\section{A}\nFirst half.', 'complete': True},
+                        {'text': '\\section{B}\nSecond half.', 'complete': True}])
+        with patch.object(runner, '_call', side_effect=lambda *a, **k: next(replies)):
+            runner._draft()
+            self.assertEqual(len(runner.state['parts']), 2)
+            runner._draft()
+            runner._draft()
+        self.assertEqual(runner.state['phase'], 'assemble')
+        self.assertEqual(runner.state['body'], '\\section{A}\nFirst half.\n\n\\section{B}\nSecond half.')
+        self.assertEqual(runner.state['title'], 'T')
+
+    def test_an_announcement_is_asked_once_more_then_refused(self):
         runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
         with patch.object(ResearchRunner, '_run', return_value={}):
             runner.start('Write the notes.', notes='Exact source line.')
-        latex = '\\section{Section}\n% src: [M0:L1]\nExact source line.'
-        runner.state['sections'] = [{'title': 'Section', 'sources': ['M0:L1-L1'], 'latex': latex, 'complete': True}]
-        with patch.object(runner, '_call', return_value={'text': latex, 'complete': True}):
-            runner._review()
-        self.assertFalse(runner.state['review_complete'])
-        self.assertEqual(runner.state['review'], '')
-        self.assertTrue(any('returned LaTeX instead of a review' in w for w in runner.state['warnings']))
+        runner._prepare()
+        reply = {'text': "I'll read the source lines first.", 'complete': True}
+        with patch.object(runner, '_call', return_value=reply) as call:
+            runner._draft()
+            with self.assertRaises(WorkerInputError):
+                runner._draft()
+        self.assertEqual(call.call_count, 2)
+
+    def test_a_writing_call_sets_its_own_reasoning_share_only_while_it_runs(self):
+        runner = WriteupRunner(self.agent(FakeClient(), ctx=40960))
+        with patch.object(ResearchRunner, '_run', return_value={}):
+            runner.start('Write the notes.', notes='Exact source line.')
+        class Transport:
+            def __init__(self, policy):
+                self.thinking_budget_policy = policy
+        class Wrapper:  # like the Assistant's budget client: reads forward, writes would not
+            def __init__(self, client):
+                self.client = client
+        seen = []
+        for policy, expected in (({'ordinary': 0.75, 'structured': 0.75}, 8192 / 24576), ({}, None)):
+            transport = Transport(policy)
+            runner.agent.client = Wrapper(transport)
+            def fake(self, role, instruction, **kwargs):
+                seen.append(transport.thinking_budget_policy.get('ordinary'))
+                return {'text': '', 'complete': True}
+            with patch.object(ResearchRunner, '_call', fake):
+                runner._call('writing', 'x', cap=24576, think=True, thinking_budget=8192)
+            self.assertEqual(seen[-1], expected)
+            self.assertEqual(transport.thinking_budget_policy, policy)  # restored afterwards

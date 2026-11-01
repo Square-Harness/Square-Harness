@@ -1,7 +1,7 @@
 // Effort levels: one control instead of budget fields (no React; testable with node).
 import type { Defaults } from './api'
 
-export type EffortKind = 'proof' | 'research' | 'writeup'
+export type EffortKind = 'proof' | 'research' | 'writeup' | 'style'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'poincare'
 
 // Effort sets checking depth, attempts, and time. Token estimates remain in this
@@ -47,7 +47,7 @@ export function effortLimits(kind: EffortKind, defaults: Defaults, level: Effort
   const seconds = effort.minutes * 60
   if (kind === 'proof') return { rounds: effort.tries, seconds, ...proofCeilings(defaults, defaults.proof_tokens) }
   const base: Limits = { tokens: defaults.research_tokens, input_tokens: defaults.research_input_tokens, seconds }
-  if (kind === 'writeup') return base
+  if (kind === 'writeup' || kind === 'style') return base
   return { ...base, rounds: effort.tries, requests: effort.requests, chars: effort.chars }
 }
 
@@ -62,6 +62,7 @@ export function describeLimits(kind: EffortKind, limits: Limits) {
   const tokenCap = limits.tokens === null ? '' : `; output capped at ${count(limits.tokens)} tokens`
   if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   if (kind === 'writeup') return `Section-by-section writing and a fidelity check; ${minutesLabel(limits.seconds)} working time${tokenCap}`
+  if (kind === 'style') return `Each article read once, then each domain merged; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   const depth = EFFORTS.find((effort) => effort.tries === limits.rounds)?.label || 'Custom'
   return `Checking depth: ${depth}; ${minutesLabel(limits.seconds)} working time${tokenCap}`
 }

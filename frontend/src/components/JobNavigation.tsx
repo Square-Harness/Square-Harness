@@ -4,7 +4,7 @@ import { BackIcon } from './Icons'
 
 export function JobNavigation({ route }: { route: Route }) {
   const app = useApp()
-  if (!route.id || !['prove', 'literature', 'referee', 'writeup'].includes(route.mode)) return null
+  if (!route.id || !['prove', 'literature', 'referee', 'writeup', 'style'].includes(route.mode)) return null
   const origin = route.from && (!app.chats || app.chats.some((chat) => chat.id === route.from))
     ? route.from : null
   return (

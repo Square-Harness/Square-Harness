@@ -15,6 +15,7 @@ import { ResearchNew } from './views/ResearchNew'
 import { ResearchView } from './views/ResearchView'
 import { WriteupNew } from './views/WriteupNew'
 import { WriteupView } from './views/WriteupView'
+import { StyleNew, StyleView } from './views/Style'
 
 function View({ route }: { route: Route }) {
   const info = MODES[route.mode]
@@ -25,6 +26,7 @@ function View({ route }: { route: Route }) {
     return <ChatView key={mode + (route.id || '')} mode={mode} id={route.id} />
   }
   if (info.kind === 'writeup') return route.id ? <WriteupView key={route.id} id={route.id} tab={route.tab} /> : <WriteupNew />
+  if (info.kind === 'style') return route.id ? <StyleView key={route.id} id={route.id} tab={route.tab} /> : <StyleNew />
   return route.id
     ? <ResearchView key={route.id} id={route.id} tab={route.tab} />
     : <ResearchNew key={route.mode} kind={route.mode as 'literature' | 'referee'} />

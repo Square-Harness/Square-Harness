@@ -38,12 +38,17 @@ Do not describe a model's review as a formal proof certificate.
 You can delegate a precise objective to an existing worker when sustained proof
 search, independent criticism, exploration, a precise reference, literature,
 manuscript review or a write-up will help. The available modes are prove, critic,
-explore, check, literature, referee, detailed_review, quick_review, explain and writeup. Delegation is optional. Prefer the
+explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize. Delegation is optional. Prefer the
 least effort suitable for the objective; use poincare only when the user requested
 maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, critic, explore, referee
 and writeup workers the unchanged original user message and conversation, so
-your objective must identify its relationship to that request.
+your objective must identify its relationship to that request. writeup and summarize
+also receive the conversation's results (proofs, reports) as their source and write
+a .tex file; summarize recaps the important results obtained so far. Delegate a
+write-up only when the user asks for one, with the user's own words as its request
+(do not restate or correct the mathematics), and never critique, review or redo a
+write-up: it is for results the user has already checked, and it ends the turn.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
 its proof; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
@@ -900,11 +905,15 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
-        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup')
+        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup', 'summarize')
                 and result.get('mode') == self.state['required_mode'] and isinstance(value, dict)):
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead
             # of starting another whole-manuscript scan in the parent.
+            self.state['force_final'] = True
+        if result.get('mode') in ('writeup', 'summarize') and isinstance(value, dict) and value.get('answer'):
+            # A delivered document ends the turn: the user writes up results they checked, so no
+            # critique of it and no second version; its ready message is the reply.
             self.state['force_final'] = True
         if (self.state.get('automatic_source_mode') == 'explore'
                 and isinstance(value, dict) and value.get('source_excerpt')
@@ -953,6 +962,32 @@ class Orchestrator:
                 answer += '\n\nLookup limitation: ' + detail.strip()
         # Render the worker's supported answer even after a partial/provider
         # failure. A second model pass can invent references or coverage claims.
+        return self._worker_reply(child, answer)
+
+    def _document_answer(self):
+        """An explicit @writeup or @summarize: the worker's short ready message is the reply.
+
+        The user writes up results they have checked; a second model pass would
+        only assess or restate the document.
+        """
+        mode = self.state.get('required_mode')
+        if mode is None and self.state['children'] and self.state['children'][-1]['action']['mode'] in ('writeup', 'summarize'):
+            mode = self.state['children'][-1]['action']['mode']  # the Assistant chose to write one up itself
+        if mode not in ('writeup', 'summarize'):
+            return None
+        child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
+        if child is None or child['status'] != 'complete' or (self.state.get('required_mode') is None
+                                                               and not (child.get('result') or {}).get('answer')):
+            return None
+        value = child.get('result') or {}
+        answer = value.get('answer') if isinstance(value.get('answer'), str) else ''
+        if not answer.strip():
+            error = value.get('error')
+            answer = 'The ' + ('summary' if mode == 'summarize' else 'write-up') + ' could not be made: ' + str(
+                (error.get('message') if isinstance(error, dict) else error) or value.get('status') or 'unknown error')
+        return self._worker_reply(child, answer)
+
+    def _worker_reply(self, child, answer):
         provenance = {'kind': 'worker_result', 'job_id': child['job_id']}
         rendered = (self.state.get('answer_source') == provenance
                     and self.state['messages'][-1] == {'role': 'assistant', 'content': answer})
@@ -1006,7 +1041,7 @@ class Orchestrator:
             # empty/continuation recovery may follow; bad peers remain bounded.
             while self._call_room() or final_rescue:
                 final_rescue = False
-                qualified = self._qualified_reference_answer()
+                qualified = self._qualified_reference_answer() or self._document_answer()
                 if qualified is not None:
                     return qualified
                 tools = self._tools() if self._action_room() else []
