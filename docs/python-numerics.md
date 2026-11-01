@@ -168,9 +168,24 @@ Every run is saved in the workspace, next to the other jobs:
 .mathagent/experiments/exp-20261031-221508-3fa2c1/
   record.json   code, seed, parameters, image id, limits, status, timings, stdout/stderr, RESULT, files
   code.py       the exact code that ran
-  figure-1.png  open Matplotlib figures (with a text summary in record.json)
-  values.csv    files the code saved in OUTPUT_DIR (.png .csv .txt .json)
+  figure-1.png  open Matplotlib figures not already saved (with a text summary in record.json)
+  plot.svg …    files the code saved (relative paths land in OUTPUT_DIR, its working directory,
+                or directly in /tmp): .png .svg .pdf .html .csv .txt .json
 ```
+
+In the interface, each run's files appear in the conversation where the run
+happened, as typed artifacts (`artifact_id`, `filename`, `mime_type`, `url`),
+served by `/api/artifacts/<run>/<file>` (only files the run's record declares):
+
+| Type | Shown as | Served with |
+| --- | --- | --- |
+| PNG, SVG | image (click for full size) | `image/png`, `image/svg+xml` + CSP `sandbox` |
+| HTML | `<iframe sandbox="allow-scripts">`, no same-origin | CSP `sandbox allow-scripts`, framing by the interface only |
+| PDF | link, opens in the browser | `application/pdf` |
+| CSV, TXT, JSON | link | `text/plain` + CSP `sandbox` |
+
+An open interface tab reloads itself when the server starts with a newer
+interface bundle, so new display features never wait for a manual reload.
 
 The oldest records are pruned beyond 200 runs or 256 MB. The model sees
 each run as compact JSON: the experiment id, status, bounded stdout and
