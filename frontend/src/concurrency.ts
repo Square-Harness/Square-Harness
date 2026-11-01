@@ -1,4 +1,4 @@
-import type { Activity, Concurrency, LiveStep, TaskEntry, TaskSnapshot, TaskSummary } from './api.ts'
+import type { Activity, Concurrency, LiveStep, TaskEntry, TaskSnapshot, TaskSummary, TranscriptItem } from './api.ts'
 
 export const taskRunning = (task: TaskSummary | null | undefined) =>
   !!task && ['starting', 'running', 'pausing'].includes(task.state)
@@ -63,7 +63,8 @@ export function reduceActivity(snapshot: TaskSnapshot, task: string, activity: A
 }
 
 export type ChatEvent = {
-  seq: number; task: string; chat: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice'; thinking?: string; text?: string
+  seq: number; task: string; chat: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice' | 'experiment'
+  thinking?: string; text?: string; item?: TranscriptItem
 }
 
 export function reduceChat(snapshot: TaskSnapshot, event: ChatEvent): TaskSnapshot {
@@ -75,6 +76,7 @@ export function reduceChat(snapshot: TaskSnapshot, event: ChatEvent): TaskSnapsh
       const last = steps[steps.length - 1]
       if (last?.type === 'call') steps[steps.length - 1] = { ...last, thinking: last.thinking + (event.thinking || ''), text: last.text + (event.text || '') }
     } else if (event.kind === 'tool' || event.kind === 'result' || event.kind === 'notice') steps.push({ type: event.kind, text: event.text || '' })
+    else if (event.kind === 'experiment' && event.item?.role === 'experiment') steps.push({ type: 'experiment', item: event.item })
     return { ...entry, live: { ...entry.live, steps } }
   })
 }

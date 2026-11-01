@@ -102,6 +102,7 @@ export type Approval = {
 export type LiveStep =
   | { type: 'call'; thinking: string; text: string }
   | { type: 'tool' | 'result' | 'notice'; text: string }
+  | { type: 'experiment'; item: TranscriptItem }  // a sandbox run's figures, shown as soon as they exist
 
 export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' | 'free' | 'check' }
 

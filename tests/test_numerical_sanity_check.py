@@ -359,6 +359,28 @@ class InterfaceFigureTests(GuiCase):
                     f"/api/experiments/{item['experiment']}/record.json", f"/api/experiments/{item['experiment']}/code.py"):
             self.assertIn(self.request('GET', bad)[0], (404,), bad)
 
+    def test_figures_join_the_live_turn_as_soon_as_they_are_saved(self):
+        import types
+        events = []
+        self.hub.bus.publish = lambda event, mutate=None, **data: (mutate and mutate(), events.append((event, data)))
+        task = types.SimpleNamespace(id='t1', live={'chat': 'c1', 'steps': []})
+        workspace = types.SimpleNamespace(numerics=types.SimpleNamespace(on_record=None))
+        chat = gui_store.create_chat(self.root, 'critic')['id']
+        task.live['chat'] = chat
+        self.hub._show_experiments(workspace, self.root, chat, task, persist=False)
+        record = {'id': 'exp-20261101-005400-abcdef', 'status': 'ok', 'purpose': 'Plot one path',
+                  'artifacts': [{'name': 'figure-1.png', 'kind': 'figure', 'width': 800, 'height': 500}]}
+        workspace.numerics.on_record(record)
+        self.assertEqual(task.live['steps'][0]['type'], 'experiment')
+        self.assertEqual(task.live['steps'][0]['item']['figures'][0]['name'], 'figure-1.png')
+        self.assertEqual([kind for kind, _ in events], ['chat'])               # live only: saved with the turn
+        self.assertEqual(gui_store.load_chat(self.root, chat)['transcript'], [])
+        self.hub._show_experiments(workspace, self.root, chat, task)            # Assistant: saved at once instead
+        workspace.numerics.on_record(record)
+        self.assertEqual([kind for kind, _ in events], ['chat', 'chat_saved'])
+        self.assertEqual(len(task.live['steps']), 1)                             # no second live copy
+        self.assertEqual(gui_store.load_chat(self.root, chat)['transcript'][0]['role'], 'experiment')
+
     def test_critique_chat_saves_the_figures_with_the_turn(self):
         self.executor.results = [figure_run()]
         chat = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']

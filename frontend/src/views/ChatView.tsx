@@ -81,7 +81,9 @@ const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isL
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
   const tick = useTick(id)
-  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick])
+  // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
+  const [ended, setEnded] = useState(0)
+  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended])
   const work = chatWork(app.snapshot, id)
   const task = work.active?.task
   const ours = !!task
@@ -90,7 +92,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const [lingering, setLingering] = useState<LiveTurn | null>(null)
   const previous = useRef<LiveTurn | null>(null)
   useEffect(() => {
-    if (!current && previous.current) setLingering(previous.current)
+    if (!current && previous.current) { setLingering(previous.current); setEnded((n) => n + 1) }
     previous.current = current
   }, [current])
   useEffect(() => { setLingering(null) }, [data])
@@ -546,6 +548,8 @@ function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
             <p key={index} className="tool-line tool-live">{step.text}</p>
           ) : step.type === 'result' ? (
             <p key={index} className="tool-result-live">{step.text}</p>
+          ) : step.type === 'experiment' ? (
+            <ExperimentFigures key={index} item={step.item} />
           ) : (
             <p key={index} className="notice">{step.text}</p>
           ))}

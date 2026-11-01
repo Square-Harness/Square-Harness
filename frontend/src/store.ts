@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react'
 import {
   api, ApiError, onUnauthorized,
   type ChatListItem, type Concurrency, type ProofListItem, type ResearchListItem,
-  type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity,
+  type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity, type TranscriptItem,
 } from './api'
 import { reduceActivity, reduceChat, reduceTask, taskById } from './concurrency'
 import { chatDeleteBlocked, deletedChatDestination, withoutDeletedChat } from './chatDeletion'
@@ -26,7 +26,7 @@ type ServerEvent =
   | { type: 'task'; seq: number; task: TaskSummary }
   | ({ type: 'activity'; seq: number; task: string; job: string; id: string | null } & Activity)
   | { type: 'approval'; seq: number; state: 'pending' | 'approved' | 'denied'; approval: Approval | { id: string; task: string } }
-  | { type: 'chat'; seq: number; chat: string; task: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice'; thinking?: string; text?: string }
+  | { type: 'chat'; seq: number; chat: string; task: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice' | 'experiment'; thinking?: string; text?: string; item?: TranscriptItem }
   | { type: 'chat_saved'; seq: number; chat: string }
   | { type: 'chat_deleted'; seq: number; chat: string }
   | { type: 'job'; seq: number; job: 'proof' | 'research'; id: string; status: string; phase: string | null }

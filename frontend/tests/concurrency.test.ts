@@ -109,3 +109,15 @@ test('pause, limits, sends and reviews use explicit task identity and automatic 
     ])
   } finally { globalThis.fetch = original }
 })
+
+test('a sandbox run adds its figures to the live turn', async () => {
+  const { reduceChat } = await import('../src/concurrency.ts')
+  const item = { role: 'experiment' as const, content: '', time: '', experiment: 'exp-20261101-005400-abcdef',
+    figures: [{ name: 'figure-1.png', width: 800, height: 500 }] }
+  const live = { chat: 'c1', kind: 'message' as const, user: 'Plot', steps: [], mode: 'free' as const }
+  const task = { id: 't1', state: 'running' } as unknown as import('../src/api.ts').TaskSummary
+  const snapshot = { seq: 1, task, activity: [], live, approvals: [], tasks: [{ task, activity: [], live }] } as unknown as import('../src/api.ts').TaskSnapshot
+  const next = reduceChat(snapshot, { seq: 2, task: 't1', chat: 'c1', kind: 'experiment', item })
+  const steps = (next as unknown as { tasks: { live: { steps: unknown[] } }[] }).tasks[0].live.steps
+  assert.deepEqual(steps, [{ type: 'experiment', item }])
+})

@@ -598,8 +598,13 @@ class Hub:
         agent.document_output_cap = getattr(args, 'specialist_output_tokens', None)
         return agent, library
 
-    def _show_experiments(self, workspace, root, chat_id):
-        """Append each sandbox run with figures to an Assistant conversation as it is saved."""
+    def _show_experiments(self, workspace, root, chat_id, task, persist=True):
+        """Show each sandbox run with figures as soon as it is saved.
+
+        With ``persist`` (Assistant turns and reviews) the item is saved in the transcript at
+        once, which the page shows immediately. Otherwise (critique and exploration turns,
+        saved from their tool results when the turn is committed) it joins the live turn.
+        """
         numerics = getattr(workspace, 'numerics', None)
         if numerics is None:
             return
@@ -608,9 +613,17 @@ class Hub:
             item = store.experiment_item(record['id'], record['status'],
                                          [a for a in record.get('artifacts', []) if a.get('kind') == 'figure'],
                                          record.get('purpose', ''))
-            if item is not None:
+            if item is None:
+                return
+            if persist:
                 store.append_items(root, chat_id, [item])
                 self.bus.publish('chat_saved', chat=chat_id)
+                return
+
+            def mutate():
+                if task.live is not None and task.live.get('chat') == chat_id:
+                    task.live['steps'].append({'type': 'experiment', 'item': item})
+            self.bus.publish('chat', mutate=mutate, chat=chat_id, task=task.id, kind='experiment', item=item)
         numerics.on_record = show
 
     def _ensure_model(self, agent):
@@ -817,6 +830,7 @@ class Hub:
             agent.history = fresh['history']
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
+            self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
             if agent.workspace.literature.online:
                 agent.workspace.checker = nested_checker(agent, capture.emit)
             try:
@@ -888,6 +902,7 @@ class Hub:
                                     online=fresh['settings'].get('online', False) and not self.online_locked)
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
+            self._show_experiments(agent.workspace, self.root, chat_id, task)
             try:
                 result = agent.run('Audit this proposed answer. Re-read relevant files if needed.\n'
                                    f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}', capture.emit)
@@ -958,7 +973,7 @@ class Hub:
                 online = online and bool(previous.get('online', False))
             main, _ = self._engine(task, mode='explore', think=False, online=online)
             main.workspace.pin_files(files)
-            self._show_experiments(main.workspace, root, chat_id)
+            self._show_experiments(main.workspace, root, chat_id, task)
             self._ensure_model(main)
             checkpoint_lock = threading.RLock()
             parent = None
@@ -1116,7 +1131,7 @@ class Hub:
                                                                  approve=lambda preview: self._approve(task, preview))
                 except SandboxUnavailable as exc:
                     sandbox_error = f'@{mode} needs the Python sandbox on this computer. {exc}'
-        self._show_experiments(agent.workspace, root, chat_id)
+        self._show_experiments(agent.workspace, root, chat_id, task)
         if mode in ('critic', 'explore') + USER_MODES:
             # These workers return analysis; file mutation belongs to Write-up,
             # whose durable runner already checkpoints approved tool actions.
