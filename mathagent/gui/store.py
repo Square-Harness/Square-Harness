@@ -29,26 +29,37 @@ ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'liter
                'writeup': 'Write-up', 'clarify': 'Question', 'python_lab': 'Python Lab',
                'sanity_check': 'Numerical sanity check'}
 _EXPERIMENT = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
-_FIGURE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.png$')
+_ARTIFACT_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+# Types a sandbox run may return and the interface can show (served by /api/artifacts).
+ARTIFACT_MIME = {'.png': 'image/png', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html',
+                 '.csv': 'text/csv', '.txt': 'text/plain', '.json': 'application/json'}
 
 
-def experiment_item(experiment_id, status, figures, purpose=''):
-    """A transcript item that shows a sandbox run's figures, or None when it has none.
+def artifact_url(experiment_id, name):
+    return f'/api/artifacts/{experiment_id}/{name}'
 
-    ``figures`` are dicts with a ``name`` or a workspace ``path``, and optional width/height;
-    the interface loads them from /api/experiments/<id>/<name>, which validates both again.
+
+def experiment_item(experiment_id, status, artifacts, purpose=''):
+    """A transcript item listing a sandbox run's files as artifacts, or None when there are none.
+
+    Each artifact is {artifact_id, filename, mime_type, url, width, height, bytes}; ``artifacts``
+    may give a ``name`` or a workspace ``path`` per file. The endpoint validates both again.
     """
     if not isinstance(experiment_id, str) or not _EXPERIMENT.match(experiment_id):
         return None
     shown = []
-    for figure in figures or []:
-        name = figure.get('name') or str(figure.get('path', '')).rsplit('/', 1)[-1]
-        if _FIGURE.match(name):
-            shown.append({'name': name, 'width': figure.get('width'), 'height': figure.get('height')})
+    for artifact in artifacts or []:
+        name = artifact.get('name') or str(artifact.get('path', '')).rsplit('/', 1)[-1]
+        mime = ARTIFACT_MIME.get(Path(name).suffix.lower())
+        if mime is None or not _ARTIFACT_NAME.match(name):
+            continue
+        shown.append({'artifact_id': f'{experiment_id}/{name}', 'filename': name, 'mime_type': mime,
+                      'url': artifact_url(experiment_id, name), 'width': artifact.get('width'),
+                      'height': artifact.get('height'), 'bytes': artifact.get('bytes')})
     if not shown:
         return None
     return {'role': 'experiment', 'content': '', 'experiment': experiment_id, 'run_status': str(status or ''),
-            'purpose': str(purpose or '')[:300], 'figures': shown[:8], 'time': _now()}
+            'purpose': str(purpose or '')[:300], 'artifacts': shown[:16], 'time': _now()}
 
 
 def _tool_experiment(message):
@@ -61,7 +72,8 @@ def _tool_experiment(message):
         return None
     if not isinstance(value, dict):
         return None
-    return experiment_item(value.get('experiment_id'), value.get('status'), value.get('figures'))
+    return experiment_item(value.get('experiment_id'), value.get('status'),
+                           list(value.get('figures') or []) + list(value.get('files') or []))
 UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()

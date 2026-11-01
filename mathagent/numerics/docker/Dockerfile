@@ -4,9 +4,9 @@
 # Build (current architecture):
 #   python -m mathagent.numerics build
 # or equivalently:
-#   docker build -t square-harness/python-numerics:1 mathagent/numerics/docker
+#   docker build -t square-harness/python-numerics:2 mathagent/numerics/docker
 # Multi-architecture build (linux/amd64 + linux/arm64):
-#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:1 --push mathagent/numerics/docker
+#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:2 --push mathagent/numerics/docker
 #
 # The base image is pinned by its multi-architecture index digest and every wheel by
 # its hash, so a rebuild installs the same files. Nothing is installed at run time:
@@ -34,7 +34,7 @@ RUN mkdir -p /opt/sandbox/mplconfig \
  && chmod -R a+rX /opt/sandbox
 
 LABEL org.squareharness.sandbox="python-numerics" \
-      org.squareharness.sandbox.version="1" \
+      org.squareharness.sandbox.version="2" \
       org.opencontainers.image.title="Square Harness Python sandbox" \
       org.opencontainers.image.licenses="Apache-2.0"
 

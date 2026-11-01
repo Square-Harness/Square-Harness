@@ -610,8 +610,7 @@ class Hub:
             return
 
         def show(record):
-            item = store.experiment_item(record['id'], record['status'],
-                                         [a for a in record.get('artifacts', []) if a.get('kind') == 'figure'],
+            item = store.experiment_item(record['id'], record['status'], record.get('artifacts', []),
                                          record.get('purpose', ''))
             if item is None:
                 return

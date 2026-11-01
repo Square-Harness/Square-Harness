@@ -186,6 +186,14 @@ class FakeDockerTests(unittest.TestCase):
         self.assertEqual([(a.name, a.kind) for a in kept], [('figure-1.png', 'figure'), ('table.csv', 'data')])
         self.assertEqual((kept[0].width, kept[0].height), (3, 2))
         self.assertEqual(len(warnings), 6)
+        typed = [{'name': 'plot.svg', 'b64': base64.b64encode(b'<svg xmlns="x"></svg>').decode()},
+                 {'name': 'fake.svg', 'b64': base64.b64encode(b'<html>not svg</html>').decode()},
+                 {'name': 'doc.pdf', 'b64': base64.b64encode(b'%PDF-1.7 x').decode()},
+                 {'name': 'fake.pdf', 'b64': base64.b64encode(b'MZ executable').decode()},
+                 {'name': 'page.html', 'b64': base64.b64encode(b'<p>ok</p>').decode()}]
+        kept = DockerExecutor._artifacts(typed, SANITY_DEFAULTS, warnings)
+        self.assertEqual([(a.name, a.mime_type) for a in kept],
+                         [('plot.svg', 'image/svg+xml'), ('doc.pdf', 'application/pdf'), ('page.html', 'text/html')])
         tiny = replace(SANITY_DEFAULTS, artifact_bytes=10)
         self.assertEqual(DockerExecutor._artifacts(items[:1], tiny, []), [])
 
@@ -228,6 +236,19 @@ class RealExecutorTests(unittest.TestCase):
         self.assertEqual(result.result['versions'], ['2.5.4', '1.18.1', '1.14.0', '1.3.0', '3.11.2'])
         self.assertEqual(result.result['symbolic'], '1/3')
         self.assertAlmostEqual(result.result['integral'], 1 / 3)
+
+    def test_files_saved_anywhere_are_collected_once(self):
+        result = self.run_code('''
+            import matplotlib.pyplot as plt
+            plt.plot([0, 1], [0, 1]); plt.savefig('closed.png'); plt.close()
+            fig = plt.figure(); plt.plot([0, 1]); fig.savefig('kept_open.png')
+            plt.figure(); plt.plot([1, 0]); plt.savefig('vector.svg'); plt.savefig('/tmp/absolute.pdf'); plt.close()
+            open('page.html', 'w').write('<h1>Report</h1>')
+            open('photo.jpg', 'wb').write(b'x')''')
+        self.assertEqual(result.status, 'ok', result.as_dict())
+        self.assertEqual(sorted(a.name for a in result.artifacts),
+                         ['absolute.pdf', 'closed.png', 'kept_open.png', 'page.html', 'vector.svg'])
+        self.assertTrue(any('photo.jpg' in w for w in result.warnings))
 
     def test_matplotlib_figures_are_returned_with_a_text_summary(self):
         result = self.run_code('''

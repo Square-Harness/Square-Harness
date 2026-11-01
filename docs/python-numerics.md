@@ -25,13 +25,13 @@ Numerical evidence is reported as exactly one of: *exact counterexample*,
 2. **Build the image once** (about 200 MB of wheels; nothing is installed later):
 
    ```bash
-   python -m mathagent.numerics build      # docker build -t square-harness/python-numerics:1 …
+   python -m mathagent.numerics build      # docker build -t square-harness/python-numerics:2 …
    python -m mathagent.numerics doctor     # checks Docker, the image and a tiny run
    ```
 
    For another architecture or a shared registry:
-   `docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:1 --push mathagent/numerics/docker`,
-   then pass `--python-image <registry>/python-numerics:1`. Images are never
+   `docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:2 --push mathagent/numerics/docker`,
+   then pass `--python-image <registry>/python-numerics:2`. Images are never
    pulled automatically (`--pull never`).
 
 The image is pinned: `python:3.12.13-slim-trixie` by its multi-architecture

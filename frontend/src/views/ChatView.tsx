@@ -12,7 +12,7 @@ import { callPayload, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
-import { figureUrl } from '../figures'
+import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { go, href } from '../router'
@@ -508,22 +508,52 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   )
 }
 
-/** The figures of one sandbox run, shown where the run happened; click for full size. */
+/** The files of one sandbox run, shown where the run happened, each by its MIME type. */
 function ExperimentFigures({ item }: { item: TranscriptItem }) {
-  const id = item.experiment
-  if (!id || !item.figures?.length) return null
+  const artifacts = artifactsOf(item)
+  if (!artifacts.length) return null
   return (
     <div className="experiment">
-      {item.figures.map((figure) => (
-        <figure key={figure.name} className="experiment-figure">
-          <a href={figureUrl(id, figure.name)} target="_blank" rel="noopener noreferrer" title="Open the figure at full size">
-            <img src={figureUrl(id, figure.name)} alt={`${figure.name} from sandbox run ${id}`} loading="lazy"
-              width={figure.width ?? undefined} height={figure.height ?? undefined} />
-          </a>
-          <figcaption>{item.purpose ? `${item.purpose} · ` : ''}{figure.name} · <span className="experiment-id">{id}</span></figcaption>
-        </figure>
-      ))}
+      {artifacts.map((artifact) => <ArtifactView key={artifact.artifact_id} artifact={artifact} purpose={item.purpose} />)}
     </div>
+  )
+}
+
+function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: string }) {
+  const display = displayOf(artifact.mime_type)
+  const caption = (
+    <figcaption>
+      {purpose ? `${purpose} · ` : ''}
+      <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.filename}</a>
+      {' · '}<span className="experiment-id">{artifact.artifact_id.split('/')[0]}</span>
+    </figcaption>
+  )
+  if (display === 'image') {
+    return (
+      <figure className="experiment-figure">
+        <a href={artifact.url} target="_blank" rel="noopener noreferrer" title="Open at full size">
+          <img src={artifact.url} alt={`${artifact.filename} from a sandbox run`}
+            width={artifact.width ?? undefined} height={artifact.height ?? undefined} />
+        </a>
+        {caption}
+      </figure>
+    )
+  }
+  if (display === 'page') {
+    // Untrusted HTML: its own scripts only, in an opaque origin (no allow-same-origin).
+    return (
+      <figure className="experiment-figure experiment-page">
+        <iframe src={artifact.url} sandbox="allow-scripts" title={artifact.filename} referrerPolicy="no-referrer" />
+        {caption}
+      </figure>
+    )
+  }
+  return (
+    <p className="experiment-file">
+      <FileIcon size={14} /> <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.filename}</a>
+      <span className="muted small"> · {display === 'document' ? 'PDF' : artifact.mime_type}
+        {artifact.bytes ? ` · ${Math.max(1, Math.round(artifact.bytes / 1024))} KB` : ''}</span>
+    </p>
   )
 }
 

@@ -22,7 +22,7 @@ export type AppState = {
 }
 
 type ServerEvent =
-  | { type: 'hello'; seq: number; instance: string; resync: boolean }
+  | { type: 'hello'; seq: number; instance: string; build?: string; resync: boolean }
   | { type: 'task'; seq: number; task: TaskSummary }
   | ({ type: 'activity'; seq: number; task: string; job: string; id: string | null } & Activity)
   | { type: 'approval'; seq: number; state: 'pending' | 'approved' | 'denied'; approval: Approval | { id: string; task: string } }
@@ -170,6 +170,9 @@ async function refreshSnapshot() {
 }
 
 let instance = ''
+// The bundle this page runs (assets/index-<hash>.js); empty in development.
+const ownBuild = typeof document === 'undefined' ? ''
+  : (document.querySelector('script[src*="/assets/index-"]') as HTMLScriptElement | null)?.src.split('/').pop() || ''
 
 function handle(event: ServerEvent) {
   // A task event (such as a new job's ID) may be newer than the snapshot being fetched.
@@ -179,6 +182,8 @@ function handle(event: ServerEvent) {
   }
   switch (event.type) {
     case 'hello':
+      // A server started with another interface bundle: load it, or new features stay invisible.
+      if (event.build && ownBuild && event.build !== ownBuild) { window.location.reload(); return }
       if (event.resync || (instance && instance !== event.instance)) {
         if (instance && instance !== event.instance) resetChatDeletionCache()
         refreshAll()

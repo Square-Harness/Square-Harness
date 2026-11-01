@@ -31,9 +31,12 @@ MAX_INPUT = 512 * 1024
 WORK = '/tmp/.sqh'
 OUTPUT_DIR = '/tmp/outputs'
 MPL_TEMPLATE = '/opt/sandbox/mplconfig'
-KINDS = {'.png': 'figure', '.csv': 'data', '.txt': 'data', '.json': 'data'}
+# Files a run may return (validated again by the host). Relative paths land in OUTPUT_DIR,
+# the working directory; files saved directly in /tmp are collected too.
+KINDS = {'.png': 'figure', '.svg': 'figure', '.pdf': 'document', '.html': 'page',
+         '.csv': 'data', '.txt': 'data', '.json': 'data'}
 MAX_FIGURES = 8
-MAX_FILES = 12
+MAX_FILES = 16
 MAX_PIXELS = 4_000_000
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 SOURCE = '<experiment>'
@@ -123,6 +126,43 @@ def describe(figure):
     return jsonable({'axes': axes})
 
 
+def track_saved_figures():
+    """Remember where each Matplotlib figure was saved, so a saved figure is not captured twice."""
+    try:
+        from matplotlib.figure import Figure
+    except ImportError:
+        return
+    original = Figure.savefig
+
+    def savefig(self, fname, *args, **kwargs):
+        if isinstance(fname, (str, os.PathLike)):
+            self.__dict__.setdefault('_sqh_paths', []).append(os.path.abspath(os.fspath(fname)))
+        return original(self, fname, *args, **kwargs)
+    Figure.savefig = savefig
+
+
+def output_files():
+    """Candidate files: OUTPUT_DIR (and its subfolders, one level) and /tmp itself, by name."""
+    found = []
+    for folder, prefix in ((OUTPUT_DIR, ''), ('/tmp', '')):
+        try:
+            entries = sorted(os.scandir(folder), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith('.') or entry.path in (OUTPUT_DIR, WORK):
+                continue
+            if entry.is_dir(follow_symlinks=False) and folder == OUTPUT_DIR:
+                try:
+                    found += [(f'{entry.name}-{inner.name}', inner) for inner in sorted(os.scandir(entry.path), key=lambda e: e.name)
+                              if inner.is_file(follow_symlinks=False)]
+                except OSError:
+                    pass
+            elif entry.is_file(follow_symlinks=False):
+                found.append((prefix + entry.name, entry))
+    return found
+
+
 def collect(limits, warnings):
     artifacts, names, total = [], set(), 0
     budget = int(limits.get('artifact_bytes', 0))
@@ -140,9 +180,15 @@ def collect(limits, warnings):
         artifacts.append({'name': name, 'kind': kind, 'b64': base64.b64encode(data).decode('ascii'),
                           'summary': summary})
 
+    files = [(name, entry) for name, entry in output_files() if os.path.splitext(name)[1].lower() in KINDS]
+    ignored = [name for name, entry in output_files() if os.path.splitext(name)[1].lower() not in KINDS]
+    if ignored:
+        warnings.append('Ignored files of unsupported types: ' + ', '.join(ignored[:5])[:200])
+    saved_paths = {os.path.abspath(entry.path) for _, entry in files}
     plt = sys.modules.get('matplotlib.pyplot')
     if plt is not None:
-        numbers = plt.get_fignums()
+        numbers = [n for n in plt.get_fignums()
+                   if not set(getattr(plt.figure(n), '_sqh_paths', ())) & saved_paths]  # already a file
         if len(numbers) > MAX_FIGURES:
             warnings.append(f'Only the first {MAX_FIGURES} of {len(numbers)} open figures were saved')
         for index, number in enumerate(numbers[:MAX_FIGURES], 1):
@@ -156,25 +202,20 @@ def collect(limits, warnings):
                 add(f'figure-{index}.png', 'figure', buffer.getvalue(), describe(figure))
             except Exception as exc:  # A broken figure must not hide the experiment's result.
                 warnings.append(f'Figure {number} could not be saved: {type(exc).__name__}: {exc}'[:300])
-    try:
-        entries = sorted(os.scandir(OUTPUT_DIR), key=lambda e: e.name)
-    except OSError:
-        entries = []
-    for entry in entries[:MAX_FILES]:
-        suffix = os.path.splitext(entry.name)[1].lower()
-        if not entry.is_file(follow_symlinks=False) or suffix not in KINDS or not NAME.match(entry.name):
-            warnings.append(f'Ignored {entry.name[:80]}: save .png, .csv, .txt or .json files with simple names')
+    for name, entry in files[:MAX_FILES]:
+        if not NAME.match(name):
+            warnings.append(f'Ignored {name[:80]}: use simple file names (letters, digits, . _ -)')
             continue
         try:
             fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(fd, 'rb') as stream:
-                data = stream.read(budget - total + 1)
+                data = stream.read(max(budget - total, 0) + 1)
         except OSError as exc:
-            warnings.append(f'Could not read {entry.name}: {exc}'[:300])
+            warnings.append(f'Could not read {name}: {exc}'[:300])
             continue
-        add(entry.name, KINDS[suffix], data)
-    if len(entries) > MAX_FILES:
-        warnings.append(f'Only the first {MAX_FILES} files in OUTPUT_DIR were collected')
+        add(name, KINDS[os.path.splitext(name)[1].lower()], data)
+    if len(files) > MAX_FILES:
+        warnings.append(f'Only the first {MAX_FILES} output files were collected')
     return artifacts
 
 
@@ -240,6 +281,8 @@ def main():
         except ImportError:
             pass
     linecache.cache[SOURCE] = (len(code), None, code.splitlines(True), SOURCE)
+    os.chdir(OUTPUT_DIR)  # plt.savefig('plot.png') lands where it is collected
+    track_saved_figures()
 
     status, error, warnings = 'ok', None, []
     protocol.write(f'<<<SQH-START {nonce}>>>\n'.encode())

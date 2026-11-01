@@ -211,7 +211,7 @@ def parser():
                          help='Do not offer automatic numerical sanity checks in chat (/python-lab and /sanity-check remain)')
     sandbox.add_argument('--no-python-sandbox', action='store_true',
                          help='Disable the Docker Python sandbox entirely (python-lab and numerical checks)')
-    sandbox.add_argument('--python-image', metavar='TAG', help='Sandbox image (default: square-harness/python-numerics:1)')
+    sandbox.add_argument('--python-image', metavar='TAG', help='Sandbox image (default: square-harness/python-numerics:2)')
     sandbox.add_argument('--python-limits', type=Path, metavar='FILE',
                          help='JSON file with sanity-check and python-lab limits, bounded by built-in maxima')
     p.add_argument('--gui', action='store_true', help='Serve the visual interface in your browser instead of the terminal prompt')

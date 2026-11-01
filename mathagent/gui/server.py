@@ -41,6 +41,15 @@ VERSION = __version__
 COOKIE = 'square_token'  # suffixed with the port: cookies ignore ports, workspaces must not collide
 UUID = r'(?P<id>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})'
 STATIC = Path(__file__).with_name('static')
+
+
+def build_id():
+    """The interface bundle being served; an open page with another one reloads itself."""
+    try:
+        match = re.search(r'assets/(index-[\w-]+\.js)', (STATIC / 'index.html').read_text(encoding='utf-8'))
+    except OSError:
+        return ''
+    return match[1] if match else ''
 MAX_BODY = 1_000_000
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
@@ -120,7 +129,7 @@ def _text(body, key, limit):
 @route('GET', '/api/status')
 def status(h, body):
     hub, args = h.server.hub, h.server.hub.args
-    out = {'version': VERSION, 'instance': hub.bus.instance, 'seq': hub.bus.seq,
+    out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            # The default for new work in the interface: online unless launched --offline.
            'online': hub.online(), 'online_locked': hub.online_locked,
@@ -179,13 +188,13 @@ def events(h, body):
         h.wfile.write(f'id: {bus.instance}:{event.get("seq", after)}\ndata: {data}\n\n'.encode())
 
     h.wfile.write(b'retry: 2000\n\n')
-    send({'type': 'hello', 'instance': bus.instance, 'seq': after, 'resync': resync})
+    send({'type': 'hello', 'instance': bus.instance, 'build': build_id(), 'seq': after, 'resync': resync})
     h.wfile.flush()
     while not h.server.stopping.is_set():
         batch, missed = bus.wait(after, 15)
         if missed:
             after = bus.seq
-            send({'type': 'hello', 'instance': bus.instance, 'seq': after, 'resync': True})
+            send({'type': 'hello', 'instance': bus.instance, 'build': build_id(), 'seq': after, 'resync': True})
         elif not batch:
             h.wfile.write(b': ping\n\n')
         for event in batch:
@@ -482,20 +491,46 @@ def writeup_start(h, body):
     return {'task': task.summary(), 'id': task.target}
 
 
-@route('GET', r'/api/experiments/(?P<experiment>exp-\d{8}-\d{6}-[0-9a-f]{6})/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.png)')
-def experiment_figure(h, body, experiment, name):
+# Untrusted files from sandbox runs. Each type gets headers that keep its content inert:
+# SVG and HTML never run in this origin (CSP sandbox); HTML may run its own scripts in an
+# opaque origin only, framed by this interface; data files are plain text.
+ARTIFACT_HEADERS = {
+    '.png': ('image/png', "default-src 'none'", False),
+    '.svg': ('image/svg+xml', "default-src 'none'; style-src 'unsafe-inline'; sandbox", False),
+    '.pdf': ('application/pdf', None, True),
+    '.html': ('text/html; charset=utf-8', "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; "
+              "style-src 'unsafe-inline'; img-src data: blob:; font-src data:; frame-ancestors 'self'", True),
+    '.csv': ('text/plain; charset=utf-8', "default-src 'none'; sandbox", False),
+    '.txt': ('text/plain; charset=utf-8', "default-src 'none'; sandbox", False),
+    '.json': ('text/plain; charset=utf-8', "default-src 'none'; sandbox", False),
+}
+
+
+@route('GET', r'/api/artifacts/(?P<experiment>exp-\d{8}-\d{6}-[0-9a-f]{6})/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})')
+def experiment_artifact(h, body, experiment, name):
     from ..numerics.artifacts import ExperimentStore
-    path = ExperimentStore(h.server.hub.root).path(experiment, name)
+    suffix = Path(name).suffix.lower()
+    if suffix not in ARTIFACT_HEADERS:
+        raise store.NotFound('No such artifact in this folder')
+    experiments = ExperimentStore(h.server.hub.root)
+    try:
+        declared = {a.get('name') for a in experiments.load(experiment).get('artifacts', [])}
+    except (ValueError, OSError):
+        declared = set()
+    if name not in declared:  # only the run's own outputs: never record.json or code.py
+        raise store.NotFound('No such artifact in this folder')
+    path = experiments.path(experiment, name)
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_000_000:
             raise FileNotFoundError
         data = path.read_bytes()
     except OSError:
-        raise store.NotFound('No such figure in this folder') from None
-    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
-        raise store.NotFound('No such figure in this folder')
-    h.send_bytes(200, data, 'image/png', [('Cache-Control', 'private, max-age=86400'),
-                                          ('X-Content-Type-Options', 'nosniff')])
+        raise store.NotFound('No such artifact in this folder') from None
+    content_type, policy, frame = ARTIFACT_HEADERS[suffix]
+    headers = [('Cache-Control', 'private, max-age=86400'), ('Content-Disposition', f'inline; filename="{name}"')]
+    if policy:
+        headers.append(('Content-Security-Policy', policy))
+    h.send_bytes(200, data, content_type, headers, csp=False, frame=frame)
     return Streamed
 
 
@@ -673,12 +708,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(200, target.read_bytes(), TYPES.get(target.suffix.lower(), 'application/octet-stream'),
                         [('Cache-Control', cache)])
 
-    def security_headers(self, csp=True):
+    def security_headers(self, csp=True, frame=False):
         if csp:
             self.send_header('Content-Security-Policy', CSP)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('X-Frame-Options', 'DENY')
+        # Only sandboxed artifacts (HTML, PDF) may be framed, and only by this interface.
+        self.send_header('X-Frame-Options', 'SAMEORIGIN' if frame else 'DENY')
         self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
         self.send_header('Cross-Origin-Resource-Policy', 'same-origin')
         self.send_header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
@@ -686,11 +722,11 @@ class Handler(BaseHTTPRequestHandler):
             # SameSite=Strict and HttpOnly: other sites can neither send nor read it.
             self.send_header('Set-Cookie', f'{self.server.cookie_name}={self.cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000')
 
-    def send_bytes(self, status, body, content_type, headers=(), csp=True):
+    def send_bytes(self, status, body, content_type, headers=(), csp=True, frame=False):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
-        self.security_headers(csp)
+        self.security_headers(csp, frame)
         for key, value in headers:
             self.send_header(key, value)
         if not getattr(self, 'body_read', True):

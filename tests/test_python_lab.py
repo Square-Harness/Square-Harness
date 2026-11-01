@@ -68,7 +68,7 @@ class PythonLabSkillTests(unittest.TestCase):
         saved = json.loads((self.root / '.mathagent' / 'experiments' / record['id'] / 'record.json').read_text())
         self.assertEqual((saved['skill'], saved['invocation'], saved['code']), (LAB, 'explicit', USER_CODE))
         self.assertEqual((self.root / '.mathagent' / 'experiments' / record['id'] / 'code.py').read_text(), USER_CODE)
-        self.assertEqual(saved['image']['image'], 'square-harness/python-numerics:1')
+        self.assertEqual(saved['image']['image'], 'square-harness/python-numerics:2')
 
     def test_hyphenated_and_underscored_commands_select_the_same_mode(self):
         for command in ('/python-lab', '/python_lab'):

@@ -23,10 +23,10 @@ import threading
 import time
 import uuid
 
-IMAGE = 'square-harness/python-numerics:1'
+IMAGE = 'square-harness/python-numerics:2'
 IMAGE_LABEL = 'org.squareharness.sandbox'
 IMAGE_KIND = 'python-numerics'
-IMAGE_VERSION = '1'
+IMAGE_VERSION = '2'  # 2: generated files of every supported type are collected, wherever they are saved
 CONTAINER_LABEL = 'org.squareharness.sandbox.run'
 SANDBOX_UID = '10001:10001'
 MAX_CODE_BYTES = 200_000
@@ -35,7 +35,11 @@ STARTUP_SECONDS = 60
 GRACE_SECONDS = 3
 MAX_ARTIFACTS = 20
 ARTIFACT_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
-ARTIFACT_KINDS = {'.png': 'figure', '.csv': 'data', '.txt': 'data', '.json': 'data'}
+# Returned file types: extension -> (kind, MIME type). Everything else is dropped.
+ARTIFACT_TYPES = {'.png': ('figure', 'image/png'), '.svg': ('figure', 'image/svg+xml'),
+                  '.pdf': ('document', 'application/pdf'), '.html': ('page', 'text/html'),
+                  '.csv': ('data', 'text/csv'), '.txt': ('data', 'text/plain'), '.json': ('data', 'application/json')}
+ARTIFACT_KINDS = {suffix: kind for suffix, (kind, _) in ARTIFACT_TYPES.items()}
 PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 # Variables the Docker CLI itself may need (it never forwards them into the container).
 DOCKER_ENV = ('PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'SYSTEMROOT',
@@ -59,8 +63,12 @@ class Artifact:
     width: int = None
     height: int = None
 
+    @property
+    def mime_type(self):
+        return ARTIFACT_TYPES[os.path.splitext(self.name)[1].lower()][1]
+
     def describe(self):
-        value = {'name': self.name, 'kind': self.kind, 'bytes': len(self.data)}
+        value = {'name': self.name, 'kind': self.kind, 'mime_type': self.mime_type, 'bytes': len(self.data)}
         if self.width:
             value.update(width=self.width, height=self.height)
         if self.summary:
@@ -461,7 +469,8 @@ class DockerExecutor:
             if not isinstance(name, str) or not ARTIFACT_NAME.match(name) or name in names:
                 warnings.append('Rejected an output with an invalid or duplicate name')
                 continue
-            kind = ARTIFACT_KINDS.get(os.path.splitext(name)[1].lower())
+            suffix = os.path.splitext(name)[1].lower()
+            kind = ARTIFACT_KINDS.get(suffix)
             try:
                 data = base64.b64decode(item.get('b64', ''), validate=True)
             except (ValueError, TypeError):
@@ -471,17 +480,24 @@ class DockerExecutor:
                 warnings.append(f'Rejected {name}: unsupported type or over the artifact budget')
                 continue
             width = height = None
-            if kind == 'figure':
+            if suffix == '.png':
                 size = _png_size(data)
                 if size is None:
                     warnings.append(f'Rejected {name}: not a PNG image')
                     continue
                 width, height = size
+            elif suffix == '.pdf':
+                if not data.startswith(b'%PDF-'):
+                    warnings.append(f'Rejected {name}: not a PDF document')
+                    continue
             else:
                 try:
-                    data.decode('utf-8')
+                    text = data.decode('utf-8')
                 except UnicodeDecodeError:
-                    warnings.append(f'Rejected {name}: data files must be UTF-8 text')
+                    warnings.append(f'Rejected {name}: text files must be UTF-8')
+                    continue
+                if suffix == '.svg' and '<svg' not in text[:4096]:
+                    warnings.append(f'Rejected {name}: not an SVG image')
                     continue
             summary = item.get('summary') if isinstance(item.get('summary'), dict) else None
             if summary is not None and len(json.dumps(summary)) > 8000:

@@ -350,11 +350,12 @@ export type TranscriptItem = {
   effort?: string
   orchestrated?: boolean
   outcome?: string
-  // A sandbox run's figures (role 'experiment'), served by /api/experiments/<id>/<name>.
+  // A sandbox run's files (role 'experiment'), served by /api/artifacts/<id>/<name>.
   experiment?: string
   run_status?: string
   purpose?: string
-  figures?: { name: string; width?: number | null; height?: number | null }[]
+  artifacts?: import('./artifacts.ts').Artifact[]
+  figures?: { name: string; width?: number | null; height?: number | null }[]  // items saved before artifacts
 }
 
 export type Chat = {

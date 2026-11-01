@@ -301,6 +301,9 @@
 .experiment-figure a:hover img { border-color: var(--ink); }
 .experiment-figure figcaption { margin-top: 5px; font: 13px/1.4 var(--font-ui); color: var(--text-3); }
 .experiment-id { font-family: var(--font-mono); font-size: 12px; }
+.experiment-page iframe { display: block; width: min(100%, 720px); height: 420px; background: #fff;
+  border: 1px solid var(--line); border-radius: 8px; }
+.experiment-file { display: flex; align-items: center; gap: 6px; margin: 2px 0; font: 14px/1.4 var(--font-ui); }
 .tool-step > summary { font-weight: 400; }
 
 .composer { flex: none; padding: 12px 40px calc(12px + env(safe-area-inset-bottom)) var(--content-x); background: var(--paper); border-top: 1px solid var(--line); }

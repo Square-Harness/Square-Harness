@@ -306,12 +306,15 @@ class FigureTranscriptTests(unittest.TestCase):
             roles = [item['role'] for item in gui_store.load_chat(root, chat['id'])['transcript']]
         self.assertEqual(roles, ['user', 'assistant', 'tool', 'tool', 'experiment', 'assistant'])
 
-    def test_experiment_items_accept_only_valid_ids_and_png_names(self):
+    def test_experiment_items_accept_only_valid_ids_names_and_types(self):
         self.assertIsNone(gui_store.experiment_item('../exp', 'ok', [{'name': 'figure-1.png'}]))
-        self.assertIsNone(gui_store.experiment_item('exp-20261101-101010-abcdef', 'ok', [{'name': 'data.csv'}]))
+        self.assertIsNone(gui_store.experiment_item('exp-20261101-101010-abcdef', 'ok', [{'name': 'photo.jpg'}]))
         item = gui_store.experiment_item('exp-20261101-101010-abcdef', 'ok',
-                                         [{'name': 'figure-1.png'}, {'name': '../x.png'}, {'path': 'a/b/plot.png'}])
-        self.assertEqual([f['name'] for f in item['figures']], ['figure-1.png', 'plot.png'])
+                                         [{'name': 'figure-1.png'}, {'name': '../x.png'}, {'path': 'a/b/plot.svg'},
+                                          {'name': 'run.sh'}])
+        self.assertEqual([(a['filename'], a['mime_type']) for a in item['artifacts']],
+                         [('figure-1.png', 'image/png'), ('plot.svg', 'image/svg+xml')])
+        self.assertEqual(item['artifacts'][0]['artifact_id'], 'exp-20261101-101010-abcdef/figure-1.png')
 
     def test_memory_failures_tell_the_model_how_to_shrink_the_experiment(self):
         sandbox, executor = fake_sandbox()
@@ -348,16 +351,43 @@ class InterfaceFigureTests(GuiCase):
         roles = [item['role'] for item in transcript]
         self.assertLess(roles.index('experiment'), len(roles) - 1 - roles[::-1].index('assistant'))
         [item] = self.figure_items(chat)
-        self.assertEqual((item['purpose'], item['run_status'], item['figures'][0]['name']),
-                         ('Simulate Brownian paths', 'ok', 'figure-1.png'))
-        path = f"/api/experiments/{item['experiment']}/figure-1.png"
-        status, body, headers = self.request('GET', path)
+        [artifact] = item['artifacts']
+        self.assertEqual((item['purpose'], item['run_status'], artifact['filename'], artifact['mime_type']),
+                         ('Simulate Brownian paths', 'ok', 'figure-1.png', 'image/png'))
+        self.assertEqual(artifact['url'], f"/api/artifacts/{item['experiment']}/figure-1.png")
+        status, body, headers = self.request('GET', artifact['url'])
         self.assertEqual((status, headers['Content-Type']), (200, 'image/png'))
         self.assertTrue(body.startswith('\ufffdPNG'))  # the helper decodes bodies as text
-        self.assertEqual(self.request('GET', path, auth=False)[0], 401)
-        for bad in (f"/api/experiments/{item['experiment']}/missing.png", '/api/experiments/exp-1/figure-1.png',
-                    f"/api/experiments/{item['experiment']}/record.json", f"/api/experiments/{item['experiment']}/code.py"):
-            self.assertIn(self.request('GET', bad)[0], (404,), bad)
+        self.assertEqual(headers['X-Frame-Options'], 'DENY')
+        self.assertEqual(self.request('GET', artifact['url'], auth=False)[0], 401)
+        run = item['experiment']
+        for bad in (f'/api/artifacts/{run}/missing.png', '/api/artifacts/exp-1/figure-1.png',
+                    f'/api/artifacts/{run}/record.json', f'/api/artifacts/{run}/code.py',
+                    f'/api/experiments/{run}/figure-1.png'):
+            self.assertEqual(self.request('GET', bad)[0], 404, bad)
+
+    def test_every_artifact_type_is_served_inert(self):
+        from mathagent.numerics.executor import Artifact
+        page = Artifact('page.html', 'page', b'<h1>x</h1><script>1</script>')
+        svg = Artifact('plot.svg', 'figure', b'<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>')
+        pdf = Artifact('report.pdf', 'document', b'%PDF-1.4 minimal')
+        data = Artifact('values.csv', 'data', b'n,v\n1,2\n')
+        self.executor.results = [ExperimentResult('ok', exit_code=0, artifacts=[page, svg, pdf, data])]
+        session = self.hub.sandbox.bind(SANITY, self.root, explicit=False)
+        run = json.loads(session.execute('execute_python', {'code': 'save()'}))['experiment_id']
+        expected = {'page.html': ('text/html; charset=utf-8', 'sandbox allow-scripts', 'SAMEORIGIN'),
+                    'plot.svg': ('image/svg+xml', 'sandbox', 'DENY'),
+                    'report.pdf': ('application/pdf', None, 'SAMEORIGIN'),
+                    'values.csv': ('text/plain; charset=utf-8', 'sandbox', 'DENY')}
+        for name, (content_type, policy, frame) in expected.items():
+            status, _, headers = self.request('GET', f'/api/artifacts/{run}/{name}')
+            self.assertEqual((status, headers['Content-Type'], headers['X-Frame-Options']), (200, content_type, frame), name)
+            if policy:
+                self.assertIn(policy, headers['Content-Security-Policy'], name)
+                self.assertNotIn('allow-same-origin', headers['Content-Security-Policy'], name)
+        item = gui_store.experiment_item(run, 'ok', [{'name': n} for n in expected])
+        self.assertEqual([a['mime_type'] for a in item['artifacts']],
+                         ['text/html', 'image/svg+xml', 'application/pdf', 'text/csv'])
 
     def test_figures_join_the_live_turn_as_soon_as_they_are_saved(self):
         import types
@@ -372,7 +402,7 @@ class InterfaceFigureTests(GuiCase):
                   'artifacts': [{'name': 'figure-1.png', 'kind': 'figure', 'width': 800, 'height': 500}]}
         workspace.numerics.on_record(record)
         self.assertEqual(task.live['steps'][0]['type'], 'experiment')
-        self.assertEqual(task.live['steps'][0]['item']['figures'][0]['name'], 'figure-1.png')
+        self.assertEqual(task.live['steps'][0]['item']['artifacts'][0]['filename'], 'figure-1.png')
         self.assertEqual([kind for kind, _ in events], ['chat'])               # live only: saved with the turn
         self.assertEqual(gui_store.load_chat(self.root, chat)['transcript'], [])
         self.hub._show_experiments(workspace, self.root, chat, task)            # Assistant: saved at once instead

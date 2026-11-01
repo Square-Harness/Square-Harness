@@ -16,12 +16,12 @@ import stat
 import sys
 import textwrap
 
-from mathagent.numerics.executor import DockerExecutor, ExperimentResult, SandboxUnavailable
+from mathagent.numerics.executor import IMAGE_VERSION, DockerExecutor, ExperimentResult, SandboxUnavailable
 from mathagent.numerics.policy import load_policies
 from mathagent.numerics.session import PythonSandbox
 
-IMAGE_INFO = {'image': 'square-harness/python-numerics:1', 'id': 'sha256:test', 'architecture': 'amd64',
-              'os': 'linux', 'docker': 'fake', 'version': '1', 'no_new_privileges': 'docker+process'}
+IMAGE_INFO = {'image': 'square-harness/python-numerics:2', 'id': 'sha256:test', 'architecture': 'amd64',
+              'os': 'linux', 'docker': 'fake', 'version': IMAGE_VERSION, 'no_new_privileges': 'docker+process'}
 
 
 class FakeExecutor:
@@ -84,7 +84,7 @@ if args[:1] == ['version']:
 if args[:2] == ['image', 'inspect']:
     if mode == 'no_image':
         sys.stderr.write('Error: No such image\n'); sys.exit(1)
-    version = '0' if mode == 'old_image' else '1'
+    version = '0' if mode == 'old_image' else '{version}'
     print(json.dumps({{'org.squareharness.sandbox': 'python-numerics',
                        'org.squareharness.sandbox.version': version}}) + '|sha256:fake|amd64|linux')
     sys.exit(0)
@@ -144,7 +144,7 @@ def fake_docker(directory, mode='ok'):
     state = directory / 'state'
     state.mkdir(exist_ok=True)
     script = directory / 'docker'
-    script.write_text(FAKE_DOCKER.format(python=sys.executable))
+    script.write_text(FAKE_DOCKER.format(python=sys.executable, version=IMAGE_VERSION))
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script), {'DOCKER_FAKE_DIR': str(state), 'DOCKER_FAKE_MODE': mode}
 
