@@ -4,6 +4,10 @@ Square Harness is an experimental mathematical research project. Focused fixes,
 clear failure cases and documentation improvements are welcome. The current
 priority is a dependable solve–verify–repair loop before adding more orchestration.
 
+The [development guide](docs/llm-development.md) describes the architecture,
+the rules every change follows and how to add a feature. It is written so that
+coding agents can follow it, and it applies to everyone.
+
 ## Development
 
 Use Python 3.10+ on Linux or macOS:
@@ -15,9 +19,11 @@ python -m pip install -e '.[research]'
 python -m unittest discover -s tests -v
 ```
 
-Tests use mocks and temporary workspaces; they do not need a model server.
-For inference-dependent changes, record the model/weights revision, server
-version, settings, exact source revision and the manual check performed.
+Tests use scripted model servers and temporary workspaces; they do not need a
+real model. The suite is deliberately small: add a test only when it drives real
+entry points and would catch a genuine regression. For inference-dependent
+changes, record the model/weights revision, server version, settings, exact
+source revision and the manual check performed.
 
 The visual interface's source lives in `frontend/` and is built into
 `mathagent/gui/static`, which is committed so that installing needs no Node.js.

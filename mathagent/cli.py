@@ -205,7 +205,7 @@ def parser():
     p.add_argument('--no-think', action='store_true')
     p.add_argument('--show-thinking', action='store_true')
     p.add_argument('--allow-python', action='store_true', help='Offer unsandboxed Python with per-call approval (Linux)')
-    sandbox = p.add_argument_group('Python sandbox (Docker; see docs/python-numerics.md)')
+    sandbox = p.add_argument_group('Python sandbox (Docker; see docs/guide.md)')
     sandbox.add_argument('--no-numerical-checks', action='store_true',
                          help='Do not offer automatic numerical sanity checks in chat (/python-lab and /sanity-check remain)')
     sandbox.add_argument('--no-python-sandbox', action='store_true',

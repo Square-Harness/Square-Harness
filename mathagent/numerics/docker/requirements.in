@@ -1,5 +1,5 @@
-# Direct dependencies of the sandbox image. Regenerate requirements.lock with the
-# command in docs/python-numerics.md; never install packages at run time.
+# Direct dependencies of the sandbox image. requirements.lock pins them with wheel
+# hashes for amd64 and arm64; never install packages at run time.
 numpy
 scipy
 sympy

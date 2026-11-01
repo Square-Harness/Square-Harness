@@ -122,7 +122,7 @@ def load_policies(path=None):
     sanity = config.get('sanity') or {}
     lab = config.get('lab') or {}
     if set(sanity) - {'limits', 'max_runs'} or set(lab) - {'defaults', 'ceiling', 'max_runs'}:
-        raise ValueError('Unknown key in Python sandbox limits; see docs/python-numerics.md')
+        raise ValueError('Unknown key in Python sandbox limits; see docs/guide.md')
     return {SANITY: sanity_policy(sanity.get('limits'), sanity.get('max_runs', 3)),
             LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs', 20))}
 

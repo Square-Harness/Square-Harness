@@ -155,126 +155,22 @@ square-harness --workspace ~/research/my-paper --mode writeup \
 
 Template files (`.sty`, `.cls`, `.tex`, `.bib`) are pinned like the notes. The
 controller reads them in full and gives the model their macro definitions and
-theorem environments to use; a template `.tex` contributes its preamble.
-
-One writing call sees all the material at once, with your request, your
-notation and a fitting saved style, and writes the whole document body. It
-reasons first (Qwen's recommended sampling, temperature 0.6 and top-p 0.95; on a
-server with a thinking budget, at most 8,192 of its 24,576 output tokens go to
-reasoning). Only material longer than one call can read is written in
-consecutive parts, each told what the previous parts covered; a part whose text
-outgrows its call is written again as two halves. The controller builds the
-preamble itself, adds macros the model defined (never over yours), and compiles
-with `latexmk` in a temporary folder without shell escape and with TeX's
-paranoid file access (`openin_any=p`, `openout_any=p`). A document that does not
-compile gets one repair call on the whole text, told the errors and the lines
-around them. There is no model review of the content: write up results you have
-checked.
+theorem environments to use; a template `.tex` contributes its preamble. The
+model plans sections from the numbered note lines, then writes one section per
+call from exactly the lines that section cites, so long notes stay within the
+context. Before every paragraph it writes a comment such as `% src: [M1:L12-L30]`;
+the controller checks those against the lines actually read and reports
+paragraphs without one. When `latexmk` is installed, the document is compiled in
+a temporary folder without shell escape and with TeX's paranoid file access
+(`openin_any=p`, `openout_any=p`); sections named in LaTeX errors get one repair
+round. A fresh model review compares the result with the notes.
 
 The `.tex` file (and the PDF when it compiled) is written to the workspace under
 the `--output` name, or `<notes>-writeup.tex`; an existing file is never
-replaced. A job is `complete` when it compiled and every part was written;
-otherwise it is `partial`, with the reasons in its report. Resume and budgets
-work as for literature reports. In the interface, template files can be
-remembered under a name and reused in any folder.
-
-### From a conversation: `@writeup` and `@summarize`
-
-In an Assistant conversation, type `@writeup` (pick it from the menu, or type it out
-in full followed by a space: the *Selected for this message* chip shows it is a
-call) followed by what you want: for
-example `@writeup a short note with Lemma 2 and the reviewed proof, for my
-students`. The material is the conversation so far, as you saw it: your
-messages, the answers and the full final text of each finished job (the
-selected proof with its review status, reports, documents). Attach a draft
-(`.tex`, `.md`, `.txt` or `.pdf`) to the same message to write it up as well.
-Your instructions set the goal and the scope: unlike a write-up from notes, the
-document need not cover every line, and superseded attempts are left out.
-
-`@summarize`, or `@writeup` with nothing after it, writes `summary-<title>.tex`: each
-important result with its exact statement, its status as recorded (a model
-review is not a certificate), the key idea of its proof, the references found
-and the open questions.
-
-Both go through the same steps as other write-ups, with the conversation as
-their material, but nothing is written into your folder: the reply is one line saying the document is ready,
-and the card has **Download .tex** (and **Download PDF** when it compiled). The
-document is kept with its job, under `.mathagent/research/`, until you delete the
-conversation it was made in. No model pass assesses or restates it in the reply.
-
-Notation you give in the request wins. Write the definitions in the message, for
-example `@writeup the proof, with \newcommand{\dt}{\Delta t} and
-\newcommand{\bbone}{\mathbf{1}}`: the model is told to use exactly these
-commands, they go into the preamble, a saved style's macro for the same object
-(same name or same meaning) is dropped, and a macro the model defines never
-replaces them. Macros whose replacement is several tokens are defined with braces
-(`{{\Delta t}}`), so `\tau^\dt`, `\sqrt\dt` and `\dt^{1/10}` mean what they say.
-When the text uses a command nothing defines, compilation supplies it from a
-saved style or from its name (`\bbP` as `\mathbb{P}`, `\rmd` as `\mathrm{d}`,
-`\cL` as `\mathcal{L}`), and an undefined environment as a theorem-like one,
-and lists them for you to check; other undefined commands are named to the
-repair call.
-
-**Style used by write-ups**, on the style page, decides which saved style
-write-ups and summaries use: *Choose automatically* (the default), *None* (the
-usual style of the field), a style (the model picks its domain that fits best),
-or one domain of a style. It is kept in `.mathagent/style-choice.json` under the
-interface root, like the styles. In the automatic setting, a short call first
-picks the domain style that fits the material, or none: a style fits only when the material is the same kind
-of mathematics. The writing call then gets that domain's explanation habits and
-phrasings (not the structure of your papers: the request sets the structure) and
-its macros, minus any that clash with yours; the macros the document uses join
-the preamble. Without a fitting style, the model writes as a careful author in
-the material's field would. The page shows which was used.
-
-## Writing styles
-
-In the interface, **Learn my writing style** (below *New conversation* in the
-sidebar) opens a page that condenses the `.tex` sources of your earlier articles
-into a style. If the open folder has no `.tex` files, the page asks you to drop a
-few articles or to open the folder that holds them. Choose main article files,
-ideally two or more for each kind of paper you write; `\input` parts are not
-followed, so pin them as well.
-
-The controller reads the articles exactly: macro definitions (`\newcommand`,
-`\def`, `\DeclareMathOperator`, `\DeclarePairedDelimiter`) with how often each
-article's body uses them, theorem environments, titles, abstracts and section
-headings. Unused macros are dropped. The model then works in three small steps,
-all from the pinned articles and never online: it sorts the articles by domain
-(one call), describes how each article is written (one call per article, from
-its opening, section openings, one proof and its end), and merges the articles
-of each domain (one call per domain with more than one article). Quoted
-phrasings are kept only when they occur verbatim in the articles.
-
-A style is saved as `.mathagent/styles/<name>.json` under the interface root, so
-every folder can use it. A new job with the same name replaces it. Its fields
-are bounded, so one domain renders to about 2,000 characters
-(`mathagent.style.style_prompt(profile, domain)`), and `style_sty` gives the
-domain's macros as a `.sty`:
-
-```json
-{"format": "square-style", "version": 1, "name": "My papers",
- "articles": [{"path": "scheme.tex", "sha256": "…", "title": "…", "domain": "Numerical analysis"}],
- "macros": [{"name": "R", "definition": "\\newcommand{\\R}{\\mathbb{R}}", "uses": 42, "articles": ["scheme.tex"]}],
- "environments": [{"name": "lemma", "definition": "\\newtheorem{lemma}[theorem]{Lemma}", "uses": 9}],
- "domains": [{"name": "Numerical analysis", "description": "…", "articles": ["scheme.tex"],
-              "aim": "…", "structure": ["Introduction: …"], "habits": ["…"], "phrases": ["We now turn to"]}]}
-```
-
-A style can also carry a LaTeX template: choose it when learning the style, or
-later under **Saved styles** (*Choose template files*, *Remove the template*).
-It is a `.tex` whose preamble write-ups should use (its document class,
-packages, macros and theorem environments; one of your articles works, and its
-title is replaced), and/or `.sty`, `.cls` and `.bib` files. The files are copied
-into the style file (`"template": [{"name", "content"}]`), so it stays
-self-contained; learning the style again keeps the template. A write-up that
-picks the style builds on its template unless you gave the write-up a template
-of your own, which always wins; the template's macros then count as template
-notation (your request's notation still comes first).
-
-The description is a model's reading of your style: open the file and correct
-anything that does not sound like you. The job's report, articles and model
-calls stay under `.mathagent/research/<id>/` like other jobs.
+replaced. A job is `complete` only if it compiled, every paragraph is traced to
+read lines and the review finished; otherwise it is `partial`, with the reasons in
+its report. Resume and budgets work as for literature reports. In the interface,
+template files can be remembered under a name and reused in any folder.
 
 ## Saved reports and limits
 
