@@ -189,9 +189,9 @@ messages, the answers and the full final text of each finished job (the
 selected proof with its review status, reports, documents). Attach a draft
 (`.tex`, `.md`, `.txt` or `.pdf`) to the same message to write it up as well.
 Your instructions set the goal and the scope: unlike a write-up from notes, the
-outline need not cover every line, and superseded attempts are left out.
+document need not cover every line, and superseded attempts are left out.
 
-`@summarize`, or `@writeup` with nothing after it, writes `summary.tex`: each
+`@summarize`, or `@writeup` with nothing after it, writes `summary-<title>.tex`: each
 important result with its exact statement, its status as recorded (a model
 review is not a certificate), the key idea of its proof, the references found
 and the open questions.

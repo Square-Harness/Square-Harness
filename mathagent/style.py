@@ -630,6 +630,11 @@ def grouped(definition):
     if (re.fullmatch(r'\s*(?:\\[A-Za-z]+|[^\s\\{}])\s*', body)
             or (inner is not None and end == len(body.strip()))):  # one token, or braced already
         return definition
+    # Not notation: a number or length (\arraystretch is read as a number, so {2.2} must stay bare),
+    # or text that opens environments, aligns or breaks lines (\newcommand{\be}{\begin{equation}}).
+    if (re.fullmatch(r'\s*-?(?:\d+\.?\d*|\.\d+)\s*(?:pt|em|ex|cm|mm|in|bp|sp|pc|dd|cc|mu)?\s*', body)
+            or re.search(r'\\(?:begin|end|par)\b|\\\\|&|#', body)):
+        return definition
     return match.group(1) + '{{' + body + '}}'
 
 

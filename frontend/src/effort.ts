@@ -61,7 +61,7 @@ export function describeLimits(kind: EffortKind, limits: Limits) {
   const tries = (n: number, one: string) => `${count(n)} ${n === 1 ? one : one + 's'}`
   const tokenCap = limits.tokens === null ? '' : `; output capped at ${count(limits.tokens)} tokens`
   if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${minutesLabel(limits.seconds)} working time${tokenCap}`
-  if (kind === 'writeup') return `Section-by-section writing and a fidelity check; ${minutesLabel(limits.seconds)} working time${tokenCap}`
+  if (kind === 'writeup') return `One writing call (in parts if the material is long), then compiled; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   if (kind === 'style') return `Each article read once, then each domain merged; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   const depth = EFFORTS.find((effort) => effort.tries === limits.rounds)?.label || 'Custom'
   return `Checking depth: ${depth}; ${minutesLabel(limits.seconds)} working time${tokenCap}`

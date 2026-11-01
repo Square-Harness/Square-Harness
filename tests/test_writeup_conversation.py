@@ -1,5 +1,8 @@
-"""@writeup end to end: a proved result written up as .tex in a saved style, kept for download, deleted with its chat."""
+"""Write-ups end to end: a proved result written up in a saved style and deleted with its chat; a draft with
+figures, a table, citations and TODOs compiled for real."""
+import base64
 import json
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +91,53 @@ class ConversationWriteupTests(GuiCase):
         self.assertEqual(self.request('GET', f'/api/research/{card["job_id"]}/tex')[0], 404)
         self.assertEqual(list((self.root / '.mathagent' / 'proofs').iterdir()), proofs)
 
+    @unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
+    def test_a_draft_with_figures_tables_and_citations_compiles_and_shows_what_to_check(self):
+        paper = self.root / 'paper'
+        paper.mkdir()
+        (paper / 'macros.sty').write_text('\\newcommand{\\E}{\\mathrm{E}}\n')
+        (paper / 'refs.bib').write_text('@article{HS04,\n  author = {Holcman, D. and Schuss, Z.},\n'
+                                        '  title = {Escape through a small opening},\n  year = {2004},\n}\n')
+        (paper / 'fig.png').write_bytes(base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='))
+        (paper / 'notes.md').write_text('E[tau] ~ |Omega|/(4 eps) for a small disk window [HS04].')
+        self.fake.replies = [text(r"""\title{Narrow escape}
+\section{Result}
+The mean exit time satisfies $\E[\tau]\sim|\Omega|/(4\varepsilon)$ \cite{HS04}, see also \cite{Invented13}.
+% TODO: check the constant 4_x
+%  against the reference.
+\begin{enumerate}[(i)]
+\item A window on the boundary.
+\end{enumerate}
+\begin{table}[h]\centering
+\renewcommand{\arraystretch}{2.2}
+\begin{tabular}{cc} a & b \\ \end{tabular}
+\end{table}
+\begin{figure}[h]\centering\includegraphics[width=1cm]{fig}\includegraphics{missing-plot}\end{figure}""")]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note. \\newcommand{\\E}{\\mathbb{E}}', 'seconds': 300,
+                                                   'source_files': ['paper/notes.md'],
+                                                   'template_files': ['paper/macros.sty', 'paper/refs.bib']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        prompt = self.fake.requests[0]['messages'][1]['content']
+        self.assertIn('HS04: Holcman, D., Escape through a small opening (2004)', prompt)  # the author's .bib
+        self.assertIn('never invent a bibliographic entry', prompt)
+        job = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((job / 'state.json').read_text())
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertTrue((self.root / 'notes-writeup.pdf').exists() and (job / 'artifacts' / 'compiled.pdf').exists())
+        document = state['document']
+        table = document[document.index('\\begin{table}'):document.index('\\end{table}')]
+        self.assertIn('\\renewcommand{\\arraystretch}{2.2}', table)  # stays in its table, unbraced
+        self.assertNotIn('{{2.2}}', document)
+        self.assertIn('\\renewcommand{\\E}{{\\mathbb{E}}}', document)  # the request's notation wins
+        self.assertIn('\\usepackage[shortlabels]{enumitem}', document)
+        self.assertEqual(state['missing_figures'], ['missing-plot'])  # a placeholder; fig.png was copied
+        block = document[document.index('Points to check'):document.index('\\section{Result}')]
+        self.assertIn('check the constant 4\\_x against the reference.', block)
+        self.assertIn('Invented13', block)
+        self.assertNotIn('HS04', block)
+        self.assertIn('missing-plot', block)
+        self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
 
 if __name__ == '__main__':
     unittest.main()

@@ -77,7 +77,8 @@ def _tool_experiment(message):
         return None
     return experiment_item(value.get('experiment_id'), value.get('status'),
                            list(value.get('figures') or []) + list(value.get('files') or []))
-UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
+UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg'}
+BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg'}  # figures for write-ups, and PDFs to read
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
 CHAT_BYTES = 16 * 1024 * 1024
@@ -888,10 +889,10 @@ def save_upload(workspace, name, data):
     base = re.sub(r'[^\w.\- ()+]', '_', str(name).replace('\\', '/').split('/')[-1]).strip()
     suffix = Path(base).suffix.lower()
     if not base or base.startswith('.') or suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop .tex, .sty, .cls, .bib, .md, .txt, .pdf or .py files')
+        raise ValueError('Drop .tex, .sty, .cls, .bib, .md, .txt, .pdf or .py files, or .png/.jpg figures')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
-    if suffix != '.pdf' and b'\x00' in data:
+    if suffix not in BINARY_UPLOADS and b'\x00' in data:
         raise ValueError('That file is not text')
     stem, number = Path(base).stem, 2
     target = workspace / base

@@ -50,16 +50,11 @@
   (a style macro with the same name or meaning is dropped). Multi-token macros are
   defined braced so scripts and arguments keep their meaning. Commands the sources
   use without defining them are supplied at compile time from saved styles or
-  their names (`\bbP`, `\rmd`, `\cL`) and reported. Notation fixes are exact
-  substitutions inside mathematics (named commands only, never the user's).
-  Write-up calls no longer mention tools, and an answer that only announces what it
-  would do is retried, never kept as a section or repair; the outline keeps one
-  version of each result.
+  their names (`\bbP`, `\rmd`, `\cL`) and reported. Write-up calls no longer
+  mention tools, and an answer that only announces what it would do is retried,
+  never kept as the document or a repair.
 - Write-ups and summaries no longer get a model review: they are for results the
-  user has checked. A notation check replaces it: one pass settles one symbol per
-  object across the document (plain-text answer, reasoning on), and only the
-  sections where another symbol occurs are rewritten, each kept only if its
-  comments and its prose outside mathematics are unchanged.
+  user has checked.
 - `@writeup` and `@summarize` deliver by download: the conversation card offers
   the `.tex` (and the PDF when it compiled), nothing is written into the folder,
   and the kept copy is deleted with its conversation. The reply is a one-line
@@ -69,14 +64,29 @@
 - `@writeup` and `@summarize` in Assistant conversations. A write-up's material
   is the conversation so far (messages, answers and the full results of finished
   proof, review and literature jobs, as `conversation.md`) plus any attached
-  draft; the instructions after `@writeup` set its goal and scope, and the
-  outline no longer has to cover every line. `@summarize`, or a bare `@writeup`,
-  writes `summary.tex` with each result's statement, recorded status, proof idea,
-  references and open questions. The outline names the material's domain and
-  picks a fitting saved writing style, whose guidance reaches every section and
-  whose used macros and environments join the preamble; otherwise the usual
-  style of that domain. Write-up workers get the conversation once, as this
-  source, instead of the raw history as reference context.
+  draft; the instructions after `@writeup` set its goal and scope.
+  `@summarize`, or a bare `@writeup`, writes `summary-<title>.tex` with each
+  result's statement, recorded status, proof idea, references and open
+  questions. A short call picks a fitting saved writing style, whose digest
+  reaches the writing call and whose used macros join the preamble; otherwise
+  the usual style of the material's field. Write-up workers get the conversation
+  once, as this source, instead of the raw history as reference context.
+- Write-up fixes found by live tests on Qwen 3.8 27B: figures the document
+  includes are copied from the pinned files' folders (and `.png`/`.jpg` can be
+  uploaded); a figure that is missing becomes a framed placeholder instead of a
+  fatal error. A `\renewcommand` or a definition inside an environment stays
+  where it is, and numbers, lengths and environment shortcuts are no longer
+  braced (`\renewcommand{\arraystretch}{2.2}` broke tables). The document starts
+  with the points left to check: its `% TODO` comments, citations that are not in
+  the author's `.bib`, and missing figures (comments alone do not show in the
+  PDF). The writing call sees the author's bibliography keys and may cite only
+  them or works the material gives with an identifier. The request's notation
+  now really outranks a template's (`\renewcommand` after the template). A
+  template without theorems no longer gets `\newtheorem{theorem}[theorem]`, a
+  file the template `\input`s is not pasted twice, `\begin{enumerate}[(i)]`
+  loads `enumitem`, a writing call that stops early is retried once, and a
+  document written within the time limit is always compiled and offered (the
+  repair call is skipped when time is out).
 - Writing styles: a Style page in the interface (`#/style`, "Learn my writing
   style" in the sidebar) condenses the .tex sources of the author's earlier
   articles into one small JSON file per name, shared by every folder like saved

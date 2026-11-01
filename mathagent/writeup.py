@@ -21,12 +21,66 @@ import subprocess
 import tempfile
 
 from .ledger import _atomic_write
-from .research import ResearchRunner, remaining_limit
+from .research import ResearchBudget, ResearchRunner, remaining_limit
 from .style import (_group, definition_body, environment_definitions, grouped, list_profiles, macro_definitions,
                     style_digest, uses)
 from .worker_errors import WorkerInputError
 
 TEMPLATE_SUFFIXES = ('.sty', '.cls', '.tex', '.bib')
+GRAPHIC_SUFFIXES = ('.pdf', '.png', '.jpg', '.jpeg')
+FIGURE_BYTES, FIGURES_BYTES = 20_000_000, 60_000_000
+_GRAPHIC = re.compile(r'\\includegraphics\*?\s*(?:\[[^\]]*\]\s*)?\{([^{}]+)\}')
+_CITE = re.compile(r'\\(?:no|paren|text|auto|foot|super)?cite[pt]?\*?\s*(?:\[[^\]]*\]\s*){0,2}\{([^{}]*)\}')
+_BIB_ENTRY = re.compile(r'@\s*([A-Za-z]+)\s*\{\s*([^,\s{}]+)\s*,', re.M)
+_LOADED = r'\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\]\s*)?\{[^}]*\b(?:%s)\b[^}]*\}'
+# Missing figures are drawn as framed placeholders: the document compiles, and the gap shows.
+MISSING_FIGURES = r'''% Figures not found next to the material are drawn as framed placeholders until they are added.
+\makeatletter
+\newcommand\sqh@figure[2][]{\IfFileExists{#2}{\sqh@includegraphics[#1]{#2}}{\IfFileExists{#2.pdf}{\sqh@includegraphics[#1]{#2}}{%
+\IfFileExists{#2.png}{\sqh@includegraphics[#1]{#2}}{\IfFileExists{#2.jpg}{\sqh@includegraphics[#1]{#2}}{%
+\fbox{\parbox[c][3em][c]{.5\linewidth}{\centering\small Figure not found: \texttt{\detokenize{#2}}}}}}}}}
+\AtBeginDocument{\let\sqh@includegraphics\includegraphics\let\includegraphics\sqh@figure}
+\makeatother'''
+
+
+def _uncommented(tex):
+    return re.sub(r'(?<!\\)%.*', '', tex)
+
+
+def latex_text(text):
+    """Plain text made safe to print in LaTeX's text mode (a comment's content, shown in the document)."""
+    out = text.replace('\\', '\0')
+    for char in '{}$&#_%':
+        out = out.replace(char, '\\' + char)
+    return out.replace('^', '\\^{}').replace('~', '\\~{}').replace('\0', '\\textbackslash{}')
+
+
+def todo_comments(body):
+    """The text of each % TODO comment of a body, with the comment lines that continue it."""
+    items, current = [], None
+    for line in body.splitlines():
+        match = re.search(r'(?<!\\)%\s*TODO\b:?\s*(.*)', line)
+        if match:
+            current = [match.group(1).strip()]
+            items.append(current)
+        elif current is not None and re.match(r'\s*%', line):
+            current.append(line.strip().lstrip('%').strip())
+        else:
+            current = None
+    return [' '.join(part for part in item if part)[:500] for item in items]
+
+
+def bibliography_entries(text):
+    """(key, author, title, year) of each BibTeX entry, read loosely: enough to cite it by its key."""
+    entries = []
+    for match in _BIB_ENTRY.finditer(text):
+        if match.group(1).lower() in ('comment', 'string', 'preamble'):
+            continue
+        chunk = text[match.end():match.end() + 1500].split('\n@', 1)[0]
+        field = lambda name: ' '.join((re.search(name + r'\s*=\s*[{"](.+?)[}"]\s*,?\s*$', chunk, re.I | re.M)
+                                       or [None, ''])[1].replace('{', '').replace('}', '').split())
+        entries.append((match.group(2), field('author').split(' and ')[0][:40], field('title')[:90], field('year')[:4]))
+    return entries
 MACRO = re.compile(r'\\(?:(?:re|provide)?newcommand\*?\s*\{?\s*\\([A-Za-z@]+)'
                    r'|def\s*\\([A-Za-z@]+)|DeclareMathOperator\*?\s*\{\s*\\([A-Za-z]+)\s*\})')
 THEOREM = re.compile(r'\\(?:newtheorem|declaretheorem)\*?\s*(?:\[[^\]]*\]\s*)?\{([A-Za-z*]+)\}')
@@ -51,6 +105,11 @@ MATH_RULES = ('Write mathematics that compiles and means what the source means: 
               '\\tau^{\\dt}, \\sqrt{\\dt}); every \\left with its \\right; only standard LaTeX and amsmath commands '
               'or those defined above; formulas copied from the source with their exact symbols, constants and '
               'quantifiers.')
+
+CITATION_RULES = ("Cite only works of the author's bibliography (by their keys) or works the material gives with "
+                  'an identifier (DOI, arXiv or zbMATH). Never cite a work the material marks as not found, only '
+                  'remembered or unverified, never attribute a result to a work the material does not connect it to, '
+                  'and never invent a bibliographic entry: where a reference is missing, write % TODO: reference.')
 
 
 _UNDEFINED = re.compile(r'Undefined control sequence\.\n(?P<block>(?:.*\n){0,6}?)l\.\d+ [^\n]*?\\(?P<name>[A-Za-z@]+)\s*\n')
@@ -83,11 +142,27 @@ def named_definition(name):
 
 _ENVIRONMENT = re.compile(r'LaTeX Error: Environment (?P<name>[A-Za-z]+\*?) undefined')
 _DEFINITION_LINE = re.compile(r'^[ \t]*\\(?:(?:re|provide)?newcommand|DeclareMathOperator|DeclarePairedDelimiter|def|newtheorem)\b.*$', re.M)
+# Definitions moved to the preamble: \renewcommand stays where it is (it may be meant for one table or
+# one section, and it is allowed in the body), and so does anything inside an environment.
+_HOISTED_LINE = re.compile(r'^[ \t]*\\(?:(?:provide)?newcommand|DeclareMathOperator|DeclarePairedDelimiter|def|newtheorem)\b')
 _WRAPPER_LINE = re.compile(r'^[ \t]*\\(?:documentclass|usepackage|maketitle|author|date|begin\{document\}|end\{document\})\b.*$', re.M)
 
 
 def undefined_environments(log):
     return list(dict.fromkeys(m.group('name') for m in _ENVIRONMENT.finditer(log)))
+
+
+def _hoist_definitions(text):
+    """(definitions, rest): the top-level definition lines of a body, and the body without them."""
+    kept, moved, depth = [], [], 0
+    for line in text.split('\n'):
+        code = re.sub(r'(?<!\\)%.*', '', line)
+        if depth == 0 and _HOISTED_LINE.match(code):
+            moved.append(line.strip())
+        else:
+            kept.append(line)
+        depth = max(0, depth + len(re.findall(r'\\begin\s*\{', code)) - len(re.findall(r'\\end\s*\{', code)))
+    return '\n'.join(moved), '\n'.join(kept)
 
 
 def split_body(text):
@@ -104,8 +179,9 @@ def split_body(text):
     else:
         definitions = ''
     text = text.split('\\end{document}', 1)[0]
-    definitions += '\n' + '\n'.join(m.group(0) for m in _DEFINITION_LINE.finditer(text))
-    text = _WRAPPER_LINE.sub('', _DEFINITION_LINE.sub('', text))
+    moved, text = _hoist_definitions(text)
+    definitions += '\n' + moved
+    text = _WRAPPER_LINE.sub('', text)
     title = ''
     at = text.find('\\title')
     if at != -1:
@@ -192,8 +268,11 @@ def template_vocabulary(sources):
     return macros[:80], theorems[:30], definitions[:80]
 
 
-def compile_latex(tex, files=(), timeout=60):
-    """Compile with latexmk in a scratch folder: no shell escape, paranoid file access."""
+def compile_latex(tex, files=(), timeout=60, assets=()):
+    """Compile with latexmk in a scratch folder: no shell escape, paranoid file access.
+
+    `files` are template texts, written under their base names; `assets` are (relative path, bytes)
+    pairs such as figures, written at that path so that \\includegraphics{figures/x} finds them."""
     exe = shutil.which('latexmk')
     if exe is None:
         return {'available': False, 'ok': False, 'errors': [], 'log': '', 'pdf': None}
@@ -202,6 +281,12 @@ def compile_latex(tex, files=(), timeout=60):
             base = Path(name).name
             if base and not base.startswith('.') and base != 'document.tex':
                 Path(folder, base).write_text(content, encoding='utf-8')
+        for name, data in assets:
+            parts = Path(name).parts
+            if parts and not Path(name).is_absolute() and not any(p in ('', '.', '..') or p.startswith('.') for p in parts):
+                target = Path(folder, *parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
         Path(folder, 'document.tex').write_text(tex, encoding='utf-8')
         env = dict(os.environ, openin_any='p', openout_any='p', shell_escape='f', max_print_line='1000')
         command = [exe, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error',
@@ -251,6 +336,15 @@ class WriteupRunner(ResearchRunner):
     def __init__(self, agent, emit=lambda kind, value: None, *, styles_root=None):
         super().__init__(agent, emit)
         self.styles_root = Path(styles_root or agent.workspace.root)
+        self._repairing = False
+
+    def _check_time(self):
+        """A written document is always assembled, compiled and offered, even when time ran out while
+        it was written: those steps call no model. The repair call keeps the limit (see _repair)."""
+        phase = self.state.get('phase')
+        if phase in ('assemble', 'compile', 'export') or (phase == 'repair' and not self._repairing):
+            return
+        super()._check_time()
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
               conversation='', variant=None, scoped=False, deliver='folder', style_choice=None, **budgets):
@@ -403,7 +497,15 @@ class WriteupRunner(ResearchRunner):
             out.append("THE AUTHOR'S USUAL MACROS: use them where they fit:\n"
                        + '\n'.join(m['definition'] for m in style['macros'])[:1500])
         out.append('Theorem environments: ' + ', '.join(self.state['theorems'] or DEFAULT_THEOREMS) + ', and proof.')
+        entries = self._bibliography()
+        if entries:
+            listing = '\n'.join(f'{key}: {author}, {title} ({year})' for key, author, title, year in entries)
+            out.append("THE AUTHOR'S BIBLIOGRAPHY (cite these works with \\cite{key}, by these keys only):\n" + listing[:6000])
         return '\n\n'.join(out)
+
+    def _bibliography(self):
+        """The entries of the template .bib files."""
+        return [entry for source in self._templates_in(('.bib',)) for entry in bibliography_entries(source['content'])]
 
     def _style_note(self):
         style = self.state.get('style')
@@ -535,7 +637,7 @@ class WriteupRunner(ResearchRunner):
                        'define it with \\newcommand on its own line before \\title.\n'
                        'Keep the mathematics exactly as in the material: the same statements, hypotheses, constants and '
                        'quantifiers, and no new results. Where the material is unclear or incomplete, keep what it says '
-                       'and add a comment % TODO: ... describing the gap.\n' + MATH_RULES +
+                       'and add a comment % TODO: ... describing the gap.\n' + CITATION_RULES + '\n' + MATH_RULES +
                        '\n\n' + self._notation() + '\n\n' + self._style_note() +
                        '\n\nUSER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + part['text'])
         trailer = 'Write the document now: everything needed is above, and no tools are available.'
@@ -550,6 +652,12 @@ class WriteupRunner(ResearchRunner):
             # The document outgrew the call's allowance: write this material as two shorter parts.
             parts[index:index + 1] = [{'text': text, 'body': '', 'complete': False} for text in halves(part['text'])]
             self.state['warnings'].append('A part of the document was too long for one call and was written in two.')
+            return
+        if not result['complete'] and not part.get('retried_incomplete'):
+            # Usually the reasoning used the output allowance: one more call, as for a non-answer.
+            part['retried_incomplete'] = True
+            self.state['warnings'].append('A writing call stopped before the end of the document; it was written again.')
+            self._save()
             return
         if not result['complete'] or announces_only(body):
             part['body'] = body
@@ -583,15 +691,106 @@ class WriteupRunner(ResearchRunner):
             lines.append(f'\\title{{{title}}}')
             preamble, head = '\n'.join(lines), '\\begin{document}\n\\maketitle\n'
         body = self.state['body']
+        loaded = '\n'.join(_uncommented(s['content']) for s in self._templates_in(('.tex', '.sty', '.cls')))
+        # A file the template already \input's (or loads as a package) is copied next to the document, not pasted.
+        referenced = {Path(name.strip()).stem for match in re.finditer(
+            r'\\(?:input|include|usepackage|RequirePackage)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}', loaded)
+            for name in match.group(1).split(',')}
         for fragment in self._templates_in(('.tex',)):  # a template .tex without a document is all preamble
-            if fragment is not template and '\\begin{document}' not in fragment['content']:
+            if (fragment is not template and '\\begin{document}' not in fragment['content']
+                    and Path(fragment['path']).stem not in referenced):
                 preamble += f'\n% From the template {Path(fragment["path"]).name}\n' + fragment['content'].strip()
         preamble += self._request_preamble(preamble)
         preamble += self._style_preamble(preamble, body)
         preamble += self._model_preamble(preamble)
-        document = preamble + '\n\n' + head + '\n'
+        preamble += self._package_preamble(preamble + '\n' + loaded, body)
+        document = preamble + '\n\n' + head + self._checks_block(body) + '\n'
         self.state['body_line'] = document.count('\n') + 1
         self.state['document'] = self.state['draft'] = document + body + '\n\n\\end{document}\n'
+
+    def _package_preamble(self, preamble, body):
+        """Packages the text needs and the preamble lacks, and placeholders for figures that are not there."""
+        text, lines = _uncommented(body), []
+        if (re.search(r'\\begin\{(?:enumerate|itemize|description)\}\s*\[', text)
+                and not re.search(_LOADED % 'enumitem|enumerate|paralist', preamble)):
+            lines.append('\\usepackage[shortlabels]{enumitem}')  # \begin{enumerate}[(i)] needs it
+        if _GRAPHIC.search(text):
+            if not re.search(_LOADED % 'graphicx|graphics', preamble):
+                lines.append('\\usepackage{graphicx}')
+            _, missing = self._figures(body)
+            self.state['missing_figures'] = missing
+            if missing:
+                lines.append(MISSING_FIGURES)
+        return ('\n' + '\n'.join(lines)) if lines else ''
+
+    def _checks_block(self, body):
+        """What the author must settle, printed at the top of the document: comments alone are invisible in the PDF."""
+        points = todo_comments(body)
+        unknown = self._unknown_citations(body)
+        if unknown:
+            note = (f'Cites works that are not in your bibliography: {", ".join(unknown)}. Check that they exist and say '
+                    'what the text claims; the model may have taken them from works the literature search did not find.')
+            points.append(note)
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
+        missing = self.state.get('missing_figures') or []
+        if missing:
+            note = ('Figures not found next to the material (drawn as placeholders): ' + ', '.join(missing) +
+                    '. Put them in the folder, next to the pinned files.')
+            points.append(note)
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
+        if not points:
+            return ''
+        items = '\n'.join('\\item ' + latex_text(point) for point in points)
+        return ('% Points to check before using this draft (from its TODO comments and the controller\'s checks);\n'
+                '% delete this block once they are settled.\n'
+                '\\begin{quote}\\small\\textbf{Points to check before using this draft.}\n'
+                f'\\begin{{enumerate}}\n{items}\n\\end{{enumerate}}\n\\end{{quote}}\n')
+
+    def _unknown_citations(self, body):
+        """Keys the text cites that neither the author's .bib nor the document's own bibliography defines."""
+        cited = [key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',') if key.strip()]
+        known = {key for key, *_ in self._bibliography()} | set(re.findall(r'\\bibitem\s*(?:\[[^\]]*\])?\{([^}]+)\}', body))
+        return list(dict.fromkeys(key for key in cited if key not in known))
+
+    def _figure_folders(self):
+        """Where the material's figures may be: the folders of the pinned files, then the workspace root."""
+        folders = []
+        for source in self.state['sources']:
+            if source['path'] in ('typed-notes.md', 'conversation.md') or source['path'].startswith(('saved-template/', 'style-template/')):
+                continue
+            parent = str(Path(source['path']).parent)
+            if parent not in folders:
+                folders.append(parent)
+        return folders + ([''] if '.' not in folders else [])
+
+    def _figure(self, folder, name):
+        """The workspace file a figure name refers to (graphicx tries .pdf, .png, .jpg), or None."""
+        root = Path(self.agent.workspace.root).resolve()
+        relative = Path(folder, name) if folder not in ('', '.') else Path(name)
+        if relative.is_absolute() or any(part == '..' or part.startswith('.') for part in relative.parts):
+            return None
+        candidates = ([relative] if relative.suffix.lower() in GRAPHIC_SUFFIXES else
+                      [relative.with_name(relative.name + suffix) for suffix in GRAPHIC_SUFFIXES])
+        for candidate in candidates:
+            path = (root / candidate).resolve()
+            if (path.is_relative_to(root) and not any(p.startswith('.') for p in path.relative_to(root).parts)
+                    and path.is_file() and path.stat().st_size <= FIGURE_BYTES):
+                return path
+        return None
+
+    def _figures(self, body):
+        """(assets, missing): the figures the text includes, as (path in the document, bytes), and those not found."""
+        assets, missing, total = [], [], 0
+        for name in dict.fromkeys(n.strip() for n in _GRAPHIC.findall(_uncommented(body))):
+            path = next((p for folder in self._figure_folders() if (p := self._figure(folder, name))), None)
+            if path is None or total + path.stat().st_size > FIGURES_BYTES:
+                missing.append(name)
+                continue
+            total += path.stat().st_size
+            assets.append((name if Path(name).suffix.lower() in GRAPHIC_SUFFIXES else name + path.suffix, path.read_bytes()))
+        return assets, missing
 
     def _defined(self, preamble):
         return set(self.state['macros']) | {next(g for g in m.groups() if g) for m in MACRO.finditer(preamble)}
@@ -600,7 +799,20 @@ class WriteupRunner(ResearchRunner):
         """The request's definitions the template does not make, and commands supplied at compile time."""
         defined = self._defined(preamble)
         environments = set(self.state['theorems']) | set(THEOREM.findall(preamble))
-        lines = [grouped(d) for name, d in (self.state.get('request_macros') or {}).items() if name not in defined]
+        lines = []
+        for name, definition in (self.state.get('request_macros') or {}).items():
+            if name not in defined:
+                lines.append(grouped(definition))
+                continue
+            # The request's notation outranks the template's: redefine the command after the template.
+            renewed = re.sub(r'^\\(?:provide)?newcommand', r'\\renewcommand', definition.strip())
+            if renewed.startswith(('\\renewcommand', '\\def')):
+                lines.append(grouped(renewed))
+                note = f'Your request redefines \\{name}, which the template also defines; the request\'s meaning is used.'
+            else:
+                note = f'Your request defines \\{name} with \\DeclareMathOperator, but the template defines it too; the template\'s is kept.'
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
         lines += [d for name, d in (self.state.get('request_environments') or {}).items() if name not in environments]
         supplied = [grouped(d) for name, d in (self.state.get('supplied_macros') or {}).items() if name not in defined]
         supplied += [d for name, d in (self.state.get('supplied_environments') or {}).items() if name not in environments]
@@ -647,15 +859,18 @@ class WriteupRunner(ResearchRunner):
         self.emit('notice', 'Compiling the document with latexmk')
         macros = self.state.setdefault('supplied_macros', {})
         environments = self.state.setdefault('supplied_environments', {})
-        counter = '[theorem]' if not self.state['theorems'] or 'theorem' in self.state['theorems'] else ''
         for _ in range(8):  # supply what the text uses without defining, then compile again
             remaining = self.state['settings']['max_seconds'] - self._elapsed()
-            result = compile_latex(self.state['document'], files, timeout=int(min(60, max(1, remaining))))
+            assets, _ = self._figures(self.state['body'])
+            # At least 30 s: a document written within the time limit is still compiled after it.
+            result = compile_latex(self.state['document'], files, timeout=int(min(60, max(30, remaining))), assets=assets)
             if result['ok'] or not result['available']:
                 break
             found = {n: d for n in undefined_names(result['log']) if n not in macros and (d := self._definition_for(n))}
+            # Share the theorem counter only when it exists (a template may define no theorem at all).
+            counter = '[theorem]' if 'theorem' in set(THEOREM.findall(self.state['document'])) | set(environments) else ''
             new_environments = {n: (f'\\newtheorem*{{{n}}}{{{n[:-1].capitalize()}}}' if n.endswith('*') else
-                                    f'\\newtheorem{{{n}}}{counter}{{{n.capitalize()}}}')
+                                    f'\\newtheorem{{{n}}}{"" if n == "theorem" else counter}{{{n.capitalize()}}}')
                                 for n in undefined_environments(result['log']) if n not in environments}
             if not found and not new_environments:
                 break
@@ -693,6 +908,10 @@ class WriteupRunner(ResearchRunner):
         if self.state.get('undefined'):
             report.append('Not defined anywhere: ' + ', '.join('\\' + n for n in self.state['undefined']) +
                           '. Write what they stand for with standard commands or the notation below.')
+        if self.state['settings']['max_seconds'] - self._elapsed() < 60:
+            self.state['warnings'].append('No time was left for a repair call; the LaTeX errors are on its page.')
+            self.state['phase'] = 'export'
+            return
         remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
         cap = int(min(self.WRITE_TOKENS, remaining))
         instruction = ('This LaTeX document does not compile. Fix these errors and change nothing else: the same text, '
@@ -700,9 +919,18 @@ class WriteupRunner(ResearchRunner):
                        'the text, without preamble or \\begin{document}. ' + MATH_RULES + '\n\n' + self._notation() +
                        '\n\nERRORS (with the lines around them):\n' + '\n'.join(report) +
                        '\n\nDOCUMENT BODY:\n\\title{' + title + '}\n' + body)
-        result = self._call('repair', instruction, cap=cap, think=True, minimum_output=max(1, min(self._minimum_output(), cap)),
-                            sampling=self.SAMPLING, thinking_budget=min(4096, cap // 4),
-                            trailer='Output the whole corrected body now.')
+        self._repairing = True
+        try:
+            result = self._call('repair', instruction, cap=cap, think=True, minimum_output=max(1, min(self._minimum_output(), cap)),
+                                sampling=self.SAMPLING, thinking_budget=min(4096, cap // 4),
+                                trailer='Output the whole corrected body now.')
+        except ResearchBudget:
+            # Out of time during the repair: the written document is still offered, with its errors.
+            self.state['warnings'].append('Time ran out during the repair call; the LaTeX errors are on its page.')
+            self.state['phase'] = 'export'
+            return
+        finally:
+            self._repairing = False
         _, definitions, fixed = split_body(result['text'])
         if result['complete'] and fixed and not announces_only(fixed) and len(fixed) >= 0.6 * len(body):
             self.state['body'] = fixed
@@ -773,7 +1001,7 @@ class WriteupRunner(ResearchRunner):
     def _progress(self):
         parts = self.state.get('parts', [])
         return {'phase': self.state['phase'], 'completed': sum(bool(p.get('complete')) for p in parts),
-                'total': len(parts), 'unit': 'parts written', 'scope': self.state['goal'],
+                'total': len(parts), 'unit': 'parts', 'scope': self.state['goal'],
                 'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
                 'resumable': self.state['status'] in ('running', 'paused')}
 
