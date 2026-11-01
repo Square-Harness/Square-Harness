@@ -91,7 +91,8 @@ newer; git; about 100 MB of disk for the harness, plus the model (1–20 GB with
 Ollama, about 40 GB with HyperQwen). Optional:
 
 - Docker, for the Python sandbox;
-- a TeX distribution with `latexmk`, to compile write-ups;
+- a TeX distribution with `latexmk` (and BibTeX or Biber, which TeX Live and
+  MacTeX include), to compile write-ups and their bibliographies;
 - `zstd`, to unpack Ollama without `sudo`.
 
 ## 2. Install the harness
@@ -574,7 +575,8 @@ Install the parts the user chose in step 1:
   two skills explain what is missing. Snap-packaged Docker makes `doctor` report
   `"no_new_privileges": "process"`; that is expected.
 - **Write-up compilation**: `latexmk` with a TeX distribution (TeX Live, or MacTeX
-  on macOS). Without it, write-ups produce `.tex` files that are not compiled.
+  on macOS); bibliographies also use BibTeX or Biber, which both include. Without
+  `latexmk`, write-ups produce `.tex` files that are not compiled.
 - **Search keys** (optional, set in the environment of the web app):
   `SEMANTIC_SCHOLAR_API_KEY` (fewer rate limits) and `BRAVE_SEARCH_API_KEY`
   (general web search for the Assistant). Literature tools work without keys.

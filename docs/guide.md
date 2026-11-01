@@ -113,14 +113,17 @@ address that carries the access token.
   everything it did.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
   `@literature`, `@quick_review`, `@referee`, `@detailed_review`, `@explain`,
-  `@writeup`, `@critic`, `@explore`, `@python_lab`, `@sanity_check`. Hover over the
-  chip above the text box to read what the skill does and to choose its effort.
-  **Auto** means Medium, or High for a detailed review.
+  `@writeup`, `@summarize`, `@critic`, `@explore`, `@python_lab`, `@sanity_check`.
+  Hover over the chip above the text box to read what the skill does and to
+  choose its effort. **Auto** means Medium, or High for a detailed review.
 - **Your folder** is shown above the text box. Click it to open another folder
   (below `--gui-root`; by default only the workspace itself). Drop files onto the
-  window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, up to
-  20 MB). An existing file is never replaced: the new one is renamed. Dropped
-  files are attached to your next message.
+  window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
+  `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
+  replaced: the new one is renamed. Dropped files are attached to your next
+  message.
+- **Learn my writing style**, below New conversation, teaches write-ups how you
+  write (see [Writing styles](#writing-styles)).
 - **Job pages** show live output, every attempt and review, sources, budgets and
   saved files. **Pause** saves at the next checkpoint and **Resume** continues with
   the remaining budget. "Back to conversation" returns to the chat that started
@@ -179,7 +182,7 @@ app and the other way round: both use the same saved files.
 | Review | Referee report: overview, typos, presentation | `@referee`, New review | `/referee` |
 | Detailed review | The review, plus checks of the proofs | `@detailed_review` | `/detailed_review` |
 | Explain | A result and its proof explained step by step | `@explain` | `/explain` |
-| Write-up | Your notes as LaTeX in your own style | `@writeup`, New write-up | `/writeup` |
+| Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
 | Sanity check | An attempt to falsify a claim numerically | `@sanity_check`, automatic | `/sanity-check` |
 
@@ -291,18 +294,75 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
 
 ### Write-up
 
-Turns rough notes, a draft or a PDF into a LaTeX document in your own style. It is
-exposition, not research:
+Turns rough notes, a draft, a PDF or the results of a conversation into a LaTeX
+document in your own style. It is exposition, not research: every statement,
+hypothesis and constant comes from your material, and nothing reviews the
+mathematics, so write up results you have checked.
 
-- every statement, hypothesis and constant comes from your material;
-- unclear points become `% TODO:` comments for you to settle;
-- your template's class, packages, macros and theorem environments are used and
-  never redefined.
+Use it for:
 
-The document is compiled with `latexmk` when it is installed, in a temporary
-folder, without shell escape and with restricted file access. An existing file
-is never replaced. In the web app, a template can be saved under a name and
-reused in any folder.
+- a clean note from your notes or from a proof the Assistant found:
+  `@writeup a short note with Lemma 2 and the reviewed proof, for my students`;
+- a summary of a conversation: `@summarize` (or `@writeup` with nothing after it
+  and no attachment) gives each
+  result's statement, its recorded status, the proof idea, the references found
+  and the open questions;
+- a missing part of a paper: attach its sections (without `\begin{document}`),
+  your `.sty` and your `.bib`, and say what to write.
+
+What it uses:
+
+- **Material**: the conversation so far (messages, answers and the full results
+  of finished jobs, including those of the current turn) and the files you
+  attach. A complete `.tex` file (with `\begin{document}`) is used as a
+  **template**: its preamble and layout, not its text, and the reply says so. To
+  write from a draft, attach it without `\begin{document}`, or as `.md` or `.pdf`.
+  `.sty`, `.cls` and `.bib` files are templates too.
+- **Notation**: `\newcommand` definitions you type in the request win; then your
+  template's macros and theorem environments; then those of your saved style.
+- **References**: with a `.bib` attached, only its keys are cited, and any other
+  work becomes a `% TODO: reference` comment. Without one, the document cites only
+  works the material gives with a DOI, arXiv or zbMATH identifier, and their
+  bibliography is made inside the `.tex`. A work the literature search could not
+  confirm is never cited.
+- **Figures** the text includes are taken from the folders of the attached files
+  or from your folder (`.pdf`, `.png`, `.jpg`). A missing figure is drawn as a
+  placeholder.
+
+How it works:
+
+1. One writing call reads all the material, your request, your notation and your
+   style, and writes the document. Long material is written in consecutive parts.
+2. Equations the text uses again are numbered and cited with `\eqref`; displays
+   nothing refers to stay unnumbered. Labels from your own material are kept.
+3. The document is compiled with `latexmk` when it is installed, in a temporary
+   folder, without shell escape and with restricted file access. If it does not
+   compile, one repair call fixes the reported errors.
+4. The document opens with **Points to check**: its `% TODO` comments, citations
+   and figures it could not resolve, and references to undefined labels. Delete
+   that block once they are settled.
+
+From a conversation, the card offers **Download .tex** (and **Download PDF** when
+it compiled); the copy is deleted with the conversation. From the New write-up
+form or the terminal, the `.tex` and the PDF are written in your folder, and an
+existing file is never replaced. In the web app, a template can be saved under a
+name and reused in any folder.
+
+### Writing styles
+
+**Learn my writing style** condenses the `.tex` sources of your earlier articles
+into a named style: the macros you actually use, your theorem environments and,
+for each kind of paper you write, how you announce, explain and phrase things.
+Choose main article files, ideally two or more per kind of paper; `\input` parts
+are not followed, so pin them as well. A style can also keep a LaTeX template (an
+article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
+style build on unless you attach one.
+
+On the same page, **Style used by write-ups** chooses: automatically (a short
+call picks the style that fits the material, or none), none, one style, or one
+of its domains. A style gives phrasing and macros, never the structure of your
+papers: the request sets the structure. Styles and this choice are kept in the
+`.mathagent/` folder of `--gui-root` and shared by every folder.
 
 ### Python Lab and Sanity check
 
@@ -406,7 +466,7 @@ Everything is saved in your folder under `.mathagent/`:
 | Folder | Contents |
 | --- | --- |
 | `proofs/` | Proof jobs |
-| `research/` | Reports, reviews, reading lists, write-ups |
+| `research/` | Reports, reviews, reading lists, write-ups (those made in a conversation are deleted with it) |
 | `checks/` | Literature checks |
 | `chats/` | Conversations |
 | `experiments/` | Sandbox runs |

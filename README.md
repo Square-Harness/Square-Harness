@@ -65,7 +65,8 @@ Mac. For smaller machines and other model servers, see the
 - **Reading lists**: built from verified records.
 - **Reviews**: a quick check of a proof, a referee report, a detailed review that
   also checks the proofs, and step-by-step explanations.
-- **Write-ups**: LaTeX in your own template's style.
+- **Write-ups**: LaTeX in your own style (a template, or a style learnt from your
+  articles), with numbered equations and checked references.
 - **Python Lab and Sanity check**: run in a Docker sandbox.
 
 Every job has a bounded budget, can be paused and resumed, and saves what the

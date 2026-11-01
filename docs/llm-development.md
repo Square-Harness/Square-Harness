@@ -54,9 +54,10 @@ Version 0.5.1, experimental. The source of truth for the version is
 ### Tests
 
 - The suite is deliberately small. `python -m unittest discover -s tests` runs
-  12 tests in about 5 seconds:
-  - 8 end-to-end tests through real entry points (CLI subprocess, HTTP API, GUI
-    server, runners) with scripted model servers;
+  15 tests in about 8 seconds:
+  - 11 end-to-end tests through real entry points (CLI subprocess, HTTP API, GUI
+    server, runners) with scripted model servers; one of them compiles a
+    write-up with latexmk and BibTeX and skips where `latexmk` is missing;
   - 4 sandbox tests, of which 2 skip without Docker and the sandbox image.
 
   `npm test` in `frontend/` runs one test.
@@ -127,6 +128,14 @@ Version 0.5.1, experimental. The source of truth for the version is
   are locked with `fcntl`, and paths are validated against symlinks and escapes.
   Proof candidates are immutable and hashed: a changed digest is refused, not
   re-reviewed.
+- **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
+  request, then the template's, then the saved style's, then the model's
+  (`writeup._request_preamble`). A written document is always assembled,
+  compiled and offered, even when time ran out while writing
+  (`WriteupRunner._check_time`). `tidy_numbering` never touches labels or
+  displays that come from the material: the rest of the author's paper may refer
+  to them. Citations are the `.bib`'s keys, or entries whose DOI, arXiv or
+  zbMATH identifier occurs in the material (`_take_bibtex`); nothing else.
 - **Honest status.** Never report an operational failure (timeout, budget,
   context, malformed output) as a mathematical verdict. Never describe a model
   review as a certificate. Partial work stays labelled partial.
@@ -189,7 +198,8 @@ Version 0.5.1, experimental. The source of truth for the version is
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
    │ agent.Agent (critic/explore chat)             ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
    │ numerics.session (sandbox skills)             │   / JournalRunner (Detailed review) / ExplainRunner
-   │                                               └ writeup.WriteupRunner
+   │                                               ├ writeup.WriteupRunner (write-up, summary)
+   │                                               └ style.StyleRunner (writing styles)
    └───────────────┬─────────────────────────────────────────┬───────────────────┘
                    │ bounded model calls                      │ tools and sources
      backends.py, agent.Ollama, api_profiles.py      tools.Workspace, literature.py, web.py,
@@ -212,7 +222,7 @@ Version 0.5.1, experimental. The source of truth for the version is
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
-| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py` | One controller per skill (see the diagram) |
+| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; providers that refused (`down`) |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
@@ -258,22 +268,35 @@ is saved before the model sees it. Independent children run concurrently
 (`--assistant-concurrency`, on OpenAI-compatible servers only). All share one
 `AssistantBudget`. Children cannot delegate.
 
+Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
+call) → `draft` (one writing call, or consecutive parts for long material; the
+controller then takes the model's BibTeX out and keeps equation numbers only
+where they are referred to) → `assemble` (the preamble, the made bibliography
+and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
+files and the figures the text includes; commands and environments the text
+uses without defining are supplied) → `repair` (one call on the whole body) →
+`export` (the folder, or kept for download when started from a conversation).
+`@writeup` and `@summarize` reach it through the Assistant's worker adapter
+with the conversation as material (`store.conversation_record`).
+
 ### Saved state
 
 `<workspace>/.mathagent/` contains:
 
 - `proofs/<id>/`: state, candidates, reviews, request payloads, streams,
   `proof.md`, `report.md`;
-- `research/<id>/`: reports, reviews, reading lists, write-ups (state,
-  `report.md`, artifacts);
+- `research/<id>/`: reports, reviews, reading lists, write-ups and learnt
+  styles (state, `report.md`, artifacts); a write-up made in a conversation is
+  deleted with it;
 - `checks/<id>/`: literature checks;
 - `chats/`: conversations and Assistant checkpoints;
 - `experiments/`: sandbox runs (at most 200 runs or 256 MB, oldest pruned);
 - `literature/`: source cache;
 - `gui-settings.json`: per-folder file access.
 
-The `--gui-root` folder's `.mathagent/` also holds `gui-token`, `gui-state.json`
-and `templates/`. All of it is private user data and is ignored by git.
+The `--gui-root` folder's `.mathagent/` also holds `gui-token`, `gui-state.json`,
+`templates/`, `styles/` and `style-choice.json` (writing styles and which one
+write-ups use). All of it is private user data and is ignored by git.
 
 ## Add a feature
 
@@ -288,8 +311,8 @@ and `templates/`. All of it is private user data and is ignored by git.
 
 ### Add a skill or mode
 
-Use the `writeup` branch (`git diff refs/remotes/origin/main...refs/remotes/origin/writeup`)
-as a worked example: it adds `@writeup`, `@summarize` and writing styles. A new
+Use the write-up merge (`git show --stat 7ae49b7`, the merge of Antonin's
+branch) as a worked example: it adds `@writeup`, `@summarize` and writing styles. A new
 mode touches, in this order:
 
 1. `mathagent/skills/<name>/SKILL.md`: working method, required output, trust
@@ -426,7 +449,7 @@ Fix these when you touch the code nearby, or ask before a larger change:
   - backend streaming and tool-call recovery;
   - web-app hardening beyond the token check;
   - Assistant budgets and concurrency;
-  - write-up compile safety;
+  - write-up compile safety where `latexmk` is missing (the compile test skips);
   - reference-lookup logic and the manuscript parser.
 - The `mathagent/gui/effort.py` docstring still says a test keeps it identical to
   `frontend/src/effort.ts`. That test no longer exists.

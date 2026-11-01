@@ -82,8 +82,8 @@ down.
 3. Retake the README screenshots: they show the old sidebar.
 4. Decide where the interface links to the licence and third-party notices
    (served at `/LICENSE.txt` and `/THIRD-PARTY-NOTICES.txt`).
-5. After the write-up merge, describe the new write-up flow (`@summarize`,
-   styles) in `guide.md`. That merge also edits `research.md`, which now lives
-   in this folder; move those edits into `guide.md`.
+5. Done in the write-up merge: the new write-up flow (`@summarize`, styles,
+   bibliographies, equation numbering) is in `guide.md` (Write-up, Writing
+   styles) and `llm-development.md`; `research.md` here stays as it was.
 6. Commit cleaned-up cluster scripts, or keep the templates in
    `llm-install.md`.
