@@ -2,8 +2,22 @@
 
 ## Unreleased
 
-- Restore the sidebar notebook selector and standalone job forms, saved-job
-  access, effort controls and write-up templates.
+- Rewrite the documentation as three guides: `docs/guide.md` (philosophy, every
+  skill and how skills are made), `docs/llm-install.md` (local and cluster
+  installation, written for a coding agent) and `docs/llm-development.md`
+  (architecture, rules, adding features, benchmarks). They replace `usage.md`,
+  `research.md`, `python-numerics.md`, `benchmark.md`, `hyperqwen-a10.md`,
+  `a10.md`, `ovh.md` and `audit-2026-11-01.md`. `AGENTS.md` sends coding agents
+  to the install and development guides.
+- Reshape the composer and sidebar: the workspace folder sits above the text box,
+  an `@mode` chip offers the mode's description and effort (Auto, Low …
+  Poincaré), and Resume replaces Send when the Assistant is paused. Search is
+  always on in conversations unless launched with `--offline`. The sidebar keeps
+  the list, model status, file access and Parallel work; the notebook selector
+  is gone, and other notebooks open from `@` modes, cards and "Back to
+  conversation".
+- Restore the standalone job forms, saved-job access, effort controls and
+  write-up templates.
 - Add the MLX OpenAI-compatible profile and local protocol smoke test, improve
   bounded reference retrieval and recovery from malformed tool calls.
 - Harden Assistant delegation, source selection, partial reports, interrupted
@@ -13,7 +27,7 @@
   lets chats and the Assistant try to falsify claims with small bounded
   experiments (`/sanity-check`, `@sanity_check`; `--no-numerical-checks`).
   Generated figures and files appear in the conversation. See
-  [docs/python-numerics.md](docs/python-numerics.md).
+  [docs/guide.md](docs/guide.md#python-lab-and-sanity-check).
 
 - Review has four kinds, started with `@quick_review`, `@referee`, `@detailed_review`
   and `@explain` in the Assistant: a quick check of a proof (independent
@@ -90,12 +104,13 @@
   remain available in the standalone forms.
 - Any job can be started while the model is busy: proof, report and write-up
   forms, suggestions and resume buttons add it to the queue instead of refusing.
-- Online search is on by default in the interface for new conversations and
-  reports; untick it per conversation or report. An explicit `--offline` launch
-  still locks it off. Write-ups never search.
+- Online search is on by default in the interface. Conversations always search;
+  the reading-list and review form keeps its own switch. An explicit `--offline`
+  launch still locks it off. Proofs and write-ups never search.
 - The job list and a job page's overview (budget, candidates, checks) can slide
   away to a thin spine on wide screens; the choice is remembered per browser.
-- The sidebar footer links the licence and bundled third-party notices.
+- The interface serves the licence and bundled third-party notices at
+  `/LICENSE.txt` and `/THIRD-PARTY-NOTICES.txt`.
 
 ## 0.5.1 — 2026-09-27
 

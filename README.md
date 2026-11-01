@@ -1,42 +1,49 @@
 # Square Harness
 
-**An open-source harness for mathematical proof work.**
+**An open-source harness for mathematical research with open-weights models.**
 
-Square Harness connects a language model to a simple workflow:
-**solve → verify → repair when needed**. It preserves the original answer,
-reviews the complete proof, and saves every candidate and objection for inspection.
+Square Harness turns a language model running on your computer, or on a GPU in
+your lab, into a research assistant for mathematics. Its core is a simple proof
+workflow, **solve → verify → repair when needed**. It keeps the original answer,
+reviews the complete proof, and saves every candidate and objection for
+inspection. Around it, the same principles serve literature checks, reading
+lists, manuscript reviews, explanations, LaTeX write-ups and numerical
+experiments.
 
-**Version 0.5.1 · experimental.** The priority is a reliable, understandable proof
-workflow. A model's approval is not a mathematical certificate; independent
-checking remains necessary.
+**Version 0.5.1 · experimental.** A model's approval is not a mathematical
+certificate; independent checking remains necessary.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-dark.png">
-  <img alt="The Square Harness visual interface with a conversation and a sidebar notebook selector" src="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-light.png">
+  <img alt="The Square Harness web app with a conversation" src="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-light.png">
 </picture>
 
 ## Quick start
 
-You need Python 3.10+, Linux or macOS, and a running model server. Models and their
-memory requirements are separate from the harness. Native Windows is not supported.
+Ask a coding agent (Claude Code, Codex, …) in a terminal:
+
+```text
+Install Square Harness following https://github.com/Square-Harness/Square-Harness/blob/main/docs/llm-install.md
+```
+
+It covers a local model (a tiny Qwen for a test, or a larger one on a gaming
+GPU or an Apple Silicon Mac) and HyperQwen, the team's setup, on a cluster GPU
+reached by SSH. By
+hand, with Python 3.10+ on Linux or macOS and [Ollama](https://ollama.com)
+running:
 
 ```bash
 git clone https://github.com/Square-Harness/Square-Harness.git
 cd Square-Harness
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[research]'
-
+.venv/bin/python -m pip install -e '.[research]'
 ollama pull qwen3.8:27b
 mkdir -p ~/research/square-workspace
-square-harness --workspace ~/research/square-workspace
+.venv/bin/square-harness --gui --workspace ~/research/square-workspace
 ```
 
-Start `ollama serve` separately if needed. Choose another installed model with
-`--model <exact-tag>`. The default proof profile uses a 40,960-token context;
-see the [usage guide](docs/usage.md) for smaller profiles and other servers.
-
-At the prompt:
+Your browser opens on the web app. Without `--gui`, the same harness runs in the
+terminal:
 
 ```text
 /prove Prove that every bounded sequence in H¹(0,1) has a subsequence converging strongly in L²(0,1).
@@ -44,127 +51,47 @@ At the prompt:
 /proof-report
 ```
 
-For a problem saved in your workspace:
+`qwen3.8:27b` (18 GB) with the default 40,960-token context needs a large GPU or
+Mac. For smaller machines and other model servers, see the
+[install guide](docs/llm-install.md).
 
-```bash
-square-harness --workspace ~/research/square-workspace \
-  --proof-file statement.tex --prompt "Prove the statement in statement.tex."
-```
+## What it does
 
-### Visual interface
+- **Conversations**: ask in plain words. The Assistant answers, or starts
+  focused jobs and reads their results before continuing.
+- **Prove**: solve, verify and repair, with every attempt kept.
+- **Literature check**: references with an evidence level (read, cited,
+  located, contradicted, not found).
+- **Reading lists**: built from verified records.
+- **Reviews**: a quick check of a proof, a referee report, a detailed review that
+  also checks the proofs, and step-by-step explanations.
+- **Write-ups**: LaTeX in your own template's style.
+- **Python Lab and Sanity check**: run in a Docker sandbox.
 
-The same harness also runs as a local web app:
+Every job has a bounded budget, can be paused and resumed, and saves what the
+model saw and wrote under `.mathagent/` in your folder. The web app runs locally,
+also works on a phone, and shares its jobs with the terminal. The
+[guide](docs/guide.md) explains each skill and how it is built.
 
-```bash
-square-harness --gui --workspace ~/research/square-workspace
-```
+## Documentation
 
-Your browser opens on `http://127.0.0.1:8765`. The sidebar notebook selector opens Conversations, Proofs, Reading lists, Reviews
-and Write-ups, including their saved jobs and new-job forms. The **Assistant** answers short questions directly and can delegate focused
-proof, critique, exploration, literature, review or writing tasks when needed.
-It reads their results and continues the conversation, within a shared budget.
-For simple web requests it can open a supplied URL and read its page, links or
-paginated bibliography directly, including references without hyperlinks.
-Delegated work has its own card and saved artifacts; pause and resume the
-assistant to continue with the remaining allowance. Proofs, answers, reports, reviews
-and write-ups appear as the model writes them, with typeset LaTeX, each proof
-attempt with its review, budgets, citation checks and approval dialogs for file
-writes. Two conversations or jobs can run at once by default, with independent
-token budgets. Additional jobs wait in a queue. Drop files onto the
-window and switch folders from the sidebar. It uses the same engine, settings and saved jobs as the terminal, including
-jobs started there, and works in phone browsers too: see the
-[usage guide](docs/usage.md#visual-interface) before exposing it to your network.
+- [Guide](docs/guide.md): philosophy, every skill, how skills are made, effort,
+  data and privacy.
+- [Install guide](docs/llm-install.md): local and cluster plans, written for a
+  coding agent.
+- [Development guide](docs/llm-development.md): architecture, rules, how to add a
+  feature, benchmarks.
+- [Changelog](CHANGELOG.md).
 
-The interface's **Parallel work** settings control active conversations/jobs
-and simultaneous model requests (1–8 each). The launch defaults are
-`--gui-concurrency 2 --gui-model-concurrency 2`. One pending turn is allowed per
-conversation. Model streams share available generation capacity, rather than
-sharing a token allowance. Exact token/s depends on the inference server and workload.
-
-Within each conversation, Assistant can run independent tasks in parallel on an OpenAI-compatible server
-such as vLLM: `--assistant-concurrency 2` is the default, and the limit can be
-set from 1 to 4. Other backends run one Assistant worker at a time. Workers in
-one conversation share that conversation's parent allowance and the interface's
-model-request slots; other conversations retain their own full allowance.
-
-### MLX servers
-
-Connect to an already running server using its URL and served model ID:
-
-```bash
-export MODEL_ID='your-served-model-id'
-square-harness --backend openai --api-profile mlx \
-  --host http://localhost:8000 --model "$MODEL_ID" --offline --gui
-```
-
-`--api-profile default` selects the existing vLLM adapter. The CLI option overrides
-`SQUARE_OPENAI_PROFILE`. Model loading stays with the inference server.
-
-The MLX profile prompts JSON and validates responses afterward. Seeds,
-reasoning-effort levels and vLLM thinking-budget fractions are unsupported.
-Checkpoint templates may ignore the thinking toggle.
-
-Local LLM Lab supplies optional `/api/tokenize` counting and a `context_limit`
-request field. Other servers may require context configuration at startup;
-missing tokenization uses the existing conservative estimate.
-
-To check a loaded model:
-
-```bash
-python scripts/test-local-mlx.py --host http://localhost:8000 \
-  --model "$MODEL_ID" --report .local/reports/mlx-protocol.json
-```
-
-## Proof mode
-
-- Give the solver one substantial attempt at the **whole problem**, with thinking enabled.
-- Ask a fresh verifier to inspect the full written proof and identify concrete issues.
-- Return an approved candidate unchanged; repair or rebut concrete objections.
-  An uncertain or unavailable review retains the answer without compulsory rewriting.
-- Preserve the initial answer and all revisions. A later fragment cannot silently displace a complete response.
-- Bound generated tokens, attempts and time; resume interrupted work with its remaining budget.
-
-The controller and storage are ordinary code. Proof mode has no planner, advisor,
-model recorder, tool loop or compulsory rewriting step. Cooperative and portfolio
-proof modes are not part of v0.5.
-
-| Command | Purpose |
-| --- | --- |
-| `/prove <problem>` | Start a saved proof job |
-| `/proofs` / `/proof-report <id>` | List jobs or inspect one without inference |
-| `/resume <id>` | Resume an interrupted v0.5 job |
-| `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
-| `/check <statement>` | Find or verify a precise reference |
-| `/literature <topic>` | Build a verified reading list |
-| `/referee <request>` / `/detailed_review <request>` | Review a manuscript, with optional proof checks |
-| `/quick_review <statement and proof>` / `/explain <request>` | Check or explain a result and its proof |
-| `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
-| `/python-lab <request>` | Run Python experiments and plots in an isolated Docker sandbox (`@python_lab` in the interface) |
-| `/sanity-check <claim>` | Try to falsify a claim with cheap numerical experiments (`@sanity_check` in the interface) |
-| `/help` | Show commands |
-| `square-harness --gui` | Open the visual interface instead of the terminal prompt |
-
-Jobs live under `.mathagent/` in the chosen workspace. The `mathagent` command is
-an alias; `python -m mathagent` also works from the checkout.
-
-## Guides
-
-- [Usage](docs/usage.md): settings, saved answers, resume, migration from v0.4 and the visual interface.
-- [Benchmarks](docs/benchmark.md): direct inference versus proof mode, costs and grading.
-- [HyperQwen on A10](docs/hyperqwen-a10.md): the pinned fast serving profile.
-- [A10 llama.cpp](docs/a10.md) / [two V100S](docs/ovh.md): retained hardware alternatives.
-- [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts, LaTeX write-ups.
-- [Python sandbox](docs/python-numerics.md): `/python-lab` experiments and automatic numerical sanity checks in Docker.
-
-Ollama, llama.cpp and OpenAI-compatible servers are supported. The solver and
-verifier currently use the same model in separate contexts and can share errors.
-Tests check software behaviour; they do not establish mathematical performance.
+Ollama, llama.cpp, vLLM and MLX servers are supported. The solver and verifier
+currently use the same model in separate contexts and can share errors. Tests
+check software behaviour; they do not establish mathematical performance.
 
 ## Contributing and license
 
 Created by **Vincent Boulard**, with **Louis Carillo**. See
-[CONTRIBUTING.md](CONTRIBUTING.md), [CITATION.cff](CITATION.cff) and
-[CHANGELOG.md](CHANGELOG.md). Maintainers decide which contributions are merged.
+[CONTRIBUTING.md](CONTRIBUTING.md) and [CITATION.cff](CITATION.cff). Maintainers
+decide which contributions are merged.
 
 [Apache License 2.0](LICENSE): free scientific and commercial reuse under its terms.
 Model weights, dependencies and retrieved papers retain their own licenses.
