@@ -564,6 +564,11 @@ class Hub:
         with self._lock:
             if self._tasks or self.queue or self.routing:
                 raise Busy('Pause all running jobs and clear the queue before opening another folder.')
+            if getattr(self, 'folder_lock', None) is not None and target != self.root:
+                from .server import folder_lock
+                lock = folder_lock(target)  # refuses a folder another interface serves
+                self.folder_lock.close()
+                self.folder_lock = lock
             self.root = target
             self.args.workspace = target
         store.remember_folder(self.base, target.relative_to(self.base).as_posix())
@@ -1146,11 +1151,18 @@ class Hub:
                 state = fresh.get('assistant_state')
                 if state and state.get('status') == 'interrupted':
                     raise
-                if state:
-                    state['status'] = 'failed'
-                    state.setdefault('warnings', []).append(str(exc))
-                    store.save_assistant(root, chat_id, state)
-                store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc),
+                unreachable = isinstance(exc, AgentError) and not isinstance(exc, CallContextError)
+                ours = bool(state) and (resume or state.get('query') == content)
+                if resume and unreachable:
+                    # The model server is down: the turn stays paused, to resume once it is back.
+                    message = f'The model server could not be reached ({exc}); the turn is still paused.'
+                else:
+                    message = 'Not added to the conversation: ' + str(exc)
+                    if ours:  # never mark the previous, finished turn as failed
+                        state['status'] = 'failed'
+                        state.setdefault('warnings', []).append(str(exc))
+                        store.save_assistant(root, chat_id, state)
+                store.append_items(root, chat_id, [{'role': 'notice', 'content': message,
                     'discarded': True, 'time': store._now()}])
                 self.bus.publish('chat_saved', chat=chat_id)
                 raise
@@ -1426,6 +1438,9 @@ class Hub:
             self.bus.publish('chat_saved', chat=chat_id)
             raise
         except (AgentError, ValueError, OSError) as exc:
+            with state_lock:  # a failed worker's progress line must not stay under the turn (B13)
+                child.pop('progress', None)
+                parent.state.pop('progress', None)
             store.update_item(root, chat_id, index, status='failed', outcome=str(exc), error=str(exc))
             self.bus.publish('chat_saved', chat=chat_id)
             if isinstance(exc, WorkerInputError):

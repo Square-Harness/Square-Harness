@@ -10,17 +10,24 @@ import re
 def loads(text):
     if not isinstance(text, str):
         raise TypeError('Expected JSON text')
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.S).strip()
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.S)
+    text = re.sub(r'^.*?</think>', '', text, flags=re.S).strip()  # a reasoning block whose opening tag was not sent
     decoder = json.JSONDecoder(strict=False)
-    error = None
+    error, first_list = None, None
     for candidate in _objects(text):
         for value in (candidate, _repair_latex(candidate)):
             try:
                 result = decoder.decode(value)
-                if isinstance(result, (dict, list)):
-                    return _repair_values(result)
             except ValueError as exc:
                 error = exc
+                continue
+            if isinstance(result, dict):
+                return _repair_values(result)  # an object is the answer; "[0, 1]" in the prose before it is not
+            if isinstance(result, list) and first_list is None:
+                first_list = result
+            break
+    if first_list is not None:
+        return _repair_values(first_list)
     raise ValueError('No complete JSON value in model response') from error
 
 
@@ -93,6 +100,9 @@ def _objects(text):
                     offset = index + 1
                     break
         else:
+            if text[start] == '[' and re.match(r'\[\s*[-+\w.\\^{}]+\s*,\s*[-+\w.\\^{}]+\s*\)', text[start:]):
+                offset = start + 1  # a half-open interval such as [0,1) in prose, not unfinished JSON
+                continue
             # A nested object may be complete while the containing JSON is not.
             # Its fields must never be promoted to a standalone verdict.
             return

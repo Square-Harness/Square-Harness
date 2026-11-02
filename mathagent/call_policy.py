@@ -28,9 +28,12 @@ as one payload. Backends determine how their response schema affects input.
     counter = getattr(client, 'count_input_tokens', None)
     count = counter(payload) if callable(counter) else None
     if count is None:
-        material = {key: payload[key] for key in ('messages', 'tools', 'format') if key in payload}
-        count = len(json.dumps(material, ensure_ascii=False).encode()) + 256
-        return count, 'conservative UTF-8 byte estimate'
+        material = json.dumps({key: payload[key] for key in ('messages', 'tools', 'format') if key in payload},
+                              ensure_ascii=False)
+        # About 3-4 characters a token for English and 2.5-3 for LaTeX; other scripts about one each.
+        ascii_chars = sum(1 for char in material if ord(char) < 128)
+        count = -(-ascii_chars * 2 // 5) + (len(material) - ascii_chars) + 256
+        return count, 'conservative character estimate (2.5 per token)'
     if type(count) is not int or count < 0:
         raise AgentError('Invalid exact input token count')
     return count, 'server token count'

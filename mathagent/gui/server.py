@@ -376,8 +376,11 @@ def chat_create(h, body):
 def chat(h, body, id):
     hub = h.server.hub
     result = _chat_view(store.load_chat(hub.root, id))
-    if result['assistant_status'] == 'running':
-        snapshot = hub.snapshot()
+    snapshot = hub.snapshot()
+    if any(task['target'] == id and task['state'] == 'queued' for task in snapshot['queue']):
+        # A queued turn has not saved its state yet: the previous turn's status would show (B8).
+        result['assistant_status'], result['assistant_resumable'], result['assistant_progress'] = 'queued', False, None
+    elif result['assistant_status'] == 'running':
         tasks = [entry['task'] for entry in snapshot['tasks']] + snapshot['queue']
         if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
             result['assistant_status'] = 'paused'
@@ -886,6 +889,27 @@ def _lan_addresses():
     return sorted(a for a in found if not ipaddress.ip_address(a).is_loopback)
 
 
+def folder_lock(root):
+    """Hold the folder for this interface: two interfaces writing one folder's jobs and chats corrupt them."""
+    import fcntl
+    path = Path(root) / '.mathagent' / 'gui.lock'
+    path.parent.mkdir(exist_ok=True)
+    handle = open(path, 'a+')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        owner = handle.read().strip()
+        handle.close()
+        raise ValueError(f'Another Square Harness interface already serves {root}'
+                         + (f' (process {owner})' if owner else '') + '; use it, or stop it first.') from None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 def bind(host, port, hub, token):
     error = None
     for candidate in range(port, port + 10) if port else [0]:
@@ -911,8 +935,11 @@ def serve(args):
     args.workspace, args.gui_root = root, base
     token = workspace_token(base)
     hub = Hub(args)
+    hub.folder_lock = folder_lock(root)
     server = bind(args.gui_host, args.gui_port, hub, token)
     port = server.server_address[1]
+    if args.gui_port and port != args.gui_port:
+        print(f'Port {args.gui_port} is busy; this interface uses {port}.', file=sys.stderr)
     local = f'http://127.0.0.1:{port}' if server.loopback or args.gui_host in ('0.0.0.0', '::') else f'http://{args.gui_host}:{port}'
     if not server.loopback:
         hosts = _lan_addresses() if args.gui_host in ('0.0.0.0', '::') else [args.gui_host]

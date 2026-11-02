@@ -43,6 +43,7 @@ SCOPE_SCHEMA = {
                            'title': {'type': 'string', 'maxLength': 300}, 'year': {'type': 'string', 'maxLength': 10}}}},
     },
 }
+MIN_REQUESTS, MIN_SECONDS = 40, 240  # a scope, three queries on four sources, seed lookups and the graph
 SCOPE_RETRY_SCHEMA = {**SCOPE_SCHEMA, 'required': ['topic', 'subfield', 'msc', 'intent', 'assumptions', 'queries'],
                       'properties': {k: v for k, v in SCOPE_SCHEMA['properties'].items() if k != 'seeds'}}
 SCREEN_SCHEMA = {
@@ -109,10 +110,18 @@ class ReviewRunner(ResearchRunner):
             raise ValueError('The reading-list pipeline builds literature reviews only')
         if budgets.get('max_requests') is None:
             budgets['max_requests'] = 6 * breadth(budgets.get('max_rounds', 6))['queries'] + 26
+        raised = []
+        if budgets['max_requests'] < MIN_REQUESTS:
+            budgets['max_requests'], raised = MIN_REQUESTS, raised + [f'{MIN_REQUESTS} source requests']
+        if budgets.get('max_seconds') is not None and budgets['max_seconds'] < MIN_SECONDS:
+            budgets['max_seconds'], raised = MIN_SECONDS, raised + [f'{MIN_SECONDS // 60} minutes']
+        self._raised = raised
         return super().start(goal, kind='literature', source_files=source_files, **budgets)
 
     def _extra_state(self):
-        return {'pipeline': PIPELINE, 'scope': None, 'pool': [], 'sweep_log': [], 'screened': {}, 'down': [],
+        raised = getattr(self, '_raised', [])
+        notes = ([f'The effort was below what a reading list needs: it was given {" and ".join(raised)}.'] if raised else [])
+        return {'warnings_at_start': notes, 'pipeline': PIPELINE, 'scope': None, 'pool': [], 'sweep_log': [], 'screened': {}, 'down': [],
                 'screen_order': [], 'organisation': None, 'annotations': {}, 'unverified': [], 'msc_seen': {},
                 'screen_attempts': {}, 'annotation_attempts': {}, 'screen_failed': {}, 'annotation_failed': {}}
 
@@ -207,7 +216,8 @@ class ReviewRunner(ResearchRunner):
     def _record(self, raw, source, via):
         """A pool record from a source result; merged with an existing record for the same work."""
         ident = str(raw.get('identifier') or '')
-        clean = lambda value: ' '.join(html.unescape(re.sub(r'<[^>]*>', '', str(value or ''))).split())
+        clean = lambda value: ' '.join(re.sub(r'</?(?:[a-z]+:)?(?:i|b|em|strong|sub|sup|scp|sc|span|mml|math|mi|mo|mn|msub|msup|mrow|title|p|italic|bold)\b[^<>]*>',
+                                              '', html.unescape(str(value or '')), flags=re.I).split())
         record = {'title': clean(raw.get('title'))[:300],
                   'authors': [html.unescape(str(a)) for a in raw.get('authors') or []][:15],
                   'year': raw.get('year') or (str(raw.get('published') or '')[:4] or None),
@@ -380,7 +390,7 @@ class ReviewRunner(ResearchRunner):
             'msc': [m for m in (str(x).strip().upper() for x in value.get('msc') or []) if re.fullmatch(r'\d\d[A-Z-]?\d{0,2}', m)][:3],
             'intent': value.get('intent') if value.get('intent') in ('learn', 'frontier', 'both') else 'both',
             'assumptions': str(value.get('assumptions') or '')[:600], 'queries': list(dict.fromkeys(queries))[:b['queries']],
-            'seeds': list({(_norm(s['title']), tuple(_fold(_surname(a)) for a in s.get('authors') or [])): s for s in value.get('seeds') or []
+            'seeds': list({_norm(s['title']): s for s in value.get('seeds') or []
                            if isinstance(s, dict) and str(s.get('title') or '').strip()}.values())[:8]}
         sc = self.state['scope']
         self.state['plan'] = '\n'.join([
@@ -468,7 +478,7 @@ class ReviewRunner(ResearchRunner):
             found = {w for w in re.findall(r'[a-z]{4,}', _fold(raw.get('title')))}
             authors = _fold(' '.join(str(a) for a in raw.get('authors') or []))
             return (words and len(words & found) >= max(1, math.ceil(0.6 * len(words)))
-                    and (not names or any(_fold(n) in authors for n in names)))
+                    and (not names or any(re.search(r'(?<![a-z])' + re.escape(_fold(n)) + r'(?![a-z])', authors) for n in names)))
         query = (title + ' ' + ' '.join(names)).strip()
         log_start = len(self.state['sweep_log'])
         hits = [r for r in self._fetch('crossref', query, lambda: lit.crossref(query=query, limit=5)) if fits(r)]
@@ -556,6 +566,7 @@ class ReviewRunner(ResearchRunner):
             'or lecture notes a newcomer should start with), core (what everyone in the area has read), deeper '
             '(optional depth) or exclude. Judge from the title, abstract and citation signals only; a highly cited '
             'work can still be off topic. Add a note of a few words when useful. Answer for every number.\n\n'
+            'THE USER\'S REQUEST (relevance is judged against it, not only against the topic above):\n' + self.state['goal'][:1500] + '\n\n'
             'CANDIDATES (number | year | kind | authors | title | signals | abstract):\n' + lines)
         self.emit('notice', f'Screening candidates {len(self.state["screened"]) + 1}–{len(self.state["screened"]) + len(batch)}')
         value = self._json(self._call('screen', instruction, cap=2500, format_schema=SCREEN_SCHEMA)) or {}
@@ -599,6 +610,7 @@ class ReviewRunner(ResearchRunner):
             'should read first); 2 to 5 themes, each with a short name, a core of up to 6 works and up to 6 optional '
             'deeper works; a suggested reading order in a few sentences (refer to works by their #number); and honest '
             'gaps (missing angles, recent directions, what the candidates did not cover). Each work appears at most once.\n\n'
+            'THE USER\'S REQUEST (the list answers it):\n' + self.state['goal'][:1500] + '\n\n'
             'WORKS:\n' + lines)
         self.emit('notice', 'Organising the reading list')
         try:
@@ -788,7 +800,9 @@ class ReviewRunner(ResearchRunner):
                     f'{", ".join(u["authors"]) or "?"}, *{u["title"]}*' +
                     (f' ({u["year"]})' if u['year'] else '') +
                     (f' — {u.get("reason")}' if not checked and u.get('reason') else '') for u in works) + '.')
-        for warning in dict.fromkeys(s['warnings']):
+        for issue in s.get('citation_issues') or []:
+            out.append(f'- Check: {issue}')
+        for warning in dict.fromkeys(s.get('warnings_at_start', []) + s['warnings']):
             out.append(f'- {warning}')
         return '\n'.join(out).strip() + '\n'
 
@@ -822,7 +836,7 @@ class ReviewRunner(ResearchRunner):
         answered = sum(any(row['query'] in (q, q + ' (newest)') and not row['error'] for row in self.state['sweep_log']) for q in queries)
         if queries and answered < len(queries) / 2:
             issues.append(f'Only {answered} of {len(queries)} topic queries received an answered search.')
-        for source in set(row['source'] for row in self.state['sweep_log']):
+        for source in set(row['source'] for row in self.state['sweep_log']) - {'semantic_scholar'}:
             rows = [r for r in self.state['sweep_log'] if r['source'] == source]
             if sum(bool(r['error']) for r in rows) > len(rows) / 2:
                 issues.append(f'Most {source} searches failed; coverage is incomplete.')
