@@ -161,6 +161,15 @@ def keyed_citations(text, keys):
     return found
 
 
+def _limit_output():
+    """In a PDF extractor's process: no file larger than twice the text limit (a deflate bomb stops early)."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_FSIZE, (2 * MAX_TEXT, 2 * MAX_TEXT))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
 def cites_place(text, number, surname, keys=()):
     """Whether the text cites the author's work at this number (not merely an equation (9.26))."""
     n = _num(number)
@@ -1000,7 +1009,7 @@ class LiteratureTools:
                 try:
                     result = subprocess.run([command, '-layout', '-enc', 'UTF-8', str(source), str(target)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=self._remaining_timeout(), check=False)
+                        timeout=self._remaining_timeout(), check=False, preexec_fn=_limit_output)
                 except subprocess.TimeoutExpired:
                     raise LiteratureError('PDF extraction timed out') from None
                 if result.returncode or not target.exists() or target.stat().st_size > MAX_TEXT:

@@ -529,9 +529,11 @@ class ReviewRunner(ResearchRunner):
                 for raw in best:
                     self._record(raw, 'semantic_scholar', 'forward')
                 self._save()
-            if 'semantic_scholar' in self.state['down'] or not any(h['doi'] for h in hubs):
+            if 'semantic_scholar' in self.state['down']:
                 self.state['warnings'].append('Works citing the key papers ("cited by", recent developments) come from Semantic '
                                               'Scholar, which was unavailable; the frontier may be under-covered.')
+            elif not any(h['doi'] for h in hubs):
+                self.state['warnings'].append('No key paper with a DOI was found, so works citing them were not looked up.')
         self._pool_cites()
         ranked = sorted(self.state['pool'], key=lambda r: -r['score'])
         self.state['screen_order'] = [r['n'] for r in ranked[:b['screen']]]
@@ -597,7 +599,8 @@ class ReviewRunner(ResearchRunner):
     def _organise(self):
         kept = self._kept()
         if not kept:
-            self.state['warnings'].append('No candidate was screened as relevant; the list below is unorganised.')
+            self.state['warnings'].append('No candidate was screened as relevant; the list below is unorganised.' if self.state['pool']
+                                          else 'No candidate work was found, so there is no list.')
             self.state['phase'] = 'write'
             return
         lines = '\n'.join(self._line(self._by_n(n)) + f' | screened: {v["role"]}, relevance {v["relevance"]}'
@@ -771,9 +774,10 @@ class ReviewRunner(ResearchRunner):
             ranked = sorted((r for r in s['pool'] if str(r['n']) not in s['screened'] or
                 (s['screened'][str(r['n'])]['role'] != 'exclude' and s['screened'][str(r['n'])]['relevance'] >= 2)),
                 key=lambda r: -r.get('score', 0))[:15]
-            out += ['## Candidates found (not organised)',
-                    '*The review stopped before the model organised the list; these are bibliographically verified records; any unscreened candidates have unassessed relevance.*']
-            out += [self._entry(r['n']) + (' (not screened)' if str(r['n']) not in s['screened'] else '') for r in ranked] + ['']
+            if ranked:
+                out += ['## Candidates found (not organised)',
+                        '*The review stopped before the model organised the list; these are bibliographically verified records; any unscreened candidates have unassessed relevance.*']
+                out += [self._entry(r['n']) + (' (not screened)' if str(r['n']) not in s['screened'] else '') for r in ranked] + ['']
         out += ['## Notes & gaps']
         if o and o.get('gaps'):
             out += [o['gaps'], '']

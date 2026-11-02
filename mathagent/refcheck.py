@@ -38,18 +38,23 @@ TOOLS = ('search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_pap
 MAX_RESULTS = 5  # search results per call: a check needs a few good hits, not a survey
 
 
+def _unaccented(pattern):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFKD', pattern) if not unicodedata.combining(c))
+
+
 def precise_reference_request(text):
     """Human-requested precision, never the assistant's stricter restatement."""
     text = _fold(text)
     # Explicitly declining precision must not opt into the expensive workflow.
     # Remove only that clause, preserving later positive citation requests.
-    text = re.sub(
+    text = re.sub(_unaccented(
         r"\b(?:without|no need|do not need|don't need|don’t need|sans|pas besoin de)\b"
         r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?]){0,70}"
         r"(?:exact|precise|précis\w*|precis\w*|theorem number|numéro)"
-        r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?])*",
+        r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?])*"),
         '', text, flags=re.I)
-    return re.search(
+    return re.search(_unaccented(
         r'\b(?:exact\w*|precise|précis\w*|precis\w*)\b.{0,90}'
         r'(?:reference|référence|citation|place|location|locator|chapter|chapitre|section|theorem|théorème|page)'
         r'|\b(?:theorem|thm|lemma|proposition|section|chapter|chapitre|théorème|page)\s+(?:number|numéro|\d)'
@@ -60,7 +65,7 @@ def precise_reference_request(text):
         r'|\b(?:which|what|quel\w*)\b.{0,40}(?:chapter|chapitre|section|page|theorem number|numéro du théorème)'
         r'|\b(?:reference|citation|theoreme|lemme|proposition|section|page)\b.{0,25}\bexact\w*\b'
         r'|\bnumero\s+(?:du|de la)\s+(?:theoreme|lemme|proposition|section|page)\b'
-        r'|\b(?:edition|édition)\b', text, re.I | re.S) is not None
+        r'|\b(?:edition|édition)\b'), text, re.I | re.S) is not None
 
 
 def standalone_reference_request(text):
@@ -233,7 +238,8 @@ def _lines(value):
 def _clean_candidate(value, source):
     if not isinstance(value, dict):
         return None
-    placeholder = re.compile(r'\b(?:not|unknown|recall\w*|remember\w*|n/?a|none|unsure)\b', re.I)
+    placeholder = re.compile(r'^\s*(?:not (?:known|sure|recalled|remembered)|unknown|n/a|none|unsure|\?+|'
+                             r'(?:i )?(?:do not|don.t|cannot|can.t) (?:recall|remember)\b.*)\s*\.?\s*$', re.I)
     raw_authors = value.get('authors') or []
     if not isinstance(raw_authors, list):
         return None
@@ -837,7 +843,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 return {**alt, 'corrected_from': c['locator']}
         edition = None
         if entry and level == 'cited':
-            cited_year = re.findall(r'(?:19|20)\d\d', entry)
+            cited_year = re.findall(r'(?<![\d\-–:])(?:19|20)\d\d(?![\d:a-z\-–])', entry)
             known = str((record or {}).get('year') or c['year'] or '')
             if cited_year and known and cited_year[-1] != known:
                 edition = cited_year[-1]
