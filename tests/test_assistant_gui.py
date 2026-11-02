@@ -147,3 +147,23 @@ class AssistantGuiTests(GuiCase):
                               if item['role'] == 'assistant'), final)
         self.assertEqual(detail['assistant_budget']['tokens']['used'], 8 + 53 + 31 + 27)
         self.assertEqual(self.ok('GET', '/api/task')['queue'], [])
+
+        # Seen live: a critic whose reasoning filled its output limit returned an empty answer. It is now
+        # asked for the answer, without reasoning or tools, and the Assistant gets it.
+        critique = 'No gap: reflexivity holds for every real x.'
+        self.fake.replies = [delegation('critic', 'Check that proof for gaps.', effort='medium'),
+                             [{'message': {'thinking': 'Reasoning about reflexivity. ' * 40}, 'done': True,
+                               'done_reason': 'length', 'eval_count': 900, 'prompt_eval_count': 300}],
+                             text(critique, eval_count=12), text('The critique found no gap.', eval_count=9)]
+        before = len(self.fake.requests)
+        self.ask(chat, 'Now check that proof for gaps.')
+        cards = lambda: [item for item in self.detail(chat)['transcript'] if item['role'] == 'route']
+        self.wait_for(lambda: len(cards()) == 2 and self.detail(chat)['assistant_status'] == 'complete', timeout=30)
+        self.assertEqual((cards()[-1]['mode'], cards()[-1]['status']), ('critic', 'done'))
+        answer_now = self.fake.requests[before + 2]
+        self.assertFalse(answer_now['think'])
+        self.assertNotIn('tools', answer_now)
+        self.assertIn('output limit', answer_now['messages'][-1]['content'])
+        worker = json.loads(next(message['content'] for message in reversed(self.fake.requests[-1]['messages'])
+                                 if message['role'] == 'tool'))
+        self.assertEqual((worker['result']['status'], worker['result']['answer']), ('complete', critique))

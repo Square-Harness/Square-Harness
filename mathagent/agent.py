@@ -68,6 +68,10 @@ class Ollama:
             raise AgentError('Malformed or interrupted Ollama stream: ' + str(exc)) from exc
 
 
+ANSWER_NOW = ('You reached your output limit before giving an answer. Write your final answer now, from your '
+              'reasoning so far: what you established, what remains open, and why. No further reasoning or tools.')
+
+
 class Agent:
     def __init__(self, client, workspace, model='qwen3.8:27b', ctx=8192,
                  predict=4096, think=True, mode='prove', max_rounds=8,
@@ -86,10 +90,20 @@ class Agent:
         messages.append({'role': 'user', 'content': query})
         system = {'role': 'system', 'content': SYSTEM + '\nMODE: ' + MODES[self.mode]}
         schemas = self.workspace.schemas()
-        for round_no in range(self.max_rounds + 1):
-            tools = schemas if round_no < self.max_rounds else []
+        round_no, answer_now = -1, False
+        while True:
+            round_no += 1
+            tools = schemas if round_no < self.max_rounds and not answer_now else []
+            # A shared budget (an Assistant worker) shrinks every round's output to what is left of it.
+            left = getattr(self.client, 'remaining_tokens', None)
+            predict = self.predict if not isinstance(left, (int, float)) else int(min(self.predict, left))
+            if predict < 128:
+                for message in messages:
+                    message.pop('thinking', None)
+                self.history = messages
+                return next((m['content'] for m in reversed(messages) if m.get('role') == 'assistant' and m.get('content')), '')
             payload = {'model': self.model, 'messages': [system] + messages, 'stream': True,
-                       'think': self.think, 'options': {'num_ctx': self.ctx, 'num_predict': self.predict,
+                       'think': self.think and not answer_now, 'options': {'num_ctx': self.ctx, 'num_predict': predict,
                            'temperature': self.temperature, 'top_p': self.top_p}}
             if self.seed is not None:
                 payload['options']['seed'] = (self.seed + round_no) % (2 ** 31)
@@ -98,7 +112,7 @@ class Agent:
             # The complete native request is counted, including tool schemas.
             # Context fitting adjusts output room, never mathematical premises.
             from .call_policy import allocate_call
-            payload, allocation = allocate_call(self.client, payload, self.predict)
+            payload, allocation = allocate_call(self.client, payload, predict)
             self.last_allocation = allocation
             emit('start', '')
             assistant = {'role': 'assistant', 'content': ''}
@@ -142,6 +156,14 @@ class Agent:
                     emit('result', result[:200])
                 if round_no + 1 == self.max_rounds:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')
+                continue
+            if (not assistant['content'].strip() and not answer_now
+                    and self.last_stats.get('done_reason') == 'length'):
+                # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
+                # without reasoning or tools, asks for the answer instead of returning nothing.
+                answer_now = True
+                emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
+                messages.append({'role': 'user', 'content': ANSWER_NOW})
                 continue
             if not assistant['content'].strip():
                 emit('notice', 'No final answer received. Try --predict 6144 --ctx 16384 or /think off.')

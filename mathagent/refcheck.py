@@ -280,7 +280,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                        max_tokens=None, max_input_tokens=None, max_seconds=level['seconds'],
                        max_requests=level['requests'], max_chars=level['chars'])
         standard_bounds = dict(budgets)
-        budgets.update({k: v for k, v in overrides.items() if k in budgets and v is not None})
+        # Overrides only lower a limit (an allocation, a nested check's share); they never raise the effort's.
+        budgets.update({k: v if budgets[k] is None else min(v, budgets[k])
+                        for k, v in overrides.items() if k in budgets and v is not None})
         if lookup == 'standard':
             budgets = {key: min(value, standard_bounds[key]) if value is not None and standard_bounds[key] is not None else value
                        for key, value in budgets.items()}
@@ -1020,8 +1022,15 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low'):
             if kind in ('notice', 'tool'):
                 emit('tool', ('↳ ' if kind == 'tool' else '↳ check: ') + str(value))
         runner = CheckRunner(inner, emit=relay)
+        # A quarter of what the answering agent has left, so that a check cannot use up its answer.
+        limits, tokens = {}, getattr(agent.client, 'remaining_tokens', None)
+        seconds = getattr(agent.client, 'remaining_seconds', None)
+        if isinstance(tokens, (int, float)) and tokens != float('inf'):
+            limits['max_tokens'] = max(1024, int(tokens // 4))
+        if isinstance(seconds, (int, float)) and seconds != float('inf'):
+            limits['max_seconds'] = max(20.0, seconds / 4)
         try:
-            runner.start(statement, guesses=guesses, effort=effort)
+            runner.start(statement, guesses=guesses, effort=effort, **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()
