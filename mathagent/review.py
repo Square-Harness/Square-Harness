@@ -164,6 +164,23 @@ def _span(ranges):
     return ', '.join(f'L{a}' if a == b else f'L{a}-L{b}' for a, b in ranges)
 
 
+def _same_work(reference, entry):
+    """Whether a check's reference ("Authors, *Title* (year)") is the manuscript's cited work: an author's
+    surname and most of the title's words appear in the entry."""
+    words = lambda text: set(re.findall(r'[a-z]{4,}', _fold_text(text)))
+    who, _, title = reference.partition('*')
+    surnames = {w for w in re.findall(r'[a-z]{2,}', _fold_text(who)) if len(w) > 1} - {'and', 'unknown', 'author'}
+    cited = words(entry)
+    title_words = words(title or who) - {'with', 'from', 'that', 'this', 'their', 'into', 'over', 'under'}
+    return (bool(surnames & set(re.findall(r'[a-z]{2,}', _fold_text(entry))))
+            and len(title_words) >= 1 and len(title_words & cited) >= max(1, (2 * len(title_words) + 2) // 3))
+
+
+def _fold_text(text):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFKD', str(text).lower()) if not unicodedata.combining(c))
+
+
 class PhaseBudget(ResearchBudget):
     """An optional phase stopped in time to preserve the report-writing share."""
 
@@ -1926,8 +1943,12 @@ class JournalRunner(ReviewBase):
             if result.get('status') == 'paused':
                 raise KeyboardInterrupt
             refs = result.get('references') or []
-            contradicted = [ref for ref in refs + (result.get('not_confirmed') or []) if ref.get('level') == 'contradicted']
-            best = contradicted[0] if contradicted else refs[0] if refs else {}
+            # Only verdicts about the manuscript's own reference count: the check may also have judged
+            # other works it recalled, and their levels say nothing about this citation.
+            same = [ref for ref in refs + (result.get('not_confirmed') or []) if _same_work(ref.get('reference', ''), item['entry'])]
+            contradicted = [ref for ref in same if ref.get('level') == 'contradicted']
+            confirmed = [ref for ref in same if ref in refs]
+            best = contradicted[0] if contradicted else confirmed[0] if confirmed else same[0] if same else {}
             stopped = result.get('status') in ('error', 'budget_exhausted', 'budget_violation')
             self.state['cited_checks'] = [c for c in self.state['cited_checks'] if (c['key'], c['place']) != (item['key'], item['place'])]
             self.state['cited_checks'].append({'key': item['key'], 'place': item['place'], 'used_for': item['used_for'],
@@ -1941,7 +1962,13 @@ class JournalRunner(ReviewBase):
         entry = re.sub(r'\s+', ' ', item['entry'])
         parts = [p.strip() for p in re.split(r'(?<=[A-Za-zÀ-ÿ\]\)]{2})\.\s+', entry) if p.strip()]
         if len(parts) < 2:
-            return []
+            # amsplain style: "A. Author and B. Author, Title, Journal 12 (2004), 1-10."
+            pieces = [p.strip() for p in entry.split(',') if p.strip()]
+            name = r'^(?:and\s+)?(?:[A-ZÀ-Ý][a-zà-ÿ]?\.\s*(?:-\s*)?)+[A-ZÀ-Ý][\w\'’-]+(?:\s+and\s+(?:[A-ZÀ-Ý]\.\s*)+[A-ZÀ-Ý][\w\'’-]+)*$'
+            count = next((i for i, piece in enumerate(pieces) if not re.match(name, piece)), len(pieces))
+            if not count or count >= len(pieces):
+                return []
+            parts = [', '.join(pieces[:count]), pieces[count]]
         authors = [re.sub(r'^(?:and\s+)', '', a).strip() for a in re.split(r',\s*|\s+and\s+', parts[0]) if a.strip()]
         year = re.search(r'\b(1[5-9]|20)\d\d\b', entry)
         return [{'authors': authors[:4], 'title': parts[1][:300], 'year': year.group() if year else '',

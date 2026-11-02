@@ -23,7 +23,7 @@ class StandardReferenceSearch:
             'Use public mathematical topic words in keywords, never private manuscript text. '
             'Provide search_queries with two alternative complete short public queries, each containing '
             'the main topic and essential setting. Use common terminology variants, including grammatical '
-            'variants where useful: change the core term rather than append related techniques. '
+            'variants where useful, keeping the core term itself (Dirichlet-Neumann is not Dirichlet-to-Neumann). '
             'Keep each query to 4-8 words. Use the human topic and essential setting; '
             'omit inferred methods, SDEs or uniqueness assumptions not asked by the human.')
 
@@ -152,6 +152,11 @@ class StandardReferenceSearch:
             from .refcheck import _surnames
             names = _surnames(candidate['authors'])
             title = candidate['title']
+            if not title:
+                # An author alone can never match a record: no request is spent on it.
+                candidate['verdict'] = self._gate(index, {'level': 'located'})
+                s['current'] += 1
+                continue
             short = ' '.join(re.findall(r'[^\W\d_]+', title)[:3])
             surname = names[0] if names else ''
             kind = self._standard_kind()
@@ -161,6 +166,8 @@ class StandardReferenceSearch:
                         ('crossref', ' '.join((surname, title))),
                         ('openlibrary' if kind != 'article' else 'zbmath',
                          ' '.join((surname, short)) if kind != 'article' else 'ti:' + short)]
+            if candidate.get('source') != 'caller':
+                attempts = attempts[:1]  # a recalled guess gets one search; the topic search needs the rest
             stage = candidate.get('standard_search_stage', 0)
             if self._requests() >= max(1, s['settings']['max_requests'] - 5):
                 stage = len(attempts)

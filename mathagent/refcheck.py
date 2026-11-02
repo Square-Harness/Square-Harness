@@ -23,9 +23,10 @@ from .research import ResearchRunner, remaining_limit, _working_reference_prompt
 from .reference_search import StandardReferenceSearch
 
 LEVELS = ('read', 'cited', 'located', 'contradicted', 'not_found')
-RANK = {'read': 4, 'cited': 3, 'located': 2, 'contradicted': 1, 'not_found': 0}
+RANK = {'read': 4, 'cited': 3, 'located': 2, 'contradicted': 1, 'not_found': 0, 'inconclusive': 0}
 LABELS = {'read': 'Read in the source', 'cited': 'Cited by another paper', 'located': 'Located, place unconfirmed',
-          'contradicted': 'Contradicted', 'not_found': 'Not found'}
+          'contradicted': 'Contradicted', 'not_found': 'Not found',
+          'inconclusive': 'Inconclusive (a source failed)'}
 # Per effort: guesses to check, tool rounds for each, whether to look for new
 # candidates when no guess is confirmed, and the overall budgets.
 EFFORTS = {
@@ -746,7 +747,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if level in ('read', 'cited', 'contradicted'):
             doc = str(claimed.get('document_id') or '').strip()
             span = _lines(claimed.get('lines'))
-            if not (doc in ranges and span and read(doc, *span)):
+            if level == 'contradicted' and not (doc in ranges and span and read(doc, *span)):
+                # Lines that cite the work at this place are evidence for it, never a contradiction.
+                reasons.append('the passage claimed to contradict the place was not read')
+                level, doc, span = 'located', None, None
+            elif not (doc in ranges and span and read(doc, *span)):
                 # The model may have mislabelled its locator: look for a read line with the number.
                 doc, span = None, None
                 if level == 'read':
@@ -776,6 +781,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 url = next((url for e in evidence
                             if e['tool'] in ('read_paper', 'search_paper', 'open_paper', 'find_quotes') and doc in e['result']
                             if (url := self._source_url(e, doc))), None)
+                if level == 'contradicted':
+                    names = _surnames(c['authors']) or ['']
+                    keys = [k for n in names if n for k in bibliography_keys(full or [], n, c['title'])]
+                    if number and not _has_number(text, number):
+                        reasons.append(f'the passage claimed to contradict the place does not contain {number}')
+                        level = 'located'
+                    elif not (self._document_is_work(doc, c, record) or any(cites_place(text, number, n, keys) for n in names)):
+                        reasons.append('the passage claimed to contradict the place is neither the work nor a citation of it there')
+                        level = 'located'
                 if level in ('read', 'cited') and number and not _has_number(text, number):
                     reasons.append(f'the read lines do not contain {number}')
                     level = 'located'
@@ -804,11 +818,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     else:
                         # Which edition the citing paper means: numbering differs between editions.
                         # The key the quote uses, else the work's own entry ("Adams [2] … Theorem 6.2").
-                        used = [k for n in names for k in cited_keys(text, number, n, keys)] or keys
+                        used = [k for n in names for k in cited_keys(text, number, n, keys)] or (keys if len(keys) == 1 else [])
                         entry = next((e for e in (bibliography_entry(full or [], k) for k in used) if e), '')
         if level == 'located' and not record:
-            reasons.append('no record of the work was found')
-            level = 'not_found'
+            if self.literature is not None and getattr(self.literature, 'down', None):
+                reasons.append('no record was found, but ' + ', '.join(sorted(self.literature.down)) + ' failed: not conclusive')
+                level = 'inconclusive'
+            else:
+                reasons.append('no record of the work was found')
+                level = 'not_found'
         corrected = _number(locator)
         if (level == 'contradicted' and corrected and corrected != _number(c['locator'])
                 and claimed.get('level') == 'contradicted'):
@@ -842,8 +860,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                         item['candidate_index'] = len(self.state['candidates'])
                         self.state['candidates'].append(candidate)
         judged = [c for c in self.state['candidates'] if c.get('verdict')]
-        if self.state['check'].get('lookup') == 'standard' and self.state.get('standard_selection_done'):
-            judged = [c for c in judged if c.get('selected')]
+        if self.state['check'].get('lookup') == 'standard':
+            # Topic hits are suggested only once the relevance pass has assessed them.
+            judged = [c for c in judged if c.get('selected')] if self.state.get('standard_selection_done') else [
+                c for c in judged if c.get('source') != 'bibliographic_discovery']
         judged.sort(key=lambda c: -RANK[c['verdict']['level']])
         top = [c for c in judged if RANK[c['verdict']['level']] >= RANK['cited']]
         if not top:

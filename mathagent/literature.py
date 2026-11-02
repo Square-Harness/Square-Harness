@@ -174,7 +174,14 @@ def cites_place(text, number, surname, keys=()):
     if re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I):
         key = re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I).group(1).strip()
         return not keys or key in keys
-    return _fold(surname) in _fold(text) and re.search(PLACE_WORDS + r'\.?\s*\(?' + n, text, re.I) is not None
+    if keys or not surname:
+        return False  # the paper's own keys for this work were known and none cites this place
+    # Without keys: the surname as a whole word ("Stein", not "Einstein"), with the place next to it.
+    folded = _fold(text)
+    for match in re.finditer(r'(?<![a-z])' + re.escape(_fold(surname)) + r'(?![a-z])', folded):
+        if re.search(PLACE_WORDS + r'\.?\s*\(?' + n, folded[max(0, match.start() - 150):match.end() + 150], re.I):
+            return True
+    return False
 
 
 def _s2_record(p):

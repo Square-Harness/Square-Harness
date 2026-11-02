@@ -170,6 +170,20 @@ class CheckTests(unittest.TestCase):
         # The controller looked up the record and the quotes before the model's first round.
         self.assertEqual([e['tool'] for e in runner.state['evidence'][:2]], ['search_papers', 'find_quotes'])
 
+        # Seen in review: a passage naming Brezis but citing another work at 9.26 is not "cited" for this book.
+        other = PAPER.replace(b'with equivalent norms; see, e.g., [Bre11, Theorem 9.26].',
+                              b'by the Brezis-Lieb lemma [BL83] and [Eva10, Theorem 9.26].')
+        other += (b'\n[BL83] Haim Brezis and Elliott Lieb. A relation between pointwise convergence of functions and '
+                  b'convergence of functionals. 1983.\n[Eva10] Lawrence Evans. Partial differential equations. 2010.')
+        fresh = tempfile.TemporaryDirectory()  # a new folder: the first run cached the original paper
+        self.addCleanup(fresh.cleanup)
+        self.root = Path(fresh.name)
+        runner, result = self.run_check([text(RECALL), *self.searches(), response('Enough evidence.'), self.verdict()],
+                                        fetcher=lambda url, headers=None, max_bytes=None: fetch(url, headers, max_bytes, paper=other))
+        verdict = runner.state['candidates'][0]['verdict']
+        self.assertEqual(verdict['level'], 'located')
+        self.assertIn('do not cite this work at 9.26', ' '.join(verdict['reasons']))
+
 
 
 
