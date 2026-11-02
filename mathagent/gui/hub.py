@@ -1183,7 +1183,10 @@ class Hub:
             if pending:
                 levels = [effort.level(c['action']['mode'], c['action']['effort']) for c in pending]
                 worker_seconds = max(l['minutes'] * 60 for l in levels)
-                budget.ensure_limits(max_seconds=worker_seconds + min(300, 0.1 * worker_seconds))
+                # Time already used in this turn plus the new workers' time (capped by the turn's ceiling):
+                # an absolute ceiling left a second worker after a long first one with almost nothing.
+                used = budget.snapshot()['seconds']
+                budget.ensure_limits(max_seconds=used + worker_seconds + min(300, 0.1 * worker_seconds))
                 parent.agent.workspace.literature.deadline = time.monotonic() + budget.remaining_seconds
                 # Leave room for synthesis and one empty-answer recovery. Workers
                 # share what remains in proportion to their requested effort.
