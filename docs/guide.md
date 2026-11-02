@@ -43,7 +43,7 @@ could not do in a single answer.
 far it was checked:
 
 - a proof is reported as reviewed with no issue found, never as correct;
-- a reference is *read*, *cited*, *located*, *contradicted* or *not found*;
+- a reference is *read*, *cited*, *located*, *contradicted*, *not found* or *inconclusive*;
 - a partial report names what it did not cover.
 
 When the software fails (a timeout, an exhausted budget, malformed output), the
@@ -104,7 +104,9 @@ mkdir -p ~/research/my-paper
 
 `square-harness --gui --workspace <folder>` serves the interface at
 `http://127.0.0.1:8765` and opens your browser. The terminal prints an `Open:`
-address that carries the access token.
+address that carries the access token. One interface serves a folder: a second
+one on the same folder refuses to start, and a busy port moves to the next free
+one with a message.
 
 - **Conversations** are the entry point (the sidebar title is "Square Harness").
   Ask in plain words. The Assistant answers directly, or starts focused jobs
@@ -126,8 +128,9 @@ address that carries the access token.
   write (see [Writing styles](#writing-styles)).
 - **Job pages** show live output, every attempt and review, sources, budgets and
   saved files. **Pause** saves at the next checkpoint and **Resume** continues with
-  the remaining budget. "Back to conversation" returns to the chat that started
-  the job. The standalone forms (New proof, New reading list, New review, New
+  the remaining budget. A paused conversation shows **Resume** while the text box
+  is empty; type a new message instead to set the paused turn aside. "Back to
+  conversation" returns to the chat that started the job. The standalone forms (New proof, New reading list, New review, New
   write-up) start a job without a conversation.
 - **The sidebar footer** shows:
   - the model and its status, the theme, and phone pairing;
@@ -246,8 +249,11 @@ Each reference gets an evidence level:
 - **cited**: another paper was read that cites the work at that place for that
   result;
 - **located**: the work exists, but the exact place is unconfirmed;
-- **contradicted**: a source attributes that place to another statement;
-- **not found**: no evidence.
+- **contradicted**: a passage that was read, in the work or citing it there,
+  attributes that place to another statement;
+- **not found**: no evidence;
+- **inconclusive**: no record was found while a source was failing, so the
+  absence proves nothing.
 
 The code lowers any level that the passages read do not support. A theorem
 number the model remembers stays labelled as a guess. Needs online search.
@@ -262,7 +268,9 @@ The code searches Crossref, arXiv, zbMATH and Semantic Scholar and follows
 citations: what the key works cite, what cites them, what the pool keeps
 citing. The model only screens, organises and annotates the works that were
 found, and refers to them by number. It cannot invent a reference: works it
-remembers are kept only if a source returns them.
+remembers are kept only if a source returns them. A reading list needs at least
+4 minutes and 40 source requests, so Low is raised to that and says so; a list
+cut short by time is saved as far as it got and resumes with more time.
 
 ### Quick review, Review, Detailed review, Explain
 

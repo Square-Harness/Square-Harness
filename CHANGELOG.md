@@ -29,6 +29,19 @@
   Generated figures and files appear in the conversation. See
   [docs/guide.md](docs/guide.md#python-lab-and-sanity-check).
 
+- Robustness fixes found in live tests and code review: a structured answer
+  that turns into whitespace is stopped and its complete fields kept (a reading
+  list searched nothing in 20 s); a worker whose reasoning fills its output is
+  asked for the answer instead of returning an empty one; a reply that only
+  announces work ("Let me do targeted checks…") is continued, and a new message
+  sets a paused turn aside; model-server outages pause jobs instead of failing
+  them for good, and time-limited reading lists resume with more time;
+  checking computations that mention a book is no longer a reference lookup;
+  a second worker in a turn gets its own time; reference evidence is tied to
+  the work actually cited ("Stein" no longer matches "Einstein"), contradictions
+  need a read passage, and provider failures give *inconclusive*; reading lists
+  judge relevance against the request and keep the maths in titles; one
+  interface per folder.
 - Writing styles: **Learn my writing style** (`#/style`) condenses the `.tex`
   sources of the author's articles into a named style shared by every folder:
   the macros they use, their theorem environments and, for each kind of paper,
