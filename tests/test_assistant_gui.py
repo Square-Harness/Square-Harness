@@ -158,7 +158,8 @@ class AssistantGuiTests(GuiCase):
         before = len(self.fake.requests)
         self.ask(chat, 'Now check that proof for gaps.')
         cards = lambda: [item for item in self.detail(chat)['transcript'] if item['role'] == 'route']
-        self.wait_for(lambda: len(cards()) == 2 and self.detail(chat)['assistant_status'] == 'complete', timeout=30)
+        idle = lambda: not self.ok('GET', '/api/task')['tasks'] and self.detail(chat)['assistant_status'] == 'complete'
+        self.wait_for(lambda: len(cards()) == 2 and idle(), timeout=30)
         self.assertEqual((cards()[-1]['mode'], cards()[-1]['status']), ('critic', 'done'))
         answer_now = self.fake.requests[before + 2]
         self.assertFalse(answer_now['think'])
@@ -167,3 +168,18 @@ class AssistantGuiTests(GuiCase):
         worker = json.loads(next(message['content'] for message in reversed(self.fake.requests[-1]['messages'])
                                  if message['role'] == 'tool'))
         self.assertEqual((worker['result']['status'], worker['result']['answer']), ('complete', critique))
+
+        # Seen live: "Let me do targeted checks…" ended a turn. It is now continued once.
+        self.fake.replies = [text('The critic found no gap. Let me do targeted checks for these specific works.'),
+                             text('Answer: no gap, and no further check is needed.')]
+        self.ask(chat, 'Is anything left to check?')
+        answer = lambda: [item['content'] for item in self.detail(chat)['transcript'] if item['role'] == 'assistant']
+        self.wait_for(lambda: answer()[-1:] == ['Answer: no gap, and no further check is needed.'] and idle(), timeout=30)
+        # A new message sets an unfinished turn aside instead of being refused.
+        store.save_assistant(self.root, chat, {**store.load_chat(self.root, chat)['assistant_state'], 'status': 'incomplete'})
+        self.assertEqual(self.detail(chat)['assistant_status'], 'paused')
+        self.fake.replies = [text('A fresh answer.')]
+        self.ask(chat, 'Never mind; a new question.')
+        self.wait_for(lambda: answer()[-1:] == ['A fresh answer.'] and idle(), timeout=30)
+        self.assertTrue(any('set aside' in (item.get('content') or '') for item in self.detail(chat)['transcript']
+                            if item['role'] == 'notice'))

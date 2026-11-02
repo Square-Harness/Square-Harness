@@ -142,7 +142,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const call = validCall(raw, selectedCall) ? selectedCall : raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null
     const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
-    if (!content.trim() || sending || resuming || paused || work.blocked) return
+    // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
+    if (!content.trim() || sending || resuming || work.blocked) return
     setSending(true)
     setSendError('')
     try {
@@ -212,7 +213,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {free && assistantResumable(data) && !ours && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
-              <p className="notice">The assistant is paused. Its work is saved; resume from where it stopped.</p>
+              <p className="notice">The assistant is paused. Its work is saved: resume from where it stopped, or send a new message to set this turn aside.</p>
             </div>
           )}
         </div>
@@ -240,7 +241,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
             </button>
-          ) : paused ? (
+          ) : paused && !draft.trim() ? (
             <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>

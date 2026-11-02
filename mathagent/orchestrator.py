@@ -142,21 +142,27 @@ FINAL_PREDICT = 8192
 DEFAULT_ACTIONS = None
 
 
+_PROMISE = re.compile(r"(?:(?:now|next|then|first|so)\s*,?\s+)?(?:let me|let's|i will|i'll|i am going to|i'm going to|"
+                      r"i need to|i must|we will|we'll|je vais|laissez-moi|nous allons)\s+\S", re.I)
+_POLITE = re.compile(r"\b(?:let me know|feel free|happy to|glad to|if you (?:want|wish|like|need|prefer)|"
+                     r"hope (?:this|that)|n'h[ée]sitez)", re.I)
+
+
 def _ends_with_work_plan(text):
     """Catch an explicit unexecuted follow-up, not judge mathematical validity.
 
-    Only inspect a short final paragraph and a promise at its end, so an opening
-    explanation such as 'Let me check ...' followed by an answer is unaffected.
+    Only the last sentence counts, so an opening 'Let me check ...' followed by an
+    answer is unaffected. "Let me do targeted checks for these works." is a promise;
+    "Let me know if you want more." and "I'll summarize: the bound holds." are not.
     """
-    tail = text.strip().split('\n\n')[-1]
-    if len(tail) > 600 or re.search(r'[:=0-9]', tail):
+    paragraph = text.strip().split('\n\n')[-1].strip()
+    sentences = [s for s in re.split(r'(?<=[.!?])\s+', paragraph) if s.strip()]
+    last = sentences[-1].strip() if sentences else ''
+    if not last or len(last) > 400 or _POLITE.search(last):
         return False
-    return re.search(
-        r"\b(?:let me|i will|i'll|je vais|laissez-moi)\s+"
-        r"(?:(?:try to|now|first|then|next|essayer de)\s+)*"
-        r"(?:find|search|look|verify|check|read|open|continue|retrieve|investigate|"
-        r"chercher|trouver|vérifier|lire|ouvrir|continuer)\b[^.!?]*[.!?]?\s*$",
-        tail, re.I) is not None
+    if ':' in last and len(last.split(':', 1)[1].split()) > 3:
+        return False  # a colon followed by the content itself
+    return _PROMISE.match(last) is not None
 
 
 def _delegate_schema():
@@ -1157,8 +1163,9 @@ class Orchestrator:
                         self._warning('The reply announced further work without performing it; continuing once from the saved results.')
                         self._save()
                         continue
-                    return self._finish('incomplete', assistant['content'],
-                        'The reply still promises further work without an answer. Work is saved and can be resumed.')
+                    # A second promise is kept as the answer: resuming would only repeat it and lock the turn.
+                    return self._finish('complete', assistant['content'],
+                        'The reply announces further work it did not do. Ask for that work explicitly in a new message.')
                 self.agent.history = self.conversation_history()
                 for item in self.agent.history:
                     item.pop('thinking', None)

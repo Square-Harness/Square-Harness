@@ -748,8 +748,8 @@ def assistant_view(chat):
     status = 'paused' if status in ('interrupted', 'incomplete') else status
     budget = state.get('budget') or {}
     reserved = budget.get('reserved_tokens', 0)
-    progress = state.get('progress')
-    if not isinstance(progress, dict):
+    progress = state.get('progress') if status != 'set_aside' else None
+    if not isinstance(progress, dict) and status != 'set_aside':
         progress = next((child.get('result', {}).get('progress')
                          for child in reversed(state.get('children') or [])
                          if isinstance(child.get('result'), dict)

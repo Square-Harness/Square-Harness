@@ -1016,10 +1016,15 @@ class Hub:
             if (self._closing or chat_id in self.routing
                     or any(t.origin_chat == chat_id or t.target == chat_id for t in pending)):
                 raise Busy('The Assistant is still working on this conversation.')
-            if not resume and saved.get('status') in ('interrupted', 'running', 'incomplete'):
-                raise ValueError('Resume the pending Assistant turn first, or start a new conversation.')
+            set_aside = not resume and saved.get('status') in ('interrupted', 'running', 'incomplete')
             self.routing[chat_id] = time.time()
             try:
+                if set_aside:
+                    # A new message moves on from a paused or stuck turn instead of being refused.
+                    store.save_assistant(self.root, chat_id, {**saved, 'status': 'set_aside'})
+                    store.append_items(self.root, chat_id, [{'role': 'notice', 'discarded': True, 'time': store._now(),
+                        'content': 'Not added to the conversation: the paused turn was set aside by a new message. '
+                                   'Jobs it started keep their saved work.'}])
                 if not resume:
                     store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files, 'time': store._now()}])
             except BaseException:
