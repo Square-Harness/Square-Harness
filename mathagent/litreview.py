@@ -15,7 +15,7 @@ import math
 import re
 from xml.etree.ElementTree import ParseError
 
-from .jsonutil import loads
+from .jsonutil import complete_fields, loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
 from .literature import LiteratureError, _fold
@@ -38,11 +38,13 @@ SCOPE_SCHEMA = {
         'assumptions': {'type': 'string', 'maxLength': 600},
         'queries': {'type': 'array', 'maxItems': 12, 'items': {'type': 'string', 'maxLength': 120}},
         'seeds': {'type': 'array', 'maxItems': 8, 'items': {
-            'type': 'object', 'additionalProperties': False, 'required': ['authors', 'title', 'year'],
+            'type': 'object', 'additionalProperties': False, 'required': ['authors', 'title'],
             'properties': {'authors': {'type': 'array', 'maxItems': 4, 'items': {'type': 'string', 'maxLength': 60}},
                            'title': {'type': 'string', 'maxLength': 300}, 'year': {'type': 'string', 'maxLength': 10}}}},
     },
 }
+SCOPE_RETRY_SCHEMA = {**SCOPE_SCHEMA, 'required': ['topic', 'subfield', 'msc', 'intent', 'assumptions', 'queries'],
+                      'properties': {k: v for k, v in SCOPE_SCHEMA['properties'].items() if k != 'seeds'}}
 SCREEN_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
     'properties': {'items': {'type': 'array', 'maxItems': 40, 'items': {
@@ -345,17 +347,34 @@ class ReviewRunner(ResearchRunner):
             'notes, founding papers), with authors\' surnames, title and year; they will be checked and dropped if '
             'they do not exist. Never copy manuscript text into queries.\n\nREQUEST:\n' + self.state['goal'] + material)
         self.emit('notice', 'Scoping the topic')
-        value = None
-        for think, cap in ((False, 1800), (False, 1200)):
-            value = self._json(self._call('scope', instruction, cap=cap, format_schema=SCOPE_SCHEMA, think=think))
+        value, kept = None, {}
+        retry = ('\n\nAnswer with one JSON object with exactly these fields: topic, subfield, msc (a list), intent, '
+                 'assumptions and queries (a list of short strings). Leave out remembered works.')
+        for attempt, (prompt, schema, cap) in enumerate(((instruction, SCOPE_SCHEMA, 1800),
+                                                         (instruction + retry, SCOPE_RETRY_SCHEMA, 1200))):
+            result = self._call('scope', prompt, cap=cap, format_schema=schema, think=False)
+            value = self._json(result)
             if value:
                 break
-            self.state['warnings'].append('The scoping answer was not usable JSON' + (' after thinking; retried without.' if think else '.'))
-        value = value or {}
+            # A cut-off answer still holds every field it finished (the queries, before a stuck seed).
+            for key, item in complete_fields(result.get('text', '')).items():
+                kept.setdefault(key, item)
+            if kept.get('queries'):
+                value = kept
+                self.state['warnings'].append('The scoping answer was cut off; its complete fields were kept.')
+                break
+            self.state['warnings'].append('The scoping answer was not usable JSON' + ('; retried with the fields named.' if not attempt else '.'))
+        value = value or kept
         queries = [' '.join(str(q).split())[:120] for q in value.get('queries') or [] if str(q).strip()]
         queries = self._public_queries(queries)
         if not queries:
-            self.state['warnings'].append('No usable public topic queries were produced; private request text was not sent as a fallback query.')
+            # The model's own public paraphrase of the topic, never the request text itself.
+            fallback = [' '.join(part.split()[:7]) for part in re.split(r'[:;,()]', str(value.get('topic') or '') + ', '
+                                                                         + str(value.get('subfield') or '')) if len(part.split()) >= 2]
+            queries = self._public_queries(list(dict.fromkeys(fallback))[:2])
+            self.state['warnings'].append(
+                'No usable public topic queries were produced; searched with the scoping topic instead: ' + '; '.join(queries)
+                if queries else 'No usable public topic queries were produced; private request text was not sent as a fallback query.')
         self.state['scope'] = {
             'topic': str(value.get('topic') or self.state['goal'])[:300], 'subfield': str(value.get('subfield') or '')[:200],
             'msc': [m for m in (str(x).strip().upper() for x in value.get('msc') or []) if re.fullmatch(r'\d\d[A-Z-]?\d{0,2}', m)][:3],

@@ -140,6 +140,9 @@ def remaining_limit(settings, key, used=0):
     return math.inf if limit is None else max(0, limit - used)
 
 
+WHITESPACE_RUN = 400  # characters of whitespace in a row: a structured answer stuck between two tokens
+
+
 def usable_completion(stats, cap):
     """A usable completed call needs a supported finish and accountable usage."""
     return (stats.get('done_reason') in ('stop', 'tool_calls')
@@ -717,6 +720,7 @@ class ResearchRunner:
         self.state['input_tokens_charged'] += estimated
         self._save()
         text, tool_calls, done, stats = '', [], False, {}
+        blank, stopped = 0, None  # whitespace run of the answer; why the stream was cut short
         client = self.agent.client
         old_timeout = getattr(client, 'timeout', None)
         if old_timeout is not None:
@@ -732,14 +736,30 @@ class ResearchRunner:
                     output.flush()
                     os.fsync(output.fileno())
                     msg = event.get('message', {})
-                    text += msg.get('content', '')
+                    chunk = msg.get('content', '')
+                    text += chunk
+                    if chunk:
+                        blank = blank + len(chunk) if not chunk.strip() else len(chunk) - len(chunk.rstrip())
                     tool_calls.extend(msg.get('tool_calls') or [])
                     if role in {'draft', 'revise'} and msg.get('content'):
                         self.emit('text', msg['content'])
                     if event.get('done'):
                         done = True
                         stats = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'done_reason') if k in event}
-                    self._check_time()
+                        break
+                    if format_schema and blank > WHITESPACE_RUN:
+                        # Grammars allow unbounded whitespace; a model can fill its whole allowance with it.
+                        stopped = 'whitespace'
+                        break
+                    if self._elapsed() >= settings['max_seconds']:
+                        stopped = 'time'  # the text so far is returned; the next step stops the job
+                        break
+            if stopped:
+                call['status'] = 'whitespace_loop' if stopped == 'whitespace' else 'timed_out'
+                self.state['warnings'].append(
+                    'A structured answer turned into whitespace; it was stopped and its complete part kept.'
+                    if stopped == 'whitespace' else 'Time ran out during a model call; its text so far was kept.')
+                return {'text': text, 'calls': [], 'complete': False, 'output_limit': cap, 'stopped': stopped}
             if not done:
                 raise AgentError('Model stream ended without completion; partial output saved')
             if type(stats.get('eval_count')) is int and stats['eval_count'] > cap:

@@ -857,6 +857,10 @@ class WriteupRunner(ResearchRunner):
                             thinking_budget=min(self.THINK_TOKENS, cap // 2), trailer=trailer)
         title, definitions, body = split_body(result['text'])
         body = normalised_references(body)
+        if result.get('stopped') == 'time' and body.strip():
+            # Out of time in the middle of the document: keep what was written, compile it and say so.
+            result = {**result, 'complete': True}
+            self.state['truncated'] = True
         if result['complete'] and announces_only(body) and not part.get('retried'):
             part['retried'] = True  # a reply that only says what it would do: once more, plainly
             self._save()
@@ -945,6 +949,8 @@ class WriteupRunner(ResearchRunner):
     def _checks_block(self, body):
         """What the author must settle, printed at the top of the document: comments alone are invisible in the PDF."""
         points = todo_comments(body) + self._template_notes()
+        if self.state.get('truncated'):
+            points.append('Time ran out while the document was being written: it stops early.')
         unknown = self._unknown_citations(body)
         if unknown:
             note = (f'Cites works that are not in your bibliography: {", ".join(unknown)}. Check that they exist and say '
@@ -1217,7 +1223,8 @@ class WriteupRunner(ResearchRunner):
 
     def _finish(self):
         compile_state = self.state.get('compile') or {}
-        complete = compile_state.get('ok') and all(part['complete'] for part in self.state.get('parts', []))
+        complete = (compile_state.get('ok') and all(part['complete'] for part in self.state.get('parts', []))
+                    and not self.state.get('truncated'))
         self.state['status'] = 'complete' if complete else 'partial'
         self.state['stop_reason'] = ('Written and compiled; read it before using it.' if complete else
                                      'Written; see the checks for what still needs you.')

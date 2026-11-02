@@ -117,7 +117,9 @@ class ReviewTests(unittest.TestCase):
                 pool = self.pool(runner) if runner.state else {}
                 n = {t: r['n'] for t, r in pool.items()}
                 if role == 1:
-                    reply = text(SCOPE)
+                    # Seen live: a remembered work without a year left the grammar nothing but whitespace.
+                    cut = json.dumps(SCOPE)[:-2] + ', {"authors": ["Holcman"], "title": "Narrow escape", "year":'
+                    reply = [{'message': {'content': cut}, 'done': False}] + [{'message': {'content': '        '}, 'done': False}] * 80
                 elif role == 2:
                     items = [{'n': r['n'], 'relevance': 0 if 'cooking' in r['title'] else 3 if r['cited_by'] and r['cited_by'] > 50 else 2,
                               'role': 'exclude' if 'cooking' in r['title'] else 'entry' if 'survey' in r['title'] or 'nonlinearity' in r['title'] else 'core',
@@ -189,6 +191,11 @@ class ReviewTests(unittest.TestCase):
         lebeau = pool['Contrôle exact de l’équation de la chaleur']
         self.assertEqual((lebeau['doi'], lebeau['venue']), ('10.1080/03605309508821097', 'Comm. PDE & Appl'))
         self.assertFalse(any('contents unavailable' in r['title'] + ' '.join(r['authors']) for r in runner.state['pool']))
+        # The cut-off scope answer was stopped at its whitespace and its complete fields and works kept.
+        self.assertTrue(any('turned into whitespace' in w for w in runner.state['warnings']))
+        self.assertTrue(any('complete fields were kept' in w for w in runner.state['warnings']))
+        self.assertEqual(runner.state['scope']['queries'], SCOPE['queries'])
+        self.assertEqual(len(self.client.requests), 4)  # no second scoping call
 
 
 

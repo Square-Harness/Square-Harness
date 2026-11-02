@@ -24,6 +24,46 @@ def loads(text):
     raise ValueError('No complete JSON value in model response') from error
 
 
+def complete_fields(text):
+    """The fields of a top-level JSON object that were written completely, in order, when the
+    object itself was cut off (a length stop). An unfinished list keeps its complete items; any
+    other unfinished value is left out: nothing is completed or invented."""
+    if not isinstance(text, str):
+        return {}
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.S)
+    start = text.find('{')
+    if start == -1:
+        return {}
+    decoder, out, index = json.JSONDecoder(strict=False), {}, start + 1
+    skip = re.compile(r'[\s,]*')
+    try:
+        while True:
+            index = skip.match(text, index).end()
+            if index >= len(text) or text[index] == '}':
+                return _repair_values(out)
+            key, index = decoder.raw_decode(text, index)
+            index = re.compile(r'\s*:\s*').match(text, index).end()
+            try:
+                value, index = decoder.raw_decode(text, index)
+            except ValueError:
+                if text.startswith('[', index) and isinstance(key, str):
+                    items, index = [], index + 1
+                    while True:
+                        index = skip.match(text, index).end()
+                        try:
+                            item, index = decoder.raw_decode(text, index)
+                        except ValueError:
+                            break
+                        items.append(item)
+                    if items:
+                        out[key] = items
+                raise
+            if isinstance(key, str):
+                out[key] = value
+    except (ValueError, AttributeError):
+        return _repair_values(out)
+
+
 def _objects(text):
     """Yield complete outer candidates, never salvage an unfinished child."""
     offset = 0
