@@ -495,6 +495,11 @@ class Orchestrator:
             payload['options']['seed'] = (self.agent.seed + self.state['main_calls']) % (2 ** 31)
         if tools:
             payload['tools'] = tools
+        if not tools and self.state.get('required_failed'):
+            payload['messages'].append({'role': 'user', 'content':
+                f'CONTROLLER: the @{self.state["required_failed"]} worker the user selected did not finish. Say so '
+                'plainly, give only what it saved and why it stopped, and do not write the review, explanation or '
+                'document yourself: an unchecked substitute is not what the user asked for.'})
         if (not tools and any((c.get('result') or {}).get('disposition') == 'answer_with_qualification'
                               for c in self.state['children'])):
             payload['messages'].append({'role': 'user', 'content':
@@ -983,6 +988,8 @@ class Orchestrator:
             # Synthesize its saved result, including pending coverage, instead
             # of starting another whole-manuscript scan in the parent.
             self.state['force_final'] = True
+            if value.get('status') in ('failed', 'error', 'incomplete') or value.get('error'):
+                self.state['required_failed'] = self.state['required_mode']
         if result.get('mode') in ('writeup', 'summarize') and isinstance(value, dict) and value.get('answer'):
             # A delivered document ends the turn: the user writes up results they checked, so no
             # critique of it and no second version; its ready message is the reply.

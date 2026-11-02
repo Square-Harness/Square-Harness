@@ -29,7 +29,7 @@ _REFERENCE_FOLLOWUP = re.compile(
 
 def _reference_followup(text, history):
     if (not _REFERENCE_FOLLOWUP.match(text.strip())
-            or re.search(r'\b(?:prove|derive|compute|calculate|explain|verify|check|audit|'
+            or re.search(r'\b(?:prove|derive|comput\w*|calculat\w*|explain|verify|check|audit|'
                          r'proof|proofs|counterexample|counterexamples|proving|explaining|'
                          r'prouve\w*|demontre\w*|preuve\w*|contre.exemple\w*|explique\w*|verifie\w*)\b', text)):
         return False
@@ -118,6 +118,15 @@ class ModeOrchestrator(Orchestrator):
 
     def _validate_delegate(self, args):
         mode = args.get('mode') if isinstance(args, dict) else None
+        selected = self.required_mode or (self.state or {}).get('required_mode')
+        if selected and mode and mode != selected:
+            ran = [child for child in (self.state or {}).get('children', [])
+                   if (child.get('action') or {}).get('mode') == selected]
+            if ran and not any(child.get('status') == 'complete' and isinstance(child.get('result'), dict)
+                               and child['result'].get('status') not in ('failed', 'error', 'incomplete') for child in ran):
+                # The user chose this worker: after it failed, retry it or answer; never swap in another one.
+                raise ValueError(f'@{selected} was selected and its worker did not finish. Retry @{selected} with a '
+                                 'narrower objective, or answer with what it saved and say that it did not finish.')
         if mode in USER_MODES:
             # Only this turn's own @ selection (saved in the state for resume) may start them.
             if mode != (self.required_mode or (self.state or {}).get('required_mode')):

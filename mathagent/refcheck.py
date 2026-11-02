@@ -99,9 +99,16 @@ def standalone_reference_request(text):
             r'(?:include|add|provide|give)\s+(?:(?:me|us)\s+)?'
             r'(?:(?:a|an|the|full|complete|detailed|rigorous|short|brief)\s+)*'
             r'(?:proof|explanation|derivation|calculation|review)|'
-            r'(?:check|verify)\s+(?:the\s+)?(?:proof|hypothes\w*|assumptions|conditions)|'
+            r'(?:check|verify|audit|correct)\s+(?:(?:the|my|these|this|those|our|all)\s+)?'
+            r'(?:proof|hypothes\w*|assumptions|conditions|comput\w*|calculat\w*|derivations?|notes?|steps?|'
+            r'arguments?|work|answers?|claims?|values?|results?|bounds?|formulas?|identit\w*|estimates?|'
+            r'constants?|signs?|factors?|algebra|maths?|mathematics)|'
             r'(?:(?:a|an|the|complete|full|detailed)\s+)*(?:proof|explanation|derivation))\b')
     if re.search(lead + work, value):
+        return False
+    # Asking whether something is right is a check of that thing, whatever book it comes from.
+    if re.search(r'\b(?:any|a|some)\s+(?:mistakes?|errors?|typos?)\b|\b(?:is|are)\s+(?:this|these|it|that|my|the)\b'
+                 r'.{0,60}\b(?:right|correct|true|valid|wrong)\b|\bcomput\w*|\bcalculat\w*', value):
         return False
     if re.search(r'\b(?:for|pour)\s+(?:(?:theorem|result)\s+)?a\s+(?:and|et)\s+'
                  r'(?:(?:theorem|result)\s+)?b\b', value):

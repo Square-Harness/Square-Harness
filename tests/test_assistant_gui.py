@@ -183,3 +183,11 @@ class AssistantGuiTests(GuiCase):
         self.wait_for(lambda: answer()[-1:] == ['A fresh answer.'] and idle(), timeout=30)
         self.assertTrue(any('set aside' in (item.get('content') or '') for item in self.detail(chat)['transcript']
                             if item['role'] == 'notice'))
+
+        # Checking computations that mention a book is a check of the computations, not a reference lookup.
+        self.fake.replies = [text('No mistake: both computations are right.')]
+        before = len(self.fake.requests)
+        self.ask(chat, "Can you check these computations? Any mistake? The setting is from Karatzas–Shreve's book.")
+        self.wait_for(lambda: answer()[-1:] == ['No mistake: both computations are right.'] and idle(), timeout=30)
+        self.assertIn('tools', self.fake.requests[before])  # the Assistant itself answered, with its tools
+        self.assertEqual(len(cards()), 2)  # no automatic check card
