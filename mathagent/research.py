@@ -428,6 +428,23 @@ class ResearchRunner:
                 self.state['stop_reason'] = str(exc)
             except TokenBudgetError as exc:
                 self.state['status'], self.state['stop_reason'] = 'budget_violation', str(exc)
+            except CallContextError as exc:
+                # The request cannot fit the context: retrying the same request cannot help.
+                self.state['status'] = 'error'
+                self.state['stop_reason'] = str(exc)
+                self.state['worker_error'] = {'code': 'context_overflow', 'message': str(exc), 'retryable': False,
+                                              'scope': 'context', 'details': {'phase': self.state['phase']}}
+            except AgentError as exc:
+                from .assistant_budget import AssistantBudget
+                if isinstance(exc, AssistantBudget):
+                    # The Assistant's shared budget or this worker's deadline: resumable with more.
+                    self.state['status'], self.state['stop_reason'] = 'budget_exhausted', str(exc)
+                else:
+                    # The model server stopped answering (tunnel, restart, time-out): the work is saved.
+                    self.state['status'] = 'paused'
+                    self.state['stop_reason'] = f'The model server stopped answering ({exc}); the work is saved and resumes from here.'
+                    self.state['worker_error'] = {'code': 'model_unavailable', 'message': str(exc), 'retryable': True,
+                                                  'scope': 'transport', 'details': {'phase': self.state['phase']}}
             except Exception as exc:
                 self.state['status'] = 'error'
                 self.state['stop_reason'] = f'{type(exc).__name__}: {exc}'

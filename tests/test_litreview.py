@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import unquote
 
-from mathagent.agent import Agent
+from mathagent.agent import Agent, AgentError
 from mathagent.literature import LiteratureError, LiteratureTools
 from mathagent.litreview import ReviewRunner, breadth
 from mathagent.tools import Workspace
@@ -105,14 +105,19 @@ class ReviewTests(unittest.TestCase):
         pool = self.pool(runner)
         return [pool[t]['n'] for t in titles]
 
-    def full_run(self):
-        # The numbers are known only after the sweep, so the scripted answers are built lazily.
-        runner_box = {}
+    def full_run(self, drop_screening=False):
+        # The numbers are known only after the sweep, so the scripted answers are built lazily, by what is asked.
+        runner_box, dropped = {}, []
 
         class Lazy(FakeClient):
             def stream(inner, payload):
                 inner.requests.append(payload)
-                role = len(inner.requests)
+                asked = payload['messages'][1]['content']
+                role = (1 if asked.startswith('Scope') else 2 if asked.startswith('Screen') else
+                        3 if asked.startswith('Organise') else 4)
+                if role == 2 and drop_screening and not dropped:
+                    dropped.append(True)
+                    raise AgentError('Malformed or interrupted stream: connection reset by peer')
                 runner = runner_box['runner']
                 pool = self.pool(runner) if runner.state else {}
                 n = {t: r['n'] for t, r in pool.items()}
@@ -148,10 +153,15 @@ class ReviewTests(unittest.TestCase):
         with patch.object(lit, '_fetch', side_effect=fetch):
             result = runner.start('What should a graduate student read on observability of the heat equation?', max_rounds=1,
                                   max_tokens=40000, max_input_tokens=300000, max_seconds=600, max_requests=60, max_chars=30000)
+            if drop_screening:
+                # A dropped model server leaves a paused, retryable job; resuming finishes it.
+                self.assertEqual(result['status'], 'paused')
+                self.assertTrue(runner.state['worker_error']['retryable'])
+                result = runner.resume(result['id'])
         return runner, result
 
     def test_reading_list_from_sources_graph_and_model_choices(self):
-        runner, result = self.full_run()
+        runner, result = self.full_run(drop_screening=True)
         self.assertEqual(result['status'], 'listed', runner.state.get('citation_issues'))
         pool = self.pool(runner)
         # The arXiv hit, the Crossref and the Semantic Scholar records of the same paper are one candidate.
@@ -195,7 +205,8 @@ class ReviewTests(unittest.TestCase):
         self.assertTrue(any('turned into whitespace' in w for w in runner.state['warnings']))
         self.assertTrue(any('complete fields were kept' in w for w in runner.state['warnings']))
         self.assertEqual(runner.state['scope']['queries'], SCOPE['queries'])
-        self.assertEqual(len(self.client.requests), 4)  # no second scoping call
+        self.assertEqual([r['messages'][1]['content'][:6] for r in self.client.requests],
+                         ['Scope ', 'Screen', 'Screen', 'Organi', 'Annota'])  # no second scoping call; screening retried
 
 
 

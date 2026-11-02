@@ -538,6 +538,8 @@ class ReviewRunner(ResearchRunner):
         attempts = self.state.setdefault('screen_attempts', {})
         failed = self.state.setdefault('screen_failed', {})
         todo = [n for n in self.state['screen_order'] if str(n) not in self.state['screened'] and attempts.get(str(n), 0) < 2]
+        if todo and self._elapsed() >= self.state['settings']['max_seconds'] * .7:
+            self.state.setdefault('cut', 'screen')  # out of time with candidates left: resumable with more
         if not todo or not self._remaining(.7):
             kept = self._kept()
             self._note('Screening', f'{len(self.state["screened"])} screened, {len(kept)} kept as relevant:\n'
@@ -603,6 +605,7 @@ class ReviewRunner(ResearchRunner):
             value = self._json(self._call('organise', instruction, cap=2500, format_schema=ORGANISE_SCHEMA)) or {}
         except ResearchBudget as exc:
             self.state['warnings'].append('Organisation stopped: ' + str(exc))
+            self.state.setdefault('cut', 'organise')
             value = {}
         allowed, used = {n for n, _ in kept}, set()
 
@@ -678,6 +681,7 @@ class ReviewRunner(ResearchRunner):
             value = self._json(self._call('annotate', instruction, cap=2400, format_schema=ANNOTATE_SCHEMA)) or {}
         except ResearchBudget as exc:
             self.state['warnings'].append('Annotations stopped: ' + str(exc))
+            self.state.setdefault('cut', 'annotate')
             self.state['phase'] = 'write'
             return
         for item in value.get('items') or []:
@@ -788,12 +792,23 @@ class ReviewRunner(ResearchRunner):
             out.append(f'- {warning}')
         return '\n'.join(out).strip() + '\n'
 
+    def _recover(self):
+        super()._recover()
+        if self.state.get('cut') and self.state['phase'] == 'done':
+            # Resumed with more time: go back to the step that ran out of it.
+            self.state['phase'] = self.state.pop('cut')
+
     def _finish(self):
         o = self.state['organisation']
         self.state['citation_issues'] = self._checks()
         self.state['review_complete'] = True
         self.state['status'] = 'listed' if o and o['themes'] and not self.state['citation_issues'] else 'partial'
         self.state['stop_reason'] = 'Reading list finished.' if self.state['status'] == 'listed' else 'Reading list finished with gaps; see Notes & gaps.'
+        if self.state.get('cut'):
+            # Out of time: the list so far is written, and more time finishes it.
+            step = {'screen': 'screening', 'organise': 'organising', 'annotate': 'annotating'}[self.state['cut']]
+            self.state['status'] = 'budget_exhausted'
+            self.state['stop_reason'] = f'Time ran out while {step}; the list so far is saved. Resume with more time to finish it.'
 
     def _checks(self):
         """The skill's self-check, done by code."""
