@@ -5,7 +5,7 @@ import threading
 import time
 
 from .agent import AgentError
-from .backends import ToolCallError
+from .backends import TokenBudgetError, ToolCallError
 from .proof import count_input
 
 
@@ -199,6 +199,10 @@ class BudgetClient:
                 self.pool.state['tokens'] -= cap - used
                 self.usage['tokens'] -= cap - used
             self.pool.checkpoint()
+            raise
+        except AgentError as exc:
+            if not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
+                raise AssistantBudget('Assistant time budget exhausted during generation.') from exc
             raise
         finally:
             try:

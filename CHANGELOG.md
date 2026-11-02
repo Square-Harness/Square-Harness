@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Render chat and sidebar mathematics with request, attached-template and saved
+  style macros, scoped to each conversation. Keep temporary worker outages
+  resumable, bound reasoning recovery, and clear failed or cancelled progress.
+- Preserve unfinished reading-list queries and seed checks on resume, and merge
+  arXiv DOI aliases. Check webpage extraction deadlines and consult robots.txt.
+- Replace the write-up compiler's fixed command-count limit with bounded,
+  progress-based retries; stop compilation promptly on pause and remove every
+  retained download when a re-run card's conversation is deleted.
+- Refuse file writes when their approved diff is stale. Preserve explicit chat
+  attachments for restricted file access and fresh reviews, and allow a new
+  message after pausing the Assistant.
+- Keep both endpoints of LaTeX range references, match complete bibliography
+  identifiers, and deliver a source ZIP when write-ups need template files or
+  figures. Apply explicit specialist caps to proof admission and enforce elapsed
+  stream guards even during blank Ollama keepalives.
+- Finish short write-ups without a hidden reasoning prelude. Preserve and offer
+  partial LaTeX when their time allowance expires, instead of reporting a server
+  outage. Conversation write-ups now receive executed sandbox code and can
+  include that conversation's recorded figures.
+- Compile code listings with their actual packages, retain the exact executed
+  sandbox code, and resolve its recorded figures to portable source files.
+  Offer the PDF and a Sources ZIP containing the LaTeX, code, figures and
+  templates used by compilation. Short jobs can use their remaining time for
+  repair; a compile failure is reported as an unfinished draft.
 - Rewrite the documentation as three guides: `docs/guide.md` (philosophy, every
   skill and how skills are made), `docs/llm-install.md` (local and cluster
   installation, written for a coding agent) and `docs/llm-development.md`

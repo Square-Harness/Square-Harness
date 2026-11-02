@@ -70,7 +70,7 @@ def run_case(host, model, query, concurrency=2, seconds=60):
         ])
         args.workspace = Path(directory)
         args.assistant_concurrency = concurrency
-        args.assistant_tokens = 6000
+        args.assistant_tokens = 24000
         args.assistant_seconds = seconds
         hub = Hub(args)
         chat = store.create_chat(Path(directory), 'free', model=model, online=False)
@@ -120,10 +120,10 @@ def main():
     ]
     cases = [run_case(args.host, args.model, query, seconds=args.seconds) for query in queries]
     if args.parallel:
-        query = ('Use exactly two separate critic workers to independently check the claim '
-                 'a^2 >= 0 for all real a. Request both delegate calls in the same model turn, '
-                 'with low effort. Each worker must answer in at most three sentences. '
-                 'After both return, summarize their checks in at most three sentences.')
+        query = ('Use exactly two critic workers with distinct objectives to check a^2 >= 0 for real a. '
+                 'The first must check a=0 and the equality case. The second must check a<0 by the signs '
+                 'of the two factors. Request both delegate calls in the same model turn, with low effort. '
+                 'Each worker must answer in at most three sentences. After both return, summarize briefly.')
         cases.extend(run_case(args.host, args.model, query, concurrency=concurrency,
                               seconds=args.seconds) for concurrency in (1, 2))
     report = {'model': args.model, 'cases': cases}

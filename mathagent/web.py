@@ -53,6 +53,8 @@ def _safe_error(exc):
     code, retryable = 'web_unavailable', False
     if 'offline' in lower:
         code = 'offline_uncached'
+    elif 'robots.txt' in lower:
+        code = 'source_access_denied'
     elif 'brave_search_api_key' in lower:
         code = 'missing_search_provider'
     elif 'unsupported' in lower or 'no readable' in lower or 'extraction' in lower:
@@ -88,8 +90,9 @@ def _section_label(value):
 
 
 class _Node:
-    def __init__(self, tag, attrs=None, parent=None):
+    def __init__(self, tag, attrs=None, parent=None, check=lambda: None):
         self.tag, self.attrs, self.parent = tag, {key: value or '' for key, value in (attrs or ())}, parent
+        self.check = parent.check if parent is not None else check
         self.children = []
         self.start, self.end = 0, 0
         self.anchor_start, self.anchor_end = 0, 0
@@ -102,10 +105,12 @@ class _Node:
     def ancestors(self):
         current = self.parent
         while current is not None:
+            self.check()
             yield current
             current = current.parent
 
     def walk(self):
+        self.check()
         yield self
         for child in self.children:
             if isinstance(child, _Node):
@@ -115,6 +120,7 @@ class _Node:
         return self.tag in _HIDDEN or bool(self.classes & _HIDDEN_CLASSES)
 
     def text(self):
+        self.check()
         if self.hidden():
             return ''
         if self.tag == 'math' and (self.attrs.get('alttext') or self.attrs.get('aria-label')):
@@ -127,13 +133,15 @@ class _Node:
 
 class _HTMLPage(HTMLParser):
     """Small structural reader, with no script execution or automatic crawling."""
-    def __init__(self):
+    def __init__(self, check=lambda: None):
         super().__init__(convert_charrefs=True)
-        self.root = _Node('document')
+        self.check = check
+        self.root = _Node('document', check=check)
         self.stack = [self.root]
         self.nodes = 1
 
     def handle_starttag(self, tag, attrs):
+        self.check()
         implied = {'p': {'p'}, 'li': {'li'}, 'dt': {'dt', 'dd'}, 'dd': {'dt', 'dd'},
                    'tr': {'tr'}, 'td': {'td', 'th'}, 'th': {'td', 'th'}, 'option': {'option'}}
         stops = {'li': {'ul', 'ol'}, 'dt': {'dl'}, 'dd': {'dl'},
@@ -159,13 +167,19 @@ class _HTMLPage(HTMLParser):
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
+        self.check()
         for index in range(len(self.stack) - 1, 0, -1):
             if self.stack[index].tag == tag:
                 del self.stack[index:]
                 return
 
     def handle_data(self, data):
-        self.stack[-1].children.append(data)
+        self.check()
+        children = self.stack[-1].children
+        if children and isinstance(children[-1], str):
+            children[-1] += data
+        else:
+            children.append(data)
 
     def content_root(self):
         nodes = list(self.root.walk())
@@ -184,6 +198,7 @@ class _HTMLPage(HTMLParser):
 
         def append(value):
             nonlocal buffered_chars
+            self.check()
             buffer.append(value)
             if value:
                 anchor_segments.extend((anchor, buffered_chars, buffered_chars + len(value)) for anchor in active_anchors)
@@ -191,6 +206,7 @@ class _HTMLPage(HTMLParser):
 
         def flush():
             nonlocal buffered_chars
+            self.check()
             raw = ''.join(buffer)
             text = _label(raw)
             buffer.clear()
@@ -452,9 +468,13 @@ class WebTools:
             if len(body) > MAX_BYTES or _digest(body) != document['sha256']:
                 raise WebError('Cached original document changed; extraction refused.', code='source_integrity_error')
             if document['original_file'].endswith('.html'):
-                parser = _HTMLPage()
-                parser.feed(body.decode('utf-8', errors='replace'))
+                parser = _HTMLPage(self.literature._remaining_timeout)
+                decoded = body.decode('utf-8', errors='replace')
+                for offset in range(0, len(decoded), 8192):
+                    self.literature._remaining_timeout()
+                    parser.feed(decoded[offset:offset + 8192])
                 text, headings, links, references, coverage = parser.extract(document['source_url'])
+                self.literature._remaining_timeout()
                 source_kind = 'html'
             else:
                 _, lines = self.literature._document(document['document_id'])

@@ -50,6 +50,8 @@ a .tex file; summarize recaps the important results obtained so far. Delegate a
 write-up only when the user asks for one, with the user's own words as its request
 (do not restate or correct the mathematics), and never critique, review or redo a
 write-up: it is for results the user has already checked, and it ends the turn.
+Recorded sandbox code and figures are supplied automatically to write-up workers;
+do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
 its proof; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
@@ -683,9 +685,27 @@ class Orchestrator:
         if not isinstance(files, list) or len(files) > 20:
             raise ValueError('files must contain at most 20 workspace references')
         workspace = getattr(self.agent, 'workspace', None)
+        sandbox_files = set()
+        experiments = None
+        experiment_ids = set()
+        if args['mode'] in ('writeup', 'summarize') and workspace is not None:
+            from .numerics.artifacts import ExperimentStore
+            experiments = ExperimentStore(workspace.root)
+            for message in self.state.get('history', []) + self.state.get('messages', []):
+                if message.get('role') != 'tool' or (message.get('tool_name') or message.get('name')) != 'execute_python':
+                    continue
+                try:
+                    result = loads(message.get('content') or '')
+                    experiment_ids.add(result['sandbox_result']['experiment_id'])
+                except (ValueError, TypeError, KeyError):
+                    continue
         for filename in files:
             if not isinstance(filename, str) or not filename or len(filename) > 300:
                 raise ValueError('Each file must be a nonempty workspace reference of at most 300 characters')
+            if experiments is not None and any(experiments.figure(i, filename) for i in experiment_ids):
+                # These are controller-owned conversation artifacts, not general workspace reads.
+                sandbox_files.add(filename)
+                continue
             if workspace is not None and hasattr(workspace, 'path'):
                 path = workspace.path(filename, pdf=True)
                 workspace._readable(path)
@@ -695,6 +715,8 @@ class Orchestrator:
                     human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
                     if filename not in self.state['files'] and not any(filename in text for text in human):
                         raise ValueError('Use only attached files or files named by the user: ' + filename)
+        if sandbox_files:
+            args['files'] = [f for f in files if f not in sandbox_files]
 
     def _child(self, pending, args):
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
@@ -780,6 +802,15 @@ class Orchestrator:
                 if value.get('job_id') is not None and not isinstance(value['job_id'], str):
                     raise AgentError('Worker adapter returned an invalid job identifier')
                 json.dumps(value, ensure_ascii=False, allow_nan=False)
+                error = value.get('error')
+                if isinstance(error, dict) and error.get('retryable') is True:
+                    with self._state_lock:
+                        child['result'] = copy.deepcopy(value)
+                        child['job_id'] = value.get('job_id') or child['job_id']
+                        child['status'] = 'interrupted'
+                        self._save()
+                    # Keep the native tool transaction open: Resume continues this same saved child.
+                    raise AgentError(error.get('message') or 'The worker stopped; its saved work can be resumed.')
                 with self._state_lock:
                     child['result'] = copy.deepcopy(value)
                     child['job_id'] = value.get('job_id') or child['job_id'] or child['id']

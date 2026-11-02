@@ -60,7 +60,7 @@ class ConversationWriteupTests(GuiCase):
         self.assertEqual(choice['messages'][0]['content'], 'You match mathematical material to the saved styles of its author. '
                          'Answer with one label or with none.')
         prompt = writing['messages'][1]['content']
-        self.assertTrue(writing['think'])
+        self.assertFalse(writing['think'])  # a non-answer retry writes directly
         self.assertIn('a one-section note with the reviewed proof', prompt)
         self.assertIn(PROOF, prompt)  # the proof job's full result is the material
         self.assertIn('## Proof result (the model review found no issue)', prompt)
@@ -71,7 +71,8 @@ class ConversationWriteupTests(GuiCase):
         self.assertNotIn('% src', prompt)
         self.assertEqual(detail['style']['label'], 'My papers: Real analysis')
         self.assertFalse((self.root / 'writeup.tex').exists())  # kept for download
-        self.assertEqual(card['outputs'], {'download': 'writeup-a-note-on-reflexivity.tex', 'pdf': False})
+        self.assertEqual(card['outputs'], {'download': 'writeup-a-note-on-reflexivity.tex', 'pdf': False,
+                                          'source': 'writeup-a-note-on-reflexivity-source.zip'})
         status, document, headers = self.request('GET', f'/api/research/{card["job_id"]}/tex')
         self.assertEqual(status, 200)
         self.assertEqual(headers['Content-Disposition'], 'attachment; filename="writeup-a-note-on-reflexivity.tex"')
@@ -80,7 +81,9 @@ class ConversationWriteupTests(GuiCase):
         self.assertIn(r'\newcommand{\R}{{\mathbb{R}}}', document)  # a style macro the text uses
         self.assertNotIn('unusedhere', document)
         reply = [i for i in self.ok('GET', f'/api/chats/{chat}')['transcript'] if i['role'] == 'assistant'][-1]['content']
-        self.assertEqual(reply, 'Write-up ready: `writeup-a-note-on-reflexivity.tex` (download it from the card above).')
+        self.assertEqual(reply, 'Write-up partial draft saved: `writeup-a-note-on-reflexivity.tex` (download it from the card above). '
+                         'LaTeX is not installed here; no PDF was produced. '
+                         'Download Sources (.zip) for the LaTeX together with its code, figures and template files.')
         record = store.conversation_record(self.root, chat)
         self.assertIn('## Write-up saved', record)
         self.assertNotIn('tau^', record)  # the document itself is not material for later write-ups

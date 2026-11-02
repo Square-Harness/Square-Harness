@@ -229,6 +229,10 @@ class ProofRunner:
         limit = self.state['settings']['max_tokens']
         return math.inf if limit is None else limit - self.state['tokens_charged']
 
+    def _call_cap(self, cap):
+        explicit = self.state['settings'].get('specialist_output_cap')
+        return min(cap, explicit) if explicit is not None else cap
+
     def _attempt_cap(self, kind):
         settings = self.state['settings']
         return settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
@@ -236,7 +240,7 @@ class ProofRunner:
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']
         solve = self._attempt_cap(kind) if kind == 'initial' else settings['min_solve_tokens']
-        needed = solve + settings['verify_tokens']
+        needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
         if self._remaining() < needed:
             raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
@@ -295,7 +299,10 @@ class ProofRunner:
             except KeyboardInterrupt:
                 self._stop('paused', 'Interrupted by the user. Saved calls will not be repeated; unfinished calls retain their full token reservation.')
             except AgentError as exc:
-                self._stop('paused', str(exc))
+                if self._elapsed() >= self.state['settings']['max_seconds']:
+                    self._stop('budget_exhausted', 'Elapsed-time budget exhausted: ' + str(exc))
+                else:
+                    self._stop('paused', str(exc))
             except Exception as exc:
                 self._stop('paused', str(exc))
                 raise
@@ -359,7 +366,7 @@ class ProofRunner:
         settings = self.state['settings']
         cap = self._attempt_cap(pending['kind'])
         if pending['kind'] != 'initial':
-            cap = min(cap, self._remaining() - settings['verify_tokens'])
+            cap = min(cap, self._remaining() - self._call_cap(settings['verify_tokens']))
         if pending['kind'] not in {'initial', 'retry'}:
             floor = settings.get('min_solve_tokens', cap)
             try:
@@ -426,7 +433,7 @@ class ProofRunner:
             return messages
 
         room = ctx - CONTEXT_MARGIN - floor - self._count(build(''), floor)
-        if room > 0:
+        if room >= 0:
             keep = min(len(notes), int(room * 2.5))
             for _ in range(5):
                 tail = notes[len(notes) - keep:] if keep else ''
@@ -438,7 +445,7 @@ class ProofRunner:
         if length_limited:
             settings = self.state['settings']
             desired = self._attempt_cap('retry')
-            desired = min(desired, self._remaining() - settings['verify_tokens'])
+            desired = min(desired, self._remaining() - self._call_cap(settings['verify_tokens']))
             fresh = self._payload('solver', self._initial_messages(goal, sources), desired)
             try:
                 _, allocation = allocate_call(self.agent.client, fresh, desired,
@@ -495,7 +502,7 @@ class ProofRunner:
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
         cap = self.state['settings']['verify_tokens']
         cached = any(c['key'] == self._call_key('verifier') for c in self.state['calls'])
-        if not cached and self._remaining() < cap:
+        if not cached and self._remaining() < self._call_cap(cap):
             self._stop('review_unavailable', 'Insufficient budget for a full verifier call; the candidate was retained without rewriting it.')
             return
         result = self._call('verifier', messages, cap, format_schema=VERIFIER_SCHEMA)
@@ -515,7 +522,7 @@ class ProofRunner:
         pending['review'] = review['id']
         if error:
             candidate['review_status'] = 'review_unavailable'
-            if pending['review_attempt'] == 0 and self._remaining() >= cap:
+            if pending['review_attempt'] == 0 and self._remaining() >= self._call_cap(cap):
                 pending['review_attempt'] = 1
                 pending['protocol_error'] = error
                 self.emit('notice', 'Clarifying an unavailable review on the same candidate; no proof rewrite was requested')
@@ -591,7 +598,7 @@ class ProofRunner:
         previous = next((c for c in self.state['calls'] if c['key'] == key), None)
         if previous is not None:
             return self._read_stream(previous['stream'])
-        if self._remaining() < cap:
+        if self._remaining() < self._call_cap(cap):
             raise ProofBudget('Insufficient budget for the full role allowance; no reduced-cap call was dispatched')
         remaining_seconds = self.state['settings']['max_seconds'] - self._elapsed()
         if remaining_seconds <= 0:
@@ -647,6 +654,8 @@ class ProofRunner:
                 raise AgentError('Model stream ended without completion; exact partial work was saved')
             self._charge_completed(call, result)
             self.agent.last_stats = result['stats']
+            if self._elapsed() >= self.state['settings']['max_seconds']:
+                raise ProofBudget('Elapsed-time budget exhausted during generation')
             return result
         except BaseException as exc:
             if isinstance(exc, TokenBudgetError):

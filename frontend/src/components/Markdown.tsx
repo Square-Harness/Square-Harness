@@ -2,7 +2,8 @@
 // no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.
 // The one image source allowed is an image saved by a sandbox run in this folder, which the
 // authenticated /api/artifacts endpoint serves after validating its id and name.
-import { memo, useMemo, type ReactNode } from 'react'
+import { createContext, memo, useContext, useMemo, type ReactNode } from 'react'
+import { renderToString } from 'katex'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -12,6 +13,26 @@ import { normalizeMath, remarkCitations, snippet, splitBlocks } from '../mathtex
 import { experimentImage } from '../artifacts'
 
 const KATEX = { throwOnError: false, strict: 'ignore', trust: false, maxExpand: 500, maxSize: 20 } as const
+const MathMacros = createContext<Record<string, string | object>>({})
+
+export function MathMacrosProvider({ definitions, children }: { definitions?: Record<string, string>; children: ReactNode }) {
+  const macros = useMemo(() => {
+    const macros: Record<string, string | object> = {}
+    for (const [name, definition] of Object.entries(definitions || {})) {
+      // The server selected each definition with request notation ahead of templates.
+      const source = definition.replace(/^\\(?:newcommand|providecommand)\b/, '\\renewcommand')
+      const replacement = source.startsWith('\\renewcommand')
+      if (replacement) macros['\\' + name] = ''
+      try {
+        renderToString(source, { ...KATEX, throwOnError: true, macros, globalGroup: true })
+      } catch {
+        if (replacement) delete macros['\\' + name]
+      }
+    }
+    return macros
+  }, [definitions])
+  return <MathMacros.Provider value={macros}>{children}</MathMacros.Provider>
+}
 
 // -- rendering ---------------------------------------------------------------------
 
@@ -27,6 +48,8 @@ type Props = {
 }
 
 export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline }: Props) {
+  const macros = useContext(MathMacros)
+  const katex = useMemo(() => ({ ...KATEX, macros: { ...macros } }), [macros])
   const components = useMemo<Components>(() => ({
     a: ({ href, children: label }) => (
       <a href={href} target="_blank" rel="noopener noreferrer nofollow">{label}</a>
@@ -55,7 +78,7 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
     <Wrapper className={(inline ? 'prose-inline' : 'prose') + (className ? ' ' + className : '')}>
       <ReactMarkdown
         remarkPlugins={onCite ? [remarkGfm, remarkMath, remarkCitations] : [remarkGfm, remarkMath]}
-        rehypePlugins={[[rehypeKatex, KATEX]]}
+        rehypePlugins={[[rehypeKatex, katex]]}
         components={components}
         urlTransform={safeUrl}
       >

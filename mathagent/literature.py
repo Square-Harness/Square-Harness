@@ -23,6 +23,7 @@ import textwrap
 import tempfile
 import time
 from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
 
 BACKEND_VERSION = 'literature-v1'
@@ -32,6 +33,8 @@ MAX_TEXT = 4_000_000
 MAX_RESULT = 8000
 TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'}
 PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath', 'crossref', 'openlibrary')
+API_HOSTS = frozenset({'api.crossref.org', 'api.opencitations.net', 'api.search.brave.com',
+                      'api.semanticscholar.org', 'api.zbmath.org', 'export.arxiv.org'})
 ARXIV_ID = re.compile(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', re.I)
 DOC_ID = re.compile(r'doc-[0-9a-f]{24}')
 
@@ -238,8 +241,9 @@ def _zbmath_record(r):
 
 class _HTMLText(HTMLParser):
     """Readable HTML; retain TeX math alttext where available, omit scripts."""
-    def __init__(self):
+    def __init__(self, check=lambda: None):
         super().__init__(convert_charrefs=True)
+        self.check = check
         self.parts = []
         self.hidden = 0
         self.math_depth = 0
@@ -248,6 +252,7 @@ class _HTMLText(HTMLParser):
         self.in_title = False
 
     def handle_starttag(self, tag, attrs):
+        self.check()
         attrs = dict(attrs)
         if tag in ('script', 'style', 'noscript', 'nav', 'svg'):
             self.hidden += 1
@@ -266,6 +271,7 @@ class _HTMLText(HTMLParser):
             self.parts.append(' ' + attrs['alt'] + ' ')
 
     def handle_endtag(self, tag):
+        self.check()
         if tag in ('script', 'style', 'noscript', 'nav', 'svg'):
             self.hidden = max(0, self.hidden - 1)
         if tag == 'title':
@@ -278,6 +284,7 @@ class _HTMLText(HTMLParser):
             self.parts.append('\n')
 
     def handle_data(self, data):
+        self.check()
         if self.in_title:
             self.title.append(data)
         if not self.hidden and not self.suppress_math:
@@ -285,8 +292,14 @@ class _HTMLText(HTMLParser):
 
     def text(self):
         # Stable line numbers refer to this exact stored extraction, not PDF lines.
-        paragraphs = [_plain(x, MAX_TEXT) for x in ''.join(self.parts).splitlines()]
-        return '\n'.join(textwrap.fill(x, width=180, break_long_words=False, break_on_hyphens=False) for x in paragraphs if x)
+        paragraphs = []
+        for part in ''.join(self.parts).splitlines():
+            self.check()
+            text = _plain(part, MAX_TEXT)
+            if text:
+                paragraphs.append(textwrap.fill(text, width=180, break_long_words=False, break_on_hyphens=False))
+        self.check()
+        return '\n'.join(paragraphs)
 
 
 class LiteratureTools:
@@ -300,6 +313,7 @@ class LiteratureTools:
         self.down = set()  # sources out of quota: not asked again by this instance
         self.on_budget_change = None
         self.deadline = None
+        self._robots = {}
         self.reset_budget(max_requests=max_requests, max_chars=max_chars)
 
     def reset_budget(self, *, max_requests=12, max_chars=30000):
@@ -874,9 +888,13 @@ class LiteratureTools:
             text, extractor = self._pdf(body)
             suffix = '.pdf'
         elif 'html' in content_type or body.lstrip().lower().startswith((b'<!doctype html', b'<html')):
-            parser = _HTMLText()
-            parser.feed(body.decode('utf-8', errors='replace'))
+            parser = _HTMLText(self._remaining_timeout)
+            decoded = body.decode('utf-8', errors='replace')
+            for offset in range(0, len(decoded), 8192):
+                self._remaining_timeout()
+                parser.feed(decoded[offset:offset + 8192])
             text, title, extractor, suffix = parser.text(), _plain(' '.join(parser.title), 300), 'stdlib HTMLParser with math alttext', '.html'
+            self._remaining_timeout()
         elif content_type.startswith('text/plain'):
             text, extractor, suffix = body.decode('utf-8'), 'UTF-8 text', '.txt'
         else:
@@ -1156,7 +1174,29 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             raise LiteratureError('Literature workflow time budget insufficient for provider rate limit')
         time.sleep(duration)
 
-    def _fetch(self, url, *, headers=None, max_bytes=MAX_BYTES):
+    def _check_robots(self, url):
+        parts = self._url(url)
+        if parts.hostname in API_HOSTS or (parts.hostname == 'openlibrary.org' and parts.path.endswith('.json')):
+            return
+        origin = urlunsplit((parts.scheme, parts.netloc, '', '', ''))
+        if origin not in self._robots:
+            rules = RobotFileParser()
+            try:
+                body, _, _ = self._fetch(origin + '/robots.txt', max_bytes=512_000, _robots=False)
+            except LiteratureError as exc:
+                if 'HTTP 404' in str(exc) or 'HTTP 410' in str(exc):
+                    rules.allow_all = True
+                elif 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+                    rules.disallow_all = True
+                else:
+                    raise
+            else:
+                rules.parse(body.decode('utf-8', errors='replace').splitlines())
+            self._robots[origin] = rules
+        if not self._robots[origin].can_fetch('SquareHarness', url):
+            raise LiteratureError('Source robots.txt disallows automated retrieval of this URL')
+
+    def _fetch(self, url, *, headers=None, max_bytes=MAX_BYTES, _robots=True):
         if not self.online:
             raise LiteratureError('Offline mode: internet access is disabled')
         headers = dict(headers or {})
@@ -1171,6 +1211,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         while True:
             host = self._url(url).hostname
             self._remaining_timeout()
+            if _robots:
+                self._check_robots(url)
             if self.stats['requests'] >= self.max_requests:
                 raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence')
             interval = 3.0 if host.endswith('arxiv.org') else 0.25

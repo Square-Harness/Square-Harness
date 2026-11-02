@@ -2,7 +2,7 @@
 
 The material is what the user has checked: pinned notes, a draft or a PDF, or the record of an
 Assistant conversation (its messages and the full results of its jobs). One writing call sees all
-of it at once, with reasoning on, and returns the document body; only material too long for the
+of it at once, reasoning when time permits, and returns the document body; only material too long for the
 context is written in consecutive parts. The controller builds the preamble itself (the request's
 notation first, then the template's, then a fitting saved style's, multi-token macros braced),
 supplies commands the sources use without defining, and compiles with latexmk in a temporary
@@ -13,6 +13,7 @@ they have checked, and the document is theirs to read.
 from .reporting import usage_footer
 import copy
 import hashlib
+import io
 import os
 from pathlib import Path
 import re
@@ -20,8 +21,10 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
+import zipfile
 
-from .ledger import _atomic_write
+from .ledger import _atomic_write, _directory, _regular
 from .research import ResearchBudget, ResearchRunner, remaining_limit
 from .style import (_group, definition_body, environment_definitions, grouped, list_profiles, macro_definitions,
                     style_digest, uses)
@@ -30,6 +33,7 @@ from .worker_errors import WorkerInputError
 TEMPLATE_SUFFIXES = ('.sty', '.cls', '.tex', '.bib')
 GRAPHIC_SUFFIXES = ('.pdf', '.png', '.jpg', '.jpeg')
 FIGURE_BYTES, FIGURES_BYTES = 20_000_000, 60_000_000
+SOURCE_BUNDLE_BYTES = 100_000_000
 _GRAPHIC = re.compile(r'\\includegraphics\*?\s*(?:\[[^\]]*\]\s*)?\{([^{}]+)\}')
 _CITE = re.compile(r'\\(?:no|paren|text|auto|foot|super)?cite[pt]?\*?\s*(?:\[[^\]]*\]\s*){0,2}\{([^{}]*)\}')
 _BIB_ENTRY = re.compile(r'@\s*([A-Za-z]+)\s*\{\s*([^,\s{}]+)\s*,', re.M)
@@ -44,7 +48,26 @@ MISSING_FIGURES = r'''% Figures not found next to the material are drawn as fram
 \makeatother'''
 
 
+_CODE_BLOCK = re.compile(r'\\begin\{(verbatim\*?|Verbatim\*?|lstlisting\*?|minted\*?)\}.*?\\end\{\1\}', re.S)
+
+
+def _protect_code(text):
+    blocks = []
+    prefix = 'SQUARELITERAL'
+    while prefix in text:
+        prefix += 'X'
+    def save(match):
+        blocks.append(match.group(0))
+        return f'{prefix}{len(blocks) - 1}END'
+    masked = _CODE_BLOCK.sub(save, text)
+    def restore(value):
+        return re.sub(re.escape(prefix) + r'(\d+)END', lambda m: blocks[int(m.group(1))], value)
+    return masked, restore
+
+
 def _uncommented(tex):
+    # Commands, labels and percent signs inside a code listing are literal text.
+    tex = _CODE_BLOCK.sub(lambda m: '\\begin{' + m.group(1) + '}\n\\end{' + m.group(1) + '}', tex)
     return re.sub(r'(?<!\\)%.*', '', tex)
 
 
@@ -71,7 +94,8 @@ def todo_comments(body):
     return [' '.join(part for part in item if part)[:500] for item in items]
 
 
-_REFERENCE = re.compile(r'\\(?:eqref|ref|cref|Cref|autoref|pageref|crefrange|Crefrange)\*?\s*\{([^{}]*)\}')
+_REFERENCE = re.compile(r'\\(?:eqref|ref|cref|Cref|autoref|pageref)\*?\s*\{([^{}]*)\}')
+_REFERENCE_RANGE = re.compile(r'\\(?:crefrange|Crefrange)\*?\s*\{([^{}]*)\}\s*\{([^{}]*)\}')
 _LABEL = re.compile(r'\\label\s*\{([^{}]*)\}')
 _POSITIONAL = re.compile(r'\b(?:the\s+(?:equation|display|formula|identity|inequality|estimate)\s+above|the\s+(?:above|previous|preceding)\s+'
                          r'(?:equation|display|formula|identity|inequality|estimate)|(?:equation|formula|identity|inequality|estimate)s?'
@@ -80,7 +104,14 @@ _POSITIONAL = re.compile(r'\b(?:the\s+(?:equation|display|formula|identity|inequ
 
 def normalised_references(body):
     """(\\ref{x}) and (\\eqref{x}) become \\eqref{x}: amsmath sets the parentheses."""
-    return re.sub(r'\(\s*\\(?:eq)?ref\s*\{([^{}]+)\}\s*\)', r'\\eqref{\1}', body)
+    body, restore = _protect_code(body)
+    return restore(re.sub(r'\(\s*\\(?:eq)?ref\s*\{([^{}]+)\}\s*\)', r'\\eqref{\1}', body))
+
+
+def reference_keys(text):
+    groups = _REFERENCE.findall(text) + [keys for match in _REFERENCE_RANGE.findall(text) for keys in match]
+    return [key.strip() for group in groups for key in group.split(',') if key.strip()]
+
 
 
 def reference_problems(body):
@@ -88,7 +119,7 @@ def reference_problems(body):
     formulas referred to by position or by a hand-typed number."""
     text = _uncommented(body)
     labels = [label.strip() for label in _LABEL.findall(text)]
-    references = [key.strip() for match in _REFERENCE.finditer(text) for key in match.group(1).split(',') if key.strip()]
+    references = reference_keys(text)
     undefined = list(dict.fromkeys(key for key in references if key not in labels))
     duplicated = list(dict.fromkeys(label for label in labels if labels.count(label) > 1))
     positional = list(dict.fromkeys(' '.join(m.group(0).split()) for m in _POSITIONAL.finditer(text)))
@@ -124,9 +155,10 @@ def tidy_numbering(body, protected=(), material=''):
     """Number only the formulas the text refers to: a label nothing references (and that the author's
     material does not have) is removed, the other rows of a multi-line display get \\notag, and a display
     left without labels is unnumbered (starred), unless the author's material has that display as it is."""
+    body, restore = _protect_code(body)
     from_material = lambda content: ' '.join(content.split()) in material
     text = _uncommented(body)
-    referenced = {key.strip() for match in _REFERENCE.finditer(text) for key in match.group(1).split(',')}
+    referenced = set(reference_keys(text))
     keep = lambda label: label.strip() in referenced or label.strip() in protected
     pattern = re.compile(r'\\begin\{(' + '|'.join(_NUMBERED) + r')\}(\{[^{}]*\})?(.*?)\\end\{\1\}', re.S)
 
@@ -149,12 +181,13 @@ def tidy_numbering(body, protected=(), material=''):
                 else row.rstrip() + ' \\notag' for row in rows]
         return f'\\begin{{{name}}}{argument}' + '\\\\'.join(rows) + f'\\end{{{name}}}'
 
-    return pattern.sub(tidy, body)
+    return restore(pattern.sub(tidy, body))
 
 
 def bibtex_entries(body):
     """(entries, rest): the BibTeX entries written in a body, commented or not, as (key, text), and the body
     without them (nor the BEGIN/END BIBTEX lines)."""
+    body, restore = _protect_code(body)
     lines, entries, rest, i = body.split('\n'), [], [], 0
     while i < len(lines):
         bare = re.sub(r'^\s*%\s?', '', lines[i])
@@ -173,17 +206,30 @@ def bibtex_entries(body):
         if not re.match(r'\s*%+\s*(?:BEGIN|END) BIBTEX\b', lines[i]):
             rest.append(lines[i])
         i += 1
-    return entries, re.sub(r'\n{3,}', '\n\n', '\n'.join(rest))
+    return entries, restore(re.sub(r'\n{3,}', '\n\n', '\n'.join(rest)))
 
 
 def entry_identifiers(text):
-    """The DOI, arXiv and zbMATH identifiers an entry gives, lower-cased."""
+    """Complete, typed identifiers in notes or BibTeX; arXiv versions identify the same work."""
     found = set()
-    for pattern in (r'doi\s*=\s*[{"]\s*(?:https?://(?:dx\.)?doi\.org/)?([^}"\s]+)', r'eprint\s*=\s*[{"]\s*([^}"\s]+)',
-                    r'\b(10\.\d{4,9}/[^\s},"]+)', r'arxiv\.org/abs/([^\s},"]+)', r'zbmath\.org/\?q=an:([\d.]+)',
-                    r'zbmath\.org/(\d{4,})', r'zbl\s*=\s*[{"]\s*([^}"\s]+)'):
-        found |= {m.lower().rstrip('.') for m in re.findall(pattern, text, re.I)}
+    for identifier in re.findall(r'\b10\.\d{4,9}/[^\s<>{}"]+', text, re.I):
+        identifier = identifier.lower().rstrip('.,;:')
+        while identifier.endswith((')', ']')):
+            closing = identifier[-1]
+            opening = '(' if closing == ')' else '['
+            if identifier.count(closing) <= identifier.count(opening):
+                break
+            identifier = identifier[:-1].rstrip('.,;:')
+        found.add('doi:' + identifier)
+    arxiv = r'(?<![\w.])(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})(?:v\d+)?(?![\w/-]|\.\w)'
+    for identifier in re.findall(r'(?:arxiv\s*:\s*|arxiv\.org/(?:abs|html|pdf)/|eprint\s*=\s*[{"]\s*)(' + arxiv + ')',
+                                 re.sub(r'\.pdf\b', '', text, flags=re.I), re.I):
+        found.add('arxiv:' + re.sub(r'v\d+$', '', identifier.lower()))
+    for pattern in (r'\bzbl\s*(?:=\s*[{"]\s*|:\s*|\s+)([\d.]+)',
+                    r'zbmath\.org/(?:\?q=an:)?([\d.]+)'):
+        found |= {'zbl:' + identifier.rstrip('.') for identifier in re.findall(pattern, text, re.I)}
     return found
+
 
 
 def bibliography_entries(text):
@@ -218,8 +264,10 @@ _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| shoul
 def announces_only(latex):
     """A reply that only says what the model would do (no tools exist here), or has no body at all."""
     body = [line for line in latex.splitlines()
-            if line.strip() and not line.lstrip().startswith('%') and not re.match(r'\s*\\(?:sub)*section\*?\{', line)]
+            if line.strip() and not line.lstrip().startswith('%')
+            and not re.fullmatch(r'\s*\\(?:sub)*section\*?\{[^{}]*\}\s*', line)]
     return not body or bool(_ANNOUNCE.match(body[0]) and len('\n'.join(body)) < 600)
+
 
 
 MATH_RULES = ('Write mathematics that compiles and means what the source means: braces around every subscript, '
@@ -316,6 +364,7 @@ def split_body(text):
     they move to the preamble, where every kind of definition is allowed.
     """
     text = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', text.strip())
+    text, restore = _protect_code(text)
     if '\\begin{document}' in text:
         head, text = text.split('\\begin{document}', 1)
         text = head[head.find('\\title') if '\\title' in head else len(head):] + '\n' + text
@@ -338,7 +387,7 @@ def split_body(text):
         if inner is not None:
             title = ' '.join(inner.split())
             text = text[:at] + text[end:]
-    return title, definitions.strip(), re.sub(r'\n{3,}', '\n\n', text).strip()
+    return restore(title), restore(definitions.strip()), restore(re.sub(r'\n{3,}', '\n\n', text).strip())
 
 
 def _pieces(text, room):
@@ -412,7 +461,23 @@ def template_vocabulary(sources):
     return macros[:80], theorems[:30], definitions[:80]
 
 
-def compile_latex(tex, files=(), timeout=60, assets=()):
+def _compile_files(tex, files, assets):
+    """The exact safe files used by both the compiler and the downloadable source bundle."""
+    contents = {}
+    for name, content in files:
+        base = Path(name).name
+        if base and not base.startswith('.') and base != 'document.tex':
+            contents[base] = content.encode('utf-8')
+    for name, data in assets:
+        parts = Path(name).parts
+        if parts and not Path(name).is_absolute() and not any(p in ('', '.', '..') or p.startswith('.') for p in parts):
+            contents[str(Path(*parts))] = data
+    contents['document.tex'] = tex.encode('utf-8')
+    return contents
+
+
+
+def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
     """Compile with latexmk in a scratch folder: no shell escape, paranoid file access.
 
     `files` are template texts, written under their base names; `assets` are (relative path, bytes)
@@ -421,17 +486,10 @@ def compile_latex(tex, files=(), timeout=60, assets=()):
     if exe is None:
         return {'available': False, 'ok': False, 'errors': [], 'log': '', 'pdf': None}
     with tempfile.TemporaryDirectory(prefix='square-writeup-') as folder:
-        for name, content in files:
-            base = Path(name).name
-            if base and not base.startswith('.') and base != 'document.tex':
-                Path(folder, base).write_text(content, encoding='utf-8')
-        for name, data in assets:
-            parts = Path(name).parts
-            if parts and not Path(name).is_absolute() and not any(p in ('', '.', '..') or p.startswith('.') for p in parts):
-                target = Path(folder, *parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-        Path(folder, 'document.tex').write_text(tex, encoding='utf-8')
+        for name, data in _compile_files(tex, files, assets).items():
+            target = Path(folder, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
         env = dict(os.environ, openin_any='p', openout_any='p', shell_escape='f', max_print_line='1000')
         command = [exe, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error',
                    '-no-shell-escape', 'document.tex']
@@ -440,9 +498,18 @@ def compile_latex(tex, files=(), timeout=60, assets=()):
             process = subprocess.Popen(command, cwd=folder, env=env, stdout=output, stderr=subprocess.STDOUT,
                                        stdin=subprocess.DEVNULL, start_new_session=True)
             try:
-                process.wait(timeout=max(1, timeout))
-            except subprocess.TimeoutExpired:
-                timed_out = True
+                deadline = time.monotonic() + max(0.1, timeout)
+                while process.poll() is None:
+                    if cancel is not None and cancel.is_set():
+                        raise KeyboardInterrupt
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        process.wait(timeout=min(0.1, remaining))
+                    except subprocess.TimeoutExpired:
+                        pass
             finally:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -465,6 +532,7 @@ def compile_latex(tex, files=(), timeout=60, assets=()):
     return {'available': True, 'ok': pdf is not None, 'errors': errors[:20], 'log': log, 'pdf': pdf}
 
 
+
 class WriteupRunner(ResearchRunner):
     """Write-ups and summaries. A `conversation` (the Assistant's record) is one more source;
     `scoped` lets the request choose what to write up from it; the `summary` variant follows the
@@ -485,6 +553,9 @@ class WriteupRunner(ResearchRunner):
     def _check_time(self):
         """A written document is always assembled, compiled and offered, even when time ran out while
         it was written: those steps call no model. The repair call keeps the limit (see _repair)."""
+        cancel = getattr(self.agent.client, 'cancel', None)
+        if cancel is not None and cancel.is_set():
+            raise KeyboardInterrupt
         phase = self.state.get('phase')
         if phase in ('assemble', 'compile', 'export') or (phase == 'repair' and not self._repairing):
             return
@@ -492,7 +563,7 @@ class WriteupRunner(ResearchRunner):
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
               conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
-              explain_templates=False, **budgets):
+              explain_templates=False, experiment_ids=(), **budgets):
         if variant not in (None, 'summary'):
             raise ValueError('Unknown write-up variant')
         if deliver not in ('folder', 'download'):
@@ -525,6 +596,7 @@ class WriteupRunner(ResearchRunner):
         self._variant, self._scoped, self._deliver = variant, bool(scoped or variant), deliver
         self._style_choice = dict(style_choice or {'mode': 'auto'})
         self._explain_templates = bool(explain_templates)
+        self._experiment_ids = list(dict.fromkeys(experiment_ids))
         # Notation the user defines in the request (\newcommand...) outranks templates and saved styles.
         self._request_macros, self._request_environments = macro_definitions(goal), environment_definitions(goal)
         return super().start(goal.strip() or SUMMARY_REQUEST, kind='writeup', source_files=source_files, **budgets)
@@ -550,6 +622,7 @@ class WriteupRunner(ResearchRunner):
                 'deliver': self._deliver, 'request_macros': self._request_macros,
                 'request_environments': self._request_environments, 'style_choice': self._style_choice,
                 'explain_templates': self._explain_templates,
+                'experiment_ids': self._experiment_ids,
                 'macros': [], 'theorems': [], 'definitions': [],
                 'style': None, 'style_checked': False, 'parts': [], 'title': '', 'body': '', 'model_definitions': '',
                 'document': '', 'compile': None, 'repaired': False, 'outputs': {}, 'supplied_macros': {},
@@ -676,12 +749,12 @@ class WriteupRunner(ResearchRunner):
             if note not in self.state['warnings']:
                 self.state['warnings'].append(note)
             return body
-        material = ' '.join(source['content'] for source in self._notes_in()).lower()
+        material = entry_identifiers(' '.join(source['content'] for source in self._notes_in()))
         cited = {key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',')}
         kept = {entry['key']: entry for entry in self.state.get('bibliography') or []}
         dropped = []
         for key, text in entries:
-            if key in cited and any(identifier in material for identifier in entry_identifiers(text)):
+            if key in cited and material.intersection(entry_identifiers(text)):
                 kept[key] = {'key': key, 'text': text}
             elif key in cited:
                 dropped.append(key)
@@ -753,6 +826,7 @@ class WriteupRunner(ResearchRunner):
     def _prepare(self):
         """Read the templates, cut the material into parts that fit, and pick a fitting saved style."""
         self.state['macros'], self.state['theorems'], self.state['definitions'] = template_vocabulary(self._templates_in())
+        self._pin_experiment_code()
         labels = {'conversation.md': 'CONVERSATION (as the user saw it: messages, answers and job results)',
                   'typed-notes.md': 'NOTES TYPED BY THE USER'}
         blocks = [f'=== {labels.get(s["path"], "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
@@ -853,14 +927,44 @@ class WriteupRunner(ResearchRunner):
                        '\n\n' + self._notation() + '\n\n' + self._style_note() +
                        '\n\nUSER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + part['text'])
         trailer = 'Write the document now: everything needed is above, and no tools are available.'
-        result = self._call('writing', instruction, cap=cap, think=True, minimum_output=minimum, sampling=self.SAMPLING,
+        if self.state.get('code_files'):
+            instruction += ('\n\nRECORDED PYTHON SOURCES: the controller includes the exact executed code. '
+                            'Use these commands for the code, never reconstruct or rewrite it:\n'
+                            + '\n'.join('\\lstinputlisting[language=Python]{' + name + '}' for name in self.state['code_files']))
+        if self.state.get('experiment_ids'):
+            from .numerics.artifacts import ExperimentStore
+            experiments = ExperimentStore(self.agent.workspace.root)
+            figures = []
+            for experiment in self.state['experiment_ids']:
+                try:
+                    record = experiments.load(experiment)
+                    figures += [f'{experiment}/{a["name"]}' for a in record.get('artifacts', [])
+                                if Path(a['name']).suffix.lower() in GRAPHIC_SUFFIXES]
+                except (ValueError, OSError, KeyError, TypeError):
+                    continue
+            if figures:
+                instruction += ('\n\nRECORDED FIGURES: these files are supplied by the controller. '
+                                'Use their exact references below in \\includegraphics; do not invent a filename '
+                                'or replace an available figure with a placeholder:\n' + '\n'.join(figures))
+        # A one-minute job needs its time for the document, not a long hidden reasoning prelude.
+        think = (self.state['settings']['max_seconds'] - self._elapsed() > 60
+                 and not part.get('retried') and not part.get('retried_incomplete'))
+        result = self._call('writing', instruction, cap=cap, think=think, minimum_output=minimum, sampling=self.SAMPLING,
                             thinking_budget=min(self.THINK_TOKENS, cap // 2), trailer=trailer)
         title, definitions, body = split_body(result['text'])
         body = normalised_references(body)
-        if result.get('stopped') == 'time' and body.strip():
-            # Out of time in the middle of the document: keep what was written, compile it and say so.
-            result = {**result, 'complete': True}
-            self.state['truncated'] = True
+        if result.get('stopped') == 'time':
+            if body.strip() and not announces_only(body):
+                part['body'] = body
+                if index == 0:
+                    self.state['title'] = title
+                self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
+            if any(p['body'].strip() for p in parts):
+                # Export all written parts, including when later parts have not been started.
+                self.state['truncated'] = True
+                self._join_parts()
+                return
+            raise ResearchBudget('Time ran out before the model wrote any document text; its stream is saved.')
         if result['complete'] and announces_only(body) and not part.get('retried'):
             part['retried'] = True  # a reply that only says what it would do: once more, plainly
             self._save()
@@ -885,11 +989,23 @@ class WriteupRunner(ResearchRunner):
             self.state['title'] = title
         self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
         if all(p['complete'] for p in parts):
-            body = self._take_bibtex('\n\n'.join(p['body'] for p in parts))
-            self.state['body'] = tidy_numbering(body, self._material_labels(), self._material_text())
-            self.state['phase'] = 'assemble'
+            self._join_parts()
+
+    def _join_parts(self):
+        body = self._take_bibtex('\n\n'.join(p['body'] for p in self.state['parts']))
+        self.state['body'] = tidy_numbering(body, self._material_labels(), self._material_text())
+        self.state['phase'] = 'assemble'
 
     def _assemble(self):
+        # Earlier jobs incorrectly supplied package-backed environments as theorems.
+        for name in ('lstlisting', 'verbatim', 'Verbatim', 'minted'):
+            self.state.setdefault('supplied_environments', {}).pop(name, None)
+        if self.state.get('repaired') and not any(c['role'] == 'repair' for c in self.state.get('calls', [])):
+            self.state['repaired'] = False
+        self.state['body'] = self._portable_material(self.state['body'])
+        for source in self._templates_in():
+            if not (source['path'].lower().endswith('.tex') and '\\begin{document}' in source['content']):
+                self._pin_file(Path(source['path']).name, source['content'].encode('utf-8'))
         template = next((s for s in self._templates_in(('.tex',)) if '\\begin{document}' in s['content']), None)
         title = self.state.get('title') or ('Summary' if self.state.get('variant') == 'summary' else 'Notes')
         if template:
@@ -930,6 +1046,21 @@ class WriteupRunner(ResearchRunner):
     def _package_preamble(self, preamble, body):
         """Packages the text needs and the preamble lacks, and placeholders for figures that are not there."""
         text, lines = _uncommented(body), []
+        self.state['missing_figures'] = []
+        if re.search(r'\\begin\{lstlisting\*?\}|\\lst(?:inputlisting|inline|set)\b', text):
+            if not re.search(_LOADED % 'listings', preamble):
+                lines.append('\\usepackage{listings}')
+            if not re.search(_LOADED % 'xcolor|color', preamble):
+                lines.append('\\usepackage{xcolor}')
+            lines.append('\\lstset{basicstyle=\\ttfamily\\footnotesize,columns=fullflexible,breaklines=true,'
+                         'keepspaces=true,showstringspaces=false}')
+        if '\\Needspace' in text and not re.search(_LOADED % 'needspace', preamble):
+            lines.append('\\usepackage{needspace}')
+        if re.search(r'\\begin\{Verbatim\*?\}', text) and not re.search(_LOADED % 'fancyvrb|fvextra', preamble):
+            lines.append('\\usepackage{fancyvrb}')
+        if re.search(r'\\(?:textcolor|color|colorbox|fcolorbox|definecolor)\b', text) and not re.search(_LOADED % 'xcolor|color', preamble):
+            if '\\usepackage{xcolor}' not in lines:
+                lines.append('\\usepackage{xcolor}')
         if (re.search(r'\\begin\{(?:enumerate|itemize|description)\}\s*\[', text)
                 and not re.search(_LOADED % 'enumitem|enumerate|paralist', preamble)):
             lines.append('\\usepackage[shortlabels]{enumitem}')  # \begin{enumerate}[(i)] needs it
@@ -1028,13 +1159,116 @@ class WriteupRunner(ResearchRunner):
         """(assets, missing): the figures the text includes, as (path in the document, bytes), and those not found."""
         assets, missing, total = [], [], 0
         for name in dict.fromkeys(n.strip() for n in _GRAPHIC.findall(_uncommented(body))):
+            pinned = next((f for f in self.state.get('source_files', []) if f['name'] == name), None)
+            if pinned:
+                data = self._source_bytes(pinned)
+                assets.append((name, data))
+                total += len(data)
+                continue
             path = next((p for folder in self._figure_folders() if (p := self._figure(folder, name))), None)
+            if path is None:
+                from .numerics.artifacts import ExperimentStore
+                experiments = ExperimentStore(self.agent.workspace.root)
+                for experiment in reversed(self.state.get('experiment_ids', [])):
+                    path = experiments.figure(experiment, name)
+                    if path is not None:
+                        break
             if path is None or total + path.stat().st_size > FIGURES_BYTES:
                 missing.append(name)
                 continue
             total += path.stat().st_size
             assets.append((name if Path(name).suffix.lower() in GRAPHIC_SUFFIXES else name + path.suffix, path.read_bytes()))
         return assets, missing
+
+    def _pin_file(self, name, data):
+        relative = Path(name)
+        if relative.is_absolute() or not relative.parts or any(p.startswith('.') for p in relative.parts):
+            raise ValueError('Unsafe write-up source name')
+        files = self.state.setdefault('source_files', [])
+        known = next((f for f in files if f['name'] == name), None)
+        if known:
+            if self._source_bytes(known) != data:
+                raise ValueError('Conflicting write-up source: ' + name)
+            return
+        folder = self.directory / 'artifacts' / 'sources'
+        _directory(folder, create=True)
+        for part in relative.parts[:-1]:
+            folder = folder / part
+            _directory(folder, create=True)
+        if sum(f['bytes'] for f in files) + len(data) > FIGURES_BYTES + 4_000_000:
+            raise ValueError('Write-up source files exceed 64 MB')
+        _atomic_write(folder / relative.name, data)
+        files.append({'name': name, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)})
+
+    def _source_bytes(self, record):
+        relative = Path(record['name'])
+        if relative.is_absolute() or any(p.startswith('.') for p in relative.parts):
+            raise ValueError('Unsafe write-up source name')
+        folder = self.directory / 'artifacts' / 'sources'
+        for part in ((), *[relative.parts[:i] for i in range(1, len(relative.parts))]):
+            _directory(folder.joinpath(*part))
+        path = folder / relative
+        _regular(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            data = stream.read(FIGURES_BYTES + 4_000_001)
+        if len(data) != record['bytes'] or hashlib.sha256(data).hexdigest() != record['sha256']:
+            raise ValueError('A pinned write-up source changed: ' + record['name'])
+        return data
+
+    def _pin_experiment_code(self):
+        if not re.search(r'\b(?:code|script|implementation|programme)\b', self.state['goal'], re.I):
+            return
+        from .numerics.artifacts import ExperimentStore
+        experiments = ExperimentStore(self.agent.workspace.root)
+        names = []
+        for experiment in self.state.get('experiment_ids', []):
+            try:
+                record = experiments.load(experiment)
+            except (ValueError, OSError):
+                continue
+            name = f'code/{experiment}.py'
+            self._pin_file(name, record['code'].encode('utf-8'))
+            names.append(name)
+        self.state['code_files'] = names
+
+    def _portable_material(self, body):
+        # The only hidden paths we resolve are hashed artifacts of this conversation's runs.
+        masked, restore = _protect_code(body)
+        def graphic(match):
+            name = match.group(1).strip()
+            assets, _ = self._figures(match.group(0))
+            if not assets:
+                return match.group(0)
+            original, data = assets[0]
+            target = (name if any(f['name'] == name for f in self.state.get('source_files', [])) else
+                      'figures/' + hashlib.sha256(data).hexdigest()[:12] + '-' + Path(original).name)
+            self._pin_file(target, data)
+            return match.group(0).replace('{' + match.group(1) + '}', '{' + target + '}')
+        body = restore(_GRAPHIC.sub(graphic, masked))
+        code_files = self.state.get('code_files', [])
+        if len(code_files) == 1:
+            command = '\\lstinputlisting[language=Python]{' + code_files[0] + '}'
+            originals = re.findall(r'```python\s*\n(.*?)```', self.state['goal'], re.S | re.I)
+            source = next(f for f in self.state['source_files'] if f['name'] == code_files[0])
+            originals.append(self._source_bytes(source).decode('utf-8'))
+            originals = {s.strip('\r\n') for s in originals}
+            def recorded(match):
+                block = match.group(0)
+                opening = re.match(r'\\begin\{[^}]+\}\s*(?:\[[^\]]*\]\s*)?', block)
+                content = block[opening.end():block.rfind('\\end{')].strip('\r\n')
+                return command if content in originals else block
+            body = _CODE_BLOCK.sub(recorded, body)
+        for name in code_files:
+            if not re.search(r'\\lstinputlisting\s*(?:\[[^\]]*\]\s*)?\{' + re.escape(name) + r'\}', _uncommented(body)):
+                body += '\n\n\\subsection*{Executed Python code}\n\\lstinputlisting[language=Python]{' + name + '}\n'
+        if code_files and not self._templates_in(('.tex', '.cls')):
+            masked, restore = _protect_code(body)
+            masked = re.sub(r'(?:\\Needspace\{0\.45\\textheight\}\s*)?'
+                            r'(\\(?:sub)*section\*?\{[^\n]+\}\s*)(?=\\begin\{figure\})',
+                            lambda m: '\\Needspace{0.45\\textheight}\n' + m.group(1), masked)
+            body = restore(masked)
+        return body
 
     def _defined(self, preamble):
         return set(self.state['macros']) | {next(g for g in m.groups() if g) for m in MACRO.finditer(preamble)}
@@ -1098,24 +1332,29 @@ class WriteupRunner(ResearchRunner):
         return named_definition(name)
 
     def _compile(self):
-        files = [(s['path'], s['content']) for s in self._templates_in()
-                 if not (s['path'].lower().endswith('.tex') and '\\begin{document}' in s['content'])]
+        if 'source_files' not in self.state:
+            self._assemble()  # older saved jobs had no durable source dependencies
         self.emit('notice', 'Compiling the document with latexmk')
         macros = self.state.setdefault('supplied_macros', {})
         environments = self.state.setdefault('supplied_environments', {})
-        for _ in range(8):  # supply what the text uses without defining, then compile again
-            remaining = self.state['settings']['max_seconds'] - self._elapsed()
-            assets, _ = self._figures(self.state['body'])
-            # At least 30 s: a document written within the time limit is still compiled after it.
-            result = compile_latex(self.state['document'], files, timeout=int(min(60, max(30, remaining))), assets=assets)
-            if result['ok'] or not result['available']:
+        remaining = self.state['settings']['max_seconds'] - self._elapsed()
+        # One bounded compile allowance; new definitions, rather than a fixed pass count, drive retries.
+        deadline = time.monotonic() + min(60, max(30, remaining))
+        cancel = getattr(self.agent.client, 'cancel', None)
+        while True:
+            self._check_time()
+            assets = [(f['name'], self._source_bytes(f)) for f in self.state.get('source_files', [])]
+            result = compile_latex(self.state['document'], timeout=max(0.1, deadline - time.monotonic()),
+                                   assets=assets, cancel=cancel)
+            if result['ok'] or not result['available'] or time.monotonic() >= deadline:
                 break
             found = {n: d for n in undefined_names(result['log']) if n not in macros and (d := self._definition_for(n))}
             # Share the theorem counter only when it exists (a template may define no theorem at all).
             counter = '[theorem]' if 'theorem' in set(THEOREM.findall(self.state['document'])) | set(environments) else ''
             new_environments = {n: (f'\\newtheorem*{{{n}}}{{{n[:-1].capitalize()}}}' if n.endswith('*') else
                                     f'\\newtheorem{{{n}}}{"" if n == "theorem" else counter}{{{n.capitalize()}}}')
-                                for n in undefined_environments(result['log']) if n not in environments}
+                                for n in undefined_environments(result['log']) if n not in environments
+                                and n.rstrip('*') in set(DEFAULT_THEOREMS) | {'thm', 'lem', 'prop', 'cor', 'defn', 'claim', 'assumption', 'example', 'hypothesis'} }
             if not found and not new_environments:
                 break
             macros.update(found)
@@ -1127,6 +1366,8 @@ class WriteupRunner(ResearchRunner):
         log_name = self._artifact('compile-log', result['log'] or 'No log.') if result['available'] else None
         if result['pdf']:
             _atomic_write(self.directory / 'artifacts' / 'compiled.pdf', result['pdf'])
+        else:
+            (self.directory / 'artifacts' / 'compiled.pdf').unlink(missing_ok=True)
         self.state['undefined'] = [n for n in undefined_names(result['log']) if n not in macros]
         self.state['compile'] = {'available': result['available'], 'ok': result['ok'], 'errors': result['errors'],
                                  'log': log_name, 'pdf': bool(result['pdf'])}
@@ -1136,7 +1377,6 @@ class WriteupRunner(ResearchRunner):
 
     def _repair(self):
         """One repair call on the whole document: fix the reported errors, change nothing else."""
-        self.state['repaired'] = True
         body, title = self.state['body'], self.state.get('title', '')
         if len(body) > self._room():
             self.state['warnings'].append('The document is too long for a repair call; fix the LaTeX errors on its page by hand.')
@@ -1152,21 +1392,30 @@ class WriteupRunner(ResearchRunner):
         if self.state.get('undefined'):
             report.append('Not defined anywhere: ' + ', '.join('\\' + n for n in self.state['undefined']) +
                           '. Write what they stand for with standard commands or the notation below.')
-        if self.state['settings']['max_seconds'] - self._elapsed() < 60:
+        braces = re.findall(r'(?<!\\)[{}]', _uncommented(body))
+        delta = braces.count('{') - braces.count('}')
+        if delta:
+            report.append(f'Outside literal code there are {abs(delta)} more '
+                          + ('opening than closing' if delta > 0 else 'closing than opening')
+                          + ' braces. Balance every command argument at its intended end.')
+        seconds_left = self.state['settings']['max_seconds'] - self._elapsed()
+        if seconds_left <= 0:
             self.state['warnings'].append('No time was left for a repair call; the LaTeX errors are on its page.')
             self.state['phase'] = 'export'
             return
         remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
         cap = int(min(self.WRITE_TOKENS, remaining))
         instruction = ('This LaTeX document does not compile. Fix these errors and change nothing else: the same text, '
-                       'mathematics and notation. Output the whole corrected body in the same form: \\title{...}, then '
+                       'mathematics and notation. Correct the broken LaTeX syntax, including missing closing braces, '
+                       'rather than repeating the unchanged broken text. Output the whole corrected body in the same form: \\title{...}, then '
                        'the text, without preamble or \\begin{document}. Keep every \\label and reference; a reference to a label '
                        'that does not exist gets its label on the formula or result it means. ' + MATH_RULES + '\n\n' + self._notation() +
                        '\n\nERRORS (with the lines around them):\n' + '\n'.join(report) +
                        '\n\nDOCUMENT BODY:\n\\title{' + title + '}\n' + body)
         self._repairing = True
+        self.state['repaired'] = True
         try:
-            result = self._call('repair', instruction, cap=cap, think=True, minimum_output=max(1, min(self._minimum_output(), cap)),
+            result = self._call('repair', instruction, cap=cap, think=seconds_left > 60, minimum_output=max(1, min(self._minimum_output(), cap)),
                                 sampling=self.SAMPLING, thinking_budget=min(4096, cap // 4),
                                 trailer='Output the whole corrected body now.')
         except ResearchBudget:
@@ -1190,16 +1439,28 @@ class WriteupRunner(ResearchRunner):
     def _free_path(self, name):
         path = self.agent.workspace.path(name, pdf=True)
         stem, number = path.stem, 2
-        while path.exists():
+        while path.exists() or path.is_symlink():
             path = path.with_name(f'{stem}-{number}{path.suffix}')
             number += 1
         return path
 
     def _export(self):
+        archive = io.BytesIO()
+        assets = [(source['name'], self._source_bytes(source)) for source in self.state.get('source_files', [])]
+        contents = _compile_files(self.state['document'], (), assets)
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name, data in contents.items():
+                bundle.writestr(name, data)
+        source_bytes = archive.getvalue()
+        if len(source_bytes) > SOURCE_BUNDLE_BYTES:
+            raise WorkerInputError('The complete source bundle exceeds the 100 MB download limit.',
+                                   code='writeup_source_too_large')
+        _atomic_write(self.directory / 'artifacts' / 'source.zip', source_bytes)
+        pdf_ok = bool((self.state.get('compile') or {}).get('ok'))
         if self.state.get('deliver') == 'download':
             # Kept with the job (the document in state.json, the PDF in artifacts/) until the user downloads it.
             name = download_name(self.state)
-            self.state['outputs'] = {'download': name, 'pdf': (self.directory / 'artifacts' / 'compiled.pdf').exists()}
+            self.state['outputs'] = {'download': name, 'pdf': pdf_ok, 'source': name[:-4] + '-source.zip'}
             self.emit('notice', 'Ready to download as ' + name)
             return
         workspace = self.agent.workspace
@@ -1214,17 +1475,24 @@ class WriteupRunner(ResearchRunner):
         _atomic_write(tex, self.state['document'].encode('utf-8'))
         outputs = {'tex': str(tex.relative_to(workspace.root))}
         compiled = self.directory / 'artifacts' / 'compiled.pdf'
-        if compiled.exists():
+        if pdf_ok and compiled.exists():
             pdf = self._free_path(str(Path(outputs['tex']).with_suffix('.pdf')))
             _atomic_write(pdf, compiled.read_bytes())
             outputs['pdf'] = str(pdf.relative_to(workspace.root))
+        bundle_path = tex.with_name(tex.stem + '-source.zip')
+        number = 2
+        while bundle_path.exists() or bundle_path.is_symlink():
+            bundle_path = tex.with_name(tex.stem + f'-source-{number}.zip')
+            number += 1
+        _atomic_write(bundle_path, source_bytes)
+        outputs['source'] = str(bundle_path.relative_to(workspace.root))
         self.state['outputs'] = outputs
         self.emit('notice', 'Wrote ' + outputs['tex'] + (' and ' + outputs['pdf'] if 'pdf' in outputs else ''))
 
     def _finish(self):
         compile_state = self.state.get('compile') or {}
         complete = (compile_state.get('ok') and all(part['complete'] for part in self.state.get('parts', []))
-                    and not self.state.get('truncated'))
+                    and not self.state.get('truncated') and not self.state.get('missing_figures'))
         self.state['status'] = 'complete' if complete else 'partial'
         self.state['stop_reason'] = ('Written and compiled; read it before using it.' if complete else
                                      'Written; see the checks for what still needs you.')
@@ -1237,7 +1505,22 @@ class WriteupRunner(ResearchRunner):
         noun = 'Summary' if s.get('variant') == 'summary' else 'Write-up'
         if not name:
             return f'The {noun.lower()} was not finished: {s.get("stop_reason") or s["status"]}'
-        parts = [f'{noun} ready: `{name}`' + (' (download it from the card above).' if outputs.get('download') else '.')]
+        if compile_state.get('available') and not compile_state.get('ok'):
+            error = next((e['message'] for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), 'see its page')
+            return f'{noun} draft saved, but compilation failed: {error} No PDF was produced; the source bundle and log are available.'
+        label = 'ready' if s['status'] == 'complete' else 'partial draft saved'
+        parts = [f'{noun} {label}: `{name}`' + (' (download it from the card above).' if outputs.get('download') else '.')]
+        if s['status'] == 'complete' and outputs.get('pdf') and outputs.get('source'):
+            parts = [f'{noun} ready: PDF and complete LaTeX sources are available from the card above.'
+                     if outputs.get('download') else f'{noun} ready: `{outputs["pdf"]}` and `{outputs["source"]}`.']
+        if not compile_state.get('available'):
+            parts.append('LaTeX is not installed here; no PDF was produced.')
+        elif s.get('truncated'):
+            parts.append('Time ran out; the text is incomplete.')
+        elif s.get('missing_figures'):
+            parts.append('The PDF contains placeholders for missing figures.')
+        if outputs.get('source'):
+            parts.append('Download Sources (.zip) for the LaTeX together with its code, figures and template files.')
         if compile_state.get('available') and not compile_state.get('ok'):
             parts.append('It did not compile; the errors are on its page.')
         todo = len(re.findall(r'%\s*TODO', s.get('document', '')))

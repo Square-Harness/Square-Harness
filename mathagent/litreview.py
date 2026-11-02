@@ -18,7 +18,8 @@ from xml.etree.ElementTree import ParseError
 from .jsonutil import complete_fields, loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
-from .literature import LiteratureError, _fold
+from .agent import AgentError
+from .literature import ARXIV_ID, LiteratureError, _fold
 from .research import ResearchRunner, ResearchBudget, _reference_prompt, remaining_limit
 
 PIPELINE = 'reading-list-v1'
@@ -90,6 +91,13 @@ def _norm(title):
 def _surname(author):
     author = str(author).strip()
     return (author.split(',')[0] if ',' in author else (author.split() or [''])[-1]).strip()
+
+
+def _arxiv_doi(doi):
+    match = re.fullmatch(r'10\.48550/arxiv\.(.+)', doi or '', re.I)
+    if match and ARXIV_ID.fullmatch(match[1]):
+        return re.sub(r'v\d+$', '', match[1].lower())
+    return None
 
 
 POLICY = """You are the local mathematical research assistant, building a reading list. Follow the saved skill.
@@ -185,9 +193,10 @@ class ReviewRunner(ResearchRunner):
             log[previous] = entry
 
     def _fetch(self, source, query, call):
-        """Run one source call; failures are logged (and reported as coverage gaps), never fatal.
+        """Log source failures as coverage gaps; time-outs pause at the current checkpoint.
         A source out of quota is not asked again in this job."""
         self._cancel()
+        self._check_time()
         if source in self.state['down']:
             self._log(source, query, error='skipped: unavailable earlier in this job')
             return []
@@ -195,9 +204,13 @@ class ReviewRunner(ResearchRunner):
             results = call()
         except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
+            self._log(source, query, error=message[:200])
+            if 'workflow time budget' in message.lower() or self._elapsed() >= self.state['settings']['max_seconds']:
+                raise ResearchBudget(message) from exc
+            if re.search(r'timed out|timeout', message, re.I):
+                raise AgentError(message) from exc
             if re.search(r'rate limited|budget used up|HTTP 429|request budget exhausted|Offline', message):
                 self.state['down'].append(source)
-            self._log(source, query, error=message[:200])
             return []
         if not isinstance(results, list):
             self._log(source, query, error='Malformed provider result: expected a list')
@@ -222,7 +235,8 @@ class ReviewRunner(ResearchRunner):
                   'authors': [html.unescape(str(a)) for a in raw.get('authors') or []][:15],
                   'year': raw.get('year') or (str(raw.get('published') or '')[:4] or None),
                   'type': raw.get('type'), 'venue': clean(raw.get('venue') or raw.get('source')).rstrip(' .') or None,
-                  'doi': (raw.get('doi') or '').replace('https://doi.org/', '') or None,
+                  'doi': re.sub(r'^https?://(?:dx\.)?doi\.org/', '', str(raw.get('doi') or
+                              (ident[4:] if ident.startswith('doi:') else '')), flags=re.I) or None,
                   'arxiv': raw.get('arxiv_id') or (ident[6:] if ident.startswith('arxiv:') else None),
                   'zbl': ident[4:] if ident.startswith('zbl:') else None,  # Crossref identifiers are doi:...
                   's2': ident[3:] if ident.startswith('s2:') else None,
@@ -230,6 +244,7 @@ class ReviewRunner(ResearchRunner):
                   'abstract': str(raw.get('abstract') or '')[:700], 'review': str(raw.get('review') or '')[:1500],
                   'cited_by': raw.get('cited_by'), 'references': raw.get('references') or [],
                   'msc': raw.get('msc') or [], 'found_by': [via], 'sources': [source]}
+        record['arxiv'] = record['arxiv'] or _arxiv_doi(record['doi'])
         if record['arxiv']:
             record['arxiv'] = re.sub(r'v\d+$', '', record['arxiv'])
         if not record['title']:
@@ -241,7 +256,7 @@ class ReviewRunner(ResearchRunner):
         pool = self.state['pool']
         match = next((r for r in pool if (record['s2'] and r['s2'] == record['s2'])
                       or (record['doi'] and r['doi'] and r['doi'].lower() == record['doi'].lower())
-                      or (record['arxiv'] and r['arxiv'] == record['arxiv'])
+                      or (record['arxiv'] and (r['arxiv'] or _arxiv_doi(r['doi'])) == record['arxiv'])
                       or self._same_title_work(r, record)), None)
         if match is None:
             record['n'] = len(pool) + 1
@@ -480,19 +495,20 @@ class ReviewRunner(ResearchRunner):
             return (words and len(words & found) >= max(1, math.ceil(0.6 * len(words)))
                     and (not names or any(re.search(r'(?<![a-z])' + re.escape(_fold(n)) + r'(?![a-z])', authors) for n in names)))
         query = (title + ' ' + ' '.join(names)).strip()
-        log_start = len(self.state['sweep_log'])
+        queries = {('crossref', query)}
         hits = [r for r in self._fetch('crossref', query, lambda: lit.crossref(query=query, limit=5)) if fits(r)]
         if names:
             zb = f'au:{names[0]} ti:' + ' '.join(re.findall(r'[^\W\d_]+', title)[:8])
+            queries.add(('zbmath', zb))
             hits += [r for r in self._fetch('zbmath', zb, lambda: lit.search_papers(zb, 'zbmath', 3)['results']) if fits(r)]
         for raw in hits[:2]:
             ident = str(raw.get('identifier', ''))
             self._record(raw, 'zbmath' if ident.startswith('zbl:') else 'crossref', via)
+        self.state['unverified'] = [u for u in self.state['unverified'] if (u['title'], u['authors']) != (title, names)]
         if not hits:
             year = re.search(r'(?:1[5-9]|20)\d\d', str(seed.get('year') or ''))
-            attempts = self.state['sweep_log'][log_start:]
+            attempts = [row for row in self.state['sweep_log'] if (row['source'], row['query']) in queries]
             checked = any(not row['error'] for row in attempts)
-            self.state['unverified'] = [u for u in self.state['unverified'] if (u['title'], u['authors']) != (title, names)]
             self.state['unverified'].append({'authors': names, 'title': title, 'year': year.group() if year else '',
                 'checked': checked, 'reason': '; '.join(dict.fromkeys(row['error'] for row in attempts if row['error']))})
 
@@ -571,7 +587,8 @@ class ReviewRunner(ResearchRunner):
             'THE USER\'S REQUEST (relevance is judged against it, not only against the topic above):\n' + self.state['goal'][:1500] + '\n\n'
             'CANDIDATES (number | year | kind | authors | title | signals | abstract):\n' + lines)
         self.emit('notice', f'Screening candidates {len(self.state["screened"]) + 1}–{len(self.state["screened"]) + len(batch)}')
-        value = self._json(self._call('screen', instruction, cap=2500, format_schema=SCREEN_SCHEMA)) or {}
+        result = self._call('screen', instruction, cap=2500, format_schema=SCREEN_SCHEMA)
+        value = self._json(result) or {}
         answered = set()
         for item in value.get('items') or []:
             if isinstance(item, dict) and item.get('n') in batch and item.get('role') in ROLES:
@@ -583,7 +600,8 @@ class ReviewRunner(ResearchRunner):
                                                           'role': item['role'], 'note': str(item.get('note') or '')[:120]}
                 answered.add(item['n'])
         for n in batch:
-            attempts[str(n)] = attempts.get(str(n), 0) + 1
+            if n in answered or result.get('stopped') != 'time':
+                attempts[str(n)] = attempts.get(str(n), 0) + 1
             if n not in answered:
                 failed[str(n)] = 'No usable screening answer; not classified as irrelevant.'
             else:
@@ -617,7 +635,10 @@ class ReviewRunner(ResearchRunner):
             'WORKS:\n' + lines)
         self.emit('notice', 'Organising the reading list')
         try:
-            value = self._json(self._call('organise', instruction, cap=2500, format_schema=ORGANISE_SCHEMA)) or {}
+            result = self._call('organise', instruction, cap=2500, format_schema=ORGANISE_SCHEMA)
+            if result.get('stopped') == 'time':
+                self.state.setdefault('cut', 'organise')
+            value = self._json(result) or {}
         except ResearchBudget as exc:
             self.state['warnings'].append('Organisation stopped: ' + str(exc))
             self.state.setdefault('cut', 'organise')
@@ -680,6 +701,8 @@ class ReviewRunner(ResearchRunner):
         attempts = self.state.setdefault('annotation_attempts', {})
         failed = self.state.setdefault('annotation_failed', {})
         todo = [n for n in self._chosen() if str(n) not in self.state['annotations'] and attempts.get(str(n), 0) < 2]
+        if todo and self._elapsed() >= self.state['settings']['max_seconds'] * .9:
+            self.state.setdefault('cut', 'annotate')
         if not todo or not self._remaining(.9):
             self.state['phase'] = 'write'
             return
@@ -693,7 +716,10 @@ class ReviewRunner(ResearchRunner):
             'they do not state. Add a prerequisite only when the jump is steep.\n\nWORKS:\n' + lines)
         self.emit('notice', f'Annotating {len(batch)} works')
         try:
-            value = self._json(self._call('annotate', instruction, cap=2400, format_schema=ANNOTATE_SCHEMA)) or {}
+            result = self._call('annotate', instruction, cap=2400, format_schema=ANNOTATE_SCHEMA)
+            if result.get('stopped') == 'time':
+                self.state.setdefault('cut', 'annotate')
+            value = self._json(result) or {}
         except ResearchBudget as exc:
             self.state['warnings'].append('Annotations stopped: ' + str(exc))
             self.state.setdefault('cut', 'annotate')
@@ -704,7 +730,8 @@ class ReviewRunner(ResearchRunner):
                 self.state['annotations'][str(item['n'])] = {'why': str(item['why']),
                                                              'prerequisite': str(item.get('prerequisite') or '')}
         for n in batch:
-            attempts[str(n)] = attempts.get(str(n), 0) + 1
+            if str(n) in self.state['annotations'] or result.get('stopped') != 'time':
+                attempts[str(n)] = attempts.get(str(n), 0) + 1
             if str(n) not in self.state['annotations']:
                 failed[str(n)] = 'No usable annotation was produced.'
             else:
@@ -812,7 +839,7 @@ class ReviewRunner(ResearchRunner):
 
     def _recover(self):
         super()._recover()
-        if self.state.get('cut') and self.state['phase'] == 'done':
+        if self.state.get('cut'):
             # Resumed with more time: go back to the step that ran out of it.
             self.state['phase'] = self.state.pop('cut')
 

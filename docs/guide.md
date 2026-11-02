@@ -143,6 +143,17 @@ one with a message.
   once; the phone stays paired. This is plain HTTP on your network: use it only
   on a trusted network, or through an SSH tunnel or a VPN.
 
+Explicitly attached files stay available to their conversation and its fresh
+review even when that file type is hidden from general discovery. When approving
+a file edit, SH refuses the write if the file changed since the displayed diff.
+Chat mathematics and sidebar previews use supported macros from your requests,
+attachments, selected writing style and an unambiguous saved template. Request
+notation takes precedence, and one conversation's definitions do not leak into
+another. KaTeX's restrictions on unsafe commands still apply.
+
+Temporary model or source outages leave saved work resumable. Resuming retries
+the same child job; cancelled queued turns leave a clear notice in the chat.
+
 ### The terminal
 
 `square-harness --workspace <folder>` opens a prompt. Proof is the default: type
@@ -271,6 +282,8 @@ found, and refers to them by number. It cannot invent a reference: works it
 remembers are kept only if a source returns them. A reading list needs at least
 4 minutes and 40 source requests, so Low is raised to that and says so; a list
 cut short by time is saved as far as it got and resumes with more time.
+Unfinished source queries and seed checks are retried on resume rather than
+marked complete by a timeout. An arXiv record and its arXiv DOI count as one work.
 
 ### Quick review, Review, Detailed review, Explain
 
@@ -341,19 +354,31 @@ How it works:
 
 1. One writing call reads all the material, your request, your notation and your
    style, and writes the document. Long material is written in consecutive parts.
+   With at most a minute left, it writes directly without a hidden reasoning
+   prelude. If time runs out, the text already written is compiled and offered
+   as a partial draft. A conversation's sandbox results supply the executed
+   Python code and their recorded figures, even if the answer did not repeat them.
 2. Equations the text uses again are numbered and cited with `\eqref`; displays
    nothing refers to stay unnumbered. Labels from your own material are kept.
 3. The document is compiled with `latexmk` when it is installed, in a temporary
    folder, without shell escape and with restricted file access. If it does not
    compile, one repair call fixes the reported errors.
+   Missing supported commands are supplied within one bounded compile allowance;
+   pausing also stops compilation promptly.
 4. The document opens with **Points to check**: its `% TODO` comments, citations
    and figures it could not resolve, and references to undefined labels. Delete
    that block once they are settled.
 
-From a conversation, the card offers **Download .tex** (and **Download PDF** when
-it compiled); the copy is deleted with the conversation. From the New write-up
+From a conversation, the card offers **Download PDF** when compilation succeeds
+and **Sources (.zip)** containing the LaTeX and the exact code, figures and
+template files it needs. Extract that ZIP into a folder to compile it yourself.
+**Main .tex only** gives only the main file, without those dependencies.
+The saved copy is deleted with the conversation. From the New write-up
 form or the terminal, the `.tex` and the PDF are written in your folder, and an
-existing file is never replaced. In the web app, a template can be saved under a
+existing file is never replaced. A sources ZIP is saved alongside them. Code
+listings use the executed sandbox source rather than a model's reconstruction.
+Compilation failures are reported as unfinished drafts, with the compiler error.
+In the web app, a template can be saved under a
 name and reused in any folder.
 
 ### Writing styles

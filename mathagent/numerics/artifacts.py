@@ -18,6 +18,7 @@ import threading
 import uuid
 
 from .executor import ARTIFACT_NAME
+from ..ledger import _directory, _read, _regular
 
 EXPERIMENT_ID = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
 STORED_OUTPUT = 200_000
@@ -88,10 +89,32 @@ class ExperimentStore:
 
     def load(self, experiment_id):
         path = self.path(experiment_id, 'record.json')
+        for folder in (self.root / '.mathagent', self.directory, path.parent):
+            _directory(folder)
+        return json.loads(_read(path))
+
+    def figure(self, experiment_id, name):
+        """A declared, unchanged graphic of this run, addressed by filename or experiment/filename."""
         try:
-            return json.loads(path.read_text(encoding='utf-8'))
-        except FileNotFoundError:
-            raise ValueError(f'No experiment {experiment_id} in this workspace') from None
+            record = self.load(experiment_id)
+            for artifact in record.get('artifacts', []):
+                filename = artifact['name']
+                relative = Path(name)
+                portable_alias = (not relative.is_absolute() and relative.parts
+                                  and not any(p.startswith('.') for p in relative.parts)
+                                  and relative.name in (filename, str(Path(filename).with_suffix(''))))
+                if name not in (filename, f'{experiment_id}/{filename}', str(Path(filename).with_suffix('')),
+                                f'.mathagent/experiments/{experiment_id}/{filename}') and not portable_alias:
+                    continue
+                if Path(filename).suffix.lower() not in ('.png', '.pdf', '.jpg', '.jpeg'):
+                    continue
+                path = self.path(experiment_id, filename)
+                _regular(path)
+                if path.stat().st_size <= 16_000_000 and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.get('sha256'):
+                    return path
+        except (ValueError, OSError, KeyError, TypeError):
+            pass
+        return None
 
     def list(self, limit=50):
         if not self.directory.is_dir():

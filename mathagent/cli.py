@@ -462,7 +462,9 @@ def main():
         if agent.mode == 'prove':
             if args.output:
                 raise ValueError('--output is for literature/referee reports; proof reports save automatically')
-            if args.proof_tokens is not None and args.proof_tokens < args.proof_solve_tokens + args.proof_verify_tokens:
+            proof_allowance = sum(min(limit, args.specialist_output_tokens or limit)
+                                  for limit in (args.proof_solve_tokens, args.proof_verify_tokens))
+            if args.proof_tokens is not None and args.proof_tokens < proof_allowance:
                 raise ValueError('--proof-tokens must cover one full solve and verification; reduce their explicit limits or raise the total')
             unpinned = unpinned_files(query)
             if unpinned:

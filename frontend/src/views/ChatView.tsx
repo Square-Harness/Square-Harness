@@ -9,7 +9,7 @@ import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } fro
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
-import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
+import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
@@ -187,9 +187,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     try { await api.review(id) } catch (reason) { setSendError((reason as Error).message) } finally { setSending(false) }
   }
   // Another conversation's work can be queued; this conversation has one active turn.
-  const blocked = work.blocked || paused
+  const blocked = work.blocked
 
   return (
+    <MathMacrosProvider definitions={data?.math_macros}>
     <div className="chat">
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
@@ -277,6 +278,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <ErrorNote>{sendError || taskError}</ErrorNote>
       </form>
     </div>
+    </MathMacrosProvider>
   )
 }
 
@@ -493,9 +495,10 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && item.outputs?.download && <>
-            <a className="btn btn-small btn-primary" href={api.researchTexUrl(item.job_id)} download={item.outputs.download}>Download .tex</a>
-            {item.outputs.pdf && <a className="btn btn-small" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
+          {item.job_id && <>
+            {item.outputs?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
+            {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
+            {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (

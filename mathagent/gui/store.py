@@ -21,8 +21,8 @@ import uuid
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace
-from ..style import list_profiles, load_choice, public_profile, read_template, save_choice, set_template
-from ..writeup import TEMPLATE_SUFFIXES, download_name
+from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
+from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name
 
 CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
@@ -451,6 +451,21 @@ def research_tex(root, job_id):
     return name, state['document'].encode('utf-8')
 
 
+def research_source(root, job_id):
+    state = research_state(root, job_id)
+    name = (state.get('outputs') or {}).get('source')
+    if state['kind'] != 'writeup' or not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.zip', name):
+        raise NotFound('This write-up has no source bundle')
+    path = _job_directory(root, job_id) / 'artifacts' / 'source.zip'
+    _regular(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(SOURCE_BUNDLE_BYTES + 1)
+    if len(data) > SOURCE_BUNDLE_BYTES:
+        raise ValueError('Source bundle exceeds the download limit')
+    return name, data
+
+
 def discard_download(root, job_id):
     """Delete a write-up kept for download (its conversation is gone); other jobs stay."""
     try:
@@ -618,16 +633,20 @@ def update_chat_settings(root, chat_id, *, think=None, online=None):
     return chat
 
 
-def list_chats(root):
+def list_chats(root, templates_root=None):
     base = _chats(root)
     if base is None:
         return []
     chats = []
+    def load(path):
+        chat = load_chat(root, path.name[:-5])
+        chat['_display_macros'] = chat_macros(root, chat, templates_root)
+        return chat
     for path in base.iterdir():
         if not path.name.endswith('.json') or not _ID.fullmatch(path.name[:-5]) or path.is_symlink():
             continue
         try:
-            chat = _cached(path, lambda: load_chat(root, path.name[:-5]))
+            chat = _cached(path, lambda: load(path))
         except (OSError, ValueError, NotFound):
             continue
         last = next((item['content'] if item.get('role') != 'route' else
@@ -638,12 +657,12 @@ def list_chats(root):
         chats.append({'id': chat['id'], 'kind': chat['mode'], 'title': chat['title'] or 'New conversation',
                       'updated_at': chat['updated_at'], 'created_at': chat['created_at'],
                       'messages': sum(1 for item in chat['transcript'] if item.get('role') == 'user'),
-                      'preview': one_line(last, 140)})
+                      'preview': one_line(last, 140), 'math_macros': chat['_display_macros']})
     return sorted(chats, key=lambda chat: chat['updated_at'], reverse=True)
 
 
 @_locked_chat
-def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None):
+def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -657,6 +676,10 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if message['role'] == 'user' and not echo_user:
             continue  # Default mode already shows the message and its route card
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
+        if message['role'] == 'user':
+            item['files'] = list(files)
+            if user_content is not None:
+                item['content'] = user_content
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
@@ -678,7 +701,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     chat['history'] = history
     chat['transcript'].extend(items)
     if not chat['title']:
-        chat['title'] = one_line(history[start]['content'], 80)
+        chat['title'] = one_line(history[start]['content'] if user_content is None else user_content, 80)
     _save_chat(root, chat)
 
 
@@ -750,10 +773,11 @@ def assistant_view(chat):
     reserved = budget.get('reserved_tokens', 0)
     progress = state.get('progress') if status != 'set_aside' else None
     if not isinstance(progress, dict) and status != 'set_aside':
-        progress = next((child.get('result', {}).get('progress')
-                         for child in reversed(state.get('children') or [])
-                         if isinstance(child.get('result'), dict)
-                         and isinstance(child['result'].get('progress'), dict)), None)
+        children = state.get('children') or []
+        result = children[-1].get('result') if children else None
+        progress = result.get('progress') if isinstance(result, dict) and not result.get('error') else None
+        if not isinstance(progress, dict):
+            progress = None
     # Standard-reference answers are rendered directly from one completed
     # worker. Its inherited research-round counters describe an old phase,
     # not work still owed by this finished, bounded bibliographic lookup.
@@ -1005,11 +1029,18 @@ def _saved_result(root, mode, job_id):
         return '', ''
 
 
+def conversation_experiments(root, chat_id, before=None):
+    """Only the sandbox runs shown in this conversation, in transcript order."""
+    return list(dict.fromkeys(item['experiment'] for item in load_chat(root, chat_id)['transcript'][:before]
+                              if item.get('role') == 'experiment' and isinstance(item.get('experiment'), str)
+                              and _EXPERIMENT.fullmatch(item['experiment'])))
+
+
 def conversation_record(root, chat_id, before=None, skip=None):
     """An Assistant conversation as one text source for a write-up or a summary.
 
     In the order the user saw it: their messages, the answers, and the full final
-    text of each finished job (proofs with their review status, reports, documents).
+    text of each finished job, and sandbox code, output and figure names.
     Reading and web tools are left out: their output is source material, not a result.
     `before` stops at that transcript index; `skip` leaves out one item (the current request, so that
     results finished earlier in the same turn still count).
@@ -1043,6 +1074,18 @@ def conversation_record(root, chat_id, before=None, skip=None):
             parts.append('## User' + (f' (attached: {", ".join(files)})' if files else '') + '\n\n' + content)
         elif role == 'assistant' and content:
             parts.append('## Assistant\n\n' + content)
+        elif role == 'experiment':
+            from ..numerics.artifacts import ExperimentStore
+            try:
+                record = ExperimentStore(root).load(item.get('experiment'))
+            except (ValueError, OSError):
+                parts.append('## Sandbox result\n\nThe saved experiment is no longer available.')
+                continue
+            figures = [a['name'] for a in record.get('artifacts', []) if Path(a.get('name', '')).suffix.lower()
+                       in ('.png', '.pdf', '.jpg', '.jpeg')]
+            parts.append(f'## Sandbox result ({record["status"]})\n\nExecuted Python code (seed: {record.get("seed")}):\n\n'
+                         + '```python\n' + record['code'] + '\n```\n\nOutput:\n' + record.get('stdout', '')
+                         + '\nFigures available to the document: ' + ', '.join(figures))
         elif role == 'route' and item.get('status') == 'done':
             mode = item.get('mode')
             # The worker's own result when the Assistant ran it; a suggested job's saved state otherwise.
@@ -1072,6 +1115,40 @@ def conversation_record(root, chat_id, before=None, skip=None):
 def style_choice(root):
     """Which saved style write-ups use."""
     return load_choice(root)
+
+
+def chat_macros(root, chat, base=None):
+    """Display notation from the selected style, templates, attachments and user requests."""
+    base = base or root
+    profiles, choice = list_profiles(base), load_choice(base)
+    profile = next((p for p in profiles if p['name'] == choice.get('style')), None) if choice['mode'] in ('style', 'domain') else None
+    if choice['mode'] == 'auto' and len(profiles) == 1:
+        profile = profiles[0]
+    texts = []
+    if profile:
+        domain = next((d for d in profile['domains'] if d['name'] == choice.get('domain')), None)
+        articles = set(domain['articles']) if domain else None
+        texts.extend(m.get('definition', '') for m in profile['macros']
+                     if articles is None or articles.intersection(m.get('articles', [])))
+        texts.extend(f.get('content', '') for f in profile.get('template', []))
+    templates = list_templates(base)
+    if len(templates) == 1:
+        texts.extend(content for _, content in load_template(base, templates[0]['name']))
+    workspace = Workspace(root)
+    files = list(dict.fromkeys(name for item in chat['transcript'] if item.get('role') in ('user', 'route')
+                               for name in item.get('files') or []))
+    for name in files[-20:]:
+        try:
+            path = workspace.path(name)
+            if path.suffix.lower() in ('.tex', '.sty', '.cls'):
+                texts.append(workspace.text(path))
+        except (OSError, ValueError, UnicodeError):
+            continue
+    texts.extend(item.get('content', '') for item in chat['transcript'] if item.get('role') == 'user')
+    definitions = {}
+    for text in texts:
+        definitions.update(macro_definitions(text))
+    return dict(list(definitions.items())[-200:])
 
 
 def set_style_choice(root, mode, style=None, domain=None):

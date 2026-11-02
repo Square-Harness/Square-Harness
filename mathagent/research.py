@@ -397,6 +397,8 @@ class ResearchRunner:
             self._seconds_before = self.state['seconds_used']
             self._clock = time.monotonic()
             self.state['status'] = 'running'
+            self.state.pop('worker_error', None)
+            self.state.pop('stop_reason', None)
             if self.literature and self.state.get('literature_snapshot'):
                 online = self.literature.online
                 self.literature.reset_budget(max_requests=self.state['settings']['max_requests'], max_chars=self.state['settings']['max_chars'])
@@ -748,7 +750,7 @@ class ResearchRunner:
             fd = os.open(self.directory / 'artifacts' / stream_name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
             with os.fdopen(fd, 'w', encoding='utf-8') as output:
                 stream = client.stream(payload)
-                for event in stream:
+                for event in self._timed_events(stream):
                     output.write(json.dumps(event, ensure_ascii=False) + '\n')
                     output.flush()
                     os.fsync(output.fileno())
@@ -771,6 +773,8 @@ class ResearchRunner:
                     if self._elapsed() >= settings['max_seconds']:
                         stopped = 'time'  # the text so far is returned; the next step stops the job
                         break
+                if not done and self._elapsed() >= settings['max_seconds']:
+                    stopped = 'time'
             if stopped:
                 call['status'] = 'whitespace_loop' if stopped == 'whitespace' else 'timed_out'
                 self.state['warnings'].append(
@@ -806,6 +810,16 @@ class ResearchRunner:
                 client.timeout = old_timeout
             self.emit('end', '')
             self._save()
+
+    def _timed_events(self, stream):
+        """A transport guard at our deadline is a budget stop; an earlier outage still propagates."""
+        try:
+            yield from stream
+        except TokenBudgetError:
+            raise
+        except AgentError:
+            if self._elapsed() < self.state['settings']['max_seconds']:
+                raise
 
     def _provenance(self, records=None):
         """Only values emitted by tools can create recognized source identities."""

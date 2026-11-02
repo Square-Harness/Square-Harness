@@ -1,6 +1,7 @@
 """Native Ollama HTTP client and bounded, backend-independent agent loop."""
 import copy
 import json
+import time
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
@@ -53,9 +54,13 @@ class Ollama:
             raise AgentError('Malformed or interrupted Ollama model-list response') from exc
 
     def stream(self, payload):
+        deadline = time.monotonic() + self.timeout
         try:
             with self.request('/api/chat', payload) as response:
                 for line in response:
+                    # The socket timeout bounds idle reads, not a stream of keepalives.
+                    if time.monotonic() >= deadline:
+                        raise AgentError('Ollama stream exceeded its elapsed-time guard')
                     if not line.strip():
                         continue
                     event = json.loads(line)
@@ -82,11 +87,18 @@ class Agent:
         self.seed, self.temperature, self.top_p = seed, temperature, top_p
         self.history = []
         self.last_stats = {}
+        self.last_stop_reason = ''
 
     def run(self, query, emit=lambda kind, value: None, fresh=False):
         # Only commit history when a full turn completes; interruptions cannot
         # leave a dangling assistant tool call in the next API request.
         messages = copy.deepcopy([] if fresh else self.history)
+        for message in messages:
+            for key in ('thinking', 'reasoning', 'reasoning_content'):
+                message.pop(key, None)
+        self.last_stats = {}
+        self.last_stop_reason = ''
+        recovery_notes = ''
         messages.append({'role': 'user', 'content': query})
         system = {'role': 'system', 'content': SYSTEM + '\nMODE: ' + MODES[self.mode]}
         schemas = self.workspace.schemas()
@@ -98,6 +110,8 @@ class Agent:
             left = getattr(self.client, 'remaining_tokens', None)
             predict = self.predict if not isinstance(left, (int, float)) else int(min(self.predict, left))
             if predict < 128:
+                self.last_stop_reason = ('Output limit reached while reasoning; no allowance remains for a final answer.'
+                                         if answer_now else 'Generated-token budget exhausted before a final answer.')
                 for message in messages:
                     message.pop('thinking', None)
                 self.history = messages
@@ -111,8 +125,21 @@ class Agent:
                 payload['tools'] = tools
             # The complete native request is counted, including tool schemas.
             # Context fitting adjusts output room, never mathematical premises.
-            from .call_policy import allocate_call
-            payload, allocation = allocate_call(self.client, payload, predict)
+            from .call_policy import allocate_call, CallContextError
+            while True:
+                payload['messages'] = [system] + messages
+                if recovery_notes:
+                    payload['messages'] = copy.deepcopy(payload['messages'])
+                    payload['messages'][-1]['content'] += ('\n\nUNVERIFIED WORKING NOTES (final excerpt of generated reasoning):\n'
+                                                          + recovery_notes)
+                try:
+                    payload, allocation = allocate_call(self.client, payload, predict)
+                    break
+                except CallContextError:
+                    if not recovery_notes:
+                        raise
+                    # Only generated scratch notes may be omitted, never the task or source text.
+                    recovery_notes = recovery_notes[len(recovery_notes) // 2:] if len(recovery_notes) > 256 else ''
             self.last_allocation = allocation
             emit('start', '')
             assistant = {'role': 'assistant', 'content': ''}
@@ -133,8 +160,6 @@ class Agent:
             emit('end', '')
             if not done:
                 raise AgentError('Model stream ended before its completion event. This turn was not saved.')
-            if thinking:
-                assistant['thinking'] = thinking
             if calls:
                 assistant['tool_calls'] = calls
             messages.append(assistant)
@@ -162,13 +187,17 @@ class Agent:
                 # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
                 # without reasoning or tools, asks for the answer instead of returning nothing.
                 answer_now = True
+                recovery_notes = thinking[-4000:]
                 emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
                 messages.append({'role': 'user', 'content': ANSWER_NOW})
                 continue
             if not assistant['content'].strip():
-                emit('notice', 'No final answer received. Try --predict 6144 --ctx 16384 or /think off.')
-            # Scratch thinking is retained within the tool loop but not persisted
-            # between user turns: keep local context and exports manageable.
+                self.last_stop_reason = ('Output limit reached while reasoning; no final answer after one recovery attempt.'
+                                         if answer_now else 'The model returned no final answer.')
+                emit('notice', self.last_stop_reason)
+            elif self.last_stats.get('done_reason') == 'length':
+                self.last_stop_reason = 'Generation hit its output limit; the written answer is incomplete.'
+            # Recovery notes belong only to that one request; scratch thinking is never kept in history.
             for message in messages:
                 message.pop('thinking', None)
             self.history = messages

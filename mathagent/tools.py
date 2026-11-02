@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from threading import Lock
 
 TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', '.yml', '.toml', '.csv'}
 # File groups the user can let the model discover and read. Pinned sources are
@@ -17,6 +18,7 @@ READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
+_WRITE_LOCK = Lock()
 
 
 def schema(name, description, properties, required=()):
@@ -146,14 +148,33 @@ class Workspace:
         if not isinstance(content, str) or len(content.encode()) > 100_000:
             raise ValueError('Content must be text, at most 100 KB')
         p = self.path(path)
-        old = self.text(p) if p.exists() else ''
+        original = p.stat() if p.exists() else None
+        old = self.text(p) if original is not None else ''
         diff = ''.join(difflib.unified_diff(old.splitlines(True), content.splitlines(True),
                                            fromfile=path + ' (old)', tofile=path + ' (new)'))
         if not self.approve(f'WRITE {p}\n{diff or "(no textual changes)"}'):
             return 'User denied the write. No file changed.'
-        p = self.path(path)  # Resolve again after the interactive approval.
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding='utf-8')
+        with _WRITE_LOCK:
+            target = self.path(path)
+            current = target.stat() if target.exists() else None
+            if (target != p or (original is None) != (current is None)
+                    or (original is not None and
+                        ((original.st_dev, original.st_ino, original.st_mtime_ns) !=
+                         (current.st_dev, current.st_ino, current.st_mtime_ns) or self.text(target) != old))):
+                raise ValueError(f'{path} changed while approval was pending; request a new diff. No file changed.')
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix='.square-write-', dir=p.parent)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    if original is not None:
+                        os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode))
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, p)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
         return f'Wrote {path} ({len(content.encode())} bytes)'
 
     def run_python(self, code):

@@ -359,7 +359,7 @@ def research_stream(h, body, id, name):
 
 @route('GET', '/api/chats')
 def chats(h, body):
-    return {'chats': store.list_chats(h.server.hub.root)}
+    return {'chats': store.list_chats(h.server.hub.root, h.server.hub.base)}
 
 
 @route('POST', '/api/chats')
@@ -375,7 +375,9 @@ def chat_create(h, body):
 @route('GET', '/api/chats/' + UUID)
 def chat(h, body, id):
     hub = h.server.hub
-    result = _chat_view(store.load_chat(hub.root, id))
+    saved = store.load_chat(hub.root, id)
+    result = _chat_view(saved)
+    result['math_macros'] = store.chat_macros(hub.root, saved, hub.base)
     snapshot = hub.snapshot()
     if any(task['target'] == id and task['state'] == 'queued' for task in snapshot['queue']):
         # A queued turn has not saved its state yet: the previous turn's status would show (B8).
@@ -609,6 +611,14 @@ def research_tex(h, body, id):
     name, data = store.research_tex(h.server.hub.root, id)
     h.send_bytes(200, data, 'application/x-tex; charset=utf-8', [('Content-Disposition', f'attachment; filename="{name}"'),
                                                                  ('Cache-Control', 'no-store')])
+    return Streamed
+
+
+@route('GET', '/api/research/' + UUID + '/source')
+def research_source(h, body, id):
+    name, data = store.research_source(h.server.hub.root, id)
+    h.send_bytes(200, data, 'application/zip', [('Content-Disposition', f'attachment; filename="{name}"'),
+                                             ('Cache-Control', 'no-store')])
     return Streamed
 
 

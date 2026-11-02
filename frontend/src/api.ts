@@ -329,7 +329,7 @@ export type ResearchDetail = {
   document?: string
   section_lines?: [number, number][]
   compile?: CompileResult | null
-  outputs?: { tex?: string; pdf?: string | boolean; download?: string }
+  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string }
   macros?: string[]
   theorems?: string[]
   output_name?: string
@@ -353,6 +353,7 @@ export type ChatListItem = {
   created_at: string
   messages: number
   preview: string
+  math_macros?: Record<string, string>
 }
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
@@ -376,7 +377,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
-  outputs?: { download?: string; pdf?: boolean; tex?: string }
+  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string }
   task?: string
   error?: string | null
   missing?: string[]
@@ -399,6 +400,7 @@ export type Chat = {
   updated_at: string
   transcript: TranscriptItem[]
   context_messages: number
+  math_macros?: Record<string, string>
   assistant_status?: 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted' | 'failed'
   assistant_resumable?: boolean
   assistant_budget?: AssistantBudget
@@ -521,6 +523,7 @@ export const api = {
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
   researchPdfDownloadUrl: (id: string) => `/api/research/${id}/pdf?download=1`,
   researchTexUrl: (id: string) => `/api/research/${id}/tex`,
+  researchSourceUrl: (id: string) => `/api/research/${id}/source`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),

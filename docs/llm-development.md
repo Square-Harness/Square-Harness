@@ -128,6 +128,11 @@ Version 0.5.1, experimental. The source of truth for the version is
   are locked with `fcntl`, and paths are validated against symlinks and escapes.
   Proof candidates are immutable and hashed: a changed digest is refused, not
   re-reviewed.
+  Workspace write approvals are tied to the original target and contents;
+  changed files require a fresh diff. Chat attachments remain structured in the
+  transcript and pinned for the initial turn and fresh review.
+  Re-run document cards retain their previous download job IDs until chat
+  deletion, so cleanup includes old copies without deleting work during retry.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
   (`writeup._request_preamble`). A written document is always assembled,
@@ -135,10 +140,36 @@ Version 0.5.1, experimental. The source of truth for the version is
   (`WriteupRunner._check_time`). `tidy_numbering` never touches labels or
   displays that come from the material: the rest of the author's paper may refer
   to them. Citations are the `.bib`'s keys, or entries whose DOI, arXiv or
-  zbMATH identifier occurs in the material (`_take_bibtex`); nothing else.
+  zbMATH identifier occurs in full in the material (`_take_bibtex`); nothing else.
+  Range references retain both endpoints. Compilation dependencies are kept in
+  the source ZIP offered with the document (`outputs.source`).
+  Calls with at most 60 seconds left skip hidden reasoning. A transport guard
+  reached at the job's deadline is a time-budget stop; earlier transport failures
+  remain resumable outages. Sandbox figures are restricted to runs shown in the
+  conversation and declared, unchanged graphics, with symlinks refused.
+  Resolve recorded artifact aliases to portable names and pin the dependency
+  bytes under the job's `artifacts/sources/`; compilation and the source ZIP use
+  those same hashed files. Preserve literal code during LaTeX transformations.
+  Package-backed environments are never invented as theorems. Repair uses the
+  actual remaining allowance, without a 60-second minimum. PDF availability
+  requires the current compile to succeed; failed drafts are not called ready.
 - **Honest status.** Never report an operational failure (timeout, budget,
   context, malformed output) as a mathematical verdict. Never describe a model
   review as a certificate. Partial work stays labelled partial.
+  Retryable child failures keep their pending native transaction and saved job;
+  a resume clears the old operational error only after its normal admission
+  checks. Progress falls back only to the latest child, never an earlier one.
+
+- **Chat notation.** The server extracts bounded macro definitions from explicit
+  sources, requests, a selected style and a sole saved template. The browser
+  loads them into a fresh KaTeX scope per conversation, including sidebar
+  previews; `trust` stays false and expansion limits stay in force.
+- **Web retrieval.** HTML parsing and extraction check the workflow deadline.
+  Ordinary webpages consult cached per-origin robots.txt through the standard
+  library's prefix-rule parser, within the same HTTPS, request and time bounds.
+  This does not implement full wildcard/longest-match robots semantics.
+- **Compile retries.** Missing-command retries require a new inferred definition
+  and share one compile deadline. Cancellation stops the compiler process group.
 
 ### Security posture
 

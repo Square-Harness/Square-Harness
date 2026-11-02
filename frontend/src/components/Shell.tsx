@@ -9,7 +9,7 @@ import { href, notebook, type Mode, type Route } from '../router'
 import { applyTheme, deleteConversation, readTheme, useApp, type AppState, type Theme } from '../store'
 import { ErrorNote, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
-import { Inline } from './Markdown'
+import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
 import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlayIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
@@ -192,7 +192,8 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
         const blocked = chatDeleteBlocked(app.snapshot, chat.id)
         const work = chatWork(app.snapshot, chat.id)
         return (
-          <div key={chat.id} className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
+          <MathMacrosProvider key={chat.id} definitions={chat.math_macros}>
+          <div className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
             <a href={href(chat.kind, chat.id)} className="side-item side-item-chat" aria-current={route.id === chat.id ? 'page' : undefined}>
               {work.active && <Square variant="running" size={12} label="Active conversation" />}
               {work.queued && <Square variant="ready" size={12} label="Queued conversation" />}
@@ -213,6 +214,7 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
               <TrashIcon size={17} />
             </button>
           </div>
+          </MathMacrosProvider>
         )
       })}
       {selected && <DeleteChatDialog key={selected.id} chat={selected} app={app} opener={opener.current} onClose={() => setSelected(null)} />}
