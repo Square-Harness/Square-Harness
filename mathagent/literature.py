@@ -352,8 +352,10 @@ class LiteratureTools:
             _schema('search_papers', 'Search scholarly metadata; abstracts are not proof evidence. zbmath also finds '
                     'books, and its reviews often list their chapters; query it with fields, e.g. "au:Brezis ti:Functional analysis". '
                     'Crossref finds journal articles and books (plain author/title/topic query); Open Library is a book catalog. '
-                    'Max 8 results.' + offline,
-                    {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer}, ['query']),
+                    'For arXiv author searches use au:"Full Name"; sort=newest returns newest submissions first '
+                    '(arXiv only). Max 8 results.' + offline,
+                    {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer,
+                     'sort': {'type': 'string', 'enum': ['relevance', 'newest']}}, ['query']),
             _schema('search_web', 'Search web metadata with Brave; requires BRAVE_SEARCH_API_KEY. Max 8 results.' + offline,
                     {'query': string, 'limit': integer}, ['query']),
             _schema('find_quotes', 'See how open papers cite a work at a given place: finds papers that cite the work '
@@ -524,10 +526,15 @@ class LiteratureTools:
         self._write(parts, json.dumps(result, ensure_ascii=False))
         return result
 
-    def search_papers(self, query, provider='arxiv', limit=5):
+    def search_papers(self, query, provider='arxiv', limit=5, sort='relevance'):
         query = self._query(query, limit)
         if provider not in PROVIDERS:
             raise LiteratureError('Unknown provider; choose ' + ', '.join(PROVIDERS))
+        if sort not in ('relevance', 'newest') or sort == 'newest' and provider != 'arxiv':
+            raise LiteratureError('Use sort=relevance, or sort=newest with provider=arxiv')
+        if sort == 'newest':
+            return self._cache_search('arxiv-recent', query, limit,
+                                      lambda: self._search('arxiv', query, limit, recent=True))
         return self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
 
     def _search(self, provider, query, limit, recent=False):
@@ -609,8 +616,7 @@ class LiteratureTools:
 
     def arxiv_recent(self, query, limit=6):
         """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
-        query = self._query(query, limit)
-        return self._cache_search('arxiv-recent', query, limit, lambda: self._search('arxiv', query, limit, recent=True))['results']
+        return self.search_papers(query, 'arxiv', limit, sort='newest')['results']
 
     def citing(self, doi, limit=10):
         """Works citing a DOI, from Semantic Scholar, for controller code ("cited by"). Without a key its

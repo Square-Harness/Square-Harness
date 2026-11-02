@@ -74,7 +74,8 @@ def standalone_reference_request(text):
         return False
     from .source_tasks import _instruction_text
     value = _instruction_text(text).strip()
-    sources = (r'\b(?:references?|sources?|books?|textbooks?|monographs?|papers?|articles?|'
+    sources = (r'\b(?:references?|sources?|books?|textbooks?|monographs?|papers?|articles?|preprints?|publications?|'
+               r'arxiv\s+(?:entr(?:y|ies)|submissions?)|'
                r'livres?|ouvrages?|manuels?|bibliograph\w*)\b')
     where_proved = re.search(r'\bwhere\b.{0,80}\b(?:proved|proven|published)\b', value)
     if not re.search(sources, value) and not where_proved:
@@ -82,6 +83,7 @@ def standalone_reference_request(text):
     # The same nouns occur in source-reading tasks and ordinary observations.
     # Require an actual request for a source, in imperative or question form.
     intent = (where_proved
+              or re.search(r'\b(?:check|verify)\b.{0,30}\b(?:latest|newest|most recent)\b.{0,60}' + sources, value)
               or re.search(r'\b(?:give|find|suggest|recommend|provide|locate|identify|cite|'
                            r'point (?:me|us)|look(?:ing)? for|search(?:ing)? for|need|want|'
                            r'would like|donne\w*|trouve\w*|recommande\w*|cherche\w*|'
@@ -307,7 +309,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def _extra_state(self):
         return {'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
-                'discovered': False, 'answer': '', 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
+                'discovered': False, 'answer': '', 'standard_author': '',
+                'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
                                                         'lookup': self._lookup}}
 
     # -- context -----------------------------------------------------------------
@@ -400,7 +403,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             instruction += ('\nThis is a standard-reference lookup: suggest up to three relevant sources, with alternatives if recall is uncertain. '
                             'A chapter is useful but optional; give a place only if you recall it, '
                             'otherwise leave locator empty. The precise place need not be verified. '
-                            'Keep the statement and keywords brief.')
+                            'Keep the statement and keywords brief. '
+                            'If the question explicitly requests the latest/newest publication by a named author, '
+                            'copy that author\'s full name from the question into author and return candidates: []: '
+                            'live author search supplies the papers, never memory. Otherwise leave author empty. '
+                            'Recent papers on a topic, including a topic named after someone, are not an author lookup. '
+                            'Never infer or guess an author who is not explicitly named in the question.')
         self.emit('notice', 'Recalling where this result is usually stated')
         # Recall is where the model's knowledge matters most: let it think first, and
         # fall back to a direct answer if thinking used up the output.
@@ -418,7 +426,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if standard:
                 recovery += ('Also include search_queries: two short alternative complete public topic queries. '
                              'The second uses a common terminology variant or removes a nonessential modifier; '
-                             'keep the essential setting and do not include guessed authors.\n')
+                             'keep the essential setting and do not include guessed authors. '
+                             'Include author as the explicitly named author of a latest-publication request, '
+                             'or an empty string for all other requests.\n')
             result = self._call('recall', instruction + (recovery if standard or not think else ''), cap=cap,
                                 format_schema=RECALL_SCHEMA if think and not standard else None, think=think)
             try:
@@ -438,17 +448,34 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             queries = value.get('search_queries')
             self.state['standard_queries'] = [query.strip()[:150] for query in (queries if isinstance(queries, list) else [])
                                               if isinstance(query, str) and query.strip()][:3]
+            author = value.get('author')
+            author = ' '.join(author.split()) if isinstance(author, str) else ''
+            goal = ' '.join(_fold(self.state['goal']).split())
+            name = re.escape(_fold(author))
+            recent = re.search(r'\b(?:latest|newest|most recent|last|plus recent\w*|dernier\w*)\b', goal)
+            named = re.search(r'(?<!\w)' + name + r'(?!\w)', goal) if author else None
+            by_author = re.search(r'\b(?:papers?|articles?|preprints?|publications?|works?|entr(?:y|ies)|submissions?|'
+                                 r'papiers?|travaux|prepublications?|soumissions?|entrees?)\s+'
+                                 r"(?:(?:by|of|from|for|de|par)\s+|d['’]\s*)(?:\w+\s+){0,3}"
+                                 + name + r'(?!\w)', goal) if author else None
+            author_papers = re.search(r'(?<!\w)' + name + r"(?:['’]s)?\s+(?:(?:latest|newest|most recent|last)\s+)?"
+                                     r'(?:papers?|articles?|preprints?|publications?|arxiv)\b', goal) if author else None
+            self.state['standard_author'] = (author if len(author) <= 120 and
+                re.fullmatch(r"[^\W\d_](?:[^\W\d_]|[ .’'\-])*", author) and recent and named and (by_author or author_papers)
+                and self._standard_kind() != 'book' else '')
+            if self.state['standard_author']:
+                self.state['candidates'] = []
         def candidate_key(c):
             return (_fold(' '.join(c['authors'])), _fold(c['title']) if standard else _number(c['locator']))
         seen = {candidate_key(c) for c in self.state['candidates']}
-        candidates = value.get('candidates')
+        candidates = [] if self.state.get('standard_author') else value.get('candidates')
         for item in candidates if isinstance(candidates, list) else []:
             c = _clean_candidate(item, 'recall')
             if c and candidate_key(c) not in seen:
                 self.state['candidates'].append(c)
                 seen.add(candidate_key(c))
         self.state['candidates'] = self.state['candidates'][:self.state['check']['candidates']]
-        if not self.state['candidates']:
+        if not self.state['candidates'] and not self.state.get('standard_author'):
             self.state['warnings'].append('The model recalled no reference to check.')
         for c in self.state['candidates']:
             self.emit('notice', 'Guess: ' + describe(c).replace('*', '') + (f', {c["locator"]}' if c['locator'] else ''))
@@ -967,6 +994,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                          'quote': v.get('quote', '')[:300] or None,
                          'record': ((v.get('record') or {}).get('identifier')),
                          'url': (v.get('record') or {}).get('url'),
+                         'published': record.get('published'), 'updated': record.get('updated'),
                          'suitability': c.get('suitability'),
                          'metadata_confirmed': bool(v.get('record')),
                          'exact_statement_confirmed': v['level'] in ('read', 'cited')})
@@ -979,6 +1007,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if self.state['check'].get('lookup') == 'standard':
             value.update(lookup='standard', disposition='answer_with_qualification',
                          precise_place_confirmed=bool(self._confirmed()))
+            if self.state.get('standard_author'):
+                value['note'] = 'Author lookup: recency uses original arXiv submission dates. Bibliographic metadata only.'
         text = json.dumps(value, ensure_ascii=False)
         while len(text) > 3000 and (value['not_confirmed'] or any(r.get('quote') for r in refs)):
             if value['not_confirmed']:
@@ -1000,8 +1030,33 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def _finish(self):
         if self.state['check'].get('lookup') == 'standard':
-            self.state['status'] = 'answered' if self.chosen() else 'partial'
-            self.state['stop_reason'] = 'One standard-reference lookup finished; precise locations remain unconfirmed.'
+            chosen = self.chosen()
+            gaps = bool(self.state.get('standard_unresolved')) or any(
+                c.get('suitability', {}).get('coverage') == 'partial' for c in chosen)
+            if self.state.get('standard_author'):
+                dated = bool(chosen) and all((c['verdict'].get('record') or {}).get('published') for c in chosen)
+                online = bool(self.literature and self.literature.online)
+                stale = any((c['verdict'].get('record') or {}).get('stale_cache') for c in chosen)
+                self.state['status'] = 'answered' if dated and online and not stale and not gaps else 'partial'
+                if not chosen:
+                    reason = 'No matching author record was confirmed in this bounded search.'
+                elif not dated:
+                    reason = 'Matching author records found, but submission dates remain unconfirmed.'
+                elif not online:
+                    reason = 'Cached author records found; offline mode could not confirm the latest submissions.'
+                elif stale:
+                    reason = 'Stale cached author records found; the latest submissions remain unconfirmed.'
+                elif gaps:
+                    reason = 'Matching author records found; part of the requested scope remains unconfirmed.'
+                else:
+                    reason = 'Author lookup finished; recency uses original arXiv submission dates.'
+                self.state['stop_reason'] = reason
+            else:
+                self.state['status'] = 'answered' if chosen and not gaps else 'partial'
+                self.state['stop_reason'] = (
+                    'No suitable scholarly reference was confirmed in this bounded search.' if not chosen else
+                    'Relevant bibliographic records found; part of the requested scope remains unconfirmed.' if gaps else
+                    'One standard-reference lookup finished; precise locations remain unconfirmed.')
             return
         self.state['status'] = 'answered' if self._confirmed() else 'partial'
         self.state['stop_reason'] = ('Check finished.' if self._confirmed()

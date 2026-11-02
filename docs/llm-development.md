@@ -168,6 +168,13 @@ Version 0.5.1, experimental. The source of truth for the version is
   Ordinary webpages consult cached per-origin robots.txt through the standard
   library's prefix-rule parser, within the same HTTPS, request and time bounds.
   This does not implement full wildcard/longest-match robots semantics.
+- **Reference retrieval.** Keep all eligible fetched records within the existing
+  request and character budgets; early results must not hide later providers.
+  Retries archive rejected records and preserve their R identifiers on rediscovery.
+  Latest-author requests use arXiv author queries with `sort=newest`, a separate
+  expiring cache and ordering by original submission date, rather than model recall.
+  Source-only follow-ups return the worker's qualified answer directly, preserving
+  its metadata and limits instead of inviting unverified bibliographic additions.
 - **Compile retries.** Missing-command retries require a new inferred definition
   and share one compile deadline. Cancellation stops the compiler process group.
 

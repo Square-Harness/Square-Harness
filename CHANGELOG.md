@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep later providers' matching references instead of dropping them behind an
+  early result limit. For latest-author requests, search arXiv by author and
+  order records by original submission date. Remove rejected recommendations
+  and keep unresolved scope explicitly partial.
 - Render chat and sidebar mathematics with request, attached-template and saved
   style macros, scoped to each conversation. Keep temporary worker outages
   resumable, bound reasoning recovery, and clear failed or cancelled progress.

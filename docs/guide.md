@@ -254,6 +254,15 @@ How it works:
    citation), the code opens open-access papers that cite the work and reads how
    they cite it.
 
+For the latest papers by a named author, it searches arXiv's author field and
+orders matching records by their original submission date. Revisions are listed
+separately. The result describes the retrieved records, not a complete publication
+history or an independent check of their mathematical claims.
+References whose requested scope is only partially supported remain labelled
+as unconfirmed leads; rejecting a lead in a later check removes its recommendation.
+A broad reference request checks relevance from indexed descriptions. Exact
+theorems, pages and hypotheses require a precise check when you ask for them.
+
 Each reference gets an evidence level:
 
 - **read**: the statement was read in the work itself;
