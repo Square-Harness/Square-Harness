@@ -5,6 +5,7 @@ import json
 import shutil
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from mathagent import style
 from mathagent.gui import store
@@ -153,9 +154,13 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
         self.assertIn('\\begin{equation*} a = b \\end{equation*}', document)  # numbered only when referred to
         self.assertIn('\\begin{equation}\\label{eq:exit}', document)
         self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
+        self.assertEqual(state['status'], 'partial')
+        self.assertIn('Invented13', state['compile']['references']['citations'])
+        self.assertIn('eq:missing', state['compile']['references']['labels'])
 
         # Without a .bib, a bibliography is made from the identifiers the material gives; an entry without one is dropped.
-        (paper / 'notes2.md').write_text('E[tau] ~ |Omega|/(4 eps) [HS04], doi:10.1007/s10955-004-5712-8.')
+        (paper / 'notes2.md').write_text('E[tau] ~ |Omega|/(4 eps) [HS04], '
+                                       '[doi:10.1007/s10955-004-5712-8](https://doi.org/10.1007/s10955-004-5712-8).')
         self.fake.replies = [text(r"""\title{Without a bibliography}
 \section{Result}
 By \cite{HS04}, see also \cite{Fake99}.
@@ -175,12 +180,43 @@ By \cite{HS04}, see also \cite{Fake99}.
         self.assertIn('There is no bibliography file', self.fake.requests[-1]['messages'][1]['content'])
         state = json.loads(made.read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertEqual(state['status'], 'partial')
+        self.assertEqual(state['compile']['references']['citations'], ['Fake99'])
         document = state['document']
         self.assertTrue(document.startswith('% The bibliography made'))  # embedded: the .tex compiles on its own
         self.assertIn('doi = {10.1007/s10955-004-5712-8}', document)
         self.assertIn('\\bibliography{', document)
         self.assertNotIn('Invented', document)
         self.assertIn('Fake99', document[document.index('Points to check'):document.index('\\section{Result}')])
+
+        # A conversation's retrieved record supplies the bibliography even when
+        # the writer emits only a citation, without retyping the metadata.
+        literature_id = str(uuid4())
+        literature = {**state, 'id': literature_id, 'kind': 'literature', 'status': 'listed', 'document': '',
+                      'draft': '[doi:10.1007/s10955-004-5712-8](https://doi.org/10.1007/s10955-004-5712-8)',
+                      'pool': [{'n': 1, 'title': 'Escape through a small opening',
+                                'authors': ['D. Holcman', 'Z. Schuss'], 'year': 2004, 'type': 'journal-article',
+                                'doi': '10.1007/s10955-004-5712-8'}],
+                      'organisation': {'entry': [1], 'themes': []}}
+        directory = self.root / '.mathagent' / 'research' / literature_id
+        directory.mkdir()
+        (directory / 'artifacts').mkdir()
+        (directory / 'state.json').write_text(json.dumps(literature))
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        store.append_items(self.root, chat, [{'role': 'route', 'mode': 'literature', 'status': 'done',
+                                              'job_id': literature_id, 'request': 'Find a reference.'}])
+        self.fake.replies = [text(r'\title{A cited note}\section{Reference}By \cite{Holcman2004}.')]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@writeup this report',
+                                                   'mode_call': {'mode': 'writeup', 'start': 0}})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        saved = self.ok('GET', f'/api/chats/{chat}')
+        card = [item for item in saved['transcript'] if item['role'] == 'route'][-1]
+        self.assertIn('job_id', card)
+        completed = self.ok('GET', f'/api/research/{card["job_id"]}')
+        self.assertEqual(completed['status'], 'complete', completed['warnings'])
+        self.assertFalse(completed['compile']['references']['unresolved'])
+        self.assertTrue(completed['outputs']['pdf'])
+        self.assertIn('Holcman2004: D. Holcman', self.fake.requests[-1]['messages'][1]['content'])
 
 if __name__ == '__main__':
     unittest.main()

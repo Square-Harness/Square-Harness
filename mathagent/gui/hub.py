@@ -822,7 +822,7 @@ class Hub:
 
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
                       notes='', output='', conversation='', variant=None, scoped=False, deliver='folder', experiment_ids=(),
-                      queue=False, on_update=None, **limits):
+                      reference_records=(), queue=False, on_update=None, **limits):
         budgets = self._research_budgets(**limits)
         if budgets['max_requests'] is None:
             budgets['max_requests'] = 12
@@ -838,7 +838,7 @@ class Hub:
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, source_files=list(source_files), template_files=list(template_files),
                                 template_texts=texts, notes=notes, output=output, conversation=conversation,
-                                experiment_ids=experiment_ids,
+                                experiment_ids=experiment_ids, reference_records=reference_records,
                                 variant=variant, scoped=scoped, deliver=deliver, style_choice=load_choice(self.base), **budgets)
         label = LABELS['summarize' if variant == 'summary' else 'writeup']
         return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
@@ -1388,7 +1388,8 @@ class Hub:
                         kwargs['explain_templates'] = any(f.lower().endswith('.tex') for f in templates)
                         # The results so far, as the user saw them (this turn's finished jobs included, the
                         # request itself left out), in place of the raw history (which would fill the context twice).
-                        kwargs.update(conversation=store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
+                        kwargs.update(reference_records=store.conversation_references(root, chat_id, skip=self._turn_start(root, chat_id)),
+                                      conversation=store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
                                       experiment_ids=store.conversation_experiments(root, chat_id),
                                       variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                       style_choice=load_choice(self.base))
@@ -1581,7 +1582,9 @@ class Hub:
                 task = self.check(chat_id, request, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
                                   queue=True, on_update=on_update)
             elif mode in ('writeup', 'summarize'):
-                task = self.start_writeup(request, source_files=files, conversation=store.conversation_record(root, chat_id, before=index),
+                task = self.start_writeup(request, source_files=files,
+                                          reference_records=store.conversation_references(root, chat_id, before=index),
+                                          conversation=store.conversation_record(root, chat_id, before=index),
                                           experiment_ids=store.conversation_experiments(root, chat_id, before=index),
                                           variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                           queue=True, on_update=on_update,

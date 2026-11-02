@@ -13,6 +13,7 @@ they have checked, and the document is theirs to read.
 from .reporting import usage_footer
 import copy
 import hashlib
+from html import unescape
 import io
 import os
 from pathlib import Path
@@ -22,6 +23,8 @@ import signal
 import subprocess
 import tempfile
 import time
+import unicodedata
+from urllib.parse import unquote
 import zipfile
 
 from .ledger import _atomic_write, _directory, _regular
@@ -49,9 +52,10 @@ MISSING_FIGURES = r'''% Figures not found next to the material are drawn as fram
 
 
 _CODE_BLOCK = re.compile(r'\\begin\{(verbatim\*?|Verbatim\*?|lstlisting\*?|minted\*?)\}.*?\\end\{\1\}', re.S)
+_INLINE_CODE = re.compile(r'\\verb(?![A-Za-z])\*?([^\s])(?:(?!\1)[^\r\n])*\1')
 
 
-def _protect_code(text):
+def _protect_code(text, *, comments=False):
     blocks = []
     prefix = 'SQUARELITERAL'
     while prefix in text:
@@ -60,6 +64,9 @@ def _protect_code(text):
         blocks.append(match.group(0))
         return f'{prefix}{len(blocks) - 1}END'
     masked = _CODE_BLOCK.sub(save, text)
+    masked = _INLINE_CODE.sub(save, masked)
+    if comments:
+        masked = re.sub(r'(?<!\\)%[^\r\n]*', save, masked)
     def restore(value):
         return re.sub(re.escape(prefix) + r'(\d+)END', lambda m: blocks[int(m.group(1))], value)
     return masked, restore
@@ -68,6 +75,7 @@ def _protect_code(text):
 def _uncommented(tex):
     # Commands, labels and percent signs inside a code listing are literal text.
     tex = _CODE_BLOCK.sub(lambda m: '\\begin{' + m.group(1) + '}\n\\end{' + m.group(1) + '}', tex)
+    tex = _INLINE_CODE.sub('', tex)
     return re.sub(r'(?<!\\)%.*', '', tex)
 
 
@@ -211,8 +219,15 @@ def bibtex_entries(body):
 
 def entry_identifiers(text):
     """Complete, typed identifiers in notes or BibTeX; arXiv versions identify the same work."""
+    # Separate Markdown's DOI label from its URL; the two are not one identifier.
+    text = re.sub(r'\[((?:doi:)?10\.\d{4,9}/[^\n]*?)\]\((?=https?://)', r'\1 (', text, flags=re.I)
+    def decode_url(match):
+        value = unquote(match.group(0))
+        return match.group(0) if re.search(r'[\s<>{}"]', value) else value
+    text = re.sub(r'https?://[^\s<>{}"]+', decode_url, text, flags=re.I)
     found = set()
     for identifier in re.findall(r'\b10\.\d{4,9}/[^\s<>{}"]+', text, re.I):
+        identifier = re.sub(r'\\([_%&#])', r'\1', identifier)
         identifier = identifier.lower().rstrip('.,;:')
         while identifier.endswith((')', ']')):
             closing = identifier[-1]
@@ -229,6 +244,56 @@ def entry_identifiers(text):
                     r'zbmath\.org/(?:\?q=an:)?([\d.]+)'):
         found |= {'zbl:' + identifier.rstrip('.') for identifier in re.findall(pattern, text, re.I)}
     return found
+
+
+def record_bibliography(records):
+    """A deterministic BibTeX catalog of source-bound records, never model-recalled works."""
+    prepared = []
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        title = ' '.join(str(record.get('title') or '').split())
+        authors = record.get('authors')
+        if not title or not isinstance(authors, (list, tuple)) or not authors or any(not isinstance(a, str) or not a.strip() for a in authors):
+            continue
+        identifiers = entry_identifiers(' '.join(str(record.get(k) or '') for k in ('identifier', 'doi', 'url'))
+            + '\narxiv:' + str(record.get('arxiv_id') or record.get('arxiv') or '')
+            + '\nzbl:' + str(record.get('zbl') or ''))
+        doi = next((i[4:] for i in sorted(identifiers) if i.startswith('doi:')), '')
+        arxiv = next((i[6:] for i in sorted(identifiers) if i.startswith('arxiv:')), '')
+        zbl = next((i[4:] for i in sorted(identifiers) if i.startswith('zbl:')), '')
+        url = str(record.get('url') or '').strip()
+        identity = 'doi:' + doi if doi else 'arxiv:' + arxiv if arxiv else 'zbl:' + zbl if zbl else url
+        if not identity or not (identifiers or re.fullmatch(r'https://[^\s<>{}"]+', url)):
+            continue
+        year = re.search(r'\b(?:1[5-9]|20)\d\d\b', str(record.get('year') or record.get('published') or ''))
+        year = year[0] if year else ''
+        surname = authors[0].split(',')[0] if ',' in authors[0] else authors[0].split()[-1]
+        surname = unicodedata.normalize('NFKD', surname).encode('ascii', 'ignore').decode()
+        base = (re.sub(r'[^A-Za-z0-9]', '', surname) or 'Reference') + (year or 'Undated')
+        kind = str(record.get('type') or '').lower()
+        kind = 'book' if kind in ('book', 'monograph', 'reference-book', 'edited-book', 'book / book article') else 'article' if 'article' in kind else 'misc'
+        fields = [('author', ' and '.join(a.strip() for a in authors)), ('title', title)]
+        fields += [('year', year)] if year else []
+        fields += [('journal', str(record.get('venue') or ''))] if record.get('venue') and kind == 'article' else []
+        fields += [('publisher', str(record['publisher']))] if record.get('publisher') and kind == 'book' else []
+        fields += [('doi', doi)] if doi else []
+        fields += [('eprint', arxiv), ('archivePrefix', 'arXiv')] if arxiv else []
+        fields += [('zbl', zbl)] if zbl else []
+        fields += [('url', url)] if url else []
+        prepared.append((identity, base, kind, fields))
+    unique = {}
+    for item in sorted(prepared):
+        unique.setdefault(item[0], item)
+    counts = {}
+    for _, base, _, _ in unique.values():
+        counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
+    entries = []
+    for identity, base, kind, fields in unique.values():
+        key = base if counts[base.casefold()] == 1 else base + '_' + hashlib.sha256(identity.encode()).hexdigest()[:12]
+        values = '\n'.join('  ' + name + ' = {' + latex_text(unescape(value)) + '},' for name, value in fields)
+        entries.append('@' + kind + '{' + key + ',\n' + values + '\n}')
+    return '\n\n'.join(entries) + ('\n' if entries else '')
 
 
 
@@ -477,6 +542,20 @@ def _compile_files(tex, files, assets):
 
 
 
+def reference_diagnostics(log):
+    """Unresolved references in the final LaTeX pass, distinct from PDF creation."""
+    kinds = {'citations': r'Citation', 'labels': r'Reference', 'duplicates': r'Label'}
+    result = {}
+    for key, kind in kinds.items():
+        ending = r'multiply defined' if key == 'duplicates' else r'undefined'
+        result[key] = list(dict.fromkeys(re.findall(
+            kind + r"\s+[`'‘]([^'’\n]+)['’][^\n]*?" + ending, log, re.I)))
+    summary = re.search(r'There were (?:undefined references|multiply-defined labels)|'
+                        r'undefined citations|unresolved citations', log, re.I)
+    result['unresolved'] = bool(summary or any(result.values()))
+    return result
+
+
 def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
     """Compile with latexmk in a scratch folder: no shell escape, paranoid file access.
 
@@ -529,7 +608,8 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
         errors.insert(0, {'file': None, 'line': None, 'message': f'Compilation stopped after {timeout} seconds'})
     if not errors and pdf is None:
         errors = [{'file': None, 'line': None, 'message': 'LaTeX produced no PDF; see the log'}]
-    return {'available': True, 'ok': pdf is not None, 'errors': errors[:20], 'log': log, 'pdf': pdf}
+    return {'available': True, 'ok': pdf is not None, 'errors': errors[:20], 'log': log, 'pdf': pdf,
+            'references': reference_diagnostics(log)}
 
 
 
@@ -563,7 +643,7 @@ class WriteupRunner(ResearchRunner):
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
               conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
-              explain_templates=False, experiment_ids=(), **budgets):
+              explain_templates=False, experiment_ids=(), reference_records=(), **budgets):
         if variant not in (None, 'summary'):
             raise ValueError('Unknown write-up variant')
         if deliver not in ('folder', 'download'):
@@ -578,6 +658,12 @@ class WriteupRunner(ResearchRunner):
             cut = conversation.find('\n## ', len(conversation) - 200_000)
             conversation = '[Earlier conversation omitted.]\n\n' + conversation[cut + 1 if cut != -1 else -200_000:]
         texts = [(str(name), content) for name, content in template_texts]
+        self._reference_bib = ''
+        if reference_records and not any(Path(name).suffix.lower() == '.bib' for name in [*map(str, template_files), *(n for n, _ in texts)]):
+            catalog = record_bibliography(reference_records)
+            if catalog:
+                self._reference_bib = 'retrieved-references-' + hashlib.sha256(catalog.encode()).hexdigest()[:12] + '.bib'
+                texts.append((self._reference_bib, catalog))
         for name in [*map(str, template_files), *(name for name, _ in texts)]:
             if Path(name).suffix.lower() not in TEMPLATE_SUFFIXES:
                 raise ValueError('Template files must be .sty, .cls, .tex or .bib')
@@ -613,8 +699,9 @@ class WriteupRunner(ResearchRunner):
         pinned = self._pin(self._templates, 'T')
         # Saved templates arrive as contents: they live outside the workspace.
         for index, (name, content) in enumerate(self._template_texts, len(pinned) + 1):
-            pinned.append({'id': f'T{index}', 'path': 'saved-template/' + Path(name).name, 'content': content,
-                           'sha256': hashlib.sha256(content.encode()).hexdigest()})
+            catalog = name == self._reference_bib
+            pinned.append({'id': 'B0' if catalog else f'T{index}', 'path': 'saved-template/' + Path(name).name, 'content': content,
+                           'sha256': hashlib.sha256(content.encode()).hexdigest(), **({'catalog': True} if catalog else {})})
         return sources + pinned
 
     def _extra_state(self):
@@ -664,7 +751,7 @@ class WriteupRunner(ResearchRunner):
         return [s for s in self.state['sources'] if s['id'].startswith('T') and Path(s['path']).suffix.lower() in suffixes]
 
     def _notes_in(self):
-        return [s for s in self.state['sources'] if not s['id'].startswith('T')]
+        return [s for s in self.state['sources'] if not s['id'].startswith('T') and s['id'] != 'B0']
 
     def _room(self):
         """Characters of material one writing call can read, leaving room for its output (about 2.5 a token)."""
@@ -718,7 +805,9 @@ class WriteupRunner(ResearchRunner):
         entries = self._bibliography()
         if entries:
             listing = '\n'.join(f'{key}: {author}, {title} ({year})' for key, author, title, year in entries)
-            out.append("THE AUTHOR'S BIBLIOGRAPHY (cite these works with \\cite{key}, by these keys only):\n" + listing[:6000])
+            catalog = any(s.get('catalog') for s in self._templates_in(('.bib',)))
+            out.append(("BIBLIOGRAPHY FROM RETRIEVED RECORDS" if catalog else "THE AUTHOR'S BIBLIOGRAPHY")
+                       + ' (cite these works with \\cite{key}, by these keys only):\n' + (listing if catalog else listing[:6000]))
         return '\n\n'.join(out)
 
     def _material_labels(self):
@@ -735,16 +824,42 @@ class WriteupRunner(ResearchRunner):
         return EQUATION_RULES
 
     def _citation_rules(self):
+        if any(s.get('catalog') for s in self._templates_in(('.bib',))):
+            return (CITATION_RULES.replace("the author's bibliography", 'the supplied bibliography')
+                    + ' Use the supplied keys exactly. The controller provides every bibliography entry and prints '
+                    'the bibliography; do not write BibTeX entries or bibliography-loading commands yourself.')
         return CITATION_RULES if self._templates_in(('.bib',)) else CITATION_RULES_NO_BIB
 
     def _take_bibtex(self, body):
         """The body without the BibTeX the model wrote. With the author's .bib it is dropped; without, an entry
         is kept for the made bibliography only when the material gives its identifier and the text cites it."""
         entries, body = bibtex_entries(body)
+        supplied = self._templates_in(('.bib',))
+        catalog = any(source.get('catalog') for source in supplied)
+        aliases = {}
+        if supplied and entries:
+            known = [(key, entry_identifiers(text)) for source in supplied for key, text in bibtex_entries(source['content'])[0]]
+            keys = {key for key, _ in known}
+            for key, text in entries:
+                matches = {name for name, ids in known if ids.intersection(entry_identifiers(text))}
+                if key not in keys and len(matches) == 1:
+                    aliases[key] = matches.pop()
+        if aliases or catalog:
+            body, restore = _protect_code(body, comments=True)
+            def cite(match):
+                keys = ','.join(aliases.get(key.strip(), key.strip()) for key in match[1].split(','))
+                first, after = match.start(1) - match.start(), match.end(1) - match.start()
+                return match[0][:first] + keys + match[0][after:]
+            body = _CITE.sub(cite, body)
+            if catalog:
+                # The controller owns this generated file's name and its loading commands.
+                body = re.sub(r'\\(?:bibliography|bibliographystyle|addbibresource)\s*(?:\[[^\]]*\]\s*)?\{[^{}]*\}', '', body)
+                body = re.sub(r'\\printbibliography\b\s*(?:\[[^\]]*\])?', '', body)
+            body = restore(body)
         if not entries:
             return body
-        if self._templates_in(('.bib',)):
-            note = ('The model wrote BibTeX entries for works outside your bibliography; they were removed: '
+        if supplied:
+            note = ('The supplied bibliography was kept; model-provided BibTeX entries were removed: '
                     + ', '.join(key for key, _ in entries) + '.')
             if note not in self.state['warnings']:
                 self.state['warnings'].append(note)
@@ -772,13 +887,20 @@ class WriteupRunner(ResearchRunner):
     def _made_bibliography(self, preamble, body):
         """(before \\documentclass, preamble addition, before \\end{document}) for the bibliography made from the
         material, embedded in the .tex so that a downloaded file compiles on its own."""
+        supplied = self._templates_in(('.bib',))
+        catalog = next((source for source in supplied if source.get('catalog')), None)
         entries = self.state.get('bibliography') or []
-        if self._templates_in(('.bib',)) or not entries or not _CITE.search(_uncommented(body)):
+        if (supplied and not catalog) or (not catalog and not entries) or not _CITE.search(_uncommented(body)):
             return '', '', ''
-        name = self._bibliography_file()
-        head = (f'% The bibliography made from the identifiers in the material (check each entry).\n'
-                f'\\begin{{filecontents*}}[overwrite]{{{name}}}\n' + '\n\n'.join(e['text'] for e in entries) +
+        name = Path(catalog['path']).name if catalog else self._bibliography_file()
+        contents = catalog['content'].rstrip('\n') if catalog else '\n\n'.join(e['text'] for e in entries)
+        label = ('% Bibliography supplied from retrieved records.\n' if catalog else
+                 '% The bibliography made from the identifiers in the material (check each entry).\n')
+        head = (label +
+                f'\\begin{{filecontents*}}[overwrite]{{{name}}}\n' + contents +
                 '\n\\end{filecontents*}\n')
+        if re.search(r'\\begin\s*\{thebibliography\}', _uncommented(body)):
+            return head, '', ''
         if re.search(r'\\(?:printbibliography|bibliography)\b', body):
             return head, '', ''
         if re.search(_LOADED % 'biblatex', preamble):
@@ -844,6 +966,9 @@ class WriteupRunner(ResearchRunner):
                 self._adopt_template(choices[label][0])
             self.state['style'] = self._choose_style(label) if label else None
         self.state['style_checked'] = True
+        catalog = next((s for s in self.state['sources'] if s['id'] == 'B0'), None)
+        if catalog and not self._templates_in(('.bib',)):
+            catalog['id'] = 'T0'
         self.state['phase'] = 'draft'
 
     def _allowed_styles(self):
@@ -1082,6 +1207,8 @@ class WriteupRunner(ResearchRunner):
         points = todo_comments(body) + self._template_notes()
         if self.state.get('truncated'):
             points.append('Time ran out while the document was being written: it stops early.')
+        self.state['warnings'] = [warning for warning in self.state['warnings']
+                                  if not warning.startswith('Cites works that are not in your bibliography:')]
         unknown = self._unknown_citations(body)
         if unknown:
             note = (f'Cites works that are not in your bibliography: {", ".join(unknown)}. Check that they exist and say '
@@ -1124,7 +1251,8 @@ class WriteupRunner(ResearchRunner):
 
     def _unknown_citations(self, body):
         """Keys the text cites that neither the author's .bib nor the document's own bibliography defines."""
-        cited = [key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',') if key.strip()]
+        cited = [key.strip() for match in _CITE.finditer(_uncommented(body)) for key in match.group(1).split(',')
+                 if key.strip() and key.strip() != '*']
         known = ({key for key, *_ in self._bibliography()} | {e['key'] for e in self.state.get('bibliography') or []}
                  | set(re.findall(r'\\bibitem\s*(?:\[[^\]]*\])?\{([^}]+)\}', body)))
         return list(dict.fromkeys(key for key in cited if key not in known))
@@ -1370,7 +1498,8 @@ class WriteupRunner(ResearchRunner):
             (self.directory / 'artifacts' / 'compiled.pdf').unlink(missing_ok=True)
         self.state['undefined'] = [n for n in undefined_names(result['log']) if n not in macros]
         self.state['compile'] = {'available': result['available'], 'ok': result['ok'], 'errors': result['errors'],
-                                 'log': log_name, 'pdf': bool(result['pdf'])}
+                                 'log': log_name, 'pdf': bool(result['pdf']),
+                                 'references': result.get('references') or reference_diagnostics(result['log'])}
         if not result['available']:
             self.state['warnings'].append('LaTeX (latexmk) is not installed here; the document was not compiled.')
         self.state['phase'] = 'repair' if result['available'] and not result['ok'] and not self.state['repaired'] else 'export'
@@ -1491,11 +1620,34 @@ class WriteupRunner(ResearchRunner):
 
     def _finish(self):
         compile_state = self.state.get('compile') or {}
+        references = self._compiled_references()
         complete = (compile_state.get('ok') and all(part['complete'] for part in self.state.get('parts', []))
-                    and not self.state.get('truncated') and not self.state.get('missing_figures'))
+                    and not self.state.get('truncated') and not self.state.get('missing_figures')
+                    and not references.get('unresolved'))
         self.state['status'] = 'complete' if complete else 'partial'
         self.state['stop_reason'] = ('Written and compiled; read it before using it.' if complete else
                                      'Written; see the checks for what still needs you.')
+
+    def _compiled_references(self):
+        """Read old compile checkpoints without changing their stored documents."""
+        compiled = self.state.get('compile') or {}
+        if isinstance(compiled.get('references'), dict):
+            return compiled['references']
+        name = compiled.get('log')
+        if isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_.-]+\.md', name):
+            path = self.directory / 'artifacts' / name
+            if not path.is_symlink() and path.is_file():
+                return reference_diagnostics(path.read_text(encoding='utf-8', errors='replace'))
+        return {}
+
+    def _reference_message(self):
+        references = self._compiled_references()
+        if not references.get('unresolved'):
+            return ''
+        details = [label + ': ' + ', '.join(references[key]) for key, label in
+                   (('citations', 'undefined citations'), ('labels', 'undefined references'),
+                    ('duplicates', 'duplicate labels')) if references.get(key)]
+        return 'The PDF still has ' + ('; '.join(details) if details else 'unresolved references') + '.'
 
     def ready_message(self):
         """The short reply in the conversation: what is ready, and what still needs the author."""
@@ -1519,6 +1671,8 @@ class WriteupRunner(ResearchRunner):
             parts.append('Time ran out; the text is incomplete.')
         elif s.get('missing_figures'):
             parts.append('The PDF contains placeholders for missing figures.')
+        if message := self._reference_message():
+            parts.append(message)
         if outputs.get('source'):
             parts.append('Download Sources (.zip) for the LaTeX together with its code, figures and template files.')
         if compile_state.get('available') and not compile_state.get('ok'):
@@ -1542,9 +1696,12 @@ class WriteupRunner(ResearchRunner):
         todo = len(re.findall(r'%\s*TODO', s.get('document', '')))
         outputs = s.get('outputs') or {}
         style = s.get('style')
+        catalog = any(source.get('catalog') for source in self._templates_in(('.bib',)))
         compiled = ('compiled without errors' if compile_state.get('ok') else
                     'not compiled: LaTeX is not installed' if compile_state and not compile_state.get('available') else
                     f'failed to compile ({len(compile_state.get("errors", []))} errors)' if compile_state else 'not compiled yet')
+        if compile_state.get('ok') and self._compiled_references().get('unresolved'):
+            compiled = 'PDF compiled with unresolved references'
         out = ['# Summary' if s.get('variant') == 'summary' else '# Write-up', '',
                '**Model draft: check the mathematics and the compiled document before using it.**', '',
                f'Status: `{s["status"]}`. Phase: `{s["phase"]}`. Job ID: `{s["id"]}`.', '',
@@ -1553,6 +1710,7 @@ class WriteupRunner(ResearchRunner):
                f'- Document: ready to download as `{outputs["download"]}`' if outputs.get('download') else '- Document: not exported yet',
                f'- PDF: `{outputs["pdf"]}`' if isinstance(outputs.get('pdf'), str) else '- PDF: ' + ('ready' if outputs.get('pdf') else 'none'),
                f'- LaTeX: {compiled}', f'- TODO comments left for the author: {todo}',
+               '- Bibliography: pinned from retrieved records' if catalog else
                '- Bibliography: your .bib' if self._templates_in(('.bib',)) else
                f'- Bibliography: made from the material ({len(s.get("bibliography") or [])} entries, embedded in the .tex)'
                if s.get('bibliography') else '- Bibliography: none',
@@ -1561,6 +1719,8 @@ class WriteupRunner(ResearchRunner):
                '', '## Request', '', s['goal']]
         if s.get('warnings'):
             out += ['', '## Checks', ''] + ['- ' + w for w in dict.fromkeys(s['warnings'])]
+        if message := self._reference_message():
+            out += ['', '## Reference checks', '', message]
         if compile_state.get('errors'):
             out += ['', '## Compile errors', ''] + [f'- {e.get("file") or ""}{":" + str(e["line"]) if e.get("line") else ""} {e["message"]}'
                                                    for e in compile_state['errors']]

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve bibliography identifiers in Markdown links and pin retrieved
+  references for conversation write-ups. Reuse their metadata and citation keys;
+  keep PDFs with unresolved citations or labels explicitly partial.
 - Keep later providers' matching references instead of dropping them behind an
   early result limit. For latest-author requests, search arXiv by author and
   order records by original submission date. Remove rejected recommendations

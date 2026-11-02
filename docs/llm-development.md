@@ -153,6 +153,14 @@ Version 0.5.1, experimental. The source of truth for the version is
   Package-backed environments are never invented as theorems. Repair uses the
   actual remaining allowance, without a 60-second minimum. PDF availability
   requires the current compile to succeed; failed drafts are not called ready.
+  Conversation write-ups pin the metadata of shown literature/check references
+  and generate a deterministic bibliography after adopting the user's template.
+  An author-provided `.bib` takes precedence. Exact identifier matches can map
+  model citation aliases to supplied keys; unrelated or ambiguous works stay
+  unresolved. Parse Markdown DOI links without consuming their link syntax.
+  Compilation success means a PDF was built; completion additionally requires
+  the final LaTeX log to have no unresolved citations/references or duplicate
+  labels. Keep the PDF downloadable when those checks leave the draft partial.
 - **Honest status.** Never report an operational failure (timeout, budget,
   context, malformed output) as a mathematical verdict. Never describe a model
   review as a certificate. Partial work stays labelled partial.

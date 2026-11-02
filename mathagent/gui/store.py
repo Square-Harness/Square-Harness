@@ -22,7 +22,7 @@ from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _rea
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
-from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name
+from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 
 CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
@@ -1025,7 +1025,7 @@ def _saved_result(root, mode, job_id):
             return detail.get('answer') or '', _PROOF_STATUS.get(detail['status'], detail['status'])
         state = research_state(root, job_id)
         return state.get('document') or state.get('draft') or '', state['status']
-    except (NotFound, OSError, ValueError, KeyError):
+    except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
         return '', ''
 
 
@@ -1034,6 +1034,75 @@ def conversation_experiments(root, chat_id, before=None):
     return list(dict.fromkeys(item['experiment'] for item in load_chat(root, chat_id)['transcript'][:before]
                               if item.get('role') == 'experiment' and isinstance(item.get('experiment'), str)
                               and _EXPERIMENT.fullmatch(item['experiment'])))
+
+
+def conversation_references(root, chat_id, before=None, skip=None):
+    """Metadata for selected works actually identified in this conversation's material."""
+    chat = load_chat(root, chat_id)
+    mentioned = entry_identifiers(conversation_record(root, chat_id, before=before, skip=skip))
+    references, seen = [], set()
+    for index, item in enumerate(chat['transcript'][:before]):
+        if index == skip or item.get('role') != 'route' or item.get('status') != 'done':
+            continue
+        mode, job_id = item.get('mode'), item.get('job_id')
+        if mode not in ('literature', 'check') or not isinstance(job_id, str):
+            continue
+        try:
+            state = _read_research(_job_directory(root, job_id, 'checks' if mode == 'check' else 'research'), job_id)
+        except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if state.get('kind') != mode:
+            continue
+        if mode == 'literature':
+            organisation = state.get('organisation')
+            if not isinstance(organisation, dict):
+                continue
+            numbers = list(organisation.get('entry') or []) if isinstance(organisation.get('entry'), list) else []
+            themes = organisation.get('themes') or []
+            for theme in themes if isinstance(themes, list) else []:
+                if isinstance(theme, dict):
+                    for key in ('core', 'deeper'):
+                        if isinstance(theme.get(key), list):
+                            numbers.extend(theme[key])
+            pool = state.get('pool') or []
+            records = {record['n']: record for record in pool if isinstance(record, dict) and type(record.get('n')) is int} \
+                if isinstance(pool, list) else {}
+            chosen = [records[n] for n in dict.fromkeys(n for n in numbers if type(n) is int) if n in records]
+        else:
+            candidates = state.get('candidates') or []
+            chosen = []
+            for candidate in candidates if isinstance(candidates, list) else []:
+                if not isinstance(candidate, dict) or not isinstance(candidate.get('verdict'), dict):
+                    continue
+                verdict = candidate['verdict']
+                if verdict.get('level') in ('located', 'read', 'cited') and (
+                        candidate.get('selected') is True or verdict['level'] in ('read', 'cited')):
+                    chosen.append(verdict.get('record'))
+        for record in chosen:
+            if not isinstance(record, dict) or not isinstance(record.get('title'), str) or not record['title'].strip():
+                continue
+            arxiv, zbl = record.get('arxiv_id') or record.get('arxiv'), record.get('zbl')
+            identity = [record.get(key) for key in ('identifier', 'doi', 'url')]
+            identity += ['arXiv:' + arxiv] if isinstance(arxiv, str) else []
+            identity += ['Zbl ' + zbl] if isinstance(zbl, str) else []
+            identifiers = entry_identifiers('\n'.join(value for value in identity if isinstance(value, str)))
+            if not identifiers.intersection(mentioned) or identifiers.intersection(seen):
+                continue
+            authors = record.get('authors') or []
+            if not isinstance(authors, list) or any(not isinstance(name, str) for name in authors):
+                continue
+            normalized = {key: record[key] for key in ('title', 'type', 'venue', 'publisher', 'volume', 'issue', 'pages', 'url')
+                          if isinstance(record.get(key), str) and record[key].strip()}
+            normalized.update(authors=list(authors), identifier=sorted(identifiers)[0])
+            if type(record.get('year')) in (int, str):
+                normalized['year'] = record['year']
+            for prefix, key in (('doi:', 'doi'), ('arxiv:', 'arxiv_id'), ('zbl:', 'zbl')):
+                value = next((identifier[len(prefix):] for identifier in sorted(identifiers) if identifier.startswith(prefix)), None)
+                if value:
+                    normalized[key] = value
+            references.append(normalized)
+            seen.update(identifiers)
+    return references
 
 
 def conversation_record(root, chat_id, before=None, skip=None):

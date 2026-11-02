@@ -353,8 +353,10 @@ What it uses:
 - **References**: with a `.bib` attached, only its keys are cited, and any other
   work becomes a `% TODO: reference` comment. Without one, the document cites only
   works the material gives with a DOI, arXiv or zbMATH identifier, and their
-  bibliography is made inside the `.tex`. A work the literature search could not
-  confirm is never cited.
+  bibliography is made inside the `.tex`. References already retrieved in the
+  conversation are passed as a pinned bibliography with fixed keys; the writer
+  does not need to recreate their metadata. Your own `.bib` takes precedence.
+  A work the literature search could not confirm is never cited.
 - **Figures** the text includes are taken from the folders of the attached files
   or from your folder (`.pdf`, `.png`, `.jpg`). A missing figure is drawn as a
   placeholder.
@@ -372,6 +374,9 @@ How it works:
 3. The document is compiled with `latexmk` when it is installed, in a temporary
    folder, without shell escape and with restricted file access. If it does not
    compile, one repair call fixes the reported errors.
+   A PDF with undefined citations, unresolved references or duplicate labels is
+   offered as a partial draft, with the remaining keys listed. Producing a PDF
+   alone does not make the document complete.
    Missing supported commands are supplied within one bounded compile allowance;
    pausing also stops compilation promptly.
 4. The document opens with **Points to check**: its `% TODO` comments, citations
