@@ -18,8 +18,8 @@ experiments. You use it in a web app (on a computer or a phone) or in the
 terminal. It is experimental (version 0.5.1).
 
 For a temporary hosted-model test, `--backend openai --api-profile deepinfra`
-uses DeepSeek V4.1 Flash 1017 through DeepInfra. The harness, interface and saved
-jobs still run locally; model prompts, selected source text and tool context
+uses DeepSeek V4.1 Flash 1017 through DeepInfra. The harness and saved jobs run
+on the computer or server hosting SH; model prompts, selected source text and tool context
 are sent to DeepInfra. Its retention policy applies to that processing. Keep
 the provider credential on the backend, never in the browser or a saved job.
 `--allow-remote-model --offline` permits those model calls while locking web
@@ -28,6 +28,25 @@ research off. See the hosted-API setup in [llm-install.md](llm-install.md).
 The current hosted checkpoint is `deepseek-ai/DeepSeek-V4.1-Flash-1017`.
 Existing V4 Flash 0731 jobs keep their saved model and allowances; resuming
 them requires a credential that also permits that older checkpoint.
+
+A hosted pilot can use Cloudflare Access email codes before opening the same
+interface. The verified email selects the private workspace on the server;
+the browser never receives the model key or the workspace pairing credential.
+Conversations and files remain saved there when the browser closes. Separate
+service accounts and sandbox runtimes are required for isolation between testers;
+the Access login alone does not provide that isolation.
+
+Hosted testers may have a separate allowance shared across their conversations.
+Its meter counts output-equivalent tokens, including thinking, with input
+weighted by the configured input/output price ratio. At conservative Standard
+list prices of $0.20/M input and $0.60/M output, a $2.50 allowance is 4.167M
+output-equivalent tokens; each input token consumes one third of an output token.
+This is conservative allowance accounting, not the provider's bill: cached input
+uses the uncached price and promotional charges may be lower. Active calls reserve
+their worst-case allowance; complete usage releases the unused part. Unreported
+or interrupted calls retain reservations. A small remaining balance may therefore
+be insufficient to start a full-length call. This pilot limit is separate from
+each Proof job's existing solve/review budgets.
 
 The DS4 launcher uses Standard service by default. Add
 `--service-tier priority` to request DeepInfra's Priority service for all model

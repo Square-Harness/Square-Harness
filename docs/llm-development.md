@@ -53,12 +53,15 @@ Version 0.5.1, experimental. The source of truth for the version is
 
 ### Tests
 
-- The suite is deliberately small. `python -m unittest discover -s tests` runs
-  15 tests in about 8 seconds:
-  - 11 end-to-end tests through real entry points (CLI subprocess, HTTP API, GUI
+- The suite is deliberately small. `python -m unittest discover -s tests` runs:
+  - end-to-end tests through real entry points (CLI subprocess, HTTP API, GUI
     server, runners) with scripted model servers; one of them compiles a
     write-up with latexmk and BibTeX and skips where `latexmk` is missing;
-  - 4 sandbox tests, of which 2 skip without Docker and the sandbox image.
+  - sandbox and shared-admission tests; Docker-dependent checks skip without
+    Docker and the sandbox image;
+  - hosted allowance and gateway integration checks. Install the optional
+    `deployment/requirements-testers.txt` dependency to exercise the gateway
+    checks rather than skip them.
 
   `npm test` in `frontend/` runs one test.
 - Add a test only when it drives real entry points and would fail on a genuine
@@ -460,6 +463,31 @@ mode touches, in this order:
   and a wide window in light and dark themes, and rebuild.
 
 ## Verify a change
+
+### Optional hosted pilot
+
+`deployment/tester_gateway.py` verifies Cloudflare Access RS256 signatures,
+issuer, audience, expiry and email before selecting a fixed loopback backend.
+Never trust an email header or let a client choose the backend port/workspace.
+Pairing credentials stay in private files. Check the public Host and mutating
+request Origin before rewriting them for the backend; strip client credentials,
+backend cookies and pairing redirects. Preserve SSE streaming and disable caching.
+The optional JWT dependency belongs to this deployment layer, not SH's core.
+
+`hosted_quota.py` is opt-in through `SH_DEEPINFRA_QUOTA_FILE`. It reserves
+the full context input ceiling plus configured output before model dispatch,
+using an atomic SQLite transaction and integer nanodollars. Settle only complete,
+bounded reported usage; failed or unknown calls retain their reservation. Existing
+files and immutable settings never silently grant a new allowance. Store the
+ledger outside every served workspace. This is conservative allowance accounting,
+not exact provider billing; do not change Proof budgets to fit a depleted quota.
+
+`numerics/admission.py` optionally shares heavy-run capacity across processes and
+Linux accounts. `SH_NUMERICS_SLOTS_DIR` and `SH_NUMERICS_SLOTS` point to administrator-
+created, non-replaceable lock files. Waiting is cancellable and bounded to 45
+seconds. Container startup timing starts after admission; tiny availability
+calibration may occur outside this gate. Unset configuration preserves the
+single-user path. Keep all existing container restrictions intact.
 
 ### DeepInfra profile
 

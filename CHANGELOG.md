@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add an optional Cloudflare Access gateway for hosted pilots. Verify signed
+  identities before routing to fixed, separate backend workspaces; keep pairing
+  credentials server-side and preserve streamed responses and same-origin checks.
+- Add opt-in durable tester allowances with atomic reservations across processes,
+  conservative token accounting, and a global allowance meter. Keep ordinary
+  launches and Proof budgets unchanged when the hosted configuration is absent.
+- Bound heavy sandbox runs across separate hosted accounts with optional shared,
+  cancellable admission slots, preserving the existing container isolation.
+
 - Default the hosted DeepInfra profile to DeepSeek V4.1 Flash 1017, preserving
   Proof budgets, service-tier selection and concurrency. Keep V4 Flash 0731
   available for saved jobs without rewriting their model or allowances.

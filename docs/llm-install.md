@@ -102,6 +102,52 @@ Ollama, about 40 GB with HyperQwen). Optional:
   MacTeX include), to compile write-ups and their bibliographies;
 - `zstd`, to unpack Ollama without `sudo`.
 
+## Hosted tester deployment
+
+The ordinary GUI is a trusted single-workspace service. Before sharing it with
+testers, give each person a separate Linux service account, private home and
+workspace, model credential and rootless sandbox runtime. Keep backend listeners
+on loopback and their service configuration and credentials outside all served
+workspaces. Use separate backend ports and `--gui-root` fixed to each workspace.
+LaTeX compilation retains paranoid file access and disabled shell escape.
+
+The optional entry point is a Cloudflare Tunnel to the local tester gateway,
+protected by an Access self-hosted application and an exact email allowlist.
+Configure email-code authentication. Install the gateway dependency separately:
+
+```sh
+python -m pip install -r deployment/requirements-testers.txt
+python deployment/tester_gateway.py --help
+python deployment/tester_gateway.py --config /etc/square-harness/gateway.json
+```
+
+Its private JSON configuration contains `hostname`, the exact HTTPS Cloudflare
+Access `issuer`, the application's `audience`, and `tenants`: a mapping from each
+invited email to a fixed `port` and absolute `token_file`. Configuration and token
+files must be mode 0600 or 0640, readable only by the gateway account. Never put
+the model key there. The gateway binds to `127.0.0.1:8790`; publish that listener
+through Tunnel, with no public backend ports. Copy existing mail DNS records
+before moving nameservers, and migrate DNSSEC rather than leaving an old DS key.
+Do not cache private app responses or enable prompt/body logging.
+
+For a capped Standard-service tester, configure `SH_DEEPINFRA_QUOTA_FILE` as an
+absolute file outside served workspaces, inside a tenant-owned mode-0700 directory.
+The created SQLite file is mode 0600. `SH_DEEPINFRA_QUOTA_USD` defaults to `2.50`;
+`SH_DEEPINFRA_QUOTA_INPUT_PER_MILLION` and
+`SH_DEEPINFRA_QUOTA_OUTPUT_PER_MILLION` default to conservative `0.20` and `0.60`.
+These settings are immutable for an existing ledger. Pair this with a separately
+model-restricted provider credential; reuse credentials and ledgers on restart.
+Priority is refused for a quota-enabled instance. An exhausted allowance is an
+operational stop and does not authorize another allowance automatically.
+
+To bound heavy simulations across accounts, create a trusted shared directory
+with mode 0750, owned by root and a dedicated numerical group. Pre-create
+`slot-0.lock` and `slot-1.lock` as root-owned mode-0660 files in that group; tenants
+must not be able to replace directory entries. Add only sandbox service accounts
+to the group and configure `SH_NUMERICS_SLOTS_DIR` and `SH_NUMERICS_SLOTS=2` in their
+service environment. Arrange recreation at boot. This supplements per-container
+memory/CPU limits; it does not change model or Proof budgets.
+
 ## 2. Install the harness
 
 Run these steps in both plans, on the computer where the user will open the web app.

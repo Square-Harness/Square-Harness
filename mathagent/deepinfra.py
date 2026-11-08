@@ -189,8 +189,21 @@ class DeepInfra(OpenAICompatible):
         return self._bytes(data['messages']) + framing + extra_allowance
 
     def stream(self, payload):
+        quota = None
+        if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
+            from contextlib import closing
+            from .hosted_quota import HostedQuota
+            quota = HostedQuota.from_environment(self.service_tier)
+            reservation = quota.reserve(CONTEXT_TOKENS, self._payload(payload)['max_tokens'])
         try:
-            yield from super().stream(payload)
+            if quota is None:
+                yield from super().stream(payload)
+            else:
+                with closing(super().stream(payload)) as stream:
+                    for event in stream:
+                        if event.get('done'):
+                            quota.settle(reservation, event.get('prompt_eval_count'), event.get('eval_count'))
+                        yield event
         except AgentError as exc:
             redacted = self._redact(exc)
             if redacted != str(exc):

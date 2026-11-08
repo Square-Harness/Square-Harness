@@ -155,6 +155,9 @@ def status(h, body):
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
            'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
            'recent': store.recent_folders(hub.base)}
+    if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
+        from ..hosted_quota import quota_status
+        out['tester_allowance'] = quota_status()
     if not h.server.loopback:
         # Only an authenticated device can read the pairing addresses.
         out['pair_urls'] = [url + '/?' + urlencode({'token': h.server.token}) for url in h.server.urls]

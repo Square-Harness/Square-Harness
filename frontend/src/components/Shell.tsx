@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { api, type ChatListItem, type TaskSummary } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
-import { ago, duration } from '../format'
+import { ago, count, duration } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
-import { applyTheme, deleteConversation, readTheme, useApp, type AppState, type Theme } from '../store'
-import { ErrorNote, Modal, NumberField } from './common'
+import { applyTheme, deleteConversation, readTheme, refreshStatus, useApp, type AppState, type Theme } from '../store'
+import { ErrorNote, Meter, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
@@ -362,7 +362,18 @@ function WorkspacePanel() {
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
   const [access, setAccess] = useState(false)
+  const hasAllowance = Boolean(status?.tester_allowance)
+  useEffect(() => {
+    if (!hasAllowance) return
+    const timer = window.setInterval(() => { void refreshStatus() }, 5000)
+    return () => window.clearInterval(timer)
+  }, [hasAllowance])
   if (!status) return null
+  const allowance = status.tester_allowance
+  const outputUnit = allowance ? 1000 * Number(allowance.output_per_million) : 0
+  const inputWeight = allowance ? Number(allowance.input_per_million) / Number(allowance.output_per_million) : 0
+  const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString(undefined, { maximumFractionDigits: 3 })
+  const allowanceHint = `Across all conversations. Each input token counts as ${inputShare} of an output token; output includes thinking. This conservative pilot allowance uses list prices; actual billing may be lower. The meter includes reservations.`
   const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
   const readLabel = readable.length === 4 ? 'Reads all file types' : readable.length ? 'Reads ' + readable.join(', ') : 'Reads no files by itself'
   const reachable = status.ollama.reachable
@@ -390,6 +401,14 @@ function WorkspacePanel() {
       <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
         Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
       </button>
+      {allowance && outputUnit > 0 && (
+        <div title={allowanceHint}>
+          <Meter label="Pilot allowance" used={(allowance.charged_nanos + allowance.reserved_nanos) / outputUnit / 1e6}
+            limit={allowance.limit_nanos / outputUnit / 1e6} unit="M" decimals={3} title={allowanceHint} />
+          <p className="muted small">Output-equivalent tokens: {count(allowance.charged_nanos / outputUnit)} used.</p>
+          {allowance.reserved_nanos > 0 && <p className="muted small">{count(allowance.reserved_nanos / outputUnit)} reserved for unfinished or unreported calls.</p>}
+        </div>
+      )}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}

@@ -1,0 +1,2 @@
+# Only the optional Cloudflare Access gateway uses this dependency.
+PyJWT[crypto]==2.15.1

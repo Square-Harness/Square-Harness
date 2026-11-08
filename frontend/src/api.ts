@@ -47,6 +47,16 @@ export type Defaults = {
   research_chars: number
 }
 
+export type TesterAllowance = {
+  limit_nanos: number
+  charged_nanos: number
+  reserved_nanos: number
+  input_tokens: number
+  output_tokens: number
+  input_per_million: string
+  output_per_million: string
+}
+
 export type Status = {
   version: string
   instance: string
@@ -61,6 +71,7 @@ export type Status = {
   lan: boolean
   defaults: Defaults
   concurrency?: Concurrency
+  tester_allowance?: TesterAllowance | null
   ollama: { reachable: boolean; models: string[]; error?: string }
   pair_urls?: string[]
   root: string
