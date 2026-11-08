@@ -54,6 +54,9 @@ EFFORT = {
                      cited=4, queries=6, presentation=5, explain_check=True, fills=2),
 }
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
+SETTING_LINES = 60  # explain: at most this many source lines of setting, at most a third of them from one passage
+SETTING_TYPES = ('definition', 'assumption', 'hypothesis', 'notation', 'condition')  # statements that set the scene
+SETTING_TITLE = re.compile(r'setting|notation|preliminar|pr[ée]liminaire|assumption|hypoth[eè]s|framework|cadre', re.I)
 KIND_LABEL = {'invalid_inference': 'Invalid inference', 'missing_justification': 'Missing justification',
               'uncertainty': 'Uncertain step'}
 RANK = {'invalid_inference': 2, 'missing_justification': 1, 'uncertainty': 0}
@@ -1349,6 +1352,7 @@ class ExplainRunner(ReviewBase):
             self.state['phase'] = 'extract'
         elif phase == 'extract':
             self._pick_unit()
+            self.state['setting'] = self._setting()
             self.state['phase'] = 'explain'
         elif phase == 'explain':
             self._explain_parts()
@@ -1377,6 +1381,54 @@ class ExplainRunner(ReviewBase):
         else:
             raise ValueError('Unknown review phase: ' + phase)
 
+    def _setting(self):
+        """Line ranges that set the scene for the result: its standing assumptions and notation.
+
+        Prose before the statement, outside other results and every proof (definitions and assumptions
+        count as prose), nearest first: the passage just before the statement, the opening of its section,
+        sections titled like a setting, the opening of the text. Deterministic and bounded by SETTING_LINES.
+        """
+        unit, mapping = self.state['unit'], self.state['map']
+        if not unit.get('statement'):
+            return []
+        lines = self._lines(unit['source'])
+        skip = set()
+        for other in mapping['units']:
+            spans = list(other['proofs'])
+            if other['statement'] and other.get('type') not in SETTING_TYPES:
+                spans.append(other['statement'])
+            for a, b in spans:
+                skip.update(range(a, b + 1))
+        headings = {s['line']: s for s in mapping['sections']}
+        first = next((n + 1 for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 1)
+        runs, section, current = [], None, None  # runs: [section, line numbers] of prose between results
+        for n in range(first, unit['statement'][0]):
+            if n in headings or n in skip:
+                section, current = headings.get(n, section), None
+            elif manuscript._strip_comment(lines[n - 1]).strip():
+                if current is None:
+                    current = [section, []]
+                    runs.append(current)
+                current[1].append(n)
+        if not runs:
+            return []
+
+        def opening(of):
+            return next((run for run in runs if run[0] is of), None)
+        order = [runs[-1], opening(section)] + [opening(s) for s in mapping['sections'] if SETTING_TITLE.search(s['title'] or '')] + [runs[0]]
+        chosen, left = [], SETTING_LINES
+        for run in order:
+            if run is None or any(run is c for c, _ in chosen) or left <= 0:
+                continue
+            take = min(left, SETTING_LINES // 3)
+            numbers = run[1][-take:] if run is runs[-1] else run[1][:take]  # the end of the passage just before
+            chosen.append((run, [numbers[0], numbers[-1]]))
+            left -= len(numbers)
+        return sorted(span for _, span in chosen)
+
+    def _context(self):
+        return [tuple(span) for span in self.state.get('setting') or []]
+
     def _explain_parts(self):
         unit = self.state['unit']
         granularity = P.FINE if self._fine() else P.COARSE
@@ -1388,7 +1440,7 @@ class ExplainRunner(ReviewBase):
         self.state.setdefault('explain_plan', [])
         self.state.setdefault('explain_parts', {})
         if not self.state['explain_plan']:
-            segments = self._segments(unit, room, prompt=lambda packet: policy + '\n\n' + packet,
+            segments = self._segments(unit, room, self._context(), prompt=lambda packet: policy + '\n\n' + packet,
                                       cap=self._explain_cap(), output_schema=P.EXPLAIN_SCHEMA)
             self.state['explain_plan'] = [{'key': f'explain.{i}', 'segment': segment, 'depth': 0}
                                           for i, (segment, _, _) in enumerate(segments)]
@@ -1399,7 +1451,7 @@ class ExplainRunner(ReviewBase):
             if self.state['explain_parts'].get(item['key'], {}).get('usable'):
                 index += 1
                 continue
-            packet, fits, ranges = self._packet(unit, room, segment=item['segment'], context=True)
+            packet, fits, ranges = self._packet(unit, room, notation=self._context(), segment=item['segment'], context=True)
             self._mark(unit['source'], ranges)
             with self._timeout():
                 result = self._judge('explain', policy + '\n\n' + packet, cap=self._explain_cap(), schema=P.EXPLAIN_SCHEMA,
@@ -1432,6 +1484,7 @@ class ExplainRunner(ReviewBase):
                 for part in [self.state['explain_parts'].get(item['key'])]
                 if part and part.get('usable') and part['value']['idea'])
             self._warn('The explanation was produced in source parts; its local ideas are listed separately, without a whole-proof mechanism synthesis.')
+        combined['setting'] = next((v['setting'] for v in values if v.get('setting')), '')  # parts saved before 'setting' have none
         combined['steps'] = [step for value in values for step in value['steps']]
         combined['facts'] = list({fact['name']: fact for value in values for fact in value['facts']}.values())
         for key in ('hypotheses', 'gaps'):
@@ -1466,7 +1519,7 @@ class ExplainRunner(ReviewBase):
             return None
         facts = [{'name': str(f.get('name') or ''), 'statement': str(f.get('statement') or '')}
                  for f in value.get('facts') or [] if isinstance(f, dict) and f.get('name')]
-        return {'says': str(value.get('says')), 'idea': str(value.get('idea') or ''),
+        return {'setting': str(value.get('setting') or ''), 'says': str(value.get('says')), 'idea': str(value.get('idea') or ''),
                 'steps': sorted(steps, key=lambda s: (s['start_line'], s['end_line'])), 'facts': facts,
                 'hypotheses': str(value.get('hypotheses') or ''), 'gaps': str(value.get('gaps') or '')}
 
@@ -1479,7 +1532,7 @@ class ExplainRunner(ReviewBase):
 
     def _fill(self, missing):
         unit = self.state['unit']
-        packet, _, _ = self._packet(unit, self._room(3000, P.FILL_POLICY), segment=missing, context=True)
+        packet, _, _ = self._packet(unit, self._room(3000, P.FILL_POLICY), notation=self._context(), segment=missing, context=True)
         prompt = (P.FILL_POLICY + '\nMISSING LINES: ' + _span(missing) + '\n\nWALKTHROUGH SO FAR:\n' +
                   json.dumps(self.state['explanation']['steps'], ensure_ascii=False) + '\n\n' + packet)
         with self._timeout():
@@ -1516,7 +1569,7 @@ class ExplainRunner(ReviewBase):
                 continue
             explanation = json.dumps(value, ensure_ascii=False)
             packet, _, _ = self._packet(unit, self._room(1500, P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
-                                        segment=item['segment'], context=True)
+                                        notation=self._context(), segment=item['segment'], context=True)
             prompt = P.EXPLAIN_CHECK_POLICY + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
             with self._timeout():
                 result = self._ask('explain-check', prompt, cap=1500, schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
@@ -1537,7 +1590,8 @@ class ExplainRunner(ReviewBase):
         unit = self.state['unit']
         material = ('\n\nPROBLEMS:\n' + json.dumps(self.state['explain_problems'], ensure_ascii=False) +
                     '\n\nEXPLANATION:\n' + json.dumps(self.state['explanation'], ensure_ascii=False))
-        packet, _, _ = self._packet(unit, self._room(self._explain_cap(), P.EXPLAIN_FIX_POLICY) - len(material.encode()), context=False)
+        packet, _, _ = self._packet(unit, self._room(self._explain_cap(), P.EXPLAIN_FIX_POLICY) - len(material.encode()),
+                                    notation=self._context(), context=False)
         prompt = P.EXPLAIN_FIX_POLICY + material + '\n\n' + packet
         with self._timeout():
             result = self._ask('explain-fix', prompt, cap=self._explain_cap(), schema=P.EXPLAIN_SCHEMA, key='fix')
@@ -1570,8 +1624,11 @@ class ExplainRunner(ReviewBase):
         sid = unit['source']
         lines = self._lines(sid)
         show_source = self._source(sid)['path'].lower().endswith(('.tex', '.md', '.txt')) or sid == 'P1'
-        body = [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '', '### What it says', '', value['says'],
-                '', '### ' + ('Ideas for the proof parts' if len(s.get('explain_plan') or []) > 1 else 'The idea'), '', value['idea'] or '—']
+        body = [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '']
+        if value.get('setting'):
+            body += ['### Setting', '', value['setting'], '']
+        body += ['### What it says', '', value['says'],
+                 '', '### ' + ('Ideas for the proof parts' if len(s.get('explain_plan') or []) > 1 else 'The idea'), '', value['idea'] or '—']
         if value['steps']:
             body += ['', '### Step by step', '']
             for step in value['steps']:

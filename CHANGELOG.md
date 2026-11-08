@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Explain reads the setting of the result: the passages of the source that set
+  the scene (standing assumptions, notation, definitions) reach every
+  explanation, fill, accuracy-check and correction call. The explanation
+  recalls them under "Setting" and says when the result uses something the
+  source never defines, instead of reporting stated assumptions as hidden.
 - Preserve bibliography identifiers in Markdown links and pin retrieved
   references for conversation write-ups. Reuse their metadata and citation keys;
   keep PDFs with unresolved citations or labels explicitly partial.

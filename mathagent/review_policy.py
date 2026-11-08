@@ -126,8 +126,9 @@ STEP = {
 }
 EXPLAIN_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
-    'required': ['says', 'idea', 'steps', 'facts', 'hypotheses', 'gaps'],
+    'required': ['setting', 'says', 'idea', 'steps', 'facts', 'hypotheses', 'gaps'],
     'properties': {
+        'setting': {'type': 'string', 'maxLength': 1200},
         'says': {'type': 'string', 'maxLength': 2500},
         'idea': {'type': 'string', 'maxLength': 1200},
         'steps': {'type': 'array', 'maxItems': 40, 'items': STEP},
@@ -141,7 +142,10 @@ EXPLAIN_SCHEMA = {
 STEPS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['steps'],
                 'properties': {'steps': {'type': 'array', 'maxItems': 30, 'items': STEP}}}
 EXPLAIN_POLICY = """Explain the result and its proof below to a research mathematician from another field: precise,
-nothing hand-waved, but nothing assumed beyond a general graduate background. Return JSON:
+nothing hand-waved, but nothing assumed beyond a general graduate background. The setting of the source, when it is
+given, holds for this result. Return JSON:
+- setting: the standing assumptions and notation of the source that the result relies on, recalled briefly. If it
+  uses something the supplied text never defines, say so. Empty if nothing is needed.
 - says: what the statement says, in words and then precisely: the objects, the role of each hypothesis, the conclusion.
 - idea: the key idea of the proof and why it works, in two or three sentences.
 - steps: a walkthrough of the proof. Each step covers consecutive proof lines (start_line, end_line), says what
@@ -166,7 +170,8 @@ EXPLAIN_CHECK_SCHEMA = {
 }
 EXPLAIN_CHECK_POLICY = """Check the explanation below against the source statement and proof. Report only real problems: a
 misstated hypothesis or conclusion, a false mathematical claim, a step explained wrongly, or a gap of the proof that
-the explanation hides or silently repairs. Do not report style. Return an empty list when there is no problem."""
+the explanation hides or silently repairs. The setting of the source holds for the result. Do not report style.
+Return an empty list when there is no problem."""
 EXPLAIN_FIX_POLICY = """Correct the explanation in light of the problems listed (they are fallible: correct only those that are
 real). Return the whole explanation in the same JSON format."""
 

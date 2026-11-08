@@ -318,9 +318,13 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
   result's proof was not checked, the recommendation says it is provisional. It
   has twice the working time of a Review.
 - **Explain**: one result and its proof, for a mathematician from another field:
-  what it says, the idea, a walk through the proof (every line of a short proof),
-  the standard facts used, and where each hypothesis matters. An accuracy pass
-  compares the explanation with the source.
+  the setting it relies on, what it says, the idea, a walk through the proof
+  (every line of a short proof), the standard facts used, and where each
+  hypothesis matters. The setting is recalled from the passages of your file
+  that set the scene (standing assumptions, notation, definitions before the
+  result); if the result uses something your text never defines, the
+  explanation says so. An accuracy pass compares the explanation with the
+  source.
 
 ### Write-up
 
