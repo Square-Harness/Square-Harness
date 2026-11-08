@@ -276,6 +276,13 @@ The DeepInfra adapter inserts user-role native image blocks only into transport
 copies. Input preflight counts text plus a labelled conservative vision
 allowance, never base64 as text. Provider-reported usage settles ordinary
 accounting. Unsupported model/backend combinations fail explicitly.
+Native conversation user messages carry their own `images` references, including
+an empty list for text-only turns. Expand these anchors in place rather than
+adding the entire image pool to the latest user message. Recover old chat and
+paused-message anchors from the saved transcript without rewriting its display.
+Only fresh selections enter the current turn's attachment list; inherited image
+sources remain historical context. Standalone workers retain their task-local
+image fallback. Preflight counts image occurrences at their actual positions.
 
 Bind images to every fresh worker client and preserve refs on shared nested
 clients. Proof consumes originals directly. Research-derived manuscript

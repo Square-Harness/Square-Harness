@@ -789,7 +789,8 @@ class Hub:
         refs = {ref['sha256']: ref for ref in known + fresh}
         if len(refs) > images.MAX_IMAGES or sum(ref['bytes'] for ref in refs.values()) > images.MAX_TOTAL_BYTES:
             raise ValueError('This conversation exceeds the eight-image or 24 MiB limit. Start a new conversation for more images.')
-        return [images.validate(self.root, ref) for ref in refs.values()], [ref for ref in selected_refs if ref]
+        attached = [ref for ref in selected_refs if ref and (ref['name'] in explicit or ref['name'] not in by_name)]
+        return [images.validate(self.root, ref) for ref in refs.values()], attached
 
     def check_files(self, files, pdf=True, image_refs=()):
         """Workspace-relative files that exist; used before pinning them."""
@@ -1108,6 +1109,7 @@ class Hub:
             selected = [name for name in selected if (self.root / name).is_file()]
         image_refs, attached_images = self._capture_images(selected, session, explicit=files)
         files = self.check_files(selected, image_refs=image_refs)
+        files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         text_files = [name for name in files if not images.is_image(name)]
         project_snapshot = projects.snapshot(self.root, session.get('project_id'))
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(text_files)) if text_files else '')
@@ -1118,7 +1120,8 @@ class Hub:
             store.save_chat_images(self.root, chat_id, image_refs)
             agent, _ = self._engine(task, mode=mode, think=fresh['settings'].get('think'),
                                     online=self.online(fresh['settings'].get('online', False)) if not self.online_locked else False)
-            agent.history = fresh['history']
+            agent.history = store.image_history(fresh)
+            agent.turn_image_refs = attached_images
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
             agent.workspace.pin_files(text_files)
@@ -1267,6 +1270,8 @@ class Hub:
             else:
                 image_refs, attached_images = self._capture_images(selected, chat, explicit=files)
             files = self.check_files(selected, image_refs=image_refs)
+            if not resume:
+                files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         except (ValueError, OSError) as exc:
             if resume:
                 failed = chat.get('assistant_state') or {}
@@ -1308,6 +1313,10 @@ class Hub:
         def run_turn(task):
             fresh = store.load_chat(root, chat_id)
             previous = fresh.get('assistant_state') if resume else None
+            if previous:
+                previous = copy.deepcopy(previous)
+                for key in ('history', 'messages'):
+                    previous[key] = store.image_history(fresh, previous[key])
             online = bool(fresh['settings'].get('online')) and not self.online_locked
             if previous:
                 online = online and bool(previous.get('online', False))
@@ -1315,6 +1324,7 @@ class Hub:
             main.project_snapshot = project_snapshot
             main.project_context = projects.context(project_snapshot)
             images.bind(main, image_refs)
+            main.turn_image_refs = attached_images
             main.workspace.pin_files([name for name in files if not images.is_image(name)])
             self._show_experiments(main.workspace, root, chat_id, task)
             self._ensure_model(main)
@@ -1373,11 +1383,12 @@ class Hub:
                 max_children=previous['limits']['children'] if previous else None,
                 required_mode=required_mode, required_effort=required_effort or (previous or {}).get('required_effort'))
             checkpoint_lock = parent._state_lock
-            history = fresh['history']
+            history = store.image_history(fresh)
             if not history:
                 # Legacy chats remain useful, without the old character-capped summaries.
-                history = [{'role': i['role'], 'content': i.get('content', '')} for i in fresh['transcript']
-                           if i.get('role') in ('user', 'assistant')]
+                history = [{'role': i['role'], 'content': i.get('content', ''),
+                            **({'images': copy.deepcopy(i.get('images', []))} if i['role'] == 'user' else {})}
+                           for i in fresh['transcript'] if i.get('role') in ('user', 'assistant') and not i.get('discarded')]
                 if not resume and history and history[-1]['role'] == 'user':
                     history.pop()  # the current message is added by the controller
             try:

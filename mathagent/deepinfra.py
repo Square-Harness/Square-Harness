@@ -161,7 +161,7 @@ class DeepInfra(OpenAICompatible):
         if '_sh_bounded_title' in payload:
             self._quota_input_cap(payload, data)
         if refs and include_images:
-            data['messages'] = images.materialize(self.image_root, refs, data['messages'])
+            data['messages'] = images.materialize(self.image_root, refs, data['messages'], originals=payload['messages'])
         return data
 
     @staticmethod
@@ -209,8 +209,9 @@ class DeepInfra(OpenAICompatible):
         refs = getattr(self, 'image_refs', [])
         image_allowance, image_method = 0, ''
         if refs:
-            from .images import VISION_TOKEN_ESTIMATE, prompt_overhead
-            image_allowance = len(refs) * VISION_TOKEN_ESTIMATE + prompt_overhead(refs)
+            from .images import VISION_TOKEN_ESTIMATE, message_images, prompt_overhead
+            image_allowance = sum(len(attached) * VISION_TOKEN_ESTIMATE + prompt_overhead(attached)
+                                  for _, attached in message_images(refs, payload['messages']))
             image_method = ' + conservative 4096-token/image vision allowance (not base64 text tokens)'
         if self._tokenize_supported is not False:
             response = self._request_url(self.tokenize_url, {'model': data['model'], 'messages': data['messages'],

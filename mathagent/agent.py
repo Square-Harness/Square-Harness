@@ -104,7 +104,10 @@ class Agent:
         self.last_stats = {}
         self.last_stop_reason = ''
         recovery_notes = ''
-        messages.append({'role': 'user', 'content': query})
+        message = {'role': 'user', 'content': query}
+        if hasattr(self, 'turn_image_refs'):
+            message['images'] = copy.deepcopy(self.turn_image_refs)
+        messages.append(message)
         system = {'role': 'system', 'content': SYSTEM + '\nMODE: ' + MODES[self.mode]}
         context = ([{'role': 'user', 'content': self.project_context}]
                    if getattr(self, 'project_context', '') else [])

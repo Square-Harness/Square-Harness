@@ -347,20 +347,47 @@ def prompt_overhead(refs):
         len(_label(ref, index, len(refs)).encode('utf-8')) + 128 for index, ref in enumerate(refs)) + 128
 
 
-def materialize(root, refs, messages):
-    """Only transport copies carry base64; durable histories keep plain text and refs."""
+def message_images(refs, messages):
+    """Keep chat images on their original turn; standalone workers use task refs."""
     if not refs:
-        return messages
-    result = copy.deepcopy(messages)
-    user = next((item for item in reversed(result) if item.get('role') == 'user'), None)
-    if user is None or not isinstance(user.get('content', ''), str):
+        return []
+    users = [(index, item) for index, item in enumerate(messages) if item.get('role') == 'user']
+    if not users:
         _fail('Native images need a plain-text user message to accompany them')
-    blocks = [{'type': 'text', 'text': user.get('content', '')},
-              {'type': 'text', 'text': VISUAL_SOURCE_NOTICE}]
-    for index, ref in enumerate(refs):
-        validate(root, ref)
-        data, mime = read(root, ref['sha256'])
-        blocks += [{'type': 'text', 'text': _label(ref, index, len(refs))},
-                   {'type': 'image_url', 'image_url': {'url': 'data:' + mime + ';base64,' + base64.b64encode(data).decode('ascii')}}]
-    user['content'] = blocks
+    if not any('images' in item for _, item in users):
+        return [(users[-1][0], refs)]
+    known = {ref['sha256']: ref for ref in refs}
+    result = []
+    for index, item in users:
+        attached = item.get('images', [])
+        if not isinstance(attached, list):
+            _fail('Conversation image does not match its frozen task source')
+        for ref in attached:
+            original = known.get(ref.get('sha256')) if isinstance(ref, dict) else None
+            if original is None or any(ref.get(key) != original[key]
+                    for key in ('sha256', 'mime', 'width', 'height', 'bytes')):
+                _fail('Conversation image does not match its frozen task source')
+        if attached:
+            result.append((index, attached))
+    occurrences = [ref for _, attached in result for ref in attached]
+    if len(occurrences) > MAX_IMAGES or sum(ref['bytes'] for ref in occurrences) > MAX_TOTAL_BYTES:
+        _fail('Conversation image inputs exceed eight attachments or 24 MiB; start a new conversation')
+    return result
+
+
+def materialize(root, refs, messages, *, originals=None):
+    """Only transport copies carry base64; durable histories keep plain text and refs."""
+    result = copy.deepcopy(messages)
+    for position, attached in message_images(refs, messages if originals is None else originals):
+        user = result[position]
+        if not isinstance(user.get('content', ''), str):
+            _fail('Native images need a plain-text user message to accompany them')
+        blocks = [{'type': 'text', 'text': user.get('content', '')},
+                  {'type': 'text', 'text': VISUAL_SOURCE_NOTICE}]
+        for index, ref in enumerate(attached):
+            validate(root, ref)
+            data, mime = read(root, ref['sha256'])
+            blocks += [{'type': 'text', 'text': _label(ref, index, len(attached))},
+                       {'type': 'image_url', 'image_url': {'url': 'data:' + mime + ';base64,' + base64.b64encode(data).decode('ascii')}}]
+        user['content'] = blocks
     return result

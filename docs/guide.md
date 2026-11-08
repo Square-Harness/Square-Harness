@@ -128,6 +128,10 @@ combined, with at most 8,192 pixels per side and 32 megapixels per image.
 The model receives the actual images. Their immutable private copies
 are kept with the workspace: saved chats, follow-up questions and paused jobs
 retain the original bytes even if the uploaded file changes or is deleted.
+Images stay with the message where you attached them. Sending a text-only
+follow-up does not attach them again; the model can still refer to them in the
+earlier conversation context. Attach an image again only when you want it on a
+new message.
 Use a new conversation for a further batch. The existing Qwen profile does not
 support native images and reports that explicitly.
 

@@ -364,8 +364,10 @@ class ModeOrchestrator(Orchestrator):
             self._save()
             self.emit('progress', 'Selecting the appropriate workflow…')
             try:
+                current = next(message for message in reversed(state['messages']) if message.get('role') == 'user')
                 decision = route_request(self.agent.client, self.agent.model, state['query'],
-                                         history=state['history'], files=state['files'], ctx=self.agent.ctx)
+                                         history=state['history'], files=state['files'], ctx=self.agent.ctx,
+                                         current_images=current.get('images'))
             except AgentError as exc:
                 state['proof_routing'] = {'status': 'error', 'error': str(exc)}
                 self._save()

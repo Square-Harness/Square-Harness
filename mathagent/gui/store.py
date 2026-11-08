@@ -4,6 +4,7 @@ Job views never write engine state. Chat sessions are the interface's own
 records: the terminal keeps chat in memory, while a browser tab or phone needs
 the conversation to survive a reload.
 """
+import copy
 import errno
 import fcntl
 import hashlib
@@ -609,6 +610,31 @@ def chat_images(chat):
             for ref in item.get('images', []):
                 result[ref['sha256']] = dict(ref)
     return list(result.values())
+
+
+def image_history(chat, history=None):
+    """Annotate legacy native user messages with their original saved images.
+
+    This is a read-only view: existing anchors win, and unmatched messages are
+    explicitly text-only rather than receiving the conversation's image pool.
+    """
+    result = copy.deepcopy(chat.get('history', []) if history is None else history)
+    users = [item for item in chat.get('transcript', [])
+             if item.get('role') == 'user' and not item.get('discarded')
+             and isinstance(item.get('content'), str) and item['content']]
+    cursor = 0
+    for message in result:
+        if message.get('role') != 'user':
+            continue
+        content = message.get('content', '')
+        match = next((index for index in range(cursor, len(users))
+                      if content == users[index]['content']
+                      or (isinstance(content, str) and content.startswith(users[index]['content'] + '\n\n'))), None)
+        if 'images' not in message:
+            message['images'] = copy.deepcopy(users[match].get('images', [])) if match is not None else []
+        if match is not None:
+            cursor = match + 1
+    return result
 
 
 @_locked_chat

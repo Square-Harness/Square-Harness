@@ -326,7 +326,9 @@ there is no extra dependency or vision service to install. Keep the private
 saved job state. The GUI uses authenticated same-origin thumbnail requests.
 PNG, JPEG and static WebP are accepted, with eight images per conversation/job,
 8 MiB per image and 24 MiB combined, at most 8,192 pixels per side and 32
-megapixels. The Qwen profile rejects native images.
+megapixels. Image references remain bound to their original conversation turn,
+including after a reload or resume; text-only replies add no new attachment.
+The Qwen profile rejects native images.
 For terminal workflows, include image paths in `--proof-file` or
 `--research-file` just like text sources.
 

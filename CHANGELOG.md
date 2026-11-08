@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Keep image attachments on their original conversation message. Text-only
+  follow-ups no longer inherit a new attachment or move earlier images to the
+  latest model request; saved conversations and paused work retain their sources.
+
 ## 1.0.0 — 2026-11-08
 
 - Present the three setup routes clearly: local self-hosting, a self-hosted

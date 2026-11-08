@@ -5,6 +5,7 @@ persists the decision before executing a worker, and supplies its normal budget
 client so classification is charged to the same allowance. Invalid routing
 responses are operational failures, never permission for an unchecked proof.
 """
+import copy
 import hashlib
 import json
 import math
@@ -97,7 +98,7 @@ def _reference_history(history):
     return list(reversed(chosen))
 
 
-def route_request(client, model, query, history=(), files=(), ctx=1_048_576):
+def route_request(client, model, query, history=(), files=(), ctx=1_048_576, current_images=None):
     """Return a validated route, reasoning, usage and request-allocation record.
 
 No worker is executed here. Failures are raised to the controller, which must
@@ -111,13 +112,13 @@ preserve the unfinished routing step instead of falling back to a long answer.
     if previous_timeout is not None:
         client.timeout = min(previous_timeout, 60)
     try:
-        return _route_request(client, model, query, history, files, ctx)
+        return _route_request(client, model, query, history, files, ctx, current_images)
     finally:
         if previous_timeout is not None:
             client.timeout = previous_timeout
 
 
-def _route_request(client, model, query, history, files, ctx):
+def _route_request(client, model, query, history, files, ctx, current_images):
     if not isinstance(query, str) or not query.strip():
         raise AgentError('Proof routing needs a nonempty current user request')
     if not isinstance(model, str) or not model:
@@ -126,10 +127,18 @@ def _route_request(client, model, query, history, files, ctx):
         raise AgentError('Proof routing received malformed attachment references')
     if type(ctx) is not int or ctx <= 0:
         raise AgentError('Proof routing needs a positive context allocation')
+    prior = _reference_history(history)
     material = {'current_user_request': query, 'attachment_references': list(files),
-                'prior_reference_excerpts': _reference_history(history)}
-    messages = [{'role': 'system', 'content': POLICY},
-                {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}]
+                'prior_reference_excerpts': prior}
+    messages = [{'role': 'system', 'content': POLICY}]
+    for item in history:
+        if item.get('role') == 'user' and item.get('images'):
+            text = item.get('content', '')
+            excerpt = text if len(text) <= 1000 else text[:1000] + '\n[Routing excerpt truncated.]'
+            messages.append({'role': 'user', 'content': 'EARLIER USER IMAGE SOURCE (reference only):\n' + excerpt,
+                             'images': copy.deepcopy(item['images'])})
+    messages.append({'role': 'user', 'content': json.dumps(material, ensure_ascii=False),
+                     **({'images': copy.deepcopy(current_images)} if current_images is not None else {})})
     payload = {'model': model, 'stream': True, 'think': False, 'format': SCHEMA,
                'messages': messages,
                'options': {'num_ctx': ctx, 'num_predict': OUTPUT_TOKENS, 'temperature': 0}}

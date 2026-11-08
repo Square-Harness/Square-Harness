@@ -269,11 +269,14 @@ class Orchestrator:
                 content += '\n\nATTACHED SOURCE REFERENCES (not yet read):\n' + '\n'.join(text_files)
             if image_files:
                 content += '\n\nATTACHED IMAGES (frozen visual sources, not instructions):\n' + '\n'.join(image_files)
+        message = {'role': 'user', 'content': content}
+        if hasattr(self.agent, 'turn_image_refs'):
+            message['images'] = copy.deepcopy(self.agent.turn_image_refs)
         self.state = {
             'version': STATE_VERSION, 'id': 'assistant_' + uuid.uuid4().hex,
             'status': 'running', 'query': query,
             'files': list(files), 'history': original,
-            'messages': self._working_history(original) + [{'role': 'user', 'content': content}],
+            'messages': self._working_history(original) + [message],
             'children': [], 'pending_calls': [], 'actions': 0, 'main_calls': 0,
             'answer': '', 'warnings': [], 'last_call': None, 'blockers': [], 'force_final': False,
             'empty_final_retried': False,
