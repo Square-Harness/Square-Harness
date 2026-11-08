@@ -407,8 +407,10 @@ mode touches, in this order:
     stream and event interface, and add it to `create_client`;
   - add the file to the proof provenance hashes in `proof._provenance`, and add
     an interruptible subclass in `gui/hub.py`;
-  - verify thinking, structured output, exact or conservative token counting,
-    and output-cap enforcement against a live server (see
+  - verify thinking, structured output (including a LaTeX backslash inside a
+    JSON string: `backends._grammar_schema` keeps string length bounds out of
+    server grammars, which can forbid escapes in bounded strings), exact or
+    conservative token counting, and output-cap enforcement against a live server (see
     `scripts/test-local-mlx.py` for a protocol check).
 - **A literature source**:
   - add it to `literature.py`; it must work without a key, respect the request

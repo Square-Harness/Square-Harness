@@ -7,6 +7,11 @@
   explanation, fill, accuracy-check and correction call. The explanation
   recalls them under "Setting" and says when the result uses something the
   source never defines, instead of reporting stated assumptions as hidden.
+- Keep LaTeX in structured answers on vLLM servers: string length bounds are no
+  longer sent to the server's grammar, which admitted no backslash in a
+  length-bounded string. JSON answers (reviews, explanations, checks) had lost
+  every LaTeX command, sometimes replacing a whole formula with one letter. The
+  bounds still apply to the harness's own checks.
 - Preserve bibliography identifiers in Markdown links and pin retrieved
   references for conversation write-ups. Reuse their metadata and citation keys;
   keep PDFs with unresolved citations or labels explicitly partial.

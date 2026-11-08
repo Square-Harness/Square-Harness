@@ -63,6 +63,22 @@ def create_client(backend, host, timeout=600):
     raise AgentError(f'Unknown model backend: {backend}')
 
 
+def _grammar_schema(schema):
+    """The schema a server enforces as a grammar: string length bounds removed.
+
+    vLLM's grammar (HyperQwen image, November 2026) admits no backslash escape inside a
+    length-bounded string, so every LaTeX command in a JSON answer was lost. The bounds
+    stay in the harness's schemas and local checks; the output cap bounds each call.
+    """
+    if isinstance(schema, list):
+        return [_grammar_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    string = schema.get('type') == 'string'
+    return {key: _grammar_schema(value) for key, value in schema.items()
+            if not (string and key in ('maxLength', 'minLength'))}
+
+
 def _messages(messages):
     """Convert native tool history without modifying saved harness artifacts."""
     result, pending = [], []
@@ -217,7 +233,7 @@ class OpenAICompatible:
         if schema == 'json':
             data['response_format'] = {'type': 'json_object'}
         elif isinstance(schema, dict):
-            data['structured_outputs'] = {'json': copy.deepcopy(schema)}
+            data['structured_outputs'] = {'json': _grammar_schema(schema)}
         elif schema is not None:
             raise AgentError('Unsupported structured output format')
         fraction = self.thinking_budget_policy.get('structured' if schema else 'ordinary')
