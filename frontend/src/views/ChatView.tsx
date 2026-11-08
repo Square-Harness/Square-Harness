@@ -8,7 +8,9 @@ import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../component
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
-import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
+import { ProjectSelector } from '../components/Projects'
+import { ImageGallery, isImagePath, PinnedImages } from '../components/ImageAttachments'
+import { callPayload, coverOf, MODE_CALLS, typedCall, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -17,7 +19,7 @@ import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
 import { go, href } from '../router'
-import { useApp, useTick } from '../store'
+import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
 
 type ChatMode = 'critic' | 'explore' | 'free'
@@ -25,13 +27,8 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Literature check for citations, Literature for reading lists, Quick review to check a proof, Review and Detailed review for manuscripts, Explain for a result and its proof, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
-    examples: [
-      'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
-      'Find a reference on the $H^2$ regularity of elliptic problems with Neumann boundary conditions.',
-      'Review manuscript.tex, and find the literature on compact Sobolev embeddings it should cite.',
-      'Turn my notes in notes.md into a clean LaTeX section using my macros.',
-    ],
+    text: 'Discuss a question, share a proof or attach your notes. The main agent chooses the appropriate skills and brings their results back into the conversation.',
+    examples: [],
   },
   critic: {
     title: 'Critique an argument',
@@ -109,17 +106,38 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSelectedCall(next)
   }
   const [attachments, setAttachments] = useState<string[]>([])
+  const defaultProject = app.projects?.some((project) => project.id === app.projectFilter) ? app.projectFilter : null
+  const [newProject, setNewProject] = useState<string | null>(defaultProject)
+  const [projectOverride, setProjectOverride] = useState<string | null | undefined>(undefined)
+  const [projectSaving, setProjectSaving] = useState(false)
+  useEffect(() => { setProjectOverride(undefined) }, [data?.project_id])
+  const savedProject = data ? data.project_id || null : app.chats?.find((chat) => chat.id === id)?.project_id || null
+  const currentProject = id ? (projectOverride !== undefined ? projectOverride : savedProject) : newProject
+  useEffect(() => { if (!id && !createdChat.current) setNewProject(defaultProject) }, [defaultProject, id])
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
   const createdChat = useRef<string | null>(null)
+  useEffect(() => {
+    const prepare = (event: Event) => {
+      if (sending) { event.preventDefault(); setSendError('Wait for the message to be sent before changing projects.'); return }
+      if ((draft.trim() || attachments.length) && !window.confirm('Start a new conversation in this project? Your unsent message and attachments will be cleared.')) {
+        event.preventDefault(); return
+      }
+      setDraft(''); setAttachments([]); setSelectedCall(null); setSelectedEffort(null); setSendError(''); createdChat.current = null
+    }
+    window.addEventListener('square-new-project-chat', prepare)
+    return () => window.removeEventListener('square-new-project-chat', prepare)
+  }, [draft, attachments, sending])
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
   // Online search is always on, unless the interface was launched --offline.
   const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
+  const composer = useRef<HTMLFormElement>(null)
   const pinned = useRef(true)
 
-  useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]))
+  const uploading = useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]),
+    currentProject)
   useEffect(() => { if (data) setThink(data.settings.think) }, [data?.id])
   // Conversations saved with search off (earlier versions) get it back.
   useEffect(() => {
@@ -134,21 +152,31 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }, [data, liveSize, routing])
 
   const free = mode === 'free'
+  const hasImages = attachments.some(isImagePath)
   const budgetDisplay = data?.assistant_budget ? assistantBudgetDisplay(data.assistant_budget) : null
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
-    const raw = text ?? draft
+    let raw = text ?? draft
+    let imageOnlyCall: ModeCall | null = null
+    if (hasImages) {
+      const selected = validCall(raw, selectedCall) ? selectedCall : typedCall(raw, true)
+      const body = selected ? (raw.slice(0, selected.start) + raw.slice(selected.end)).trim() : raw.trim()
+      if (!body) {
+        imageOnlyCall = selected
+        raw = (raw.trimEnd() ? raw.trimEnd() + '\n\n' : '') + 'Please examine the attached images.'
+      }
+    }
     // A message that is only a mode name ("@summarize") is that call, picked from the menu or not.
-    const call = validCall(raw, selectedCall) ? selectedCall : raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null
+    const call = validCall(raw, selectedCall) ? selectedCall : imageOnlyCall || (raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null)
     const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
-    if (!content.trim() || sending || resuming || work.blocked) return
+    if (!content.trim() || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
     setSending(true)
     setSendError('')
     try {
       let chatId = id || createdChat.current
-      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true)).id; createdChat.current = chatId }
+      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true, newProject)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall)
       else await api.send(chatId, content, attachments)
       setDraft('')
@@ -163,6 +191,32 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     }
   }
   const submit = (event: FormEvent) => { event.preventDefault(); send() }
+  const pickSkill = (next: RouteMode) => {
+    const currentCall = validCall(draft, selectedCall) ? selectedCall : typedCall(draft, true)
+    const message = currentCall ? (draft.slice(0, currentCall.start) + draft.slice(currentCall.end)).trimStart() : draft
+    const token = '@' + next
+    setDraft(token + ' ' + message)
+    selectCall({ mode: next, start: 0, end: token.length })
+    window.requestAnimationFrame(() => {
+      const input = composer.current?.querySelector('textarea')
+      input?.focus(); input?.setSelectionRange(token.length + 1, token.length + 1)
+    })
+  }
+  const changeProject = async (project: string | null) => {
+    if (sending || resuming || projectSaving || work.blocked) return
+    const chatId = id || createdChat.current
+    if (chatId) {
+      setProjectSaving(true); setSendError('')
+      try {
+        await api.chatProject(chatId, project)
+        if (id) setProjectOverride(project)
+        refreshLists()
+      } catch (reason) { setSendError((reason as Error).message); return }
+      finally { setProjectSaving(false) }
+    }
+    if (!id) setNewProject(project)
+    setProjectFilter(project || 'all')
+  }
   const keys = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() }
   }
@@ -178,14 +232,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }
   const taskError = app.snapshot.task?.target === id && app.snapshot.task.state === 'error' ? app.snapshot.task.error : ''
   const transcript = data?.transcript || []
-  const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route' && item.role !== 'experiment')
-  const canReview = !!id && !work.blocked && !paused && !sending && !resuming && !!last && last.role === 'assistant' && !!last.content
-  const review = async () => {
-    if (!id || !canReview || sending) return
-    setSending(true)
-    setSendError('')
-    try { await api.review(id) } catch (reason) { setSendError((reason as Error).message) } finally { setSending(false) }
-  }
   // Another conversation's work can be queued; this conversation has one active turn.
   const blocked = work.blocked
 
@@ -195,10 +241,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
-          {!id && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
+          {!id && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
-          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
+          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
           {id && <Transcript items={transcript} mode={mode} chatId={id} />}
           {routing && !live && (
             <div className="entry message message-model">
@@ -219,10 +265,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           )}
         </div>
       </div>
-      <form className="composer" onSubmit={submit}>
+      <form className="composer" ref={composer} onSubmit={submit}>
         <div className="composer-top">
           <WorkspaceSwitch />
-          {attachments.map((path) => (
+          <ProjectSelector value={currentProject} onChange={(project) => { void changeProject(project) }} disabled={sending || resuming || projectSaving || work.blocked || (!!id && !data)} />
+          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || work.blocked} onClick={() => window.dispatchEvent(new Event('square-attach-files'))}><FileIcon size={14} /> Attach files{app.status?.image_support ? ' or images' : ''}</button>
+          {attachments.filter((path) => !isImagePath(path)).map((path) => (
             <span key={path} className="chip">
               <FileIcon size={14} /><span>{path}</span>
               <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
@@ -230,10 +278,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </span>
           ))}
         </div>
+        <PinnedImages paths={attachments} onRemove={(path) => setAttachments((items) => items.filter((item) => item !== path))} />
+        {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
             effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !!effortKind(selectedCall.mode)}
-            onSend={() => { send() }} disabled={blocked || sending || resuming} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+            onSend={() => { send() }} disabled={blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Ask the critic to check a statement, a proof, or a file…' : 'Ask about an approach, a reformulation or a connection…'}
@@ -242,8 +292,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
             </button>
-          ) : paused && !draft.trim() ? (
-            <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending} onClick={resume}>
+          ) : paused && !draft.trim() && !hasImages ? (
+            <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending || !!uploading} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
           ) : work.queued ? (
@@ -251,8 +301,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               <CloseIcon size={16} /> Cancel queued turn
             </button>
           ) : (
-            <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || resuming || !draft.trim()} aria-label="Send">
-              <SendIcon size={16} /> Send
+            <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label="Send">
+              <SendIcon size={16} /> {uploading ? 'Uploading…' : 'Send'}
             </button>
           )}
         </div>
@@ -266,11 +316,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               {' · '}{budgetDisplay.time}
             </span>
           )}
-          {canReview && (
-            <button type="button" className="btn btn-quiet btn-small" onClick={review}>
-              Fresh review of the last answer
-            </button>
-          )}
           {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
@@ -282,7 +327,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   )
 }
 
-function Intro({ mode, onPick }: { mode: ChatMode; onPick: (text: string) => void }) {
+function Intro({ mode, onPick, onSkill }: { mode: ChatMode; onPick: (text: string) => void; onSkill: (mode: RouteMode) => void }) {
   const intro = INTRO[mode]
   return (
     <div className="entry intro">
@@ -290,19 +335,20 @@ function Intro({ mode, onPick }: { mode: ChatMode; onPick: (text: string) => voi
       <div>
         <h1 className="page-title">{intro.title}</h1>
         <p className="lede">{intro.text}</p>
-        {mode === 'free' && <p className="lede">
-          To force a worker, type <code>@</code> anywhere in your prompt and confirm a choice in the popup.
-          The available calls are <code>@prove</code>, <code>@check</code>, <code>@literature</code>, <code>@quick_review</code>,
-          {' '}<code>@referee</code> (a review), <code>@detailed_review</code>, <code>@explain</code>, <code>@writeup</code>, <code>@critic</code>, <code>@explore</code>, and the sandbox calls <code>@python_lab</code> (run Python) and <code>@sanity_check</code> (test a claim numerically).
-          Unconfirmed <code>@</code> text stays part of your message.
-        </p>}
-        <div className="examples">
+        {mode === 'free' && <>
+          <p className="muted intro-skill-hint">Choose a skill below, or type <code>@</code> in your message, to request one explicitly.</p>
+          <div className="intro-skills" aria-label="Available skills">{MODE_CALLS.map((skill) => <button key={skill.mode} type="button" className="intro-skill" title={skill.summary} onClick={() => onSkill(skill.mode)}>
+            <span className={`route-cover mode-${coverOf(skill.mode)}`} aria-hidden="true"><Glyph mode={coverOf(skill.mode)} /></span>{skill.label}
+          </button>)}</div>
+          <p className="muted small intro-feedback">Found an issue or have an idea? <button type="button" className="link-btn" onClick={() => window.dispatchEvent(new Event('square-feedback'))}>Send feedback</button>.</p>
+        </>}
+        {intro.examples.length > 0 && <div className="examples">
           {intro.examples.map((example) => (
             <button key={example} type="button" className="example" onClick={() => onPick(example)}>
               <Markdown>{example}</Markdown>
             </button>
           ))}
-        </div>
+        </div>}
       </div>
     </div>
   )
@@ -340,8 +386,9 @@ function UserMessage({ item }: { item: TranscriptItem }) {
       <div className="message-body">
         <Markdown>{item.content}</Markdown>
         {item.files && item.files.length > 0 && (
-          <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
+          <div className="attachments">{item.files.filter((path) => !item.images?.length || !isImagePath(path)).map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
         )}
+        {!!item.images?.length && <ImageGallery images={item.images} />}
         {item.time && <span className="message-time">{ago(item.time)}</span>}
       </div>
     </div>

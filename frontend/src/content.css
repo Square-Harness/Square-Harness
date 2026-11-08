@@ -269,6 +269,22 @@
 .chat-scroll { flex: 1; }
 .chat-inner { padding-bottom: 32px; }
 .intro .examples { display: grid; gap: 8px; margin-top: 6px; max-width: 66ch; }
+.intro-skill-hint { margin: 20px 0 12px; font-size: 14px; line-height: 1.5; }
+.intro-skills { display: flex; flex-wrap: wrap; gap: 8px; max-width: 66ch; }
+.intro-skill { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 5px 10px 5px 6px; background: var(--sheet); color: var(--text-2); border: 1px solid var(--line); border-radius: 7px; font: 13px var(--font-ui); cursor: pointer; }
+.intro-skill:hover { color: var(--text); border-color: var(--ink); background: var(--hover); }
+.intro-skill .route-cover { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 4px; color: #fff; }
+.intro-skill .route-cover svg { width: 17px; height: 17px; }
+.intro-feedback { margin-top: 22px; }
+.image-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.image-attachment { position: relative; width: 144px; max-width: 100%; margin: 0; padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: var(--sheet); }
+.image-attachment a { display: block; border-radius: 4px; overflow: hidden; }
+.image-attachment img { display: block; width: 100%; height: 104px; object-fit: contain; background: var(--paper); }
+.image-attachment figcaption { padding: 5px 2px 1px; font: 11.5px/1.3 var(--font-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); }
+.image-attachment .icon-btn { position: absolute; right: 3px; top: 3px; width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); }
+.pinned-images > p { margin: 5px 0 8px; }
+.composer > .pinned-images { max-height: 210px; overflow-y: auto; flex: none; }
+@media (max-width: 480px) { .image-attachment { width: 116px; } .image-attachment img { height: 84px; } }
 .example { padding: 10px 14px; text-align: left; background: var(--sheet); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; color: var(--text); }
 .example:hover { border-color: var(--ink); }
 .example .prose { font-size: 16px; }

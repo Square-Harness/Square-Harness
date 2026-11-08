@@ -6,7 +6,9 @@ import { ago, count, duration } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
-import { applyTheme, deleteConversation, readTheme, refreshStatus, useApp, type AppState, type Theme } from '../store'
+import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus, useApp, type AppState, type Theme } from '../store'
+import { ProjectList } from './Projects'
+import { FeedbackButton } from './Feedback'
 import { ErrorNote, Meter, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
@@ -96,10 +98,11 @@ export function Sidebar({ route }: { route: Route }) {
         </header>
         <div className="side-list">
           <ErrorNote>{app.listError}</ErrorNote>
+          {info.kind === 'free' && <ProjectList />}
           <SideList route={route} app={app} />
         </div>
         <TaskPanel />
-        <WorkspacePanel />
+        <WorkspacePanel route={route} />
       </div>
     </aside>
   )
@@ -179,17 +182,18 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
 
 function ChatSideList({ route, app }: { route: Route; app: AppState }) {
   const [selected, setSelected] = useState<ChatListItem | null>(null)
+  const [actions, setActions] = useState<ChatListItem | null>(null)
   const opener = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     if (selected && app.chats && !app.chats.some((chat) => chat.id === selected.id)) setSelected(null)
   }, [app.chats, selected])
   // Every conversation lives here, including critiques and explorations from earlier versions.
   if (!app.chats) return <p className="side-empty muted">Loading…</p>
+  const chats = app.chats.filter((chat) => app.projectFilter === 'all' || chat.project_id === app.projectFilter)
   return (
     <>
-      {!app.chats.length && <p className="side-empty muted">{MODES.free.empty}</p>}
-      {app.chats.map((chat) => {
-        const blocked = chatDeleteBlocked(app.snapshot, chat.id)
+      {!chats.length && <p className="side-empty muted">{app.projectFilter === 'all' ? MODES.free.empty : 'No conversations here yet.'}</p>}
+      {chats.map((chat) => {
         const work = chatWork(app.snapshot, chat.id)
         return (
           <MathMacrosProvider key={chat.id} definitions={chat.math_macros}>
@@ -207,19 +211,48 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
                 </span>
               </span>
             </a>
-            <button type="button" className="icon-btn side-delete" disabled={blocked}
-              aria-label={`Delete conversation: ${chat.title}${blocked ? '. Pause or cancel its work first.' : ''}`}
-              title={blocked ? 'Pause this conversation or cancel its queued work before deleting it.' : 'Delete conversation'}
-              onClick={(event) => { opener.current = event.currentTarget; setSelected(chat) }}>
-              <TrashIcon size={17} />
+            <button type="button" className="icon-btn side-chat-actions" aria-label={`Conversation options: ${chat.title}`} title="Rename, move or delete conversation"
+              onClick={(event) => { opener.current = event.currentTarget; setActions(chat) }}>
+              <span aria-hidden="true">···</span>
             </button>
           </div>
           </MathMacrosProvider>
         )
       })}
+      {actions && <ChatActionsDialog key={actions.id} chat={actions} app={app} onClose={() => setActions(null)} onDelete={() => { setSelected(actions); setActions(null) }} />}
       {selected && <DeleteChatDialog key={selected.id} chat={selected} app={app} opener={opener.current} onClose={() => setSelected(null)} />}
     </>
   )
+}
+
+function ChatActionsDialog({ chat, app, onClose, onDelete }: { chat: ChatListItem; app: AppState; onClose: () => void; onDelete: () => void }) {
+  const [title, setTitle] = useState(chat.title)
+  const [project, setProject] = useState(chat.project_id || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const blocked = chatDeleteBlocked(app.snapshot, chat.id)
+  async function save() {
+    if (!title.trim() || saving) return
+    setSaving(true); setError('')
+    try {
+      if (title.trim() !== chat.title) await api.chatTitle(chat.id, title.trim())
+      if (project !== (chat.project_id || '')) await api.chatProject(chat.id, project || null)
+      refreshLists(); onClose()
+    } catch (reason) { setError((reason as Error).message); setSaving(false); refreshLists() }
+  }
+  return <Modal title="Conversation options" onClose={saving ? undefined : onClose}>
+    <form onSubmit={(event) => { event.preventDefault(); void save() }}>
+      <label className="field"><span className="field-label">Conversation title</span><input className="text-input" maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+      <label className="field"><span className="field-label">Project</span><select value={project} disabled={blocked || saving} onChange={(event) => setProject(event.target.value)}>
+        <option value="">Without a project</option>{app.projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>
+      <p className="muted small">{blocked ? 'Wait for current work to finish before moving this conversation. You can still rename it.' : 'Moving changes the project notes used by new turns. Resuming paused work keeps its saved context.'}</p>
+      <ErrorNote>{error}</ErrorNote>
+      <div className="modal-actions"><button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving || !title.trim()}>{saving ? 'Saving…' : 'Save changes'}</button></div>
+      <div className="chat-delete-option"><button type="button" className="btn btn-quiet btn-delete" disabled={blocked || saving} onClick={onDelete}><TrashIcon size={15} /> Delete conversation…</button>
+        {blocked && <p className="muted small">Pause this conversation or cancel its queued work before deleting it.</p>}</div>
+    </form>
+  </Modal>
 }
 
 function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; app: AppState; opener: HTMLButtonElement | null; onClose: () => void }) {
@@ -426,7 +459,7 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
   )
 }
 
-function WorkspacePanel() {
+function WorkspacePanel({ route }: { route: Route }) {
   const app = useApp()
   const { status } = app
   const limits = concurrencyLimits(app.snapshot, status)
@@ -492,6 +525,8 @@ function WorkspacePanel() {
       <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
         Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
       </button>
+      <FeedbackButton chatId={['free', 'critic', 'explore'].includes(route.mode) ? route.id : null}
+        chatTitle={app.chats?.find((chat) => chat.id === route.id)?.title} />
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}

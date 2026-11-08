@@ -31,10 +31,10 @@ export function ProofNew() {
   const [workspace, setWorkspace] = useState<WorkspaceFile[]>([])
   const changed = useTick('files')
 
-  useDropTarget('Pinned to this proof as sources', (paths) => {
+  const uploading = useDropTarget('Pinned to this proof as sources', (paths) => {
     const text = paths.filter((path) => !path.toLowerCase().endsWith('.pdf'))
     setFiles((items) => [...new Set([...items, ...text])])
-    if (text.length < paths.length) setError('Proofs pin text sources only; the PDF was saved in the folder but not pinned.')
+    if (text.length < paths.length) setError('Proofs pin text and image sources; the PDF was saved in the folder but not pinned.')
   })
 
   // The form opens on the Medium effort; the context is the launch context.
@@ -75,6 +75,7 @@ export function ProofNew() {
   const running = capacityFull(snapshot, status)
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (uploading) return
     setBusy(true)
     setError('')
     setQueuedNote('')
@@ -137,7 +138,7 @@ export function ProofNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Pinned sources</span>
-            <FilePicker selected={files} onChange={setFiles} />
+            <FilePicker selected={files} onChange={setFiles} allowImages />
             <span className="field-hint">The model sees only the statement and the pinned files: proof work has no file or web tools. A snapshot of each pinned file is saved with the job and stays fixed even if you edit the file.</span>
             {unpinned.length > 0 && (
               <p className="warning-note">
@@ -177,8 +178,8 @@ export function ProofNew() {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !goal.trim()}>
-              {busy ? 'Starting…' : running ? 'Add proof to the queue' : 'Start proof'}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !goal.trim()}>
+              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add proof to the queue' : 'Start proof'}
             </button>
           </div>
         </div>

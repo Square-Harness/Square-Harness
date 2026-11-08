@@ -194,6 +194,8 @@ class OpenAICompatible:
         return count
 
     def _payload(self, payload):
+        if getattr(self, 'image_refs', None) and getattr(self, 'profile', None) != 'deepinfra':
+            raise AgentError('Native image input is supported only by the DeepInfra DS4.1 Flash 1017 profile')
         options = payload.get('options', {})
         data = {'model': payload['model'], 'messages': _messages(payload['messages']),
                 'stream': True, 'stream_options': {'include_usage': True},

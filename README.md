@@ -10,8 +10,8 @@ inspection. Around it, the same principles serve literature checks, reading
 lists, manuscript reviews, explanations, LaTeX write-ups and numerical
 experiments.
 
-**Version 0.5.1 · experimental.** A model's approval is not a mathematical
-certificate; independent checking remains necessary.
+**Version 1.0. Self-host first.** Run the model, harness and workspace on your own
+computer or research server. This setup needs no model-provider API key.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-dark.png">
@@ -20,17 +20,25 @@ certificate; independent checking remains necessary.
 
 ## Quick start
 
+Choose where your model runs:
+
+| Route | Setup | Guide |
+| --- | --- | --- |
+| **1. Local self-hosting** | Run the model on your computer with Ollama, or another local model server. | [Plan A](docs/llm-install.md#plan-a-local-model) |
+| **2. Remote GPU or cluster** | Self-host the model on a lab/remote GPU and connect SH through SSH. | [Plan B](docs/llm-install.md#plan-b-model-on-a-cluster-gpu-reached-by-ssh) |
+| **3. API trial only** | Test SH without a GPU using DeepInfra and a provider API key; selected inputs are sent to the provider. | [Plan C](docs/llm-install.md#plan-c-deepinfra-api-with-a-local-interface) |
+
+**The API route is an optional testing setup.** Local and remote self-hosting
+remain the intended ways to run SH with control over the model and research data.
+
 Ask a coding agent (Claude Code, Codex, …) in a terminal:
 
 ```text
 Install Square Harness following https://github.com/Square-Harness/Square-Harness/blob/main/docs/llm-install.md
 ```
 
-It covers a local model (a tiny Qwen for a test, or a larger one on a gaming
-GPU or an Apple Silicon Mac) and HyperQwen, the team's setup, on a cluster GPU
-reached by SSH. By
-hand, with Python 3.10+ on Linux or macOS and [Ollama](https://ollama.com)
-running:
+For local self-hosting by hand, use Python 3.10+ on Linux or macOS with
+[Ollama](https://ollama.com) running:
 
 ```bash
 git clone https://github.com/Square-Harness/Square-Harness.git
@@ -68,6 +76,7 @@ Mac. For smaller machines and other model servers, see the
 - **Write-ups**: LaTeX in your own style (a template, or a style learnt from your
   articles), with numbered equations and checked references.
 - **Python Lab and Sanity check**: run in a Docker sandbox.
+- **Projects**: private saved conversations, project notes and research files.
 
 Every job has a bounded budget, can be paused and resumed, and saves what the
 model saw and wrote under `.mathagent/` in your folder. The web app runs locally,
@@ -78,15 +87,14 @@ also works on a phone, and shares its jobs with the terminal. The
 
 - [Guide](docs/guide.md): philosophy, every skill, how skills are made, effort,
   data and privacy.
-- [Install guide](docs/llm-install.md): local and cluster plans, written for a
-  coding agent.
+- [Install guide](docs/llm-install.md): local self-hosting, remote GPU/cluster,
+  and the optional API trial, written for a coding agent.
 - [Development guide](docs/llm-development.md): architecture, rules, how to add a
   feature, benchmarks.
 - [Changelog](CHANGELOG.md).
 
-Ollama, llama.cpp, vLLM and MLX servers are supported. The solver and verifier
-currently use the same model in separate contexts and can share errors. Tests
-check software behaviour; they do not establish mathematical performance.
+Ollama, llama.cpp, vLLM and MLX servers are supported. Solver and verifier calls
+use separate contexts, keeping the original statement, candidate and review.
 
 ## Contributing and license
 

@@ -15,9 +15,10 @@ computer or on a GPU in your lab. The assistant proves statements and checks the
 proofs, finds and verifies references, builds reading lists, referees
 manuscripts, explains results, writes up notes in LaTeX and runs numerical
 experiments. You use it in a web app (on a computer or a phone) or in the
-terminal. It is experimental (version 0.5.1).
+terminal. The current release is version 1.0.
 
-For a temporary hosted-model test, `--backend openai --api-profile deepinfra`
+Self-hosting on your own computer or research GPU is the primary setup. For a
+temporary hosted-model test, `--backend openai --api-profile deepinfra`
 uses DeepSeek V4.1 Flash 1017 through DeepInfra. The harness and saved jobs run
 on the computer or server hosting SH; model prompts, selected source text and tool context
 are sent to DeepInfra. Its retention policy applies to that processing. Keep
@@ -112,6 +113,95 @@ directly is respected. The routing decision and its usage are saved with the
 turn; resuming does not create a second completed Proof job. A failed routing
 decision pauses the work instead of authorizing an unchecked direct proof.
 
+## Images
+
+With the DeepInfra **DS4.1 Flash 1017** profile, attach PNG, JPEG or static WebP
+images using **Attach files**, paste a screenshot, or drop files into the work
+pane. Check the thumbnails before sending; Send/Start waits for uploads to
+finish. Images work in conversations and all specialist modes, including Proof,
+reviews, literature work, simulations,
+write-ups and learning a writing style. Source selectors also accept images;
+LaTeX templates still need their original text files.
+
+Each conversation or job accepts up to eight images, 8 MiB each and 24 MiB
+combined, with at most 8,192 pixels per side and 32 megapixels per image.
+The model receives the actual images. Their immutable private copies
+are kept with the workspace: saved chats, follow-up questions and paused jobs
+retain the original bytes even if the uploaded file changes or is deleted.
+Use a new conversation for a further batch. The existing Qwen profile does not
+support native images and reports that explicitly.
+
+Proof sees the images directly. Workflows that need a text manuscript first
+save a labelled visual transcription, within their existing allowance, and
+continue to receive the original images. The transcription links back to its
+source images. Screenshots teach visible writing style; exact LaTeX macros
+require `.tex` sources.
+An image sent without a written question receives the visible instruction
+"Please examine the attached images." An explicit `@` skill selection is kept.
+Image processing counts toward input usage; preflight labels its conservative
+vision estimate, while completed calls record the provider's reported usage.
+No effort or Proof budgets are increased by adding images.
+
+## Projects, conversation titles and feedback
+
+Use **New project** in the sidebar to group conversations around one research
+problem. Open **Project notes** to write Markdown in the editor, with a live
+preview beside it (below it on a narrow screen). The placeholder shows `#` and
+`##` headings. A useful notebook states the goal, definitions,
+notation, assumptions, established results with their sources, conjectures and
+open questions. Saving writes a `PROJECT.md` in the project's file folder.
+Edits from another tab are detected before saving so they cannot silently
+replace your draft.
+
+New turns receive a bounded copy of the selected project's notes; their workers
+receive that same context. Switching projects or editing notes does not alter
+work already running. Resume uses the original saved copy. Project notes are
+user-maintained working context and are never updated
+automatically from model answers. Only that project's note is added; earlier
+conversations and all project files are not silently imported. You can move an
+idle conversation to a project using the **Project** selector above its message
+box, including conversations that have no project yet. The conversation menu
+also offers this action. **All conversations** includes unassigned chats.
+Selecting a project in the sidebar opens a new conversation in that project;
+an unsent draft is not discarded without confirmation. Dropped or pasted files
+are saved in that project's folder. An upload already started stays with its
+original destination if you navigate elsewhere.
+
+Projects organize a single user's existing workspace. They do not add a new
+filesystem sandbox between that user's projects. Hosted testers continue to
+have separate private workspaces.
+
+After a conversation finishes and the interface is idle, an optional small
+model call proposes a short title from a bounded excerpt of its first
+substantive message. It has thinking disabled and a separate 64-output-token
+ceiling; it does not consume a Proof workflow's budget. Hosted provider usage
+still counts against the user's allowance. A failed title leaves the prompt
+preview; a title entered manually in the conversation menu always takes
+precedence. Request a further critique or review through the conversation or an
+explicit `@` skill. Saved reviews and Proof's solver/reviewer cycle remain
+available.
+
+The sidebar's **Feedback** button accepts a bug report, suggestion or a problem
+with a mathematical answer. You can paste or attach up to three screenshots.
+When a conversation is open, **Include this conversation and its diagnostic
+trace** is off by default. If selected, you can send immediately. Previewing the
+file list and downloading the diagnostic ZIP are optional. It includes the
+selected conversation and its linked worker traces, not original workspace
+documents or unrelated chats. Original model-input image bytes are not copied
+into that ZIP automatically; attach a feedback screenshot separately if needed.
+Text already quoted inside that conversation or its model calls is included;
+credential fields and recognizable secret patterns are redacted. You can inspect
+the bundle before sharing unpublished material. An oversized trace is refused
+rather than silently shortened.
+
+Reports are saved privately before delivery. With Slack file delivery configured,
+the private feedback channel receives the formatted report text, screenshots as
+native image attachments, and the complete report ZIP in its thread. The ZIP
+includes the selected trace only with your consent. Channel members can read
+these submitted files directly in Slack. The interface distinguishes completed
+delivery from a report that was only saved on the server. Older webhook-only
+installations send a summary and protected archive link instead.
+
 ## Philosophy
 
 **AI on our own terms.** Open-weights models are now good enough to help, and one
@@ -134,10 +224,9 @@ answer, the code checks it: that a quoted line exists, that a citation was reall
 read, that the answer was not cut off. This is how a 27B model can do work it
 could not do in a single answer.
 
-**Honest results.** A model's approval is not a proof, so every result says how
-far it was checked:
+**Recorded results.** Each workflow keeps its findings and status:
 
-- a proof is reported as reviewed with no issue found, never as correct;
+- a proof keeps the candidate, review verdict and located objections;
 - a reference is *read*, *cited*, *located*, *contradicted*, *not found* or *inconclusive*;
 - a partial report names what it did not cover.
 
@@ -380,8 +469,7 @@ How it works:
 
 For the latest papers by a named author, it searches arXiv's author field and
 orders matching records by their original submission date. Revisions are listed
-separately. The result describes the retrieved records, not a complete publication
-history or an independent check of their mathematical claims.
+separately. The result lists the retrieved records and the query scope.
 References whose requested scope is only partially supported remain labelled
 as unconfirmed leads; rejecting a lead in a later check removes its recommendation.
 A broad reference request checks relevance from indexed descriptions. Exact
@@ -529,6 +617,10 @@ are not followed, so pin them as well. A style can also keep a LaTeX template (a
 article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
 style build on unless you attach one.
 
+With the DS4.1 vision profile you can also choose screenshots of articles to
+learn visible phrasing and layout. Exact macro and environment definitions
+still require their `.tex` sources; they are not reconstructed from images.
+
 On the same page, **Style used by write-ups** chooses: automatically (a short
 call picks the style that fits the material, or none), none, one style, or one
 of its domains. A style gives phrasing and macros, never the structure of your
@@ -598,11 +690,9 @@ your request
    in a fixed format, usually JSON, which the code validates. Independent calls
    can run in parallel.
 
-The division of labour is always the same: the model proposes, the code verifies
-and keeps the books. The literature check is a good example. The model guesses
-candidate references, the code establishes which ones exist and what was actually
-read, and the evidence level follows from what was read, not from the model's
-confidence.
+For example, Literature check combines model-generated candidates with
+bibliographic lookups and source passages. The controller stores the retrieved
+records and assigns evidence levels from those passages.
 
 The Assistant is one level up: a controller whose model may hand a precise
 objective to any of the skills above, within one shared budget.

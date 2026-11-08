@@ -1,7 +1,7 @@
 {
   "name": "square-harness-interface",
   "private": true,
-  "version": "0.5.1",
+  "version": "1.0.0",
   "description": "Visual interface for Square Harness, built into mathagent/gui/static",
   "type": "module",
   "engines": {

@@ -20,7 +20,7 @@ import threading
 import unicodedata
 import zlib
 
-from . import manuscript
+from . import manuscript, images
 from . import review_policy as P
 from .agent import AgentError
 from .backends import TokenBudgetError
@@ -244,6 +244,7 @@ class ReviewBase(ResearchRunner):
     def start(self, goal, *, kind='referee', source_files=(), target='', reference_context=None, **budgets):
         if kind != 'referee':
             raise ValueError('The review workflows are referee jobs')
+        source_files = images.capture(self.agent, source_files)
         self._target = str(target or '').strip()[:200]
         self._reference = _reference_snapshot(reference_context)[0] if reference_context is not None else None
         self._conversation_sources = False
@@ -272,6 +273,8 @@ class ReviewBase(ResearchRunner):
         mapping = manuscript.build(content, 'pasted-text.md')
         has_proof = bool(manuscript.checkable(mapping)) or bool(manuscript.INLINE_PROOF.search(content))
         has_source = has_proof or (self.VARIANT == 'explain' and bool(mapping['units']))
+        if getattr(self.agent, 'image_refs', None) and not has_source:
+            return []  # The charged image-reading step supplies a derived manuscript before mapping.
         if self._reference is not None and not has_source:
             sources = []
             history = self._reference.get('history')

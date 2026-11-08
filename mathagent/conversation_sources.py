@@ -5,7 +5,7 @@ import unicodedata
 from .worker_errors import WorkerInputError
 
 
-_NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt|sty|cls|bib))(?![\w-]|\.\w)', re.I)
+_NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt|sty|cls|bib|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
 
 
 def conversation_sources(query, supplied, transcript):
@@ -34,7 +34,7 @@ def conversation_sources(query, supplied, transcript):
                    if not unicodedata.combining(c))
     target = bool(re.search(r'\b(?:theorem|lemma|proposition|corollary|theoreme|lemme)\s+(?:\d+(?:\.\d+)*|[a-z])\b', text))
     pointer = bool(re.search(r'\b(?:this|that|attached|same|previous|the|cet|cette|ce|le|la|meme|precedent)\s+'
-                             r'(?:article|paper|manuscript|document|proof|result|preuve|resultat)\b', text))
+                             r'(?:article|paper|manuscript|document|proof|result|preuve|resultat|image|screenshot|picture|capture)\b', text))
     plural = bool(re.search(r'\b(?:these |those |all (?:the )?|ces |tous les |toutes les )(?:articles|papers|manuscripts|documents)\b', text))
     if not (target or pointer or plural):
         return []

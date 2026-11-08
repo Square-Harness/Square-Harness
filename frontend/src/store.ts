@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react'
 import {
   api, ApiError, onUnauthorized,
   type ChatListItem, type Concurrency, type ProofListItem, type ResearchListItem,
-  type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity, type TranscriptItem,
+  type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity, type TranscriptItem, type Project,
 } from './api'
 import { reduceActivity, reduceChat, reduceTask, taskById } from './concurrency'
 import { chatDeleteBlocked, deletedChatDestination, withoutDeletedChat } from './chatDeletion'
@@ -18,6 +18,8 @@ export type AppState = {
   proofs: ProofListItem[] | null
   research: ResearchListItem[] | null
   chats: ChatListItem[] | null
+  projects: Project[] | null
+  projectFilter: string
   listError?: string
   ticks: Record<string, number>
 }
@@ -37,12 +39,13 @@ type ServerEvent =
   | { type: 'routing'; seq: number; chat: string; state: 'running' | 'done' }
   | { type: 'workspace'; seq: number; path: string }
   | { type: 'files'; seq: number; path: string }
+  | { type: 'projects'; seq: number }
 
 const EMPTY: TaskSnapshot = { seq: 0, task: null, activity: [], live: null, approvals: [], queue: [], routing: [], tasks: [] }
 
 let state: AppState = {
   auth: 'checking', status: null, connection: 'connecting', snapshot: EMPTY,
-  proofs: null, research: null, chats: null, ticks: {},
+  proofs: null, research: null, chats: null, projects: null, projectFilter: 'all', ticks: {},
 }
 const listeners = new Set<() => void>()
 
@@ -62,6 +65,11 @@ export function useApp(): AppState {
 
 export function getState() {
   return state
+}
+
+/** Sidebar grouping only; never switches the server's workspace or running jobs. */
+export function setProjectFilter(projectFilter: string) {
+  set({ projectFilter })
 }
 
 /** Changes whenever the server reports a change to this job or chat. */
@@ -103,14 +111,15 @@ export function refreshLists(delay = 0) {
   listTimer = window.setTimeout(async () => {
     listTimer = undefined
     const generation = ++listGeneration
-    const results = await Promise.allSettled([api.proofs(), api.researches(), api.chats()])
+    const results = await Promise.allSettled([api.proofs(), api.researches(), api.chats(), api.projects()])
     if (generation !== listGeneration) return
-    const [proofs, research, chats] = results
+    const [proofs, research, chats, projects] = results
     const errors = results.filter((result) => result.status === 'rejected').map((result) => String((result as PromiseRejectedResult).reason?.message || 'Could not load saved work.'))
     set({
       ...(proofs.status === 'fulfilled' ? { proofs: proofs.value.jobs } : {}),
       ...(research.status === 'fulfilled' ? { research: research.value.jobs } : {}),
       ...(chats.status === 'fulfilled' ? { chats: chats.value.chats.filter((chat) => !deletedChats.has(chat.id)) } : {}),
+      ...(projects.status === 'fulfilled' ? { projects: projects.value.projects } : {}),
       listError: errors.join(' '),
     })
   }, delay)
@@ -145,6 +154,7 @@ export async function refreshStatus() {
     const status = await api.status()
     if (state.status && state.status.workspace !== status.workspace) {
       resetChatDeletionCache()
+      set({ projects: null, projectFilter: 'all' })
       refreshLists()
     }
     set({ status })
@@ -257,11 +267,16 @@ function handle(event: ServerEvent) {
     case 'workspace':
       // Jobs and chats belong to a folder: leave any page from the previous one.
       resetChatDeletionCache()
+      set({ projects: null, projectFilter: 'all' })
       window.location.hash = window.location.hash.split('/').slice(0, 2).join('/') || '#/free'
       refreshAll()
       break
     case 'files':
       bump('files')
+      break
+    case 'projects':
+      refreshLists(50)
+      bump('projects')
       break
   }
 }

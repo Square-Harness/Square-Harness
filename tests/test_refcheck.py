@@ -2,14 +2,13 @@
 import copy
 import json
 from pathlib import Path
-import sys
 from urllib.parse import unquote
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from mathagent.agent import Agent
-from mathagent.literature import LiteratureError, LiteratureTools, _digest, bibliography_keys, cites_place
+from mathagent.literature import LiteratureTools, _digest
 from mathagent import refcheck
 from mathagent.refcheck import CheckRunner
 from mathagent.tools import Workspace
@@ -97,8 +96,6 @@ class StandardSelectionClient(FakeClient):
         yield from text(answer)
 
 
-
-
 class CheckTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -135,15 +132,6 @@ class CheckTests(unittest.TestCase):
                  'record': 'zbl:1220.46002', 'statement_found': 'The Neumann Laplacian has domain H^2 with zero normal derivative.', 'note': ''}
         value.update(fields)
         return text(value)
-
-
-
-
-
-
-
-
-
 
 
     def test_cited_reference_with_record_quote_and_bibtex(self):
@@ -183,21 +171,6 @@ class CheckTests(unittest.TestCase):
         verdict = runner.state['candidates'][0]['verdict']
         self.assertEqual(verdict['level'], 'located')
         self.assertIn('do not cite this work at 9.26', ' '.join(verdict['reasons']))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 if __name__ == '__main__':

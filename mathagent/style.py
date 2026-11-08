@@ -25,6 +25,7 @@ from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
 from .worker_errors import WorkerInputError
 from .model_limits import input_limit
+from . import images
 
 FORMAT = 'square-style'
 NAME = re.compile(r'[\w][\w .-]{0,59}')
@@ -357,9 +358,9 @@ class StyleRunner(ResearchRunner):
     def start(self, goal, *, name='', source_files=(), template_files=(), **budgets):
         style_path(self.styles_root, name)  # validates the name
         self._template = read_template(self.agent.workspace, template_files)
-        names = [str(n) for n in source_files]
-        if not names:
-            raise ValueError('Choose the .tex files of earlier articles to learn the style from')
+        names = images.capture(self.agent, source_files)
+        if not names and not getattr(self.agent, 'image_refs', None):
+            raise ValueError('Choose .tex articles or screenshots to learn the writing style from')
         if any(Path(n).suffix.lower() != '.tex' for n in names):
             raise ValueError('A style is learnt from .tex articles only')
         self._name = name
@@ -506,6 +507,8 @@ class StyleRunner(ResearchRunner):
         bodies = {s['path']: document_body(s['content']) for s in sources}
         macros, environments = {}, {}
         for source in sources:
+            if source.get('derived_from_images'):
+                continue  # Screenshots show wording/layout, not exact TeX macro definitions.
             for name, definition in macro_definitions(source['content']).items():
                 if '@' in name:
                     continue

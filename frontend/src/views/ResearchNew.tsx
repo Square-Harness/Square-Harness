@@ -88,7 +88,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [online, setOnline] = useState(true)
   const [level, setLevel] = useState<EffortLevel>(review ? VARIANT_EFFORT[savedVariant()] : 'medium')
 
-  useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
+  const uploading = useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
 
   const scaled = (next: EffortLevel, kind: ReviewVariant = variant) => {
@@ -140,6 +140,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
       : files.length ? !!(goal.trim() || target.trim()) : !!goal.trim()
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (uploading) return
     setBusy(true)
     setError('')
     setQueuedNote('')
@@ -206,7 +207,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">{copy.files}</span>
-            <FilePicker selected={files} onChange={setFiles} allowPdf />
+            <FilePicker selected={files} onChange={setFiles} allowPdf allowImages />
             <span className="field-hint">{copy.pinHint}</span>
           </div>
         </div>
@@ -248,8 +249,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !ready}>
-              {busy ? 'Starting…' : running ? `Add ${noun} to the queue` : `Start ${noun}`}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !ready}>
+              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? `Add ${noun} to the queue` : `Start ${noun}`}
             </button>
             {manuscript && !files.length && <p className="field-hint">Pin the manuscript, or name its file in the request.</p>}
             {pasted && files.length > 0 && !goal.trim() && !target.trim() && <p className="field-hint">Name the result to {variant === 'quick' ? 'check' : 'explain'}.</p>}

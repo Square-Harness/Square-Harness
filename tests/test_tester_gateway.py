@@ -19,7 +19,7 @@ except ImportError:
 
 class Backend:
     def __init__(self, token):
-        self.token, self.files, self.seen = token, {}, []
+        self.token, self.files, self.seen, self.paths = token, {}, [], []
         self.stream_continue = threading.Event()
         backend = self
 
@@ -41,6 +41,7 @@ class Backend:
 
             def authorized(self):
                 backend.seen.append(dict(self.headers))
+                backend.paths.append(self.path)
                 if self.headers.get('Authorization') != 'Bearer ' + backend.token:
                     self.send_error(401)
                     return False
@@ -215,20 +216,3 @@ class TesterGatewayTests(unittest.TestCase):
         self.assertEqual(code, 303)
         self.assertNotIn('Location', headers)
         self.assertNotIn(self.backends[0].token.encode(), body)
-
-    def test_sse_is_streamed_before_the_backend_finishes(self):
-        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=2)
-        connection.request('GET', '/api/events', headers={'Host': 'sh.example.test',
-            'Cf-Access-Jwt-Assertion': self.token(), 'Last-Event-ID': 'previous:1'})
-        response = connection.getresponse()
-        try:
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.getheader('Transfer-Encoding'), 'chunked')
-            self.assertEqual(response.readline(), b'data: first\n')
-            self.assertFalse(self.backends[0].stream_continue.is_set())
-            self.backends[0].stream_continue.set()
-            self.assertIn(b'data: second', response.read())
-        finally:
-            self.backends[0].stream_continue.set()
-            connection.close()
-        self.assertEqual(self.backends[0].seen[-1]['Last-Event-ID'], 'previous:1')

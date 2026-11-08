@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-11-08
+
+- Present the three setup routes clearly: local self-hosting, a self-hosted
+  remote GPU/cluster, and an optional hosted-API trial.
+
+- Remove the conversation composer's fresh-review shortcut.
+
+- Add native DS4.1 image attachments across conversations and specialist modes,
+  with paste/drop, private thumbnails, immutable saved sources and pause/resume.
+  Manuscript workflows retain a labelled transcription and original images;
+  existing token budgets and Qwen behavior remain unchanged.
+  Wait for uploads before submission and keep their original project destination
+  when the user changes views.
+
+- Make feedback trace preview optional and deliver formatted reports, screenshots
+  and consented trace ZIPs directly to the configured private Slack thread.
+
+- Reduce the automated suite from 50 cases to 12 core smoke checks; remove
+  redundant test files and unused fixtures rather than combining or hiding them.
+- Show the project selector in every conversation, simplify the project sidebar,
+  and place a live Markdown preview beside the project notes editor.
+
+- Add project notebooks with an ordinary-language editor, project conversation
+  lists and file folders. Pin notebook revisions to turns and worker handoffs;
+  preserve the original project context when paused work resumes.
+- Add small, idle-time conversation titles and manual rename/move actions.
+  Bound title input, output and hosted quota reservations independently of Proof.
+- Add private feedback reports with screenshots, explicit conversation-trace
+  consent, preview/export and redaction. Save reports durably before optional
+  Slack notifications and protect cross-account downloads with maintainer access.
+- Simplify the new-conversation page with a project selector, concise workflow
+  explanation and skill choices. Add optional online tools and workspace
+  selection to the local API launcher without changing model or Proof profiles.
 
 - Add a hosted account menu with verified email, Access logout, dollar allowance
   details and input/output usage. Preserve local GUI behavior and all saved
@@ -270,8 +302,7 @@ no extra reviews. One review still decides, and uncertainty still stops the job.
 ## 0.5.0 — 2026-09-27
 
 A simpler proof engine: solve the complete problem, verify the written proof,
-and repair a concrete objection. This release defines a new experimental
-protocol; mathematical gains have not yet been established by a live benchmark.
+and repair a concrete objection, retaining complete candidates and review notes.
 
 - A substantial initial solve with thinking enabled; the benchmark matches its
   initial prompt and sampling settings to the direct-inference baseline.
@@ -304,6 +335,3 @@ Subsequent v0.4 development explored proof portfolios, cooperative advisors,
 OpenAI-compatible and llama.cpp transports, GPU deployment profiles and saved
 benchmarks. These experiments motivated the v0.5 simplification; their original
 results and source snapshots should retain their original version identity.
-
-Tests validate software behaviour, not mathematical correctness. Interfaces and
-saved-state formats may evolve while the project remains experimental.

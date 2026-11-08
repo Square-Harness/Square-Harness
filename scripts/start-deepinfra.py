@@ -26,6 +26,10 @@ def main():
     parser.add_argument('--ctx', type=int, help='Model context (default: 1048576 for DS4, 65536 for Qwen)')
     parser.add_argument('--proof-call-seconds', type=float,
                         help='DS4 common per-call working-time allowance (default: 10800 seconds)')
+    parser.add_argument('--workspace', type=Path,
+                        help='Research workspace (default: the existing private profile workspace)')
+    parser.add_argument('--online', action='store_true',
+                        help='Enable online literature tools for the local test (off by default)')
     parser.add_argument('--no-browser', action='store_true')
     options = parser.parse_args()
     ds4 = options.profile == 'ds4'
@@ -53,7 +57,7 @@ def main():
         except OSError:
             parser.error(f'port {options.port} is occupied; inspect it before starting another GUI')
     runtime.mkdir(parents=True, exist_ok=True)
-    workspace = runtime / 'workspace'
+    workspace = options.workspace.expanduser().resolve() if options.workspace else runtime / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(ROOT)
@@ -68,10 +72,19 @@ def main():
     else:
         environment.setdefault('SQUARE_OPENAI_THINKING_FRACTION', '0.75')
         environment.setdefault('SQUARE_OPENAI_STRUCTURED_THINKING_FRACTION', '0.75')
+    feedback_key = ROOT / '.local' / 'feedback' / 'slack-webhook'
+    if feedback_key.is_file():
+        environment.setdefault('SH_FEEDBACK_WEBHOOK_FILE', str(feedback_key))
+    feedback_bot = ROOT / '.local' / 'feedback' / 'slack-bot-token'
+    feedback_channel = ROOT / '.local' / 'feedback' / 'slack-channel'
+    if feedback_bot.is_file() and feedback_channel.is_file():
+        environment.setdefault('SH_FEEDBACK_SLACK_TOKEN_FILE', str(feedback_bot))
+        environment.setdefault('SH_FEEDBACK_SLACK_CHANNEL', feedback_channel.read_text().strip())
+    environment.setdefault('SH_FEEDBACK_REPORT_BASE_URL', f'http://127.0.0.1:{options.port}/api/feedback')
     command = [sys.executable, '-m', 'mathagent', '--gui', '--no-browser',
                '--gui-host', '127.0.0.1', '--gui-port', str(options.port),
                '--workspace', str(workspace), '--backend', 'openai',
-               '--api-profile', 'deepinfra' if ds4 else 'default', '--offline',
+               '--api-profile', 'deepinfra' if ds4 else 'default', '--online' if options.online else '--offline',
                '--gui-concurrency', '5' if ds4 else '1',
                '--gui-model-concurrency', '5' if ds4 else '1',
                '--assistant-concurrency', '5' if ds4 else '1']
@@ -86,11 +99,12 @@ def main():
                     '--proof-verify-tokens', '16384', '--request-timeout', '1800']
     if ds4 and options.ctx is not None:
         command += ['--ctx', str(options.ctx)]
-    log = runtime / 'harness.log'
+    suffix = '' if options.port == (8780 if ds4 else 8781) else '-' + str(options.port)
+    log = runtime / ('harness' + suffix + '.log')
     with log.open('ab', buffering=0) as output:
         process = subprocess.Popen(command, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-    (runtime / 'harness.pid').write_text(str(process.pid) + '\n')
+    (runtime / ('harness' + suffix + '.pid')).write_text(str(process.pid) + '\n')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     for _ in range(60):
         if process.poll() is not None:
@@ -112,7 +126,7 @@ def main():
         import webbrowser
         webbrowser.open(url)
     print(f'Square Harness is running at http://127.0.0.1:{options.port}/ (PID {process.pid}).')
-    print('Model: ' + model + '; web research is off.')
+    print('Model: ' + model + '; web research is ' + ('on.' if options.online else 'off.'))
     if ds4:
         print('DeepInfra service tier: ' + environment['SH_DEEPINFRA_SERVICE_TIER'])
     print('Private workspace: ' + str(workspace))

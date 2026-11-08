@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 import time
 
-from . import __version__
+from . import __version__, images
 from .jsonutil import loads
 from .agent import AgentError
 from .backends import TokenBudgetError
@@ -163,6 +163,7 @@ class ProofRunner:
             raise ValueError('verify_temperature must be between 0 and 2')
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or max_seconds <= 0:
             raise ValueError('Proof time budget must be finite and positive')
+        source_files = images.capture(self.agent, source_files)
         sources = []
         for name in dict.fromkeys(str(n) for n in source_files):
             path = Path(name)
@@ -181,6 +182,9 @@ class ProofRunner:
         # allocation behaviour as well as their original numeric allowances.
         settings['full_output_ceiling'] = is_ds4(self.agent)
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources)
+        if getattr(self.agent, 'image_refs', None):
+            self.state['images'] = copy.deepcopy(self.agent.image_refs)
+            self._save()
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
 
@@ -198,6 +202,7 @@ class ProofRunner:
                 raise ValueError(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
         for key in ('model', 'ctx', 'seed', 'temperature', 'top_p'):
             setattr(self.agent, key, saved[key])
+        images.restore(self.agent, self.state)
         if hasattr(self.agent.client, 'thinking_budget_policy'):
             self.agent.client.thinking_budget_policy = copy.deepcopy(saved['thinking_budget_policy'])
         if saved.get('api_profile') == 'deepinfra':

@@ -5,6 +5,7 @@ with its ordinary workspace token; the gateway keeps those tokens server-side.
 """
 import argparse
 from dataclasses import dataclass
+import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -56,6 +57,7 @@ class Settings:
     issuer: str
     audience: str
     tenants: dict
+    feedback_admins: tuple = ()
 
     @classmethod
     def load(cls, path):
@@ -84,7 +86,14 @@ class Settings:
             ports.add(port)
         if not tenants or len(tenants) > 50:
             raise ValueError('Configure between one and fifty tenant identities')
-        return cls(hostname, issuer, audience, tenants)
+        admins = value.get('feedback_admins', [])
+        if (not isinstance(admins, list) or any(not isinstance(email, str) for email in admins)
+                or len(admins) > 10):
+            raise ValueError('Feedback administrators must be a list of invited emails')
+        admins = tuple(email.strip().casefold() for email in admins)
+        if len(set(admins)) != len(admins) or any(email not in tenants for email in admins):
+            raise ValueError('Feedback administrators must be distinct invited identities')
+        return cls(hostname, issuer, audience, tenants, admins)
 
 
 class AccessVerifier:
@@ -220,15 +229,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.refuse(400)
             if target.path == '/api/account':
                 return self.account(email) if self.command in {'GET', 'HEAD'} else self.refuse(405)
+            backend_path = self.path
+            if target.path.startswith('/api/admin/feedback'):
+                if email not in self.server.settings.feedback_admins:
+                    return self.refuse(403)
+                match = re.fullmatch(r'/api/admin/feedback/([0-9a-f]{16})/'
+                                     r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})/archive', target.path)
+                if self.command not in {'GET', 'HEAD'} or target.query or match is None:
+                    return self.refuse(403)
+                # The URL selects only a configured identity, never a client-supplied port.
+                tenant = next((entry for address, entry in self.server.settings.tenants.items()
+                               if hashlib.sha256(address.encode()).hexdigest()[:16] == match[1]), None)
+                if tenant is None:
+                    return self.refuse(404)
+                backend_path = '/api/feedback/' + match[2] + '/archive'
             token = tenant.token()
             origin = 'http://127.0.0.1:' + str(tenant.port)
             headers = {name: value for name, value in self.headers.items() if name.lower() in REQUEST_HEADERS}
             headers.update(Host='127.0.0.1:' + str(tenant.port), Authorization='Bearer ' + token,
                            Origin=origin, Connection='close')
+            # Never trust a browser-supplied reporter identity.
+            headers['X-SH-User-Email'] = email
             if self.command not in {'GET', 'HEAD'}:
                 headers['Content-Length'] = str(length)
             connection = http.client.HTTPConnection('127.0.0.1', tenant.port, timeout=45)
-            connection.request('GET' if self.command == 'HEAD' else self.command, self.path, body, headers)
+            connection.request('GET' if self.command == 'HEAD' else self.command, backend_path, body, headers)
             response = connection.getresponse()
             self.send_response_only(response.status)
             connection_headers = {part.strip().lower() for part in response.getheader('Connection', '').split(',')}

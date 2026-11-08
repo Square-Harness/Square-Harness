@@ -4,8 +4,10 @@ import { api, type Budget, type WorkProgress, type WorkspaceFile } from '../api'
 import { meterDisplay } from '../usage'
 import { workProgressText } from '../workProgress'
 import { bytes, count } from '../format'
-import { useTick } from '../store'
+import { useApp, useTick } from '../store'
+import { useRoute } from '../router'
 import { CloseIcon, FileIcon, PinIcon } from './Icons'
+import { isImagePath, PinnedImages } from './ImageAttachments'
 
 /** Load data whenever `deps` change; `reload` refetches without clearing. */
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
@@ -127,9 +129,14 @@ export function Toggle({ label, checked, onChange, disabled, hint }: {
   )
 }
 
-export function FilePicker({ selected, onChange, allowPdf = false, accept, label = 'Pin workspace files' }: {
-  selected: string[]; onChange: (files: string[]) => void; allowPdf?: boolean; accept?: string[]; label?: string
+export function FilePicker({ selected, onChange, allowPdf = false, allowImages = false, accept, label = 'Pin workspace files' }: {
+  selected: string[]; onChange: (files: string[]) => void; allowPdf?: boolean; allowImages?: boolean; accept?: string[]; label?: string
 }) {
+  const app = useApp()
+  const route = useRoute()
+  const chatId = ['free', 'critic', 'explore'].includes(route.mode) ? route.id : route.from
+  const projectId = chatId ? app.chats?.find((chat) => chat.id === chatId)?.project_id : app.projectFilter
+  const project = app.projects?.find((item) => item.id === projectId)
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState<WorkspaceFile[] | null>(null)
   const [truncated, setTruncated] = useState(false)
@@ -140,14 +147,16 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
     if (!open || files) return
     api.files().then((result) => { setFiles(result.files); setTruncated(!!result.truncated); setError('') }, (reason: Error) => setError(reason.message))
   }, [open, files])
-  const available = (files || []).filter((file) => (allowPdf || file.kind === 'text')
+  const preferred = (file: WorkspaceFile) => !!project && file.path.startsWith(project.folder.replace(/\/$/, '') + '/')
+  const available = (files || []).filter((file) => (isImagePath(file.path) ? allowImages : file.kind === 'text' || (allowPdf && file.kind === 'pdf'))
     && (!accept || accept.some((suffix) => file.path.toLowerCase().endsWith(suffix))))
+    .sort((a, b) => Number(preferred(b)) - Number(preferred(a)) || a.path.localeCompare(b.path))
   const toggle = (path: string) =>
     onChange(selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path])
   return (
     <div className="picker">
       <div className="picker-row">
-        {selected.map((path) => (
+        {selected.filter((path) => !allowImages || !isImagePath(path)).map((path) => (
           <span key={path} className="chip">
             <FileIcon size={14} />
             <span>{path}</span>
@@ -160,17 +169,20 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
           <PinIcon size={16} /> {open ? 'Done' : label}
         </button>
       </div>
+      {allowImages && <PinnedImages paths={selected} onRemove={(path) => onChange(selected.filter((item) => item !== path))} />}
+      {allowImages && app.status?.image_support === false && <p className="muted small">This model cannot read images. Choose text sources or use a vision-capable model.</p>}
       {open && (
         <div className="picker-list">
+          {project && <p className="muted small picker-project-hint">Files from {project.name} are listed first. All workspace files remain available.</p>}
           {error && <p className="error-note">{error}</p>}
           {truncated && <p className="warning-note" role="status">This folder has more files than the picker can list. Open a smaller folder to see the rest.</p>}
           {!files && !error && <p className="muted">Reading the workspace…</p>}
           {files && !available.length && (
-            <p className="muted">No {allowPdf ? 'text or PDF' : 'text'} files in this workspace. Files must be .tex, .md, .txt{allowPdf ? ', .pdf' : ''} and similar, outside hidden folders.</p>
+            <p className="muted">No matching files in this workspace. Drop files here to add them{allowImages ? ', or paste an image' : ''}.</p>
           )}
           {available.map((file) => (
             <label key={file.path} className="picker-item">
-              <input type="checkbox" checked={selected.includes(file.path)} onChange={() => toggle(file.path)} />
+              <input type="checkbox" checked={selected.includes(file.path)} disabled={!selected.includes(file.path) && isImagePath(file.path) && !app.status?.image_support} onChange={() => toggle(file.path)} />
               <span className="picker-path">{file.path}</span>
               <span className="muted">{bytes(file.size)}</span>
             </label>

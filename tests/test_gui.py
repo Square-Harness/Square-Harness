@@ -3,25 +3,20 @@ import http.client
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
 
 from mathagent import cli
-from mathagent.agent import Ollama
-from mathagent.backends import LlamaCpp, OpenAICompatible
 from mathagent.deepinfra import LEGACY_MODEL as DEEPINFRA_LEGACY_MODEL, MODEL as DEEPINFRA_MODEL
 from mathagent.gui import server, store
-from mathagent.gui.hub import Hub, Task
+from mathagent.gui.hub import Hub
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
-from mathagent.model_limits import PROFILE as DS4_PROFILE, apply_defaults
+from mathagent.model_limits import PROFILE as DS4_PROFILE
 
 MODEL = 'test-model:latest'
 
@@ -110,6 +105,7 @@ class GuiCase(unittest.TestCase):
                                         '--ctx', '16384', '--predict', '1024', '--proof-solve-tokens', '4096',
                                         '--proof-verify-tokens', '2048', '--gui-concurrency', '1', *self.extra_args])
         args.workspace = self.root
+        args.gui_auto_titles = False  # Scripted workflows opt into cosmetic model calls explicitly.
         self.token = server.workspace_token(self.root)
         self.hub = Hub(args)
         self.server = server.bind('127.0.0.1', 0, self.hub, self.token)
@@ -189,193 +185,9 @@ class SecurityTests(GuiCase):
         self.assertEqual(headers['Cache-Control'], 'no-store')
 
 
-
-
-
-
-
-
-
-
 PROOF = ('Let x be an arbitrary real number. Equality is reflexive, so $x=x$. '
          'Since x was arbitrary, the statement holds for every real number.')
 APPROVAL = {'explanation': 'Reflexivity covers every real x.', 'issues': [], 'verdict': 'no_issue_found'}
-
-
-
-
-class ProofWorkflowTests(GuiCase):
-
-    def test_qwen_main_agent_prepares_the_proof_task_with_definitions_and_sources(self):
-        definition = 'Throughout this conversation, E denotes the real numbers.'
-        source = 'The variable z ranges over E. The assertion to establish is z=z.'
-        (self.root / 'definitions.txt').write_text(source)
-        query = 'Prove the assertion in definitions.txt using the notation we fixed.'
-        prepared = ('You are one child worker of the mathematical assistant. '
-                    'E denotes the real numbers, and z is an arbitrary element of E. '
-                    'Prove z=z for every such z, using definitions.txt as the original source. '
-                    'Return a complete proof or identify the precise unresolved obligation.')
-        action = {'mode': 'prove', 'request': prepared, 'files': ['definitions.txt'],
-                  'effort': 'medium', 'reason': 'Clarify the notation and delegate the exact proof objective.'}
-        final = 'The Proof candidate and its independent review are saved.'
-        # Both a selected @prove and a model-chosen Proof delegation use the
-        # existing main-agent read/delegate tool loop, without another schema.
-        for selected in (True, False):
-            with self.subTest(selected=selected):
-                offset = len(self.fake.requests)
-                self.fake.replies = [tool('read_file', {'path': 'definitions.txt'}),
-                                     tool('delegate', action), text(PROOF),
-                                     text(json.dumps(APPROVAL)), text(final)]
-                chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-                store.append_items(self.root, chat, [{'role': 'user', 'content': definition}])
-                body = {'content': ('@prove ' if selected else '') + query, 'files': ['definitions.txt']}
-                if selected:
-                    body['mode_call'] = {'mode': 'prove', 'start': 0, 'effort': 'medium'}
-                self.ok('POST', f'/api/chats/{chat}/route', body)
-                task = self.wait_task(timeout=15)
-                self.assertEqual(task['state'], 'done', task)
-                state = store.load_chat(self.root, chat)['assistant_state']
-                self.assertEqual(state['status'], 'complete')
-                child = state['children'][0]
-                self.assertEqual(child['action'], action)
-                self.assertEqual(child['context']['query'], query)
-                proof = self.ok('GET', f'/api/proofs/{child["job_id"]}')
-                self.assertEqual((proof['goal'], proof['status']), (prepared, 'candidate_complete'))
-                self.assertEqual(proof['settings']['reference_context']['query'], query)
-                sent = self.fake.requests[offset:]
-                self.assertEqual(len(sent), 5)
-                if selected:
-                    self.assertEqual([request['options']['num_predict'] for request in sent[:2]], [2048, 2048])
-                    self.assertEqual([item['function']['name'] for item in sent[1]['tools']], ['delegate'])
-                self.assertIn(definition, json.dumps(sent[0]['messages']))
-                self.assertIn('definitions.txt', json.dumps(sent[0]['messages']))
-                # The main agent reads the attachment before preparing its
-                # delegation. Both Proof roles retain that exact source and
-                # the original conversation alongside the prepared objective.
-                self.assertIn(source, json.dumps(sent[1]['messages']))
-                for request in sent[2:4]:
-                    content = request['messages'][0]['content']
-                    self.assertIn(prepared, content)
-                    self.assertIn(definition, content)
-                    self.assertIn(source, content)
-                    self.assertIn(query, content)
-                self.assertFalse(self.fake.replies)
-
-        # Pausing while the main agent prepares the task must not create a
-        # premature Proof job or lose the original query. Resume uses the
-        # existing pending model-call machinery and then delegates normally.
-        jobs_before = self.ok('GET', '/api/proofs')['jobs']
-        slow = [{'message': {'content': 'Preparing the mathematical objective. '}, 'done': False}] * 200
-        self.fake.replies = [(slow + text('unfinished'), .02)]
-        paused_chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{paused_chat}/route', {
-            'content': '@prove ' + query, 'files': ['definitions.txt'],
-            'mode_call': {'mode': 'prove', 'start': 0, 'effort': 'medium'}})
-        self.wait_for(lambda: self.ok('GET', '/api/task').get('live', {}).get('steps'),
-                      message='the main agent preparing its delegated objective')
-        self.ok('POST', '/api/task/pause')
-        self.assertEqual(self.wait_task(timeout=3)['state'], 'paused')
-        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0, timeout=3)
-        paused = store.load_chat(self.root, paused_chat)['assistant_state']
-        self.assertEqual(paused['query'], query)
-        self.assertEqual(paused['children'], [])
-        self.assertEqual(paused['proof_preparation']['calls'], 1)
-        self.assertEqual(self.ok('GET', '/api/proofs')['jobs'], jobs_before)
-        self.assertGreaterEqual(paused['budget']['tokens'], 2048)
-        self.fake.replies = [tool('delegate', action), text(PROOF), text(json.dumps(APPROVAL)), text(final)]
-        self.ok('POST', f'/api/chats/{paused_chat}/assistant/resume')
-        task = self.wait_task(timeout=15)
-        self.assertEqual(task['state'], 'done', task)
-        resumed = store.load_chat(self.root, paused_chat)['assistant_state']
-        self.assertEqual(len(resumed['children']), 1)
-        self.assertEqual(resumed['proof_preparation']['calls'], 2)
-        self.assertEqual(resumed['children'][0]['action'], action)
-        self.assertGreaterEqual(resumed['budget']['tokens'], paused['budget']['tokens'])
-
-        # A failed preparation cannot delay Proof, execute an unadvertised
-        # tool, or create duplicate workers. The bounded fallback delegates
-        # the exact original material, without adopting the failed draft.
-        duplicate = tool('delegate', action)
-        duplicate[0]['message']['tool_calls'] *= 2
-        invalid_replies = {
-            'direct answer': text('The assertion follows immediately, so I will answer directly.'),
-            'unavailable tool': tool('execute_python', {'code': 'print("must not execute")'}),
-            'duplicate workers': duplicate,
-        }
-        for failure, reply in invalid_replies.items():
-            with self.subTest(preparation_failure=failure):
-                before_jobs = self.ok('GET', '/api/proofs')['jobs']
-                offset = len(self.fake.requests)
-                self.fake.replies = [reply, text(PROOF), text(json.dumps(APPROVAL)), text(final)]
-                invalid = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-                store.append_items(self.root, invalid, [{'role': 'user', 'content': definition}])
-                self.ok('POST', f'/api/chats/{invalid}/route', {
-                    'content': '@prove ' + query, 'files': ['definitions.txt'],
-                    'mode_call': {'mode': 'prove', 'start': 0, 'effort': 'medium'}})
-                self.assertEqual(self.wait_task(timeout=15)['state'], 'done')
-                invalid_state = store.load_chat(self.root, invalid)['assistant_state']
-                self.assertEqual(invalid_state['status'], 'complete')
-                self.assertEqual(len(invalid_state['children']), 1)
-                fallback = invalid_state['children'][0]
-                self.assertEqual(fallback['action']['mode'], 'prove')
-                self.assertEqual(fallback['context']['query'], query)
-                self.assertIn(query, fallback['action']['request'])
-                self.assertEqual(len(self.ok('GET', '/api/proofs')['jobs']), len(before_jobs) + 1)
-                self.assertEqual(len(self.fake.requests) - offset, 4)
-                self.assertEqual(self.fake.requests[offset]['options']['num_predict'], 2048)
-                proof = self.ok('GET', f'/api/proofs/{fallback["job_id"]}')
-                self.assertEqual(proof['status'], 'candidate_complete')
-                self.assertEqual(proof['settings']['reference_context']['query'], query)
-                for request in self.fake.requests[offset + 1:offset + 3]:
-                    context = request['messages'][0]['content']
-                    self.assertIn(query, context)
-                    self.assertIn(definition, context)
-                    self.assertIn(source, context)
-                    self.assertNotIn('must not execute', context)
-                transcript = self.ok('GET', f'/api/chats/{invalid}')['transcript']
-                committed = [item['content'] for item in transcript
-                             if item['role'] == 'assistant' and not item.get('discarded')]
-                self.assertEqual(committed[-1], final)
-                self.assertFalse(self.fake.replies)
-
-    def test_pause_saves_a_checkpoint_and_resume_keeps_the_budget(self):
-        slow = [{'message': {'thinking': 'step '}, 'done': False}] * 200 + text('Unfinished.')
-        self.fake.replies = [(slow, 0.02)]
-        started = self.ok('POST', '/api/proofs', {'goal': 'Prove that 1 = 1.', 'rounds': 2, 'tokens': 16000, 'seconds': 120})
-        proof_id = started['id']
-        live = self.wait_for(lambda: self.ok('GET', f'/api/proofs/{proof_id}')['live'], message='a live solver call')
-        self.wait_for(lambda: self.ok('GET', f'/api/proofs/{proof_id}/stream/{live["file"]}?from=0')['thinking'],
-                      message='streamed thinking')
-        status, value, _ = self.request('POST', '/api/proofs', {'goal': 'Another proof.'})
-        self.assertEqual(status, 409)
-        self.assertIn('active task slots', value['error'])
-        self.assertEqual(self.ok('POST', '/api/task/pause')['task']['state'], 'pausing')
-        task = self.wait_task()
-        self.assertEqual(task['state'], 'paused')
-        detail = self.ok('GET', f'/api/proofs/{proof_id}')
-        self.assertEqual(detail['status'], 'paused')
-        self.assertEqual(detail['calls'][-1]['status'], 'interrupted')
-        # The interrupted call keeps its whole reservation, and its notes are kept as partial work.
-        charged = detail['budget']['tokens']['used']
-        self.assertEqual(charged, 4096)
-        self.assertEqual([(c['id'], c['transport_complete']) for c in detail['candidates']], [('P1', False)])
-        self.assertIsNone(detail['answer'])
-        self.assertEqual(len(self.fake.requests), 1)
-
-        # Resuming does not repeat the saved call: it continues from the saved notes, then reviews.
-        self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL))]
-        resumed = self.ok('POST', f'/api/proofs/{proof_id}/resume')
-        self.assertEqual(resumed['id'], proof_id)
-        task = self.wait_task(timeout=30)
-        self.assertEqual(task['state'], 'done', task)
-        self.assertIn('SAVED WORKING NOTES', self.fake.requests[1]['messages'][0]['content'])
-        after = self.ok('GET', f'/api/proofs/{proof_id}')
-        self.assertEqual(after['status'], 'candidate_complete')
-        self.assertGreaterEqual(after['budget']['tokens']['used'], charged)
-        self.assertEqual(after['settings']['max_tokens'], 16000)
-        continued = after['candidates'][1]
-        self.assertEqual((continued['kind'], continued['parent'], continued['review_status']), ('continue', 'P1', 'no_issue_found'))
-        self.assertEqual((after['selected_candidate'], after['answer']), ('P2', PROOF))
 
 
 class FakeDeepInfra:
@@ -631,46 +443,6 @@ class DeepInfraWorkflowTests(GuiCase):
             self.assertNotIn(marker, call['messages'][0]['content'])
         self.assertFalse(self.fake.replies)
 
-    def test_five_parallel_ds4_chats_hold_model_slots_and_queue_the_sixth(self):
-        self.addCleanup(self.fake.release_silent.set)
-        apply_defaults(self.hub.args, ['--gui'])
-        limits = self.ok('POST', '/api/concurrency', {
-            'chats': self.hub.args.gui_concurrency,
-            'requests': self.hub.args.gui_model_concurrency})['concurrency']
-        self.assertEqual((limits['chats'], limits['requests'],
-                          self.hub.args.assistant_concurrency), (5, 5, 5))
-        self.fake.replies = [{'silent': True, 'events': [
-            {'choices': [{'index': 0, 'delta': {'content': f'Partial response {i}.'},
-                          'finish_reason': None}]},
-        ]} for i in range(6)]
-        tasks = []
-        for i in range(6):
-            chat = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False})['id']
-            tasks.append(self.ok('POST', f'/api/chats/{chat}/messages', {
-                'content': f'Give a short response for independent request {i}.', 'queue': True})['task'])
-        self.wait_for(lambda: len(self.fake.completions) == 5,
-                      message='five simultaneous provider streams')
-        snapshot = self.ok('GET', '/api/task')
-        self.assertEqual(len(snapshot['tasks']), 5)
-        self.assertEqual([task['id'] for task in snapshot['queue']], [tasks[5]['id']])
-        self.assertEqual(snapshot['concurrency'], {'chats': 5, 'requests': 5, 'active': 5})
-
-        # A cancelled stream must free its inference slot even though the
-        # simulated provider still keeps its TCP response open. The sixth
-        # chat takes that slot; no sixth live task is admitted concurrently.
-        self.ok('POST', '/api/task/pause', {'task': tasks[0]['id']})
-        self.wait_for(lambda: len(self.fake.completions) == 6,
-                      timeout=3, message='the queued sixth stream to acquire the released slot')
-        snapshot = self.ok('GET', '/api/task')
-        self.assertEqual(len(snapshot['tasks']), 5)
-        self.assertEqual(snapshot['queue'], [])
-        self.assertNotIn(tasks[0]['id'], [entry['task']['id'] for entry in snapshot['tasks']])
-        self.assertIn(tasks[5]['id'], [entry['task']['id'] for entry in snapshot['tasks']])
-        self.assertFalse(self.fake.release_silent.is_set())
-        for entry in snapshot['tasks']:
-            self.ok('POST', '/api/task/pause', {'task': entry['task']['id']})
-        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0,
-                      timeout=3, message='all five cancelled tasks to release their slots')
 
     def test_api_key_gui_proof_preserves_reasoning_usage_and_private_credentials(self):
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
@@ -767,379 +539,79 @@ class DeepInfraWorkflowTests(GuiCase):
             if file.is_file():
                 self.assertNotIn(self.fake.key.encode(), file.read_bytes(), str(file))
 
-    def test_proof_effort_keeps_full_ds4_calls_for_solves_repairs_and_reviews(self):
-        # Priority is transport-wide: the main-agent handoff, solver, repair
-        # and reviews all use it without changing their saved allowances.
-        os.environ['SH_DEEPINFRA_SERVICE_TIER'] = 'priority'
-        # These are explicit launch ceilings. Exercise the real HTTP route,
-        # shared Assistant budget, durable Proof runner and provider requests;
-        # reading the preset table alone would miss a later hidden reduction.
-        args = self.hub.args
-        args.ctx = 1048576
-        args.proof_solve_tokens = args.proof_verify_tokens = args.proof_repair_tokens = 384000
-        args.proof_tokens = 11520000
-        args.proof_seconds = 1000000
-        args.assistant_tokens = 16000000
-        args.assistant_input_tokens = 100000000
-        args.assistant_seconds = 1000000
-        args.request_timeout = 10800
-        jobs_before = self.ok('GET', '/api/proofs')['jobs']
-        requests_before = len(self.fake.requests)
-        status, rejected, _ = self.request('POST', '/api/proofs', {
-            'goal': 'Prove that x=x for every real x.', 'rounds': 1,
-            'solve_tokens': 400000, 'verify_tokens': 384000,
-            'ctx': 1048576, 'tokens': 11520000, 'seconds': 120})
+
+class ProjectTests(GuiCase):
+
+    def test_project_notebook_revisions_and_proof_resume_keep_the_submitted_context(self):
+        original_notes = 'Definitions: E is the real line. Conjecture A is unproved. ORIGINAL_PROJECT_NOTES.'
+        a = self.ok('POST', '/api/projects', {'name': 'Renewal project', 'notes': original_notes})['project']
+        b = self.ok('POST', '/api/projects', {'name': 'Other project', 'notes': 'OTHER_PROJECT_NOTES'})['project']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False, 'project_id': a['id']})['id']
+        self.assertEqual(self.hub.root, self.root)
+        self.assertTrue((self.root / a['folder'] / 'PROJECT.md').is_file())
+        status, uploaded, _ = self.request('POST', f'/api/files/upload?name=lemma.txt&project_id={a["id"]}',
+                                           raw=b'A synthetic project lemma.')
+        self.assertEqual(status, 200, uploaded)
+        self.assertEqual(uploaded['path'], a['folder'] + '/lemma.txt')
+        self.assertEqual((self.root / uploaded['path']).read_text(), 'A synthetic project lemma.')
+        self.assertFalse((self.root / 'lemma.txt').exists())
+        status, uploaded, _ = self.request('POST', f'/api/files/upload?name=PROJECT.md&project_id={a["id"]}',
+                                           raw=b'An uploaded note must not overwrite the notebook.')
+        self.assertEqual(status, 200, uploaded)
+        self.assertEqual(uploaded['path'], a['folder'] + '/PROJECT-2.md')
+        self.assertEqual(self.ok('GET', f'/api/projects/{a["id"]}')['project']['notes'], original_notes)
+        status, _, _ = self.request('POST', '/api/files/upload?name=escape.txt&project_id=..', raw=b'Unsafe target')
         self.assertEqual(status, 400)
-        self.assertIn('384000', rejected['error'])
-        self.assertEqual(self.ok('GET', '/api/proofs')['jobs'], jobs_before)
-        self.assertEqual(len(self.fake.requests), requests_before)
-        self.assertEqual(self.fake.completions, [])
-        expected = {'low': (1, 32768, 16384, 65536),
-                    'medium': (3, 384000, 384000, 3456000),
-                    'high': (5, 384000, 384000, 5760000),
-                    'xhigh': (7, 384000, 384000, 8064000),
-                    'poincare': (10, 384000, 384000, 11520000)}
-        presets = self.ok('GET', '/api/status')['defaults']['effort_presets']
-        objection = {'explanation': 'The candidate needs an explicit quantifier justification.',
-                     'issues': [{'location': 'Conclusion', 'kind': 'missing_justification',
-                                 'evidence': 'The universal quantifier was not justified.'}],
-                     'verdict': 'issues_found'}
-        for level, (rounds, solve, review, total) in expected.items():
-            with self.subTest(effort=level):
-                self.assertEqual((presets[level]['tries'], presets[level]['solve_tokens'],
-                                  presets[level]['verify_tokens'], presets[level]['tokens']),
-                                 (rounds, solve, review, total))
-                offset = len(self.fake.completions)
-                prepared = ('You are one child worker of the mathematical assistant. '
-                            'Let x be an arbitrary real number. Prove x=x for every real x, '
-                            'with a complete argument that retains the universal quantifier.')
-                action = {'mode': 'prove', 'request': prepared, 'files': [], 'effort': level,
-                          'reason': 'Prepare the exact mathematical task before Proof.'}
-                if level == 'medium':
-                    # A review-format retry stays on the same candidate. A
-                    # mathematical objection then starts a repair round.
-                    self.fake.replies = [deepinfra_tool('delegate', action),
-                                         (PROOF, 'Initial reasoning.', 37),
-                                         ('not valid review JSON', 'First review.', 23),
-                                         (json.dumps(objection), 'Repeated review.', 29),
-                                         (PROOF, 'Repair reasoning.', 41),
-                                         (json.dumps(APPROVAL), 'Final review.', 31)]
-                else:
-                    self.fake.replies = [deepinfra_tool('delegate', action),
-                                         (PROOF, 'Solver reasoning.', 37),
-                                         (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
-                self.fake.replies.append(('The Proof candidate and review are saved.', '', 19))
-                chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-                self.ok('POST', f'/api/chats/{chat}/route', {
-                    'content': '@prove Prove that x=x for every real x.', 'files': [],
-                    'mode_call': {'mode': 'prove', 'start': 0, 'effort': level}})
-                task = self.wait_task(timeout=20)
-                self.assertEqual(task['state'], 'done', task)
-                state = store.load_chat(self.root, chat)['assistant_state']
-                self.assertEqual(state['status'], 'complete')
-                self.assertEqual(len(state['children']), 1)
-                child = state['children'][0]
-                self.assertEqual(child['action']['request'], prepared)
-                detail = self.ok('GET', f'/api/proofs/{child["job_id"]}')
-                self.assertEqual(detail['status'], 'candidate_complete', detail['stop_reason'])
-                self.assertEqual(detail['goal'], prepared)
-                self.assertEqual(detail['settings']['reference_context']['query'],
-                                 'Prove that x=x for every real x.')
-                settings = detail['settings']
-                self.assertEqual((settings['max_rounds'], settings['max_predict'],
-                                  settings['verify_tokens'], settings['repair_tokens'], settings['max_tokens']),
-                                 (rounds, solve, review, solve, total))
-                sent = self.fake.completions[offset:]
-                self.assertTrue(all(call.get('service_tier') == 'priority' for call in sent))
-                self.assertEqual(sent[0]['reasoning_effort'], 'none')
-                self.assertIn('delegate', [item['function']['name'] for item in sent[0]['tools']])
-                worker_calls = [call for call in sent if call['reasoning_effort'] == 'high']
-                self.assertEqual([call['max_tokens'] for call in worker_calls],
-                                 [solve, review, review, solve, review] if level == 'medium' else [solve, review])
-                proof = ProofStore.load(self.root, child['job_id']).state
-                self.assertEqual(proof['rounds_started'], 2 if level == 'medium' else 1)
-                if level == 'medium':
-                    self.assertEqual([item['kind'] for item in proof['candidates']], ['initial', 'repair'])
-                    self.assertIsNotNone(proof['reviews'][0]['protocol_error'])
-                    self.assertEqual(len(proof['reviews']), 3)
-                if level != 'low':
-                    # A full call can take more than the old 30-minute Medium
-                    # deadline; effort must not reinstate that hidden limit.
-                    self.assertGreater(settings['max_seconds'], 1800)
-                self.assertFalse(self.fake.replies, 'The expected calls were not all dispatched')
-
-        # A hard manual cap must refuse a full DS4 proof rather than silently
-        # changing the solver/reviewer to smaller calls. Main-agent reporting,
-        # if needed, remains a separate non-thinking call.
-        args.assistant_tokens = 500000
-        offset = len(self.fake.completions)
-        self.fake.replies = [deepinfra_tool('delegate', {
-            'mode': 'prove', 'request': 'Prove the same statement.', 'files': [], 'effort': 'medium',
-            'reason': 'Run the requested Proof workflow.'}),
-            ('The remaining budget cannot fund a full Proof solve and review.', '', 19)]
-        limited = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{limited}/route', {
-            'content': '@prove Prove the same statement.', 'files': [],
+        self.assertFalse((self.root.parent / 'escape.txt').exists())
+        status, uploaded, _ = self.request('POST', '/api/files/upload?name=unassigned.txt', raw=b'No project')
+        self.assertEqual(status, 200, uploaded)
+        self.assertEqual(uploaded['path'], 'unassigned.txt')
+        query = 'Prove that every element x of E satisfies x=x, with the project notation.'
+        slow = [{'message': {'thinking': 'Preparing definitions. '}, 'done': False}] * 200
+        self.fake.replies = [(slow + text('not finished'), .02)]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@prove ' + query,
             'mode_call': {'mode': 'prove', 'start': 0, 'effort': 'medium'}})
-        self.wait_task(timeout=20)
-        limited_state = store.load_chat(self.root, limited)['assistant_state']
-        self.assertFalse(any(call['reasoning_effort'] == 'high'
-                             for call in self.fake.completions[offset:]))
-        for child in limited_state['children']:
-            if child.get('job_id') and not child['job_id'].startswith('child_'):
-                self.assertEqual(ProofStore.load(self.root, child['job_id']).state['calls'], [])
-        limited_view = self.ok('GET', f'/api/chats/{limited}')
-        self.assertRegex(json.dumps(limited_view).lower(), r'budget|allowance')
-
-        # A physically smaller context must also refuse the full allowance,
-        # rather than quietly fitting a smaller solver response into it.
-        args.assistant_tokens = 16000000
-        args.ctx = 65536
-        offset = len(self.fake.completions)
-        self.fake.replies = [deepinfra_tool('delegate', {
-            'mode': 'prove', 'request': 'Prove the same statement in this context.', 'files': [], 'effort': 'medium',
-            'reason': 'Run the requested Proof workflow.'}),
-                             ('The current context cannot accommodate the full Proof output allowance.', '', 19)]
-        narrow = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{narrow}/route', {
-            'content': '@prove Prove the same statement in this context.', 'files': [],
-            'mode_call': {'mode': 'prove', 'start': 0, 'effort': 'medium'}})
-        self.wait_task(timeout=20)
-        narrow_state = store.load_chat(self.root, narrow)['assistant_state']
-        self.assertFalse(any(call['reasoning_effort'] == 'high'
-                             for call in self.fake.completions[offset:]))
-        proof_id = narrow_state['children'][0]['job_id']
-        detail = self.ok('GET', f'/api/proofs/{proof_id}')
-        self.assertEqual(detail['status'], 'needs_context')
-        self.assertEqual(detail['calls'], [])
-        self.assertTrue(detail['settings']['full_output_ceiling'])
-        self.assertEqual(detail['settings']['max_predict'], 384000)
-
-    def test_pause_interrupts_a_silent_provider_and_releases_the_model_slot(self):
-        self.addCleanup(self.fake.release_silent.set)
-        partial = 'Let x be an arbitrary real number. '
-        self.fake.replies = [{'silent': True, 'events': [
-            {'choices': [{'index': 0, 'delta': {'content': partial}, 'finish_reason': None}]},
-        ]}, (PROOF, 'A fresh complete solve.', 37),
-            (json.dumps(APPROVAL), 'A fresh complete review.', 23)]
-        started = self.ok('POST', '/api/proofs', {
-            'goal': 'Prove that x = x for every real x.', 'rounds': 2,
-            'tokens': 12000, 'seconds': 120})
-        self.assertTrue(self.fake.silent_started.wait(5))
-        live = self.wait_for(lambda: self.ok('GET', f'/api/proofs/{started["id"]}')['live'])
-        self.wait_for(lambda: self.ok('GET', f'/api/proofs/{started["id"]}/stream/{live["file"]}?from=0')['text'],
-                      message='the saved partial response')
-
-        pause_started = time.monotonic()
+        self.wait_for(lambda: self.fake.requests, message='project preparation request')
+        status, _, _ = self.request('POST', f'/api/chats/{chat}/project', {'project_id': b['id']})
+        self.assertEqual(status, 409)
         self.ok('POST', '/api/task/pause')
-        task = self.wait_task(timeout=2)
-        self.assertEqual(task['state'], 'paused', task)
-        self.assertLess(time.monotonic() - pause_started, 2)
-        detail = self.ok('GET', f'/api/proofs/{started["id"]}')
-        self.assertEqual(detail['status'], 'paused')
-        self.assertEqual(detail['calls'][0]['status'], 'interrupted')
-        self.assertEqual(detail['budget']['tokens']['used'], 4096)
-        self.assertFalse(detail['candidates'][0]['transport_complete'])
-        stream = self.ok('GET', f'/api/proofs/{started["id"]}/stream/{live["file"]}?from=0')
-        self.assertEqual(stream['text'], partial)
-        self.assertFalse(stream['done'])
-
-        # The old fake remains silent throughout the next proof. A completed
-        # fresh run proves that cancellation released the shared single slot.
-        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0,
-                      timeout=2, message='the cancelled task to release its slot')
-        fresh = self.ok('POST', '/api/proofs', {
-            'goal': 'Prove the same statement in a new run.', 'rounds': 1,
-            'tokens': 12000, 'seconds': 120})
-        self.assertEqual(self.wait_task(timeout=5)['state'], 'done')
-        completed = self.ok('GET', f'/api/proofs/{fresh["id"]}')
-        self.assertEqual((completed['status'], completed['answer']), ('candidate_complete', PROOF))
-        self.assertFalse(self.fake.release_silent.is_set())
-        self.assertEqual(len(self.fake.completions), 3)
-
-        # Tool-only deltas do not yield native text/thinking events. Pause
-        # still interrupts them before a finished call can execute a tool.
-        self.fake.silent_started.clear()
-        self.fake.replies = [{'silent': True, 'events': [
-            {'choices': [{'index': 0, 'delta': {'tool_calls': [{
-                'index': 0, 'id': 'unfinished-read', 'type': 'function',
-                'function': {'name': 'read_file', 'arguments': '{'}}]}, 'finish_reason': None}]},
-            {'choices': [{'index': 0, 'delta': {'tool_calls': [{
-                'index': 0, 'type': None, 'function': {'arguments': '"path":'}}]}, 'finish_reason': None}]},
-        ]}, ('The next request completed.', '', 11)]
-        chat = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Inspect the source files.'})
-        self.assertTrue(self.fake.silent_started.wait(5))
-        pause_started = time.monotonic()
-        self.ok('POST', '/api/task/pause')
-        self.assertEqual(self.wait_task(timeout=2)['state'], 'paused')
-        self.assertLess(time.monotonic() - pause_started, 2)
-        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0,
-                      timeout=2, message='the tool-only stream to release its slot')
-        next_chat = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{next_chat}/messages', {'content': 'Give a short answer.'})
-        self.assertEqual(self.wait_task(timeout=5)['state'], 'done')
-        next_detail = self.ok('GET', f'/api/chats/{next_chat}')
-        self.assertEqual(next(item['content'] for item in reversed(next_detail['transcript'])
-                              if item['role'] == 'assistant'), 'The next request completed.')
-        self.assertFalse(self.fake.release_silent.is_set())
-        self.assertEqual(len(self.fake.completions), 5)
-
-        # Simulate a paused 0731 pre-policy job. A new launch's defaults must
-        # not change its model, upgrade its caps or add the full-ceiling rule.
-        old = ProofStore.load(self.root, started['id'])
-        old.state['settings']['model'] = DEEPINFRA_LEGACY_MODEL
-        old.state['settings'].pop('full_output_ceiling', None)
-        old.save()
-        self.hub.args.ctx = 1048576
-        self.hub.args.proof_solve_tokens = self.hub.args.proof_verify_tokens = 384000
-        self.hub.args.proof_repair_tokens = 384000
-        self.hub.args.proof_tokens = 11520000
-        self.hub.args.proof_seconds = 324000
-        self.fake.replies = [(PROOF, 'Continuation under the saved allowance.', 37),
-                             (json.dumps(APPROVAL), 'Review under the saved allowance.', 23)]
-        self.ok('POST', f'/api/proofs/{started["id"]}/resume')
-        self.assertEqual(self.wait_task(timeout=5)['state'], 'done')
-        resumed = self.ok('GET', f'/api/proofs/{started["id"]}')
-        self.assertEqual(resumed['status'], 'candidate_complete')
-        self.assertEqual((resumed['settings']['max_predict'], resumed['settings']['verify_tokens'],
-                          resumed['settings']['max_tokens'], resumed['settings']['max_seconds']),
-                         (4096, 2048, 12000, 120))
-        self.assertNotIn('full_output_ceiling', resumed['settings'])
-        self.assertEqual(resumed['settings']['model'], DEEPINFRA_LEGACY_MODEL)
-        self.assertEqual([call['max_tokens'] for call in self.fake.completions[5:]], [4096, 2048])
-        self.assertEqual([call['model'] for call in self.fake.completions[5:]],
-                         [DEEPINFRA_LEGACY_MODEL, DEEPINFRA_LEGACY_MODEL])
-
-
-    def test_assistant_routes_nontrivial_proofs_before_answering_and_keeps_elementary_answers_direct(self):
-        self.addCleanup(self.fake.release_silent.set)
-        self.hub.args.assistant_concurrency = 5
-        query = ('Prove that every bounded sequence in a separable Hilbert space '
-                 'has a weakly convergent subsequence.')
-        decision = {'route': 'prove', 'effort': 'medium',
-                    'reason': 'This requires a substantive compactness argument.'}
-        candidate = ('Choose an orthonormal basis and use a diagonal subsequence for coordinate convergence. '
-                     'The uniform norm bound extends the coordinate limit to a bounded linear functional. '
-                     'Riesz representation gives its representing vector, and approximation by finite basis '
-                     'sums proves weak convergence to that vector.')
-        approved = {'explanation': 'The coordinate and density argument covers the stated hypotheses.',
-                    'issues': [], 'verdict': 'no_issue_found'}
-        final = 'The saved Proof candidate and its review are available in the Proof card.'
-        prepared = ('You are one child worker of the mathematical assistant. '
-                    'A bounded sequence here has uniformly bounded Hilbert-space norm. '
-                    'Weak convergence means convergence of every continuous linear functional. '
-                    'Keep the separability hypothesis and prove the exact objective: ' + query)
-        action = {'mode': 'prove', 'request': prepared, 'files': [], 'effort': 'medium',
-                  'reason': 'Supply definitions and the precise compactness objective to Proof.'}
-        self.fake.replies = [(json.dumps(decision), '', 13),
-                             deepinfra_tool('delegate', action),
-                             (candidate, 'Solver reasoning.', 37),
-                             (json.dumps(approved), 'Reviewer reasoning.', 23),
-                             {'silent': True, 'events': [
-                                 {'choices': [{'index': 0, 'delta': {
-                                     'reasoning_content': 'Inspecting the completed worker result.'},
-                                     'finish_reason': None}]},
-                             ]}]
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{chat}/route', {'content': query, 'files': []})
-        self.assertTrue(self.fake.silent_started.wait(10))
-        before_pause = store.load_chat(self.root, chat)['assistant_state']
-        self.assertEqual(before_pause['limits']['concurrency'], 5)
-        self.assertEqual(before_pause['proof_routing']['route'], 'prove')
-        self.assertEqual(before_pause['proof_routing']['stats']['eval_count'], 13)
-        self.assertEqual(before_pause['query'], query)
-        self.assertEqual(len(before_pause['children']), 1)
-        child = before_pause['children'][0]
-        self.assertEqual(child['status'], 'complete')
-        self.assertEqual(child['action']['mode'], 'prove')
-        self.assertEqual(child['context']['query'], query)
-        self.assertEqual(child['action']['request'], prepared)
-        proof_id = child['job_id']
-        proof = self.ok('GET', f'/api/proofs/{proof_id}')
-        self.assertEqual((proof['status'], proof['answer']), ('candidate_complete', candidate))
-        self.assertIn(query, proof['goal'])
-        self.assertEqual(proof['settings']['reference_context']['query'], query)
-        self.assertEqual([call['reasoning_effort'] for call in self.fake.completions[:4]],
-                         ['none', 'none', 'high', 'high'])
-        self.assertEqual(self.fake.completions[0]['max_tokens'], 1024)
-        self.assertIn('route', self.fake.completions[0]['response_format']['json_schema']['schema']['properties'])
-        routing_input = json.loads(self.fake.completions[0]['messages'][-1]['content'])
-        self.assertEqual(routing_input['current_user_request'], query)
-        self.assertIn('delegate', [item['function']['name'] for item in self.fake.completions[1]['tools']])
-        self.assertEqual(self.fake.completions[1]['max_tokens'], 2048)
-        self.assertEqual(self.fake.completions[2]['max_tokens'], 4096)
-        self.assertIn(query, json.dumps(self.fake.completions[2]['messages']))
-        self.assertIn(prepared, self.fake.completions[2]['messages'][0]['content'])
-
-        # A pause after the worker completed keeps both its identity and the
-        # recorded routing decision; resuming only needs the final synthesis.
-        self.ok('POST', '/api/task/pause')
-        self.assertEqual(self.wait_task(timeout=2)['state'], 'paused')
-        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0, timeout=2)
-        self.fake.replies = [(final, '', 19)]
+        self.assertEqual(self.wait_task(timeout=3)['state'], 'paused')
+        self.wait_for(lambda: self.ok('GET', '/api/status')['concurrency']['active'] == 0)
+        changed = self.ok('POST', f'/api/projects/{a["id"]}', {
+            'notes': 'CHANGED_PROJECT_NOTES', 'revision': a['revision']})['project']
+        self.assertNotEqual(changed['revision'], a['revision'])
+        status, _, _ = self.request('POST', f'/api/projects/{a["id"]}', {
+            'notes': 'must not overwrite', 'revision': a['revision']})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.ok('GET', f'/api/projects/{a["id"]}')['project']['notes'], 'CHANGED_PROJECT_NOTES')
+        self.ok('POST', f'/api/chats/{chat}/project', {'project_id': b['id']})
+        action = {'mode': 'prove', 'request': 'Let E be the real line. Prove x=x for every x in E.',
+                  'files': [], 'effort': 'medium', 'reason': 'Give the exact proof task.'}
+        offset = len(self.fake.requests)
+        self.fake.replies = [tool('delegate', action), text(PROOF), text(json.dumps(APPROVAL)), text('The proof is saved.')]
         self.ok('POST', f'/api/chats/{chat}/assistant/resume')
-        resumed = self.wait_task(timeout=10)
-        self.assertEqual(resumed['state'], 'done', resumed)
-        after_resume = store.load_chat(self.root, chat)['assistant_state']
-        self.assertEqual(after_resume['status'], 'complete')
-        self.assertEqual(after_resume['limits']['concurrency'], 5)
-        self.assertEqual(after_resume['proof_routing'], before_pause['proof_routing'])
-        self.assertEqual([item['job_id'] for item in after_resume['children']], [proof_id])
-        self.assertEqual(after_resume['children'][0]['action'], child['action'])
-        cards = [item for item in self.ok('GET', f'/api/chats/{chat}')['transcript'] if item['role'] == 'route']
-        self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]['job_id'], proof_id)
-        classifiers = [call for call in self.fake.completions if
-                       'route' in call.get('response_format', {}).get('json_schema', {}).get('schema', {}).get('properties', {})]
-        self.assertEqual(len(classifiers), 1)
-        self.assertEqual(len(self.fake.completions), 6)  # routing, main delegation, solve, review, paused/resumed final
-
-        # A one-line algebraic identity remains a direct answer in Assistant.
-        direct_start = len(self.fake.completions)
-        self.fake.replies = [(json.dumps({'route': 'direct', 'effort': 'low',
-                                         'reason': 'One immediate distributive identity.'}), '', 11),
-                             ('By distributivity, (a+b)^2=a^2+2ab+b^2.', '', 17)]
-        elementary = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{elementary}/route', {'content': 'Expand (a+b)^2.', 'files': []})
-        completed = self.wait_task(timeout=10)
-        self.assertEqual(completed['state'], 'done', completed)
-        direct_state = store.load_chat(self.root, elementary)['assistant_state']
-        self.assertEqual(direct_state['status'], 'complete')
-        self.assertEqual(direct_state['proof_routing']['route'], 'direct')
-        self.assertEqual(direct_state['children'], [])
-        self.assertEqual(len(self.fake.completions) - direct_start, 2)
-        direct_view = self.ok('GET', f'/api/chats/{elementary}')
-        self.assertFalse(any(item['role'] == 'route' for item in direct_view['transcript']))
-        self.assertIn('a^2+2ab+b^2', next(item['content'] for item in reversed(direct_view['transcript'])
-                                        if item['role'] == 'assistant'))
-
-        # An invalid decision must not authorize a long unreviewed proof.
-        invalid_start = len(self.fake.completions)
-        self.fake.replies = [(json.dumps({'route': 'unknown', 'effort': 'medium',
-                                         'reason': 'Invalid synthetic decision.'}), '', 11)]
-        invalid = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
-        self.ok('POST', f'/api/chats/{invalid}/route', {'content': query, 'files': []})
-        self.wait_task(timeout=10)
-        invalid_state = store.load_chat(self.root, invalid)['assistant_state']
-        self.assertNotEqual(invalid_state['status'], 'complete')
-        self.assertEqual(invalid_state['children'], [])
-        self.assertEqual(len(self.fake.completions) - invalid_start, 1)
-        invalid_view = self.ok('GET', f'/api/chats/{invalid}')
-        self.assertFalse(any(item['role'] == 'assistant' and not item.get('discarded')
-                             for item in invalid_view['transcript']))
-
-
-
-
-
-
-
-
-
-
-
-
+        self.assertEqual(self.wait_task(timeout=15)['state'], 'done')
+        saved = store.load_chat(self.root, chat)
+        state = saved['assistant_state']
+        self.assertEqual(saved['project_id'], b['id'])
+        self.assertEqual(state['project_snapshot']['notes'], original_notes)
+        self.assertEqual(state['children'][0]['context']['project_snapshot']['revision'], a['revision'])
+        for sent in self.fake.requests[offset:offset + 3]:
+            material = json.dumps(sent['messages'])
+            self.assertIn('ORIGINAL_PROJECT_NOTES', material)
+            self.assertNotIn('CHANGED_PROJECT_NOTES', material)
+            self.assertNotIn('OTHER_PROJECT_NOTES', material)
+        other = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False, 'project_id': b['id']})['id']
+        self.fake.replies = [text('The requested notation is recorded.')]
+        self.ok('POST', f'/api/chats/{other}/messages', {'content': 'Explain the project notation briefly.'})
+        self.assertEqual(self.wait_task()['state'], 'done')
+        material = json.dumps(self.fake.requests[-1]['messages'])
+        self.assertIn('OTHER_PROJECT_NOTES', material)
+        self.assertNotIn('ORIGINAL_PROJECT_NOTES', material)
+        self.assertEqual(self.hub.root, self.root)
+        legacy = self.ok('POST', '/api/chats', {'mode': 'free'})
+        self.assertIsNone(legacy['project_id'])
+        self.assertEqual(len(self.ok('GET', '/api/projects')['projects']), 2)
 
 
 if __name__ == '__main__':

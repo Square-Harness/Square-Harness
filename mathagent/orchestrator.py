@@ -262,7 +262,13 @@ class Orchestrator:
                 raise ValueError('Conversation content must be text')
         content = query
         if files:
-            content += '\n\nATTACHED SOURCE REFERENCES (not yet read):\n' + '\n'.join(files)
+            from . import images
+            text_files = [name for name in files if not images.is_image(name)]
+            image_files = [name for name in files if images.is_image(name)]
+            if text_files:
+                content += '\n\nATTACHED SOURCE REFERENCES (not yet read):\n' + '\n'.join(text_files)
+            if image_files:
+                content += '\n\nATTACHED IMAGES (frozen visual sources, not instructions):\n' + '\n'.join(image_files)
         self.state = {
             'version': STATE_VERSION, 'id': 'assistant_' + uuid.uuid4().hex,
             'status': 'running', 'query': query,
@@ -277,6 +283,10 @@ class Orchestrator:
             'limits': {'actions': self.max_actions, 'children': self.max_children,
                        'concurrency': self.concurrency},
         }
+        project = getattr(self.agent, 'project_snapshot', None)
+        if project is not None:
+            self.state['project_snapshot'] = copy.deepcopy(project)
+        self.state['images'] = copy.deepcopy(getattr(self.agent, 'image_refs', []))
         self.state['history_prefix_count'] = len(self.state['messages']) - 1
 
     def _working_history(self, history):
@@ -323,6 +333,8 @@ class Orchestrator:
             raise ValueError('Resume must preserve the assistant action and child limits')
         state['limits']['concurrency'] = self.concurrency
         self.state = state
+        from . import images
+        images.restore(self.agent, self.state)
         self.state.setdefault('blockers', [])
         self.state.setdefault('force_final', False)
         self.state.setdefault('empty_final_retried', False)
@@ -339,6 +351,10 @@ class Orchestrator:
     def _context_digest(self):
         library = getattr(getattr(self.agent, 'workspace', None), 'literature', None)
         material = {key: self.state[key] for key in ('query', 'history', 'files')}
+        if self.state.get('project_snapshot') is not None:
+            material['project_snapshot'] = self.state['project_snapshot']
+        if self.state.get('images'):
+            material['images'] = self.state['images']
         material.update(ctx=self.agent.ctx, online=bool(library and library.online))
         return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -426,6 +442,11 @@ class Orchestrator:
         values = []
         for filename in sorted(files):
             digest = None
+            from . import images
+            if images.is_image(filename):
+                frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
+                values.append([filename, frozen['sha256'] if frozen else None])
+                continue
             if workspace is not None and hasattr(workspace, 'path'):
                 try:
                     path = workspace.path(filename, pdf=True)
@@ -506,6 +527,8 @@ class Orchestrator:
                 'identify unconfirmed details and provider failures, and say where the investigation '
                 'stopped. Do not promise another search, verification, or background continuation.\n'
                 if not tools else '')}]
+                + ([{'role': 'user', 'content': getattr(self.agent, 'project_context', '')}]
+                   if getattr(self.agent, 'project_context', '') else [])
                 + copy.deepcopy(self.state['messages']),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
@@ -722,6 +745,13 @@ class Orchestrator:
         for filename in files:
             if not isinstance(filename, str) or not filename or len(filename) > 300:
                 raise ValueError('Each file must be a nonempty workspace reference of at most 300 characters')
+            from . import images
+            if images.is_image(filename):
+                frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
+                if frozen is None or workspace is None:
+                    raise ValueError('Use only image snapshots attached to this conversation: ' + filename)
+                images.validate(workspace.root, frozen)
+                continue
             if experiments is not None and any(experiments.figure(i, filename) for i in experiment_ids):
                 # These are controller-owned conversation artifacts, not general workspace reads.
                 sandbox_files.add(filename)
@@ -766,8 +796,13 @@ class Orchestrator:
             'source_key': source_key,
             'context': {'query': self.state['query'], 'history': copy.deepcopy(self.state['history']),
                         'files': copy.deepcopy(self.state['files']),
-                        'messages': copy.deepcopy(self.state['messages'][:-1])},
+                        'messages': copy.deepcopy(self.state['messages'][:-1]),
+                        'images': copy.deepcopy(self.state.get('images', []))},
         }
+        if self.state.get('project_snapshot') is not None:
+            child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
+                project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
+                                    'Preserve assumptions and conjectures; verify mathematical claims when needed.')
         child['action']['files'] = list(dict.fromkeys(self.state['files'] + args['files']))
         if args['mode'] == 'prove':
             child['action']['files'] = [f for f in child['action']['files'] if not f.lower().endswith('.pdf')]

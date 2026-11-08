@@ -15,7 +15,7 @@ simpler or equally simple, explicit about what it guarantees, and consistent
 with its surroundings. When a feature would make the code hard to reason about,
 propose a simpler version first.
 
-Version 0.5.1, experimental. The source of truth for the version is
+Version 1.0. The source of truth for the machine-readable version is
 `mathagent/__init__.py` (`__version__`). `frontend/package.json` and
 `CITATION.cff` carry the same number.
 
@@ -53,21 +53,21 @@ Version 0.5.1, experimental. The source of truth for the version is
 
 ### Tests
 
-- The suite is deliberately small. `python -m unittest discover -s tests` runs:
-  - end-to-end tests through real entry points (CLI subprocess, HTTP API, GUI
-    server, runners) with scripted model servers; one of them compiles a
+- Keep the compact smoke suite. `python -m unittest discover -s tests` runs:
+  - core workflows through the HTTP API and runners with scripted model
+    servers; one of them compiles a
     write-up with latexmk and BibTeX and skips where `latexmk` is missing;
-  - sandbox and shared-admission tests; Docker-dependent checks skip without
+  - a real sandbox isolation check, which skips without
     Docker and the sandbox image;
   - hosted allowance and gateway integration checks. Install the optional
     `deployment/requirements-testers.txt` dependency to exercise the gateway
     checks rather than skip them.
 
-  `npm test` in `frontend/` runs the frontend interaction tests.
-- Add a test only when it drives real entry points and would fail on a genuine
-  regression of user-visible behaviour. Prefer extending an existing end-to-end
-  test to adding a unit test. Do not add tests that restate implementation
-  details.
+  `npm test` in `frontend/` checks interleaved conversation updates.
+- Do not expand the automated suite unless the maintainer explicitly requests
+  it. For routine interface changes, use type-checking, a build and a manual
+  browser check. Do not hide deleted tests behind a custom runner or fold them
+  into a large test just to reduce the reported count.
 - Shared fakes live in `tests/test_gui.py` (`GuiCase`, `text`, `tool`, `PROOF`,
   `APPROVAL`) and `tests/test_research.py` (`FakeClient`, `response`, `tool`).
   Reuse them.
@@ -75,8 +75,8 @@ Version 0.5.1, experimental. The source of truth for the version is
   Run heavy commands one at a time, with `nice` and a timeout. Contributors'
   machines also run a local model, so parallel test suites, builds and agents
   can freeze them.
-- Tests check software behaviour, never mathematical quality. For a change that
-  affects model interaction, also run a live check (see [Verify](#verify-a-change)).
+- For a change that affects model interaction, also run a live check
+  (see [Verify](#verify-a-change)).
 
 ### Frontend
 
@@ -134,7 +134,7 @@ Version 0.5.1, experimental. The source of truth for the version is
   re-reviewed.
   Workspace write approvals are tied to the original target and contents;
   changed files require a fresh diff. Chat attachments remain structured in the
-  transcript and pinned for the initial turn and fresh review.
+  transcript and retained for continued discussion and explicit review requests.
   Re-run document cards retain their previous download job IDs until chat
   deletion, so cleanup includes old copies without deleting work during retry.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
@@ -165,9 +165,8 @@ Version 0.5.1, experimental. The source of truth for the version is
   Compilation success means a PDF was built; completion additionally requires
   the final LaTeX log to have no unresolved citations/references or duplicate
   labels. Keep the PDF downloadable when those checks leave the draft partial.
-- **Honest status.** Never report an operational failure (timeout, budget,
-  context, malformed output) as a mathematical verdict. Never describe a model
-  review as a certificate. Partial work stays labelled partial.
+- **Workflow status.** Operational failures (timeout, budget, context, malformed
+  output) retain their own stop reasons. Partial work stays labelled partial.
   Retryable child failures keep their pending native transaction and saved job;
   a resume clears the old operational error only after its normal admission
   checks. Progress falls back only to the latest child, never an earlier one.
@@ -237,6 +236,86 @@ Version 0.5.1, experimental. The source of truth for the version is
   sandbox figures in conversations; raise sandbox memory limits").
 
 ## Architecture
+
+### Pilot projects, titles and reports
+
+`gui/projects.py` stores logical projects under the existing per-user workspace,
+with one atomic `projects/<uuid>/PROJECT.md`. Its metadata and note revision are
+committed together; optimistic revisions reject stale editor saves. Notes are
+limited to 8,000 characters. `project_id` is optional in old chat records, so
+existing conversations remain unassigned and usable. The GUI can filter chats
+and suggest a project's file folder without changing the process-wide Hub root.
+Projects are context organization, not additional file-access sandboxes.
+The project selector remains available in every conversation. A project move
+is refused while that conversation is active, queued or routing. New project
+navigation does not cancel other jobs. Keep upload destinations bound to the
+drop target captured before I/O; changing views must not attach those files to
+the next composer. Submission waits until the current target's uploads finish.
+
+Capture the selected project notebook at turn submission, including queued
+turns, and persist it in the Assistant checkpoint and child context. Resume
+must use that saved snapshot rather than rereading the current notebook.
+Keep project notes separate from Proof policy and source evidence. New turns
+see newly saved revisions; model answers do not update the notebook. Notebook
+changes never grant tool permissions.
+
+Conversation titles run only during idle time, after successful work. Their
+separate budget permits at most 4,096 conservatively counted input tokens,
+64 output tokens and 15 seconds, with thinking disabled and no tools. Title
+updates use the existing chat lock and cannot overwrite a manual rename or
+transcript. Foreground work cancels cosmetic inference. The DeepInfra adapter
+validates a strict internal bounded-title payload before reducing its hosted
+input reservation; ordinary calls retain their previous full-context reserve.
+An interrupted title must not hold a full-context tester allowance.
+
+`images.py` freezes explicitly attached PNG/JPEG/static WebP bytes in the private
+workspace's content-addressed `.mathagent/images` cache. JSON histories and job
+state carry only validated image references, never base64. Freeze before queue
+admission; subsequent turns, child workers and resume use those same snapshots.
+The DeepInfra adapter inserts user-role native image blocks only into transport
+copies. Input preflight counts text plus a labelled conservative vision
+allowance, never base64 as text. Provider-reported usage settles ordinary
+accounting. Unsupported model/backend combinations fail explicitly.
+
+Bind images to every fresh worker client and preserve refs on shared nested
+clients. Proof consumes originals directly. Research-derived manuscript
+workflows save a bounded, charged `image_read` transcription before their first
+phase and retain originals on every subsequent call, with source-image names
+and transcription stored separately. Screenshot text is source data, not new
+controller instructions. Exact TeX macros come from text sources. Keep image
+bytes during workspace backups; a missing/corrupt cache entry must fail instead of silently
+reading a changed original. Image input must fit the existing effort budget.
+The frontend previews selected sources through authenticated same-origin image
+routes and renders saved transcript refs directly. Preview state is keyed by
+workspace, selected paths and file-change events; late responses cannot replace
+the next selection. Image-only chat requests retain an explicit visible text
+instruction, including when a user selected an `@` skill.
+
+`gui/feedback.py` exports only an explicitly consented selected conversation and
+its linked durable worker traces. Inline worker output is already in the chat;
+its non-UUID child IDs are not durable job directories. Never follow source-file
+references or export a workspace/journal wholesale. Validate UUIDs, reject
+symlinks, redact credential fields and recognizable secret patterns, and enforce
+size limits before publication. A consent-off submission must not read the chat.
+Original native-input images are references in these JSON traces, not binary
+attachments; only screenshots explicitly attached to feedback are copied.
+The HTTP handler keeps the ordinary 1 MB JSON limit and permits up to 16 MiB
+only on feedback submission for bounded base64 screenshots. Reports are private
+ZIPs, atomically saved before optional Slack delivery. `gui/feedback_slack.py`
+uses a server-configured bot token and fixed channel to post the formatted
+description, upload native screenshots and attach the persisted report ZIP in
+the message thread. Signed upload URLs are restricted to Slack's HTTPS upload
+host, with no redirects and no bot credential forwarded to upload URLs. Progress
+is checkpointed privately, and only acknowledged messages and files count as
+delivered. Webhook-only installations retain their previous summary fallback.
+Trace preview is optional; the unchecked-by-default checkbox remains the consent.
+
+The gateway overwrites `X-SH-User-Email` from the verified JWT and permits
+cross-account feedback archives only for explicitly configured `feedback_admins`.
+Archive targets resolve to fixed tenant ports and private pairing files, never
+client-supplied paths or ports. Private webhook files and live deployment values
+stay outside Git. Keep the local launcher, gateway and backend configuration
+documented together when releasing these features.
 
 ```text
              terminal (cli.py)                 web app (frontend/ → mathagent/gui/static)
@@ -433,8 +512,8 @@ mode touches, in this order:
    and `references/*.md`.
 7. Docs: the skill's section and table row in `guide.md`, the commands table,
    and `CHANGELOG.md`.
-8. A test only if it passes the test rule above. Usually you extend
-   `tests/test_assistant_gui.py` or a runner test.
+8. Check the new workflow manually. Expand the automated suite only when the
+   maintainer explicitly requests it, following the test rule above.
 
 ### Other common changes
 
@@ -666,13 +745,10 @@ compute, so this is not an equal-budget comparison.
 
 Fix these when you touch the code nearby, or ask before a larger change:
 
-- **Untested since the test reduction:**
-  - persistence edge cases;
-  - backend streaming and tool-call recovery;
-  - web-app hardening beyond the token check;
-  - Assistant budgets and concurrency;
-  - write-up compile safety where `latexmk` is missing (the compile test skips);
-  - reference-lookup logic and the manuscript parser.
+- **The smoke suite is not exhaustive:** persistence and transport edge cases,
+  cross-process admission, individual skill variants, automatic titles and
+  presentation require manual checks when changed. Real compilation and
+  container isolation checks skip where their local tools are unavailable.
 - No documented command regenerates
   `mathagent/numerics/docker/requirements.lock` from `requirements.in`.
 - `prompts.SYSTEM` (ordinary chat) names specific research areas (PDE, control,

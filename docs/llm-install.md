@@ -5,13 +5,9 @@ Harness by following this file. Do the whole installation yourself, check every
 step, and end with the harness running and its web-app address given to the user.
 For what the harness is, see [guide.md](guide.md).
 
-There are three plans. Choose the one the user requested in step 1.
-
-- **Plan C, hosted API:** the harness and web app run on this computer, and
-  DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
-  agrees to send model prompts and selected source text to the provider. No
-  GPU, SSH tunnel or Cloudflare account is needed for a local interface test.
-  Follow the hosted-API section below after installing the harness.
+There are three plans. Self-hosting is the primary setup; the hosted API plan is
+an optional way to test the harness without a GPU. Choose the plan requested in
+step 1.
 
 - **Plan A, local:** the model runs on this computer with Ollama. Use it for a
   quick test with a tiny Qwen (any computer, even without a GPU), or for real use
@@ -22,6 +18,11 @@ There are three plans. Choose the one the user requested in step 1.
   reach the model through an SSH tunnel. The model server is HyperQwen, the
   team's tested setup (Qwen 3.8 27B with 4-bit weights and speculative
   decoding), with fallbacks.
+- **Plan C, API trial only:** the harness and web app run on this computer, and
+  DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
+  agrees to send model prompts and selected source text to the provider. No
+  GPU, SSH tunnel or Cloudflare account is needed for this local interface test.
+  Follow the hosted-API section below after installing the harness.
 
 ## Rules
 
@@ -130,6 +131,11 @@ through Tunnel, with no public backend ports. Copy existing mail DNS records
 before moving nameservers, and migrate DNSSEC rather than leaving an old DS key.
 Do not cache private app responses or enable prompt/body logging.
 
+Onboarding must provision the private backend, workspace, sandbox and allowance,
+then add the same identity to the gateway's `tenants` mapping and Access email
+allowlist. An operator's one-email helper may automate these steps; it is
+deployment-specific, not part of Cloudflare email-code authentication.
+
 The authenticated gateway endpoint `GET /api/account` returns only the verified
 email and the configured application's same-origin Access logout URL. It never
 returns a JWT, provider key or workspace token. The frontend uses this optional
@@ -147,6 +153,13 @@ model-restricted provider credential; reuse credentials and ledgers on restart.
 Priority is refused for a quota-enabled instance. An exhausted allowance is an
 operational stop and does not authorize another allowance automatically.
 
+For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's
+service configuration. Keep exceptions in private operator configuration. Changing
+this variable alone does not update an existing ledger: an approved cap change
+requires an administrative migration of that same ledger and matching service
+settings, preserving all charged and reserved amounts. Never replace a ledger
+or mint a new credential to simulate a cap increase.
+
 To bound heavy simulations across accounts, create a trusted shared directory
 with mode 0750, owned by root and a dedicated numerical group. Pre-create
 `slot-0.lock` and `slot-1.lock` as root-owned mode-0660 files in that group; tenants
@@ -154,6 +167,77 @@ must not be able to replace directory entries. Add only sandbox service accounts
 to the group and configure `SH_NUMERICS_SLOTS_DIR` and `SH_NUMERICS_SLOTS=2` in their
 service environment. Arrange recreation at boot. This supplements per-container
 memory/CPU limits; it does not change model or Proof budgets.
+
+### Optional feedback delivery
+
+Feedback works without Slack: reports are saved privately and the browser says
+when delivery is unconfigured. For report text, native screenshots and a report
+ZIP delivered in one private Slack thread, install a bot with `chat:write` and
+`files:write` and add it to the feedback channel. Save its bot token through a
+hidden prompt into a private mode-0600 regular file. Set
+`SH_FEEDBACK_SLACK_TOKEN_FILE` to its absolute filename and
+`SH_FEEDBACK_SLACK_CHANNEL` to the fixed private channel ID in the service
+environment. Each backend user must own its credential file. No message-history
+or file-read permission is needed. Never put the token in Git, a command
+argument, the served workspace or frontend configuration.
+
+Existing installations may retain `SH_FEEDBACK_WEBHOOK_FILE` for summary-only
+incoming webhooks. A configured bot takes precedence; an invalid bot setup does
+not fall back to the webhook. Delivery is confirmed only after Slack acknowledges
+the parent message and every attachment. A partial upload keeps the private
+report and its delivery progress for inspection.
+
+`SH_FEEDBACK_DIR` may select a mode-0700 directory outside the served workspace,
+owned by that backend user. The default is the protected `.mathagent/feedback`
+folder. Reports and ZIPs have mode 0600. A report is durable before notification;
+Slack failure does not delete it. Screenshots are limited to three PNG/JPEG/WebP
+files of 3 MiB each; consented diagnostic traces are limited to 32 MiB.
+
+For hosted downloads, add a `feedback_admins` list of existing invited maintainer
+emails to the private gateway configuration. It defaults to no administrators.
+Set `SH_FEEDBACK_REPORT_BASE_URL` in each backend to the protected application
+origin followed by `/api/admin/feedback/{tenant}`. The server replaces `{tenant}`
+with a hash of the gateway-verified reporter identity; ordinary testers cannot
+use these cross-account archive links. They can download their own submitted
+report through their normal authenticated backend. Keep the gateway and backend
+release compatible when enabling this route. Local launches may instead use an
+HTTP loopback prefix ending in `/api/feedback`; these links work only in the
+paired local browser.
+
+The isolated API launcher accepts `--workspace` for a separate acceptance
+workspace and `--online` to enable literature tools. Without `--online` it keeps
+its previous locked-offline behavior. If the private
+`.local/feedback/slack-webhook` file exists, the launcher uses it for feedback
+unless `SH_FEEDBACK_WEBHOOK_FILE` was explicitly configured. For direct file
+delivery it similarly loads `.local/feedback/slack-bot-token` and the channel ID
+in `.local/feedback/slack-channel`, unless their environment settings were
+explicitly configured. It sets no model
+or Proof-budget changes for feedback or projects.
+
+### Updating a hosted pilot
+
+Keep application code separate from each tester's persistent workspace and
+private service configuration. Before an update, record the deployed revision
+and preserve a private backup of workspaces, image caches and configuration,
+plus a consistent SQLite backup of each quota database. Use an idle window or
+explicitly pause affected work before
+restarting a backend. An in-flight generation can be interrupted by a restart;
+its unfinished output may be lost and its unreported-usage reservation retained.
+Do not automatically replay a request to hide that interruption.
+
+For a Git-backed installation, inspect local changes and the incoming release
+before updating. Use a fast-forward when available; never overwrite local
+configuration with a hard reset. Deploy the matching backend, gateway and built
+frontend revision together, and reuse the existing workspace paths, service
+accounts, credentials and allowance ledgers. A code update does not authorize
+new spending limits, changed Proof budgets or edits to saved job JSON.
+
+After restarting the affected services, check their status and a maintainer's
+email-code login. Confirm the account identity, existing history and files,
+allowance meter and access isolation before inviting testers back. Inspect a
+saved paused job without granting it a new allowance. Keep the previous code
+revision available for rollback; do not roll back user data by replacing it
+with an older workspace or database.
 
 ## 2. Install the harness
 
@@ -204,7 +288,7 @@ Fallbacks:
 Check:
 
 ```bash
-.venv/bin/square-harness --version        # prints: Square Harness 0.5.1 (or newer)
+.venv/bin/square-harness --version        # prints: Square Harness 1.0.0
 ```
 
 If this fails with `ModuleNotFoundError: mathagent`, run the harness as
@@ -235,6 +319,16 @@ different name. An existing credential prevents minting another allowance.
 The provider's spending limit is distinct from workflow token limits; ongoing
 requests may settle after admission. Changing parallel work does not mint a
 new credential or increase its existing spending allowance.
+
+Native image input needs this pinned **DS4.1 Flash 1017** DeepInfra profile;
+there is no extra dependency or vision service to install. Keep the private
+`.mathagent/images` cache when moving or backing up a workspace, alongside its
+saved job state. The GUI uses authenticated same-origin thumbnail requests.
+PNG, JPEG and static WebP are accepted, with eight images per conversation/job,
+8 MiB per image and 24 MiB combined, at most 8,192 pixels per side and 32
+megapixels. The Qwen profile rejects native images.
+For terminal workflows, include image paths in `--proof-file` or
+`--research-file` just like text sources.
 
 ```bash
 python3 scripts/start-deepinfra.py --profile ds4

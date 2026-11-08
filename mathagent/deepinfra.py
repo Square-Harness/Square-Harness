@@ -125,10 +125,17 @@ class DeepInfra(OpenAICompatible):
         except (URLError, TimeoutError, OSError) as exc:
             raise AgentError('Cannot reach DeepInfra: ' + self._redact(exc)) from None
 
-    def _payload(self, payload):
+    def _payload(self, payload, *, include_images=True):
         if payload.get('model') not in SUPPORTED_MODELS:
             raise AgentError('The DeepInfra test profile requires model ' + MODEL +
                              ' (or ' + LEGACY_MODEL + ' for saved work)')
+        refs = getattr(self, 'image_refs', [])
+        if refs:
+            from . import images
+            if not images.supported(self.profile, payload.get('model')):
+                raise AgentError('Native images require DS4.1 Flash 1017; the legacy V4 model cannot receive them')
+            if '_sh_bounded_title' in payload:
+                raise AgentError('A bounded conversation-title call cannot include images')
         data = super()._payload(payload)
         if self.service_tier == 'priority':
             data['service_tier'] = 'priority'
@@ -151,11 +158,38 @@ class DeepInfra(OpenAICompatible):
         if isinstance(schema, dict):
             data['response_format'] = {'type': 'json_schema', 'json_schema': {
                 'name': 'square_harness', 'strict': False, 'schema': copy.deepcopy(schema)}}
+        if '_sh_bounded_title' in payload:
+            self._quota_input_cap(payload, data)
+        if refs and include_images:
+            data['messages'] = images.materialize(self.image_root, refs, data['messages'])
         return data
 
     @staticmethod
     def _bytes(value):
         return len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
+
+    def _quota_input_cap(self, payload, data):
+        """Only the tiny, non-thinking title shape can reserve less than full context."""
+        if '_sh_bounded_title' not in payload:
+            return CONTEXT_TOKENS
+        messages, options = payload.get('messages'), payload.get('options')
+        valid = (payload['_sh_bounded_title'] is True and payload.get('think') is False
+                 and payload.get('stream') is True
+                 and not set(payload) - {'model', 'messages', 'options', 'think', 'stream', '_sh_bounded_title'}
+                 and isinstance(options, dict) and not set(options) - {'num_ctx', 'num_predict', 'temperature'}
+                 and type(data['max_tokens']) is int and 0 < data['max_tokens'] <= 64
+                 and isinstance(messages, list) and len(messages) == 2)
+        if valid:
+            valid = all(isinstance(message, dict) and set(message) == {'role', 'content'}
+                        and message['role'] == role and isinstance(message['content'], str)
+                        for message, role in zip(messages, ('system', 'user')))
+        if not valid:
+            raise AgentError('Invalid bounded conversation-title payload')
+        # UTF-8 bytes upper-bound text tokens; preserve the normal framing allowance.
+        bound = self._bytes(data['messages']) + 1024 + 128 * len(messages) + 2 * self._bytes({})
+        if bound > 4096:
+            raise AgentError('Bounded conversation-title input exceeds 4096 tokens')
+        return bound
 
     def count_input_tokens(self, payload):
         """Include full material, plus conservative template/schema allowance.
@@ -164,10 +198,20 @@ class DeepInfra(OpenAICompatible):
         accommodates framing and server-injected tool/schema text, without
         claiming an exact reconstruction of DeepInfra's rendering.
         """
-        data = self._payload(payload)
+        # Count text and image-processing allowance, never the base64 transport encoding.
+        data = self._payload(payload, include_images=False)
+        if '_sh_bounded_title' in payload:
+            self.input_token_count_method = 'Bounded title UTF-8 byte and framing estimate'
+            return self._quota_input_cap(payload, data)
         framing = 1024 + 128 * len(data['messages'])
         extras = {key: data[key] for key in ('tools', 'response_format') if key in data}
         extra_allowance = 2 * self._bytes(extras) + 1024 * len(data.get('tools', []))
+        refs = getattr(self, 'image_refs', [])
+        image_allowance, image_method = 0, ''
+        if refs:
+            from .images import VISION_TOKEN_ESTIMATE, prompt_overhead
+            image_allowance = len(refs) * VISION_TOKEN_ESTIMATE + prompt_overhead(refs)
+            image_method = ' + conservative 4096-token/image vision allowance (not base64 text tokens)'
         if self._tokenize_supported is not False:
             response = self._request_url(self.tokenize_url, {'model': data['model'], 'messages': data['messages'],
                                                            'return_token_strs': False}, optional=True)
@@ -182,11 +226,11 @@ class DeepInfra(OpenAICompatible):
                     raise AgentError('Malformed tokenizer response from DeepInfra') from None
                 self._tokenize_supported = True
                 self.observed_context_tokens = min(context, CONTEXT_TOKENS)
-                self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate'
-                return count + framing + extra_allowance
+                self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate' + image_method
+                return count + framing + extra_allowance + image_allowance
             self._tokenize_supported = False
-        self.input_token_count_method = 'DeepInfra UTF-8 byte and framing estimate (tokenizer unavailable)'
-        return self._bytes(data['messages']) + framing + extra_allowance
+        self.input_token_count_method = 'DeepInfra UTF-8 byte and framing estimate (tokenizer unavailable)' + image_method
+        return self._bytes(data['messages']) + framing + extra_allowance + image_allowance
 
     def stream(self, payload):
         quota = None
@@ -194,7 +238,8 @@ class DeepInfra(OpenAICompatible):
             from contextlib import closing
             from .hosted_quota import HostedQuota
             quota = HostedQuota.from_environment(self.service_tier)
-            reservation = quota.reserve(CONTEXT_TOKENS, self._payload(payload)['max_tokens'])
+            data = self._payload(payload)
+            reservation = quota.reserve(self._quota_input_cap(payload, data), data['max_tokens'])
         try:
             if quota is None:
                 yield from super().stream(payload)
