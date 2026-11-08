@@ -23,6 +23,8 @@ from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
+from .. import images
+from . import projects
 
 CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
@@ -77,8 +79,8 @@ def _tool_experiment(message):
         return None
     return experiment_item(value.get('experiment_id'), value.get('status'),
                            list(value.get('figures') or []) + list(value.get('files') or []))
-UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg'}
-BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg'}  # figures for write-ups, and PDFs to read
+UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg', '.webp'}
+BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # figures and visual inputs, and PDFs to read
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
 CHAT_BYTES = 16 * 1024 * 1024
@@ -290,6 +292,7 @@ def proof_detail(root, proof_id, active=None):
         'recovery_notice': s.get('recovery_notice'),
         'created_at': s['created_at'], 'updated_at': s['updated_at'], 'revision': s['revision'],
         'settings': settings,
+        'images': s.get('images', []),
         'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
                    'tokens': _output_budget(s, running),
                    'seconds': _working_time(s, running),
@@ -395,6 +398,7 @@ def research_detail(root, job_id, active=None):
         'id': s['id'], 'kind': s['kind'], 'goal': s['goal'], 'status': s['status'], 'phase': s['phase'],
         'stop_reason': s.get('stop_reason'), 'created_at': s['created_at'], 'updated_at': s['updated_at'],
         'settings': settings,
+        'images': s.get('images', []),
         'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
                    'tokens': _output_budget(s, running),
                    'input_tokens': _budget(s['input_tokens_charged'], settings['max_input_tokens']),
@@ -507,14 +511,14 @@ def list_files(root, limit=2000):
         for name in sorted(files):
             path = Path(folder) / name
             suffix = path.suffix.lower()
-            if name.startswith('.') or path.is_symlink() or (suffix not in TEXT and suffix != '.pdf'):
+            if name.startswith('.') or path.is_symlink() or (suffix not in TEXT and suffix != '.pdf' and not images.is_image(path)):
                 continue
             try:
                 size = path.stat().st_size
             except OSError:
                 continue
             found.append({'path': path.relative_to(root).as_posix(), 'size': size,
-                          'kind': 'pdf' if suffix == '.pdf' else 'text'})
+                          'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text'})
             if len(found) >= limit:
                 return found
     return found
@@ -559,16 +563,75 @@ def _save_chat(root, chat):
     _atomic_write(_chats(root, create=True) / (chat['id'] + '.json'), data)
 
 
-def create_chat(root, mode, think=True, model='', online=False):
+def create_chat(root, mode, think=True, model='', online=False, project_id=None):
     if mode not in CHAT_MODES:
         raise ValueError('Chat mode must be critic, explore or free')
+    if project_id is not None:
+        projects.read_project(root, project_id)
     now = _now()
     chat = {'version': 1, 'id': str(uuid.uuid4()), 'mode': mode, 'title': '',
             'created_at': now, 'updated_at': now,
             'settings': {'think': bool(think), 'model': model, 'online': bool(online)},
-            'history': [], 'transcript': []}
+            'history': [], 'transcript': [], 'project_id': project_id}
     _save_chat(root, chat)
     return chat
+
+
+@_locked_chat
+def set_chat_project(root, chat_id, project_id):
+    if project_id is not None:
+        projects.read_project(root, project_id)
+    chat = load_chat(root, chat_id)
+    chat['project_id'] = project_id
+    _save_chat(root, chat)
+    return chat
+
+
+@_locked_chat
+def set_chat_title(root, chat_id, title, *, manual=True):
+    if not isinstance(title, str) or not title.strip() or len(title) > 120:
+        raise ValueError('Give the conversation a title of at most 120 characters')
+    chat = load_chat(root, chat_id)
+    if manual or chat.get('title_source') != 'manual':
+        chat['title'] = one_line(title, 120)
+        chat['title_source'] = 'manual' if manual else 'generated'
+        _save_chat(root, chat)
+    return chat
+
+
+def chat_images(chat):
+    """The original image refs supplied to this chat, never workspace rereads."""
+    result = {}
+    for ref in chat.get('images', []):
+        result[ref['sha256']] = dict(ref)
+    for item in chat.get('transcript', []):
+        if item.get('role') == 'user':
+            for ref in item.get('images', []):
+                result[ref['sha256']] = dict(ref)
+    return list(result.values())
+
+
+@_locked_chat
+def save_chat_images(root, chat_id, refs):
+    chat = load_chat(root, chat_id)
+    chat['images'] = [dict(ref) for ref in refs]
+    _save_chat(root, chat)
+
+
+@_locked_chat
+def claim_auto_title(root, chat_id):
+    """Reserve one optional title request without racing transcript writers."""
+    chat = load_chat(root, chat_id)
+    if chat.get('auto_title_attempted') or chat.get('title_source') == 'manual':
+        return None
+    first = next((item.get('content', '').strip() for item in chat['transcript']
+                  if item.get('role') == 'user' and not item.get('discarded')
+                  and len(item.get('content', '').strip()) >= 12), '')
+    if not first:
+        return None
+    chat['auto_title_attempted'] = True
+    _save_chat(root, chat)
+    return first
 
 
 def load_chat(root, chat_id):
@@ -655,6 +718,7 @@ def list_chats(root, templates_root=None):
                      if (item.get('role') in ('assistant', 'review') and item.get('content'))
                      or (item.get('role') == 'route' and item.get('status') not in ('dismissed',))), '')
         chats.append({'id': chat['id'], 'kind': chat['mode'], 'title': chat['title'] or 'New conversation',
+                      'project_id': chat.get('project_id'),
                       'updated_at': chat['updated_at'], 'created_at': chat['created_at'],
                       'messages': sum(1 for item in chat['transcript'] if item.get('role') == 'user'),
                       'preview': one_line(last, 140), 'math_macros': chat['_display_macros']})
@@ -662,7 +726,8 @@ def list_chats(root, templates_root=None):
 
 
 @_locked_chat
-def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None):
+def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None,
+                project_snapshot=None, image_refs=()):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -678,6 +743,10 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
         if message['role'] == 'user':
             item['files'] = list(files)
+            if image_refs:
+                item['images'] = [dict(ref) for ref in image_refs]
+            if project_snapshot is not None:
+                item['project_snapshot'] = project_snapshot
             if user_content is not None:
                 item['content'] = user_content
         if mode and message['role'] != 'user':
@@ -721,12 +790,13 @@ def commit_review(root, chat_id, result, calls, notices):
 
 
 @_locked_chat
-def record_discarded(root, chat_id, content, reason):
+def record_discarded(root, chat_id, content, reason, *, files=(), image_refs=()):
     """Keep an unfinished turn visible without adding it to the model context."""
     chat = load_chat(root, chat_id)
     stamp = _now()
     if content:
-        chat['transcript'].append({'role': 'user', 'content': content, 'time': stamp, 'discarded': True})
+        chat['transcript'].append({'role': 'user', 'content': content, 'time': stamp, 'discarded': True,
+                                   'files': list(files), 'images': [dict(ref) for ref in image_refs]})
         if not chat['title']:
             chat['title'] = one_line(content, 80)
     chat['transcript'].append({'role': 'notice', 'content': 'Not added to the conversation: ' + reason,
@@ -913,7 +983,7 @@ def save_upload(workspace, name, data):
     base = re.sub(r'[^\w.\- ()+]', '_', str(name).replace('\\', '/').split('/')[-1]).strip()
     suffix = Path(base).suffix.lower()
     if not base or base.startswith('.') or suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop .tex, .sty, .cls, .bib, .md, .txt, .pdf or .py files, or .png/.jpg figures')
+        raise ValueError('Drop text/LaTeX, PDF, Python or PNG/JPEG/WebP image files')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
     if suffix not in BINARY_UPLOADS and b'\x00' in data:

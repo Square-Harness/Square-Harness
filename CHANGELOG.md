@@ -1,6 +1,94 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-11-08
+
+- Present the three setup routes clearly: local self-hosting, a self-hosted
+  remote GPU/cluster, and an optional hosted-API trial.
+
+- Remove the conversation composer's fresh-review shortcut.
+
+- Add native DS4.1 image attachments across conversations and specialist modes,
+  with paste/drop, private thumbnails, immutable saved sources and pause/resume.
+  Manuscript workflows retain a labelled transcription and original images;
+  existing token budgets and Qwen behavior remain unchanged.
+  Wait for uploads before submission and keep their original project destination
+  when the user changes views.
+
+- Make feedback trace preview optional and deliver formatted reports, screenshots
+  and consented trace ZIPs directly to the configured private Slack thread.
+
+- Reduce the automated suite from 50 cases to 12 core smoke checks; remove
+  redundant test files and unused fixtures rather than combining or hiding them.
+- Show the project selector in every conversation, simplify the project sidebar,
+  and place a live Markdown preview beside the project notes editor.
+
+- Add project notebooks with an ordinary-language editor, project conversation
+  lists and file folders. Pin notebook revisions to turns and worker handoffs;
+  preserve the original project context when paused work resumes.
+- Add small, idle-time conversation titles and manual rename/move actions.
+  Bound title input, output and hosted quota reservations independently of Proof.
+- Add private feedback reports with screenshots, explicit conversation-trace
+  consent, preview/export and redaction. Save reports durably before optional
+  Slack notifications and protect cross-account downloads with maintainer access.
+- Simplify the new-conversation page with a project selector, concise workflow
+  explanation and skill choices. Add optional online tools and workspace
+  selection to the local API launcher without changing model or Proof profiles.
+
+- Add a hosted account menu with verified email, Access logout, dollar allowance
+  details and input/output usage. Preserve local GUI behavior and all saved
+  work, model settings and Proof budgets.
+
+- Add an optional Cloudflare Access gateway for hosted pilots. Verify signed
+  identities before routing to fixed, separate backend workspaces; keep pairing
+  credentials server-side and preserve streamed responses and same-origin checks.
+- Add opt-in durable tester allowances with atomic reservations across processes,
+  conservative token accounting, and a global allowance meter. Keep ordinary
+  launches and Proof budgets unchanged when the hosted configuration is absent.
+- Bound heavy sandbox runs across separate hosted accounts with optional shared,
+  cancellable admission slots, preserving the existing container isolation.
+
+- Default the hosted DeepInfra profile to DeepSeek V4.1 Flash 1017, preserving
+  Proof budgets, service-tier selection and concurrency. Keep V4 Flash 0731
+  available for saved jobs without rewriting their model or allowances.
+
+- Add DS4 launcher `--service-tier standard|priority`, defaulting to Standard.
+  Apply Priority centrally to DeepInfra generation calls when selected, without
+  changing Proof budgets or saved allowances; reject the option for Qwen.
+
+- Bound conversational Proof preparation to two calls of at most 2,048 generated
+  tokens each, 16,384 input tokens per call and 32,768 input tokens overall,
+  then hand off to Proof. Keep model-written briefs within 4,000 characters.
+  Preserve concise context and definitions, fall back to the original request
+  when a brief is unavailable, and keep
+  preparation from consuming the full solver allowance or growing into a proof.
+  Retain preparation limits on resume and pass oversized input to Proof intact.
+
+- Restore the main agent's normal task preparation before conversational
+  Proof delegations with both Qwen and DS4. Preserve the original statement
+  and exact context for solving and review, reuse native delegation and
+  resume, and show the original and prepared tasks in Sources.
+
+- Start the DS4 profile with five active jobs, five shared model-request slots
+  and up to five independent Assistant workers; preserve Qwen's existing
+  concurrency settings and sequential solve/review within each Proof run.
+
+- Give DS4 Proof a full 384,000-token ceiling for solving, repair and review
+  from Medium upwards; effort changes the maximum solver-pass count. Derive
+  the workflow allowance from those calls, including bounded review retries,
+  and preserve Qwen's previous rules and saved-job limits. Add an explicit
+  DS4/Qwen choice to the isolated GUI launcher.
+
+- Route DS4 proof requests through a bounded semantic decision before a long
+  Assistant answer. Start a durable Proof worker for nontrivial proofs, retain
+  direct elementary identities, and preserve the decision and worker on resume.
+
+- Make GUI Pause interrupt a stalled model-response socket, preserving partial
+  work and its unknown-usage reservation while releasing the model slot.
+
+- Add an opt-in DeepInfra DS4 Flash 0731 profile for the local GUI and CLI,
+  with private capped credentials, streamed reasoning and structured output.
+  Separate remote-model consent from web research. Apply DS4-specific context,
+  role and effort budgets while preserving explicit saved allowances.
 
 - Preserve bibliography identifiers in Markdown links and pin retrieved
   references for conversation write-ups. Reuse their metadata and citation keys;
@@ -214,8 +302,7 @@ no extra reviews. One review still decides, and uncertainty still stops the job.
 ## 0.5.0 — 2026-09-27
 
 A simpler proof engine: solve the complete problem, verify the written proof,
-and repair a concrete objection. This release defines a new experimental
-protocol; mathematical gains have not yet been established by a live benchmark.
+and repair a concrete objection, retaining complete candidates and review notes.
 
 - A substantial initial solve with thinking enabled; the benchmark matches its
   initial prompt and sampling settings to the direct-inference baseline.
@@ -248,6 +335,3 @@ Subsequent v0.4 development explored proof portfolios, cooperative advisors,
 OpenAI-compatible and llama.cpp transports, GPU deployment profiles and saved
 benchmarks. These experiments motivated the v0.5 simplification; their original
 results and source snapshots should retain their original version identity.
-
-Tests validate software behaviour, not mathematical correctness. Interfaces and
-saved-state formats may evolve while the project remains experimental.

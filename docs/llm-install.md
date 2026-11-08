@@ -5,7 +5,9 @@ Harness by following this file. Do the whole installation yourself, check every
 step, and end with the harness running and its web-app address given to the user.
 For what the harness is, see [guide.md](guide.md).
 
-There are two plans. Choose one in step 1.
+There are three plans. Self-hosting is the primary setup; the hosted API plan is
+an optional way to test the harness without a GPU. Choose the plan requested in
+step 1.
 
 - **Plan A, local:** the model runs on this computer with Ollama. Use it for a
   quick test with a tiny Qwen (any computer, even without a GPU), or for real use
@@ -16,6 +18,11 @@ There are two plans. Choose one in step 1.
   reach the model through an SSH tunnel. The model server is HyperQwen, the
   team's tested setup (Qwen 3.8 27B with 4-bit weights and speculative
   decoding), with fallbacks.
+- **Plan C, API trial only:** the harness and web app run on this computer, and
+  DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
+  agrees to send model prompts and selected source text to the provider. No
+  GPU, SSH tunnel or Cloudflare account is needed for this local interface test.
+  Follow the hosted-API section below after installing the harness.
 
 ## Rules
 
@@ -69,7 +76,8 @@ shadows the system's. Use Python by absolute path (for example
 
 Decide (ask the user only what you cannot tell):
 
-1. **Plan.** Choose B if the user mentioned a cluster, Slurm, SSH or a remote GPU.
+1. **Plan.** Choose C if the user requested the hosted DeepInfra API. Otherwise
+   choose B if the user mentioned a cluster, Slurm, SSH or a remote GPU.
    Choose A otherwise. In Plan A, on Linux with an NVIDIA GPU of 24 GB or more,
    ask whether the user wants HyperQwen
    ([A4](#a4-optional-hyperqwen-instead-of-ollama)), the server the team runs
@@ -94,6 +102,142 @@ Ollama, about 40 GB with HyperQwen). Optional:
 - a TeX distribution with `latexmk` (and BibTeX or Biber, which TeX Live and
   MacTeX include), to compile write-ups and their bibliographies;
 - `zstd`, to unpack Ollama without `sudo`.
+
+## Hosted tester deployment
+
+The ordinary GUI is a trusted single-workspace service. Before sharing it with
+testers, give each person a separate Linux service account, private home and
+workspace, model credential and rootless sandbox runtime. Keep backend listeners
+on loopback and their service configuration and credentials outside all served
+workspaces. Use separate backend ports and `--gui-root` fixed to each workspace.
+LaTeX compilation retains paranoid file access and disabled shell escape.
+
+The optional entry point is a Cloudflare Tunnel to the local tester gateway,
+protected by an Access self-hosted application and an exact email allowlist.
+Configure email-code authentication. Install the gateway dependency separately:
+
+```sh
+python -m pip install -r deployment/requirements-testers.txt
+python deployment/tester_gateway.py --help
+python deployment/tester_gateway.py --config /etc/square-harness/gateway.json
+```
+
+Its private JSON configuration contains `hostname`, the exact HTTPS Cloudflare
+Access `issuer`, the application's `audience`, and `tenants`: a mapping from each
+invited email to a fixed `port` and absolute `token_file`. Configuration and token
+files must be mode 0600 or 0640, readable only by the gateway account. Never put
+the model key there. The gateway binds to `127.0.0.1:8790`; publish that listener
+through Tunnel, with no public backend ports. Copy existing mail DNS records
+before moving nameservers, and migrate DNSSEC rather than leaving an old DS key.
+Do not cache private app responses or enable prompt/body logging.
+
+Onboarding must provision the private backend, workspace, sandbox and allowance,
+then add the same identity to the gateway's `tenants` mapping and Access email
+allowlist. An operator's one-email helper may automate these steps; it is
+deployment-specific, not part of Cloudflare email-code authentication.
+
+The authenticated gateway endpoint `GET /api/account` returns only the verified
+email and the configured application's same-origin Access logout URL. It never
+returns a JWT, provider key or workspace token. The frontend uses this optional
+endpoint for its account menu; ordinary local backends return 404 and keep the
+local interface. A public presentation website and a protected app subdomain can
+share a domain while only the app is routed through this gateway.
+
+For a capped Standard-service tester, configure `SH_DEEPINFRA_QUOTA_FILE` as an
+absolute file outside served workspaces, inside a tenant-owned mode-0700 directory.
+The created SQLite file is mode 0600. `SH_DEEPINFRA_QUOTA_USD` defaults to `2.50`;
+`SH_DEEPINFRA_QUOTA_INPUT_PER_MILLION` and
+`SH_DEEPINFRA_QUOTA_OUTPUT_PER_MILLION` default to conservative `0.20` and `0.60`.
+These settings are immutable for an existing ledger. Pair this with a separately
+model-restricted provider credential; reuse credentials and ledgers on restart.
+Priority is refused for a quota-enabled instance. An exhausted allowance is an
+operational stop and does not authorize another allowance automatically.
+
+For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's
+service configuration. Keep exceptions in private operator configuration. Changing
+this variable alone does not update an existing ledger: an approved cap change
+requires an administrative migration of that same ledger and matching service
+settings, preserving all charged and reserved amounts. Never replace a ledger
+or mint a new credential to simulate a cap increase.
+
+To bound heavy simulations across accounts, create a trusted shared directory
+with mode 0750, owned by root and a dedicated numerical group. Pre-create
+`slot-0.lock` and `slot-1.lock` as root-owned mode-0660 files in that group; tenants
+must not be able to replace directory entries. Add only sandbox service accounts
+to the group and configure `SH_NUMERICS_SLOTS_DIR` and `SH_NUMERICS_SLOTS=2` in their
+service environment. Arrange recreation at boot. This supplements per-container
+memory/CPU limits; it does not change model or Proof budgets.
+
+### Optional feedback delivery
+
+Feedback works without Slack: reports are saved privately and the browser says
+when delivery is unconfigured. For report text, native screenshots and a report
+ZIP delivered in one private Slack thread, install a bot with `chat:write` and
+`files:write` and add it to the feedback channel. Save its bot token through a
+hidden prompt into a private mode-0600 regular file. Set
+`SH_FEEDBACK_SLACK_TOKEN_FILE` to its absolute filename and
+`SH_FEEDBACK_SLACK_CHANNEL` to the fixed private channel ID in the service
+environment. Each backend user must own its credential file. No message-history
+or file-read permission is needed. Never put the token in Git, a command
+argument, the served workspace or frontend configuration.
+
+Existing installations may retain `SH_FEEDBACK_WEBHOOK_FILE` for summary-only
+incoming webhooks. A configured bot takes precedence; an invalid bot setup does
+not fall back to the webhook. Delivery is confirmed only after Slack acknowledges
+the parent message and every attachment. A partial upload keeps the private
+report and its delivery progress for inspection.
+
+`SH_FEEDBACK_DIR` may select a mode-0700 directory outside the served workspace,
+owned by that backend user. The default is the protected `.mathagent/feedback`
+folder. Reports and ZIPs have mode 0600. A report is durable before notification;
+Slack failure does not delete it. Screenshots are limited to three PNG/JPEG/WebP
+files of 3 MiB each; consented diagnostic traces are limited to 32 MiB.
+
+For hosted downloads, add a `feedback_admins` list of existing invited maintainer
+emails to the private gateway configuration. It defaults to no administrators.
+Set `SH_FEEDBACK_REPORT_BASE_URL` in each backend to the protected application
+origin followed by `/api/admin/feedback/{tenant}`. The server replaces `{tenant}`
+with a hash of the gateway-verified reporter identity; ordinary testers cannot
+use these cross-account archive links. They can download their own submitted
+report through their normal authenticated backend. Keep the gateway and backend
+release compatible when enabling this route. Local launches may instead use an
+HTTP loopback prefix ending in `/api/feedback`; these links work only in the
+paired local browser.
+
+The isolated API launcher accepts `--workspace` for a separate acceptance
+workspace and `--online` to enable literature tools. Without `--online` it keeps
+its previous locked-offline behavior. If the private
+`.local/feedback/slack-webhook` file exists, the launcher uses it for feedback
+unless `SH_FEEDBACK_WEBHOOK_FILE` was explicitly configured. For direct file
+delivery it similarly loads `.local/feedback/slack-bot-token` and the channel ID
+in `.local/feedback/slack-channel`, unless their environment settings were
+explicitly configured. It sets no model
+or Proof-budget changes for feedback or projects.
+
+### Updating a hosted pilot
+
+Keep application code separate from each tester's persistent workspace and
+private service configuration. Before an update, record the deployed revision
+and preserve a private backup of workspaces, image caches and configuration,
+plus a consistent SQLite backup of each quota database. Use an idle window or
+explicitly pause affected work before
+restarting a backend. An in-flight generation can be interrupted by a restart;
+its unfinished output may be lost and its unreported-usage reservation retained.
+Do not automatically replay a request to hide that interruption.
+
+For a Git-backed installation, inspect local changes and the incoming release
+before updating. Use a fast-forward when available; never overwrite local
+configuration with a hard reset. Deploy the matching backend, gateway and built
+frontend revision together, and reuse the existing workspace paths, service
+accounts, credentials and allowance ledgers. A code update does not authorize
+new spending limits, changed Proof budgets or edits to saved job JSON.
+
+After restarting the affected services, check their status and a maintainer's
+email-code login. Confirm the account identity, existing history and files,
+allowance meter and access isolation before inviting testers back. Inspect a
+saved paused job without granting it a new allowance. Keep the previous code
+revision available for rollback; do not roll back user data by replacing it
+with an older workspace or database.
 
 ## 2. Install the harness
 
@@ -144,12 +288,170 @@ Fallbacks:
 Check:
 
 ```bash
-.venv/bin/square-harness --version        # prints: Square Harness 0.5.1 (or newer)
+.venv/bin/square-harness --version        # prints: Square Harness 1.0.0
 ```
 
 If this fails with `ModuleNotFoundError: mathagent`, run the harness as
 `PYTHONPATH=$REPO .venv/bin/python -m mathagent` from the repository instead.
 Every command below accepts that form in place of `.venv/bin/square-harness`.
+
+## Plan C: DeepInfra API with a local interface
+
+Create an account at https://deepinfra.com/login, then create a named key at
+https://deepinfra.com/dash/keys. The setup helper defaults to the key name
+`square-harness-local`. Enable `inference`, `models:read` and
+`account_scoped_jwt`; the last permits creation of the restricted test
+credential. Check Billing for the available balance; use a manual top-up only
+with the user's agreement and leave automatic top-up disabled. Do not assume
+signup credits or a particular minimum payment.
+
+Enter the parent key only through the hidden terminal prompt:
+
+```bash
+python3 scripts/setup-deepinfra.py
+```
+
+The parent key is not saved. The helper creates a DS4-only, 24-hour scoped JWT
+with a $1 allowance and stores it at `.local/deepinfra/credential`, mode 0600,
+inside private directories. Use `--key-name NAME` if the dashboard key has a
+different name. An existing credential prevents minting another allowance.
+`--replace` explicitly creates a new allowance; it does not revoke the old JWT.
+The provider's spending limit is distinct from workflow token limits; ongoing
+requests may settle after admission. Changing parallel work does not mint a
+new credential or increase its existing spending allowance.
+
+Native image input needs this pinned **DS4.1 Flash 1017** DeepInfra profile;
+there is no extra dependency or vision service to install. Keep the private
+`.mathagent/images` cache when moving or backing up a workspace, alongside its
+saved job state. The GUI uses authenticated same-origin thumbnail requests.
+PNG, JPEG and static WebP are accepted, with eight images per conversation/job,
+8 MiB per image and 24 MiB combined, at most 8,192 pixels per side and 32
+megapixels. The Qwen profile rejects native images.
+For terminal workflows, include image paths in `--proof-file` or
+`--research-file` just like text sources.
+
+```bash
+python3 scripts/start-deepinfra.py --profile ds4
+```
+
+This opens the local GUI on port 8780, uses the private workspace
+`.local/deepinfra/workspace`, keeps web research off and selects the DS4
+budgets. It allows five active jobs, five simultaneous model requests across
+all jobs, and up to five independent workers within one Assistant turn.
+Those workers share the global five-request capacity. A Proof run still
+solves and reviews in sequence. Logs and the PID stay under
+`.local/deepinfra/`. The browser receives
+the local GUI session token, never the DeepInfra key. Existing workspaces and
+servers are not used by this launcher. Use `--port N` if 8780 is occupied.
+`--profile ds4` and `--service-tier standard` are the defaults. For Priority
+service, which costs 50% more per token, launch with:
+
+```bash
+python3 scripts/start-deepinfra.py --profile ds4 --service-tier priority
+```
+
+The selection applies to every DeepInfra generation request after launch,
+without changing Proof budgets or the credential's spending limit. Priority
+does not guarantee a particular token rate. Pause active work and stop the old
+GUI before relaunching on the same port; resume the saved jobs afterwards.
+An explicit `--service-tier` is rejected with the Qwen profile. For the old
+Qwen setup, select it explicitly:
+
+```bash
+python3 scripts/start-deepinfra.py --profile qwen
+```
+
+The Qwen GUI opens on port 8781 by default and uses the existing local
+OpenAI-compatible server at
+`http://127.0.0.1:18020`, model `qwen3.8-27b`, and its previous 65,536-token
+context and Proof rules, with one active job, one model request and one
+Assistant worker at a time. Start the model server and SSH tunnel first, as in
+Plan B; selecting this profile does not allocate a GPU or create a tunnel.
+Its isolated workspace, log and PID live under `.local/qwen-test/`; it does
+not need or send a DeepInfra credential. Only one GUI can occupy a port.
+Use `--host URL --model ID` if the Qwen server advertises a different endpoint
+or model ID. `--ctx N` selects a different context supported by that server.
+
+For a manual launch, set `DEEPINFRA_API_KEY_FILE` to the private credential
+file, then use:
+
+```bash
+python -m mathagent --gui --backend openai --api-profile deepinfra \
+  --allow-remote-model --offline --workspace WORKSPACE
+```
+
+Here `--api-profile deepinfra` selects the DS4 transport and budget profile.
+For a manual launch, `SH_DEEPINFRA_SERVICE_TIER=priority` selects Priority;
+unset it or use `standard` for Standard service. The isolated launcher sets
+this value from its flag, so an inherited environment value cannot change its
+default pricing.
+A manual Qwen launch uses `--api-profile default` with the local server and
+model settings from B4. Selecting a different profile never rewrites saved
+jobs or grants them new allowances on resume.
+
+New DS4 Proof jobs use 384,000 tokens for each solve, repair and review from
+Medium upwards. Medium, High, Extra high and Poincaré allow 3, 5, 7 and 10 solver
+passes; Low remains one short solve/review pass. The total output allowance
+includes one possible review-format retry per pass. See the budget table in
+[guide.md](guide.md). The common per-call time guard defaults to three hours;
+use `--proof-call-seconds SECONDS` for an explicit value in either the DS4
+launcher or a manual launch.
+The workflow time allowance is derived from the permitted calls instead of the
+old short effort-specific deadline. Explicit token and time flags remain hard
+limits; they may stop a job before its maximum pass count. The scoped API key's
+spending allowance is separate and remains unchanged by selecting an effort.
+
+The profile pins `deepseek-ai/DeepSeek-V4.1-Flash-1017` at
+`https://api.deepinfra.com/v1/openai`. It uses ordinary streamed Chat
+Completions, with no stored Batch API or optional retained cache. The model
+catalog is read without authentication because scoped inference JWTs are
+rejected by the authenticated catalog route. Prompt preflight uses the native
+tokenizer when available, with additional framing/tool/schema allowances;
+otherwise it is explicitly labelled a UTF-8 byte estimate. Actual input and
+generated-token usage comes from the completed inference response. No exact
+reconstruction of the provider's chat template is claimed.
+
+An older model-restricted credential may permit only V4 Flash 0731. A model
+upgrade therefore needs a credential permitting V4.1 Flash 1017; do not
+silently mint a fresh spending allowance. Existing 0731 jobs retain their
+saved checkpoint and budgets, and require access to that checkpoint when
+resumed. Changing the default model does not rewrite saved work.
+
+If a response stalls, Pause closes the active response socket and preserves
+the partial work. It does not wait for another generated chunk. Connection
+setup and the wait for initial HTTP headers still obey their request timeout.
+After recovering an interrupted turn, use Resume in the same conversation;
+an incomplete fragment is never treated as a completed proof.
+
+This profile makes a small structured routing call for an unassigned new
+Assistant request. It uses at most 1,024 output tokens and 60 seconds, charged
+to the existing allowance. Very elementary identities may stay direct;
+nontrivial proof requests start Proof mode. Explicit `@` selections and the
+existing automatic source/reference routes bypass this extra decision.
+
+After Proof has been selected, Qwen and DS4 prepare a short delegation through
+the existing Assistant tool loop. This stage has its own hard limit: at most
+two calls of 2,048 generated tokens each, including any generated reasoning
+and tool arguments. Preparation also allows at most 16,384 input tokens per
+call and 32,768 in total, from the backend's count or a labelled estimate.
+Larger requests hand off to Proof without truncating the original material.
+The first call may read context; the next must delegate to Proof. The
+model-written brief is at most 4,000 characters and collects definitions,
+the precise target and ambiguities, with at most one short, explicitly
+unproved suggested direction. It must not
+attempt the proof.
+
+If the brief is unavailable or the limit is reached, the controller starts
+Proof from the original request and saved context without another preparation
+attempt; unfinished preparation is not used as the task brief. Original
+hypotheses and exact conversation stay authoritative for
+solving and review. Preparation remains charged to the existing Assistant
+budget; Proof's solve/review allowances do not change. The preparation limits
+persist across pause/resume. An older paused turn already over them hands off
+without receiving another preparation allowance. Resume leaves
+already-created Proof jobs unchanged. Standalone Proof and raw benchmark
+calls retain their direct path. The Proof page's Sources tab shows Original
+request and, when the delegated objective differs, Prepared task.
 
 ## Plan A: local model
 

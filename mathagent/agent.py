@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .prompts import SYSTEM, MODES
+from .model_limits import input_limit
 
 
 class AgentError(Exception):
@@ -88,6 +89,10 @@ class Agent:
         self.history = []
         self.last_stats = {}
         self.last_stop_reason = ''
+        # Helpers sometimes share their parent's client. Preserve that task's
+        # frozen visual context; newly constructed clients start empty.
+        from . import images
+        images.bind(self, copy.deepcopy(getattr(client, 'image_refs', [])))
 
     def run(self, query, emit=lambda kind, value: None, fresh=False):
         # Only commit history when a full turn completes; interruptions cannot
@@ -101,6 +106,8 @@ class Agent:
         recovery_notes = ''
         messages.append({'role': 'user', 'content': query})
         system = {'role': 'system', 'content': SYSTEM + '\nMODE: ' + MODES[self.mode]}
+        context = ([{'role': 'user', 'content': self.project_context}]
+                   if getattr(self, 'project_context', '') else [])
         schemas = self.workspace.schemas()
         round_no, answer_now = -1, False
         while True:
@@ -116,7 +123,7 @@ class Agent:
                     message.pop('thinking', None)
                 self.history = messages
                 return next((m['content'] for m in reversed(messages) if m.get('role') == 'assistant' and m.get('content')), '')
-            payload = {'model': self.model, 'messages': [system] + messages, 'stream': True,
+            payload = {'model': self.model, 'messages': [system] + context + messages, 'stream': True,
                        'think': self.think and not answer_now, 'options': {'num_ctx': self.ctx, 'num_predict': predict,
                            'temperature': self.temperature, 'top_p': self.top_p}}
             if self.seed is not None:
@@ -127,7 +134,7 @@ class Agent:
             # Context fitting adjusts output room, never mathematical premises.
             from .call_policy import allocate_call, CallContextError
             while True:
-                payload['messages'] = [system] + messages
+                payload['messages'] = [system] + context + messages
                 if recovery_notes:
                     payload['messages'] = copy.deepcopy(payload['messages'])
                     payload['messages'][-1]['content'] += ('\n\nUNVERIFIED WORKING NOTES (final excerpt of generated reasoning):\n'
@@ -187,7 +194,7 @@ class Agent:
                 # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
                 # without reasoning or tools, asks for the answer instead of returning nothing.
                 answer_now = True
-                recovery_notes = thinking[-4000:]
+                recovery_notes = thinking[-input_limit(self, 'recovery_note', 4000):]
                 emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
                 messages.append({'role': 'user', 'content': ANSWER_NOW})
                 continue

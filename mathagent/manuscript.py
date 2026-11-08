@@ -34,7 +34,7 @@ NUMBER = r'(?:[A-Z]\.\d+(?:\.\d+)*|\d+(?:\.\d+)*|[A-Z])'
 TEXT_STATEMENT = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(' + TYPE_WORDS + r')(?:\s+(' + NUMBER + r'))?'
                             r'(?:[*_]{0,2}\s*(\([^()]{0,90}(?:\([^()]*\)[^()]{0,40})?\))[*_]{0,2}\s*[.:]?|\.|:|[*_]{2})[*_]{0,2}(?=\s|$)', re.I)
 PROOF_WORD = r'(?:proof|preuve|démonstration|demonstration)'
-TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*' + PROOF_WORD + r'\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})', re.I)
+TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(?:(?:proposed|attempted)\s+)?' + PROOF_WORD + r'\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})', re.I)
 INLINE_PROOF = re.compile(r'(?<!\w)[*_]{0,2}' + PROOF_WORD + r'\b[*_]{0,2}\s*[.:](?=\s*\S)', re.I)
 TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{2,90})$')
 TEXT_SUBSECTION = re.compile(r'^\s*((?:\d+|[A-Z])(?:\.\d+)+)\.?\s+([A-Z][^.]{1,90})\.(?:\s|$)')

@@ -1,18 +1,6 @@
-"""Research budgets, provenance and durable workflow behavior without network/model calls."""
+"""Shared scripted model responses for the reference-check smoke test."""
 import copy
-import json
-from pathlib import Path
-import tempfile
 import unittest
-from unittest.mock import patch
-
-from mathagent.agent import Agent
-from mathagent.literature import LiteratureTools
-from mathagent.research import ResearchRunner, _reference_prompt, _reference_snapshot
-from mathagent.tools import Workspace
-
-
-DOC = 'doc-' + 'a' * 24
 
 
 def response(text='', calls=(), *, complete=True, count=20, input_count=100):
@@ -39,10 +27,6 @@ class FakeClient:
             if isinstance(event, BaseException):
                 raise event
             yield event
-
-
-
-
 
 
 if __name__ == '__main__':

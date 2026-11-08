@@ -20,7 +20,7 @@ import threading
 import unicodedata
 import zlib
 
-from . import manuscript
+from . import manuscript, images
 from . import review_policy as P
 from .agent import AgentError
 from .backends import TokenBudgetError
@@ -32,6 +32,7 @@ from .router import repair_latex
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .reporting import usage_footer
+from .model_limits import output_limit, input_limit
 
 # 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
 VARIANTS = ('quick', 'review', 'journal', 'explain')
@@ -193,7 +194,8 @@ class ReviewBase(ResearchRunner):
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
-        self.concurrency = max(1, min(4, int(concurrency)))
+        concurrency_limit = 5 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        self.concurrency = max(1, min(concurrency_limit, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
         self._phase_limit = None
@@ -201,6 +203,7 @@ class ReviewBase(ResearchRunner):
     def resume(self, job_id, *, additional_seconds=0):
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
+        self._validate_transport_resume()
         # Reject an invalid resume before changing its saved phase or report.
         if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
             raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
@@ -241,6 +244,7 @@ class ReviewBase(ResearchRunner):
     def start(self, goal, *, kind='referee', source_files=(), target='', reference_context=None, **budgets):
         if kind != 'referee':
             raise ValueError('The review workflows are referee jobs')
+        source_files = images.capture(self.agent, source_files)
         self._target = str(target or '').strip()[:200]
         self._reference = _reference_snapshot(reference_context)[0] if reference_context is not None else None
         self._conversation_sources = False
@@ -269,6 +273,8 @@ class ReviewBase(ResearchRunner):
         mapping = manuscript.build(content, 'pasted-text.md')
         has_proof = bool(manuscript.checkable(mapping)) or bool(manuscript.INLINE_PROOF.search(content))
         has_source = has_proof or (self.VARIANT == 'explain' and bool(mapping['units']))
+        if getattr(self.agent, 'image_refs', None) and not has_source:
+            return []  # The charged image-reading step supplies a derived manuscript before mapping.
         if self._reference is not None and not has_source:
             sources = []
             history = self._reference.get('history')
@@ -350,6 +356,16 @@ class ReviewBase(ResearchRunner):
         explicit = getattr(self.agent, 'document_output_cap', None)
         return min(wanted, explicit if explicit is not None else wanted)
 
+    def _model_cap(self, name, fallback):
+        return self._cap(output_limit(self.agent, name, fallback))
+
+    def _metadata_cap(self, fallback=3000):
+        return self._model_cap('review_metadata', fallback)
+
+    def _confirm_cap(self):
+        wanted = self._model_cap('review_confirm', 4096)
+        return wanted if self._thinks(wanted) else self._model_cap('review_direct', 1500)
+
     def _room(self, cap, prefix=''):
         """Bytes of manuscript text a prompt may still carry for this call."""
         cap = self._cap(cap)
@@ -406,6 +422,7 @@ class ReviewBase(ResearchRunner):
 
     def _judge(self, role, prompt, *, cap, schema, key, direct_cap=3000):
         """A call that reasons first when there is room, then once more without thinking (warmer) if unusable."""
+        direct_cap = self._model_cap('review_direct', direct_cap)
         if self._thinks(cap):
             try:
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
@@ -432,7 +449,7 @@ class ReviewBase(ResearchRunner):
 
     def _larger_explanation(self, result, role, prompt, cap, schema, key):
         previous = result.get('output_limit', self._cap(cap))
-        wanted = min(32768, max(cap, previous * 2))
+        wanted = min(output_limit(self.agent, 'review_recovery', 32768), max(cap, previous * 2))
         if wanted <= previous or self._cap(wanted) <= previous:
             return result
         try:
@@ -829,7 +846,8 @@ class ReviewBase(ResearchRunner):
     CHECK_CAP = 8192  # with thinking; a direct answer gets at most 3000
 
     def _check_cap(self):
-        return self._cap(self.CHECK_CAP if self._thinks(self.CHECK_CAP) else 3000)
+        wanted = self._model_cap('review_check', self.CHECK_CAP)
+        return wanted if self._thinks(wanted) else self._model_cap('review_direct', 3000)
 
     def _check_jobs(self, unit, lenses, journal=False, notation=()):
         """Jobs still needed by a pinned plan of review strategies and proof parts."""
@@ -1022,7 +1040,7 @@ class ReviewBase(ResearchRunner):
 
     def _confirm_job(self, cluster, unit, notation=()):
         key = cluster['key']
-        cap = self._cap(4096 if self._thinks(4096) else 1500)
+        cap = self._confirm_cap()
 
         def run():
             self.emit('notice', f'Re-checking an alleged issue in {unit["name"]} (lines {cluster["start_line"]}-{cluster["end_line"]})')
@@ -1208,7 +1226,7 @@ class QuickReviewRunner(ReviewBase):
                 for cluster in sorted(clusters, key=lambda c: (-RANK[c['kind']], c['unlocated'], -c['passes']))[:6]:
                     if cluster['key'] in self.state['confirms']:
                         continue
-                    if not self._affordable(4096 if self._thinks(4096) else 1500, 3000 * (len(jobs) + 1), share=.92, jobs=len(jobs) + 1):
+                    if not self._affordable(self._confirm_cap(), 3000 * (len(jobs) + 1), share=.92, jobs=len(jobs) + 1):
                         self._warn('Some alleged issues were not re-checked: the budget ran out.')
                         break
                     jobs.append(self._confirm_job(cluster, unit))
@@ -1333,7 +1351,8 @@ class ExplainRunner(ReviewBase):
         return not self._mechanism() and (len(self._proof_lines(unit)) <= FINE_LINES if unit['proofs'] else True)
 
     def _explain_cap(self):
-        return self._cap(16384 if self._thinks(16384) else 8000)
+        wanted = self._model_cap('review_explain', 16384)
+        return wanted if self._thinks(wanted) else self._model_cap('review_direct', 8000)
 
     def _optional(self, fn, phase):
         try:
@@ -1355,7 +1374,7 @@ class ExplainRunner(ReviewBase):
             self.state['phase'] = 'fill'
         elif phase == 'fill':
             missing = self._missing()
-            if missing and self.state['fills'] < self.effort['fills'] and self._affordable(3000, 4000, share=.85):
+            if missing and self.state['fills'] < self.effort['fills'] and self._affordable(self._metadata_cap(), 4000, share=.85):
                 self._optional(lambda: self._fill(missing), 'fill')
                 self.state['fills'] += 1
                 return
@@ -1363,7 +1382,7 @@ class ExplainRunner(ReviewBase):
                 self._warn('Proof lines not explained one by one: ' + _span(missing) + '.')
             self.state['phase'] = 'check' if self.effort['explain_check'] else 'done'
         elif phase == 'check':
-            if self._affordable(1500, 6000, share=.8):
+            if self._affordable(self._metadata_cap(1500), 6000, share=.8):
                 self._optional(self._check_explanation, 'accuracy check')
             else:
                 self._warn('The explanation accuracy check was not run within the remaining budget.')
@@ -1479,11 +1498,11 @@ class ExplainRunner(ReviewBase):
 
     def _fill(self, missing):
         unit = self.state['unit']
-        packet, _, _ = self._packet(unit, self._room(3000, P.FILL_POLICY), segment=missing, context=True)
+        packet, _, _ = self._packet(unit, self._room(self._metadata_cap(), P.FILL_POLICY), segment=missing, context=True)
         prompt = (P.FILL_POLICY + '\nMISSING LINES: ' + _span(missing) + '\n\nWALKTHROUGH SO FAR:\n' +
                   json.dumps(self.state['explanation']['steps'], ensure_ascii=False) + '\n\n' + packet)
         with self._timeout():
-            result = self._ask('fill', prompt, cap=3000, schema=P.STEPS_SCHEMA, key=f'fill{self.state["fills"]}')
+            result = self._ask('fill', prompt, cap=self._metadata_cap(), schema=P.STEPS_SCHEMA, key=f'fill{self.state["fills"]}')
         wanted = set(n for a, b in missing for n in range(a, b + 1))
         added = []
         for item in (result['value'] or {}).get('steps') or []:
@@ -1515,11 +1534,11 @@ class ExplainRunner(ReviewBase):
                 problems += part.get('problems', [])
                 continue
             explanation = json.dumps(value, ensure_ascii=False)
-            packet, _, _ = self._packet(unit, self._room(1500, P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
+            packet, _, _ = self._packet(unit, self._room(self._metadata_cap(1500), P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
                                         segment=item['segment'], context=True)
             prompt = P.EXPLAIN_CHECK_POLICY + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
             with self._timeout():
-                result = self._ask('explain-check', prompt, cap=1500, schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
+                result = self._ask('explain-check', prompt, cap=self._metadata_cap(1500), schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
             found = [{'where': str(p.get('where') or ''), 'problem': str(p.get('problem') or ''), 'fix': str(p.get('fix') or '')}
                      for p in (result['value'] or {}).get('problems') or [] if isinstance(p, dict) and p.get('problem')]
             if part is not None:
@@ -1713,7 +1732,7 @@ class JournalRunner(ReviewBase):
         intro, size = [], 0
         for n in range(first, min(end, first + 220) + 1):
             size += len(lines[n - 1].encode())
-            if size > 14000:
+            if size > input_limit(self.agent, 'review_packet', 14000):
                 break
             intro.append(n)
         if intro:
@@ -1726,7 +1745,8 @@ class JournalRunner(ReviewBase):
         bib = list(mapping['bibliography'].items())[:40]
         if bib:
             parts.append('BIBLIOGRAPHY (key: entry):\n' + '\n'.join(f'[{k}] {v[:140]}' for k, v in bib))
-        cap = 8192 if self._thinks(8192) else 3000
+        wanted = self._model_cap('review_check', 8192)
+        cap = wanted if self._thinks(wanted) else self._model_cap('review_direct', 3000)
         prompt = P.SCOPE_POLICY + '\n\n' + '\n\n'.join(parts)
         probe = {'model': self.agent.model, 'messages': [{'role': 'system', 'content': self.POLICY + '\n' + self.state['skill']},
                               {'role': 'user', 'content': prompt + self._reference_material()}],
@@ -1825,7 +1845,8 @@ class JournalRunner(ReviewBase):
         return ['line', 'adversarial'][:count]
 
     def _write_reserve(self):
-        return min(5000, (self.state['settings']['max_tokens'] or 25000) // 5)
+        wanted = output_limit(self.agent, 'review_write', 5000)
+        return min(wanted, (self.state['settings']['max_tokens'] or wanted * 5) // 5)
 
     def _checks(self):
         pending = []
@@ -1872,7 +1893,7 @@ class JournalRunner(ReviewBase):
         for cluster in clusters[:12 if self.state['level'] in ('low', 'medium') else 24]:
             if cluster['key'] in self.state['confirms']:
                 continue
-            if not self._affordable(4096 if self._thinks(4096) else 1500, 4000 * (len(jobs) + 1), reserve_out=self._write_reserve(), reserve_in=12000, share=.78, jobs=len(jobs) + 1):
+            if not self._affordable(self._confirm_cap(), 4000 * (len(jobs) + 1), reserve_out=self._write_reserve(), reserve_in=12000, share=.78, jobs=len(jobs) + 1):
                 self._warn('Some alleged issues were not re-checked: the budget ran out.')
                 break
             jobs.append(self._confirm_job(cluster, self._unit(cluster['unit']), self._notation()))
@@ -2005,13 +2026,13 @@ class JournalRunner(ReviewBase):
                                     'url': str(hit.get('url') or hit.get('source_url') or '')[:300], 'query': query})
             self.state['search_results'] = results[:15]
             self._save()
-        if not results or not self._affordable(1500, 6000, reserve_out=self._write_reserve(), share=.86):
+        if not results or not self._affordable(self._metadata_cap(1500), 6000, reserve_out=self._write_reserve(), share=.86):
             return
         listing = '\n'.join(f'{n}. {r["title"]} ({r["authors"]}, {r["year"]}). {r["abstract"][:350]}' for n, r in enumerate(results, 1))
         prompt = (P.NOVELTY_POLICY + '\n\nFIELD: ' + scope.get('field', '') + '\nCLAIMED CONTRIBUTION: ' + scope.get('contribution', '')
                   + '\n\nSEARCH RESULTS:\n' + listing)
         with self._timeout():
-            result = self._ask('novelty', prompt, cap=1500, schema=P.NOVELTY_SCHEMA, key='novelty')
+            result = self._ask('novelty', prompt, cap=self._metadata_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty')
         value = result['value'] or {}
         related = [{'n': _int(r.get('n')), 'relation': str(r.get('relation') or '')[:300]} for r in value.get('related') or []
                    if isinstance(r, dict) and 1 <= _int(r.get('n')) <= len(results)]
@@ -2020,7 +2041,7 @@ class JournalRunner(ReviewBase):
     # -- presentation ------------------------------------------------------------------------------
 
     def _read_parts(self):
-        """The paper up to its bibliography, in parts that follow its sections (at most 150 lines and 14 kB each)."""
+        """The paper up to its bibliography, in bounded section-following parts."""
         sid, mapping = self.state['sources'][0]['id'], self.state['map']
         lines = self._lines(sid)
         end = len(lines)
@@ -2032,12 +2053,14 @@ class JournalRunner(ReviewBase):
         begin = next((n for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 1) if mapping['format'] == 'tex' else 1
         starts = sorted({begin} | {sec['line'] for sec in mapping['sections'] if begin < sec['line'] <= end})
         parts = []
-        part_bytes = min(14000, max(512, self._room(3000, P.READ_POLICY) - 1500))
+        part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
+                         max(512, self._room(self._metadata_cap(), P.READ_POLICY) - 1500))
+        part_lines = input_limit(self.agent, 'review_lines', 150)
         for index, a in enumerate(starts):
             b = (starts[index + 1] - 1) if index + 1 < len(starts) else end
             while a <= b:
                 stop, size = a, 0
-                while stop <= b and stop - a < 150 and size + len(lines[stop - 1].encode()) <= part_bytes:
+                while stop <= b and stop - a < part_lines and size + len(lines[stop - 1].encode()) <= part_bytes:
                     size += len(lines[stop - 1].encode())
                     stop += 1
                 stop = max(stop, a + 1)
@@ -2080,7 +2103,7 @@ class JournalRunner(ReviewBase):
         for start in range(0, len(jobs), size):
             batch = []
             for key, fn in jobs[start:start + size]:
-                if not self._affordable(3000, 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
+                if not self._affordable(self._metadata_cap(), 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
                                         reserve_in=20000, share=.45 if self.CHECK_PROOFS else .8, jobs=len(batch) + 1):
                     break
                 batch.append((key, fn))
@@ -2093,13 +2116,13 @@ class JournalRunner(ReviewBase):
         def run():
             self.emit('notice', f'Reading lines {a}-{b}')
             prompt = P.READ_POLICY + ('\n' + P.PDF_READING if pdf else '') + '\n\nPART OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b)
-            result = self._ask('read', prompt, cap=3000, schema=P.READ_SCHEMA, key=key)
+            result = self._ask('read', prompt, cap=self._metadata_cap(), schema=P.READ_SCHEMA, key=key)
             value = result['value'] or {}
             usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                       and isinstance(value.get('comments'), list))
-            if not usable and self._affordable(3000, 6000, share=.45 if self.CHECK_PROOFS else .8):
+            if not usable and self._affordable(self._metadata_cap(), 6000, share=.45 if self.CHECK_PROOFS else .8):
                 self._warn(f'Reading lines {a}-{b} produced an unusable answer; one fresh attempt was made on the same exact source.')
-                result = self._ask('read', prompt, cap=3000, schema=P.READ_SCHEMA, key=key + ':retry', temperature=.4)
+                result = self._ask('read', prompt, cap=self._metadata_cap(), schema=P.READ_SCHEMA, key=key + ':retry', temperature=.4)
                 value = result['value'] or {}
                 usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                           and isinstance(value.get('comments'), list))
@@ -2183,7 +2206,7 @@ class JournalRunner(ReviewBase):
             return
         try:
             with self._timeout():
-                result = self._ask('write', prompt, cap=4000, schema=P.WRITE_SCHEMA, key='write')
+                result = self._ask('write', prompt, cap=self._model_cap('review_write', 4000), schema=P.WRITE_SCHEMA, key='write')
         except ResearchBudget as exc:
             self._warn(f'The prose parts were not written: {exc}')
             return

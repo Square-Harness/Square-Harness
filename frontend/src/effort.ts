@@ -31,9 +31,12 @@ export function isLevel(value: unknown): value is EffortLevel {
 }
 
 /** A proof needs room for one full solve and its review: fit the per-call ceilings in the budget. */
-function proofCeilings(defaults: Defaults, tokens: number | null) {
-  const solve = defaults.proof_solve_tokens
-  const verify = defaults.proof_verify_tokens
+function proofCeilings(defaults: Defaults, tokens: number | null, preset?: { solve_tokens: number; verify_tokens: number }) {
+  const solve = Math.min(defaults.proof_solve_tokens, preset?.solve_tokens ?? defaults.proof_solve_tokens)
+  const verify = Math.min(defaults.proof_verify_tokens, preset?.verify_tokens ?? defaults.proof_verify_tokens)
+  // DS4 keeps its full role ceilings even when an explicit total cannot fund
+  // them. Admission reports that constraint; selecting effort never hides it.
+  if (defaults.api_profile === 'deepinfra') return { tokens, solve_tokens: solve, verify_tokens: verify }
   if (tokens === null || tokens >= solve + verify) return { tokens, solve_tokens: solve, verify_tokens: verify }
   // Launch floors for repairs stay valid: the solve ceiling never goes below them.
   const floor = Math.max(128, defaults.proof_repair_tokens ?? 0, defaults.proof_min_solve_tokens ?? 0)
@@ -43,10 +46,17 @@ function proofCeilings(defaults: Defaults, tokens: number | null) {
 }
 
 export function effortLimits(kind: EffortKind, defaults: Defaults, level: EffortLevel): Limits {
-  const effort = EFFORTS.find((item) => item.id === level) || EFFORTS[1]
+  const preset = defaults.effort_presets?.[level]
+  const effort = preset || EFFORTS.find((item) => item.id === level) || EFFORTS[1]
   const seconds = effort.minutes * 60
-  if (kind === 'proof') return { rounds: effort.tries, seconds, ...proofCeilings(defaults, defaults.proof_tokens) }
-  const base: Limits = { tokens: defaults.research_tokens, input_tokens: defaults.research_input_tokens, seconds }
+  const cap = (configured: number | null, value: number) => configured === null ? value : Math.min(configured, value)
+  if (kind === 'proof') {
+    const tokens = preset ? cap(defaults.proof_tokens, preset.tokens) : defaults.proof_tokens
+    return { rounds: effort.tries, seconds: preset?.proof_seconds ?? seconds,
+      ...proofCeilings(defaults, tokens, preset) }
+  }
+  const base: Limits = { tokens: preset ? cap(defaults.research_tokens, preset.research_tokens) : defaults.research_tokens,
+    input_tokens: preset ? cap(defaults.research_input_tokens, preset.input) : defaults.research_input_tokens, seconds }
   if (kind === 'writeup' || kind === 'style') return base
   return { ...base, rounds: effort.tries, requests: effort.requests, chars: effort.chars }
 }
@@ -60,7 +70,7 @@ export function minutesLabel(seconds: number) {
 export function describeLimits(kind: EffortKind, limits: Limits) {
   const tries = (n: number, one: string) => `${count(n)} ${n === 1 ? one : one + 's'}`
   const tokenCap = limits.tokens === null ? '' : `; output capped at ${count(limits.tokens)} tokens`
-  if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${minutesLabel(limits.seconds)} working time${tokenCap}`
+  if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${count(limits.solve_tokens!)} tokens per solve and ${count(limits.verify_tokens!)} per review; time limit ${minutesLabel(limits.seconds)}${tokenCap}`
   if (kind === 'writeup') return `One writing call (in parts if the material is long), then compiled; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   if (kind === 'style') return `Each article read once, then each domain merged; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   const depth = EFFORTS.find((effort) => effort.tries === limits.rounds)?.label || 'Custom'

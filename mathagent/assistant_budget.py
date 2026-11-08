@@ -65,6 +65,14 @@ class BudgetClient:
         self.client.thinking_budget_policy = value
 
     @property
+    def reasoning_effort(self):
+        return self.client.reasoning_effort
+
+    @reasoning_effort.setter
+    def reasoning_effort(self, value):
+        self.client.reasoning_effort = value
+
+    @property
     def timeout(self):
         return self.client.timeout
 

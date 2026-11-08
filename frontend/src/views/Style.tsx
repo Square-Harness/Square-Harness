@@ -4,6 +4,7 @@ import { Collapse, ErrorNote, FilePicker, Loading, NumberField, OptionalNumberFi
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
+import { IMAGE_SUFFIXES, isImagePath } from '../components/ImageAttachments'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { capacityFull, taskForJob } from '../concurrency'
 import { useDropTarget } from '../drop'
@@ -18,7 +19,7 @@ const TEMPLATE = ['.tex', '.sty', '.cls', '.bib']
 const STEPS = ['scan', 'classify', 'observe', 'condense', 'save'] as const
 const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', save: 'Save', done: 'Done' }
 
-/** Learn a style: pick earlier .tex articles; ask for some when the folder has none. */
+/** Learn from earlier articles or screenshots; exact macros require LaTeX sources. */
 export function StyleNew() {
   const { status, snapshot } = useApp()
   const d = status?.defaults
@@ -39,7 +40,7 @@ export function StyleNew() {
   const [queuedNote, setQueuedNote] = useState('')
 
   useEffect(() => {
-    api.files().then((result) => setArticles(result.files.filter((f) => f.path.toLowerCase().endsWith('.tex')).map((f) => f.path)),
+    api.files().then((result) => setArticles(result.files.filter((f) => f.path.toLowerCase().endsWith('.tex') || isImagePath(f.path)).map((f) => f.path)),
       () => setArticles([]))
   }, [filesChanged])
   useEffect(() => { api.styles().then((result) => { setSaved(result.styles); setChoice(result.choice) }, () => undefined) }, [])
@@ -57,8 +58,8 @@ export function StyleNew() {
   }, [d])
   const preset = d ? effortLimits('style', d, level) : null
   const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
-  useDropTarget('Drop the .tex sources of your articles', (paths) => {
-    setSelected((items) => [...new Set([...items, ...paths.filter((path) => path.toLowerCase().endsWith('.tex'))])])
+  const uploading = useDropTarget('Pin .tex articles or screenshots as style examples', (paths) => {
+    setSelected((items) => [...new Set([...items, ...paths.filter((path) => path.toLowerCase().endsWith('.tex') || isImagePath(path))])])
   })
 
   const running = capacityFull(snapshot, status)
@@ -66,6 +67,7 @@ export function StyleNew() {
   const replaces = saved.some((item) => item.name === name.trim())
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (uploading) return
     setBusy(true)
     setError('')
     setQueuedNote('')
@@ -92,7 +94,7 @@ export function StyleNew() {
           <div>
             <h1 className="page-title">Learn your writing style</h1>
             <p className="lede">
-              Give the .tex sources of articles you wrote. The harness keeps the macros you actually use, sorts the articles
+              Give .tex articles or screenshots of your writing. Screenshots provide visible wording and layout; exact macros can only be learned from .tex sources. The harness sorts the articles
               by domain (a numerics paper is not written like a geometry paper), and describes for each domain what your
               papers set out to do, how you structure them and how you explain. Quotations are kept only when they occur
               word for word in your articles. The result is a small file a write-up can follow.
@@ -104,19 +106,19 @@ export function StyleNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Your articles</span>
-            {articles === null ? <Loading>Looking for .tex files in this folder…</Loading> : articles.length === 0 ? (
+            {articles === null ? <Loading>Looking for articles and screenshots…</Loading> : articles.length === 0 ? (
               <div className="style-ask" role="status">
-                <p><strong>This folder has no .tex files yet.</strong> To learn your style, the harness needs a few of your own
-                  articles as LaTeX sources, ideally two or more for each kind of paper you write.</p>
-                <p className="field-hint">Drop the .tex files anywhere on this page, or open the folder that holds them from the
+                <p><strong>Add your articles or screenshots.</strong> To learn your style, the harness needs examples of your writing,
+                  ideally two or more for each kind of paper you write.</p>
+                <p className="field-hint">Drop .tex files or images anywhere on this page, paste an image, or open the folder that holds them from the
                   folder name at the bottom of the sidebar. Files with \input parts: drop the parts too.</p>
               </div>
             ) : (
               <>
-                <FilePicker selected={selected} onChange={setSelected} accept={['.tex']} label="Choose articles" />
+                <FilePicker selected={selected} onChange={setSelected} allowImages accept={['.tex', ...IMAGE_SUFFIXES]} label="Choose .tex articles or screenshots" />
                 <span className="field-hint">
-                  {articles.length} .tex file{articles.length === 1 ? '' : 's'} here. Choose main files of articles, not
-                  macro files or fragments; two or more per domain give a better style. At most 20.
+                  {articles.length} article source{articles.length === 1 ? '' : 's'} here. Choose main .tex files or screenshots;
+                  two or more per domain give a better style. At most 20 files, including up to 8 images.
                 </span>
               </>
             )}
@@ -178,8 +180,8 @@ export function StyleNew() {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !selected.length || !validName}>
-              {busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn the style'}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || !validName}>
+              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn the style'}
             </button>
             {!selected.length && articles !== null && articles.length > 0 && <p className="field-hint">Choose at least one article.</p>}
             {selected.length > 0 && !validName && <p className="field-hint">Name the style.</p>}

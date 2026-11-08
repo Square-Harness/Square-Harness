@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type Template } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
+import { IMAGE_SUFFIXES } from '../components/ImageAttachments'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { useDropTarget } from '../drop'
@@ -50,7 +51,7 @@ export function WriteupNew() {
     applyLevel(next)
   }
   useEffect(() => { api.templates().then((result) => setTemplates(result.templates), () => undefined) }, [])
-  useDropTarget('Notes go to the sources; .sty and .cls files go to the template', (paths) => {
+  const uploading = useDropTarget('Notes go to the sources; .sty and .cls files go to the template', (paths) => {
     const style = paths.filter((path) => /\.(sty|cls)$/i.test(path))
     setTemplateFiles((items) => [...new Set([...items, ...style])])
     setSources((items) => [...new Set([...items, ...paths.filter((path) => !style.includes(path))])])
@@ -60,6 +61,7 @@ export function WriteupNew() {
   const hasMaterial = sources.length > 0 || notes.trim().length > 0
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (uploading) return
     setBusy(true)
     setError('')
     setQueuedNote('')
@@ -109,7 +111,7 @@ export function WriteupNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Notes, drafts or PDFs</span>
-            <FilePicker selected={sources} onChange={setSources} allowPdf accept={['.tex', '.md', '.txt', '.pdf']} label="Pin notes from the folder" />
+            <FilePicker selected={sources} onChange={setSources} allowPdf allowImages accept={['.tex', '.md', '.txt', '.pdf', ...IMAGE_SUFFIXES]} label="Pin notes from the folder" />
             <span className="field-hint">Or drop files anywhere on this page. PDF text is extracted locally.</span>
           </div>
         </div>
@@ -183,8 +185,8 @@ export function WriteupNew() {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !hasMaterial}>
-              {busy ? 'Starting…' : running ? 'Add write-up to the queue' : 'Start write-up'}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !hasMaterial}>
+              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add write-up to the queue' : 'Start write-up'}
             </button>
             {!hasMaterial && <p className="field-hint">Pin or drop notes, or type them above.</p>}
           </div>

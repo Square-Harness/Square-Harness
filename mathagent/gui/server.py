@@ -33,7 +33,8 @@ from .. import __version__
 from ..agent import AgentError
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
-from . import store
+from .. import images
+from . import projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
 
@@ -67,9 +68,10 @@ FALLBACK = b'''<!doctype html><meta charset="utf-8"><title>Square Harness</title
 ROUTES = []
 
 
-def route(method, pattern, auth=True, raw=False):
+def route(method, pattern, auth=True, raw=False, body_limit=MAX_BODY):
     def register(function):
         function.raw_body = raw
+        function.body_limit = body_limit
         ROUTES.append((method, re.compile(pattern + r'\Z'), function, auth))
         return function
     return register
@@ -126,18 +128,102 @@ def _text(body, key, limit):
 
 # -- routes -------------------------------------------------------------------
 
+@route('GET', '/api/projects')
+def project_list(h, body):
+    return {'projects': h.server.hub.list_projects()}
+
+
+@route('POST', '/api/projects')
+def project_create(h, body):
+    hub = h.server.hub
+    result = hub.create_project(body.get('name'), body.get('notes'))
+    hub.bus.publish('projects')
+    return {'project': result}
+
+
+@route('GET', '/api/projects/' + UUID)
+def project_read(h, body, id):
+    try:
+        return {'project': projects.read_project(h.server.hub.root, id)}
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
+
+
+@route('POST', '/api/projects/' + UUID)
+def project_update(h, body, id):
+    try:
+        hub = h.server.hub
+        result = hub.update_project(id, revision=body.get('revision'),
+                                    name=body.get('name'), notes=body.get('notes'))
+        hub.bus.publish('projects')
+        return {'project': result}
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
+
+
+@route('GET', '/api/feedback/config')
+def feedback_config(h, body):
+    from . import feedback
+    return feedback.config()
+
+
+@route('POST', '/api/feedback/preview')
+def feedback_preview(h, body):
+    from . import feedback
+    return feedback.preview(h.server.hub.root, body.get('chat_id'))
+
+
+@route('POST', '/api/feedback/export')
+def feedback_export(h, body):
+    from . import feedback
+    data = feedback.archive(h.server.hub.root, body.get('chat_id'))
+    h.send_bytes(200, data, 'application/zip', [('Content-Disposition', 'attachment; filename="conversation-diagnostics.zip"'),
+                                              ('Cache-Control', 'private, no-store')])
+    return Streamed
+
+
+@route('POST', '/api/feedback', body_limit=16 * 1024 * 1024)
+def feedback_submit(h, body):
+    from . import feedback
+    hub = h.server.hub
+    metadata = {'version': VERSION, 'build': build_id(), 'model': hub.args.model,
+                'api_profile': getattr(hub.args, 'api_profile', 'default'),
+                'service_tier': os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')}
+    # Hosted gateways overwrite this header with the verified Access identity.
+    # A local backend is a single trusted workspace and has no account identity.
+    email = h.headers.get('X-SH-User-Email', '')
+    if email and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) and len(email) <= 254:
+        metadata['reporter_email'] = email
+    return feedback.save(hub.root, body, metadata)
+
+
+@route('GET', '/api/feedback/' + UUID + '/archive')
+def feedback_archive(h, body, id):
+    from . import feedback
+    data = feedback.read_archive(h.server.hub.root, id)
+    h.send_bytes(200, data, 'application/zip', [('Content-Disposition', f'attachment; filename="feedback-{id}.zip"'),
+                                              ('Cache-Control', 'private, no-store')])
+    return Streamed
+
 @route('GET', '/api/status')
 def status(h, body):
     hub, args = h.server.hub, h.server.hub.args
+    from ..model_limits import PROFILE, effort_presets
+    api_profile = getattr(args, 'api_profile', 'default')
     out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            # The default for new work in the interface: online unless launched --offline.
            'online': hub.online(), 'online_locked': hub.online_locked,
+           'image_support': hub.image_support(),
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
            'concurrency': hub.limits(),
            'defaults': {'ctx': args.ctx, 'predict': args.predict, 'think': not args.no_think,
+                        'api_profile': api_profile,
+                        'budget_profile': PROFILE if api_profile == 'deepinfra' else 'default',
+                        'effort_presets': effort_presets(args) if api_profile == 'deepinfra' else None,
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
+                        'proof_call_seconds': getattr(args, 'proof_call_seconds', None),
                         'proof_verify_tokens': args.proof_verify_tokens,
                         'proof_repair_tokens': args.proof_repair_tokens,
                         'proof_min_solve_tokens': args.proof_min_solve_tokens,
@@ -149,6 +235,9 @@ def status(h, body):
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
            'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
            'recent': store.recent_folders(hub.base)}
+    if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
+        from ..hosted_quota import quota_status
+        out['tester_allowance'] = quota_status()
     if not h.server.loopback:
         # Only an authenticated device can read the pairing addresses.
         out['pair_urls'] = [url + '/?' + urlencode({'token': h.server.token}) for url in h.server.urls]
@@ -239,6 +328,22 @@ def approval(h, body, approval):
 def files(h, body):
     records = store.list_files(h.server.hub.root, limit=2001)
     return {'files': records[:2000], 'truncated': len(records) > 2000}
+
+
+@route('POST', '/api/images/preview')
+def image_preview(h, body):
+    paths = _files(body, 'files')
+    if any(not images.is_image(path) for path in paths):
+        raise ValueError('Image previews accept only PNG, JPEG or WebP files')
+    return {'images': images.snapshot(h.server.hub.root, paths)}
+
+
+@route('GET', r'/api/images/(?P<sha>[a-f0-9]{64})')
+def image_snapshot(h, body, sha):
+    data, mime = images.read(h.server.hub.root, sha)
+    h.send_bytes(200, data, mime, [('Cache-Control', 'private, no-store'),
+                                  ('Content-Disposition', 'inline')])
+    return Streamed
 
 
 @route('GET', '/api/proofs')
@@ -367,7 +472,7 @@ def chat_create(h, body):
     hub = h.server.hub
     think, online = _flag(body, 'think'), _flag(body, 'online')
     chat = store.create_chat(hub.root, body.get('mode'), (not hub.args.no_think) if think is None else think,
-                             hub.args.model, hub.online(online))
+                             hub.args.model, hub.online(online), project_id=body.get('project_id'))
     hub.bus.publish('chat_saved', chat=chat['id'])
     return _chat_view(chat)
 
@@ -392,6 +497,19 @@ def chat(h, body, id):
 @route('DELETE', '/api/chats/' + UUID)
 def chat_delete(h, body, id):
     return h.server.hub.delete_chat(id)
+
+
+@route('POST', '/api/chats/' + UUID + '/title')
+def chat_title(h, body, id):
+    hub = h.server.hub
+    saved = store.set_chat_title(hub.root, id, _text(body, 'title', 120))
+    hub.bus.publish('chat_saved', chat=id)
+    return _chat_view(saved)
+
+
+@route('POST', '/api/chats/' + UUID + '/project')
+def chat_project(h, body, id):
+    return _chat_view(h.server.hub.set_chat_project(id, body.get('project_id')))
 
 
 @route('POST', '/api/chats/' + UUID + '/settings')
@@ -490,9 +608,22 @@ def settings_save(h, body):
 @route('POST', '/api/files/upload', raw=True)
 def upload(h, body):
     name = (h.query.get('name') or [''])[0]
-    saved = store.save_upload(h.server.hub.root, name, body)
+    root = h.server.hub.root
+    project_id = (h.query.get('project_id') or [''])[0]
+    folder = projects.read_project(root, project_id)['folder'] if project_id else ''
+    saved = store.save_upload(root / folder if folder else root, name, body)
+    if folder:
+        saved = folder + '/' + saved
+    result = {'path': saved}
+    if images.is_image(saved):
+        try:
+            result['image'] = images.snapshot(root, [saved])[0]
+        except (AgentError, ValueError, OSError):
+            # Invalid image uploads must not accumulate as ordinary source files.
+            (root / saved).unlink(missing_ok=True)
+            raise
     h.server.hub.bus.publish('files', path=saved)
-    return {'path': saved}
+    return result
 
 
 @route('GET', '/api/templates')
@@ -629,6 +760,8 @@ def chat_review(h, body, id):
 
 def _chat_view(chat):
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
+            'project_id': chat.get('project_id'), 'title_source': chat.get('title_source'),
+            'images': store.chat_images(chat),
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
             'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat)}
 
@@ -707,9 +840,9 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         return origin is None or urlsplit(origin).netloc.lower() == self.headers.get('Host', '').lower()
 
-    def _body(self):
+    def _body(self, limit=MAX_BODY):
         length = self.headers.get('Content-Length', '0')
-        if not length.isdigit() or int(length) > MAX_BODY:
+        if not length.isdigit() or int(length) > limit:
             raise ValueError('Request body is missing or too large')
         self.body_read = int(length) == 0
         if int(length) == 0:
@@ -745,7 +878,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._same_origin():
                 return self.error(403, 'Cross-origin request refused')
             try:
-                body = self._raw_body() if getattr(function, 'raw_body', False) else self._body()
+                body = self._raw_body() if getattr(function, 'raw_body', False) else self._body(function.body_limit)
             except TypeError as exc:
                 return self.error(415, str(exc))
             except (ValueError, UnicodeError, RecursionError) as exc:
@@ -753,6 +886,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = function(self, body, **match.groupdict())
         except Busy as exc:
+            return self.error(409, str(exc))
+        except projects.StaleProject as exc:
             return self.error(409, str(exc))
         except store.NotFound as exc:
             return self.error(404, str(exc))

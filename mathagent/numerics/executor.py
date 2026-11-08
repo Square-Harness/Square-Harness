@@ -21,6 +21,8 @@ import threading
 import time
 import uuid
 
+from .admission import AdmissionCancelled, AdmissionUnavailable, slot as numerical_slot
+
 IMAGE = 'square-harness/python-numerics:2'
 IMAGE_LABEL = 'org.squareharness.sandbox'
 IMAGE_VERSION = '2'
@@ -269,8 +271,14 @@ class DockerExecutor:
         parameters = parameters or {}
         if not isinstance(parameters, dict) or len(json.dumps(parameters)) > MAX_PARAMETER_BYTES:
             raise ValueError(f'parameters must be a JSON object of at most {MAX_PARAMETER_BYTES} bytes')
-        self.probe()
-        return self._execute(code, limits, seed=seed, parameters=parameters, cancel=cancel)
+        try:
+            with numerical_slot(cancel):
+                self.probe()
+                return self._execute(code, limits, seed=seed, parameters=parameters, cancel=cancel)
+        except AdmissionCancelled:
+            return ExperimentResult('cancelled', message='Cancelled while waiting for a numerical worker.')
+        except AdmissionUnavailable as exc:
+            raise SandboxUnavailable(str(exc)) from None
 
     def _execute(self, code, limits, *, seed=None, parameters=None, cancel=None, runtime_nnp=None):
         nonce = uuid.uuid4().hex

@@ -10,12 +10,13 @@ import math
 from pathlib import Path
 import time
 
-from . import __version__
+from . import __version__, images
 from .jsonutil import loads
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_input
 from .ledger import LedgerError, ProofStore
+from .model_limits import is_ds4
 from .proof_policy import (
     CONTINUE_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
 )
@@ -123,9 +124,14 @@ class ProofRunner:
                                  for name in ('backends.py', 'agent.py')},
             'harness_version': __version__,
         }
-        if getattr(self.agent.client, 'profile', 'default') == 'mlx':
-            value['api_profile'] = 'mlx'
-            value['profile_transport_sha256'] = hashlib.sha256(Path(__file__).with_name('api_profiles.py').read_bytes()).hexdigest()
+        profile = getattr(self.agent.client, 'profile', 'default')
+        if profile != 'default':
+            value['api_profile'] = profile
+            module = 'deepinfra.py' if profile == 'deepinfra' else 'api_profiles.py'
+            value['profile_transport_sha256'] = hashlib.sha256(Path(__file__).with_name(module).read_bytes()).hexdigest()
+        if profile == 'deepinfra':
+            value['reasoning_effort'] = self.agent.client.reasoning_effort
+            value['model_limits_sha256'] = hashlib.sha256(Path(__file__).with_name('model_limits.py').read_bytes()).hexdigest()
         return value
 
     def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
@@ -157,6 +163,7 @@ class ProofRunner:
             raise ValueError('verify_temperature must be between 0 and 2')
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or max_seconds <= 0:
             raise ValueError('Proof time budget must be finite and positive')
+        source_files = images.capture(self.agent, source_files)
         sources = []
         for name in dict.fromkeys(str(n) for n in source_files):
             path = Path(name)
@@ -171,7 +178,13 @@ class ProofRunner:
                         initial_min_solve_tokens=initial_min_solve_tokens,
                         specialist_output_cap=getattr(self.agent, 'document_output_cap', None),
                         repair_tokens=repair_tokens, reference_context=copy.deepcopy(reference_context))
+        # Save this rule with new jobs; older paused jobs retain their original
+        # allocation behaviour as well as their original numeric allowances.
+        settings['full_output_ceiling'] = is_ds4(self.agent)
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources)
+        if getattr(self.agent, 'image_refs', None):
+            self.state['images'] = copy.deepcopy(self.agent.image_refs)
+            self._save()
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
 
@@ -189,8 +202,11 @@ class ProofRunner:
                 raise ValueError(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
         for key in ('model', 'ctx', 'seed', 'temperature', 'top_p'):
             setattr(self.agent, key, saved[key])
+        images.restore(self.agent, self.state)
         if hasattr(self.agent.client, 'thinking_budget_policy'):
             self.agent.client.thinking_budget_policy = copy.deepcopy(saved['thinking_budget_policy'])
+        if saved.get('api_profile') == 'deepinfra':
+            self.agent.client.reasoning_effort = saved['reasoning_effort']
         current_provenance = self._provenance()
         # Source hashes record provenance, not a compatibility contract. Only a
         # deliberate execution-policy change invalidates an unfinished proof.
@@ -239,7 +255,8 @@ class ProofRunner:
 
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']
-        solve = self._attempt_cap(kind) if kind == 'initial' else settings['min_solve_tokens']
+        solve = (self._attempt_cap(kind) if kind == 'initial' or settings.get('full_output_ceiling')
+                 else settings['min_solve_tokens'])
         needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
         if self._remaining() < needed:
             raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
@@ -365,6 +382,11 @@ class ProofRunner:
         allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
         cap = self._attempt_cap(pending['kind'])
+        if settings.get('full_output_ceiling'):
+            if self._remaining() < self._call_cap(cap) + self._call_cap(settings['verify_tokens']):
+                raise ProofBudget('Insufficient budget for the full solve and review allowances; no smaller call was dispatched')
+            pending['solver_cap'] = cap
+            return cap
         if pending['kind'] != 'initial':
             cap = min(cap, self._remaining() - self._call_cap(settings['verify_tokens']))
         if pending['kind'] not in {'initial', 'retry'}:
@@ -420,7 +442,10 @@ class ProofRunner:
         if length_limited and not text.strip() and not notes.strip():
             raise ProofContext('The previous generation reached its output limit without reusable written text or working notes. '
                                'Repeating the same allowance cannot advance this proof; its artifacts were retained.')
-        floor, ctx = self.state['settings']['min_solve_tokens'], self.agent.ctx
+        settings = self.state['settings']
+        floor = (self._call_cap(self._attempt_cap('continue')) if settings.get('full_output_ceiling')
+                 else settings['min_solve_tokens'])
+        ctx = self.agent.ctx
         observed_context = getattr(self.agent.client, 'observed_context_tokens', None)
         if type(observed_context) is int and observed_context > 0:
             ctx = min(ctx, observed_context)
@@ -613,6 +638,8 @@ class ProofRunner:
             minimum = (self.state['settings'].get('initial_min_solve_tokens', self.state['settings']['min_solve_tokens'])
                        if role == 'solver' and pending['kind'] in {'initial', 'retry'} else
                        self.state['settings']['min_solve_tokens'] if role == 'solver' else 128)
+            if self.state['settings'].get('full_output_ceiling'):
+                minimum = self._call_cap(cap)
             try:
                 payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
                                                  explicit_cap=self.state['settings'].get('specialist_output_cap'))

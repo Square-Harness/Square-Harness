@@ -12,7 +12,8 @@ from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
-from .api_profiles import MLX, resolve_api_profile
+from .api_profiles import create_profile_client, resolve_api_profile
+from .model_limits import apply_defaults
 from .prompts import MODES, SANDBOX_MODES
 from .numerics import PythonSandbox, SandboxUnavailable
 from .numerics.session import MIN_AUTOMATIC_CONTEXT
@@ -152,8 +153,8 @@ def parser():
     p.add_argument('--version', action='version', version='Square Harness ' + __version__)
     p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
                    help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
-    p.add_argument('--api-profile', choices=('default', 'mlx'), default=None,
-                   help='OpenAI API dialect: default (vLLM) or mlx; overrides SQUARE_OPENAI_PROFILE')
+    p.add_argument('--api-profile', choices=('default', 'mlx', 'deepinfra'), default=None,
+                   help='OpenAI API dialect: default (vLLM), mlx or deepinfra; overrides SQUARE_OPENAI_PROFILE')
     p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
@@ -168,13 +169,15 @@ def parser():
                    help='Optional explicit output cap per specialist model call, including thinking (default: phase and physical context)')
     p.add_argument('--max-rounds', type=int, default=8, help='Tool rounds per ordinary chat query (not proof rounds)')
     p.add_argument('--assistant-concurrency', type=int, default=2,
-                   help='Simultaneous Assistant workers on vLLM/OpenAI-compatible servers (1–4; other backends use 1)')
+                   help='Simultaneous Assistant workers (1–5 for DS4, 1–4 for other OpenAI-compatible servers; other backends use 1)')
     p.add_argument('--assistant-tokens', type=int, help='Optional hard shared generated-token ceiling (default: no cumulative ceiling)')
     p.add_argument('--assistant-input-tokens', type=int, help='Optional hard shared input-token ceiling (default: no cumulative ceiling)')
-    p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort, 900–14700 seconds)')
+    p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort and model profile)')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification (default: no cumulative ceiling)')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
+    p.add_argument('--proof-call-seconds', type=float, default=10800,
+                   help='DS4 per-call working-time allowance; new Proof totals allow three calls per solver pass (default: 10800)')
     p.add_argument('--proof-solve-tokens', type=int, default=32768,
                    help='Output ceiling for each full solve or revision, including thinking')
     p.add_argument('--proof-verify-tokens', type=int, default=16384,
@@ -189,7 +192,9 @@ def parser():
                    help='Pin a complete theorem source relative to workspace; repeat for multiple files')
     network = p.add_mutually_exclusive_group()
     network.add_argument('--online', action='store_true', help='Allow external literature/search requests; queries leave this computer')
-    network.add_argument('--offline', action='store_true', help='Use a loopback model server and local/cached sources only (default)')
+    network.add_argument('--offline', action='store_true', help='Use local/cached research sources only; model stays loopback unless --allow-remote-model (default)')
+    p.add_argument('--allow-remote-model', action='store_true',
+                   help='Allow prompts, attached source text and tool context to be sent to the remote model --host; does not enable web research')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
@@ -261,22 +266,29 @@ def main():
     except AgentError as exc:
         p.error(str(exc))
     if args.api_profile != 'default' and args.backend != 'openai':
-        p.error('--api-profile mlx requires --backend openai')
-    args.host = args.host or ('http://localhost:11434' if args.backend == 'ollama' else 'http://localhost:8000')
-    args.model = args.model or ('qwen3.8:27b' if args.backend == 'ollama' else 'square-qwen')
+        p.error('A non-default --api-profile requires --backend openai')
+    remote_profile = args.backend == 'openai' and args.api_profile == 'deepinfra'
+    args.host = args.host or ('https://api.deepinfra.com/v1/openai' if remote_profile else
+                              'http://localhost:11434' if args.backend == 'ollama' else 'http://localhost:8000')
+    args.model = args.model or ('deepseek-ai/DeepSeek-V4.1-Flash-1017' if remote_profile else
+                                'qwen3.8:27b' if args.backend == 'ollama' else 'square-qwen')
+    apply_defaults(args, sys.argv[1:])
     if (not math.isfinite(args.temperature) or not 0 <= args.temperature <= 2
             or not math.isfinite(args.top_p) or not 0 < args.top_p <= 1
             or args.seed is not None and not 0 <= args.seed < 2 ** 31):
         p.error('Use temperature 0–2, top-p in (0, 1], and seed in [0, 2**31)')
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         p.error('Request timeout must be finite and positive')
+    if not math.isfinite(args.proof_call_seconds) or args.proof_call_seconds <= 0:
+        p.error('Proof call seconds must be finite and positive')
     if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 8:
         p.error('Use gui-concurrency and gui-model-concurrency from 1 to 8')
-    if (not 1 <= args.assistant_concurrency <= 4
+    assistant_limit = 5 if remote_profile else 4
+    if (not 1 <= args.assistant_concurrency <= assistant_limit
             or args.assistant_tokens is not None and args.assistant_tokens < 4096
             or args.assistant_input_tokens is not None and args.assistant_input_tokens < 4096
             or args.assistant_seconds is not None and (not math.isfinite(args.assistant_seconds) or args.assistant_seconds <= 0)):
-        p.error('Use assistant-concurrency 1–4, assistant token budgets >= 4096, and finite assistant-seconds > 0')
+        p.error(f'Use assistant-concurrency 1–{assistant_limit}, assistant token budgets >= 4096, and finite assistant-seconds > 0')
     if args.ctx < 2048 or not 128 <= args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
         p.error('Use ctx >= 2048, 128 <= predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if args.specialist_output_tokens is not None and args.specialist_output_tokens < 128:
@@ -285,6 +297,8 @@ def main():
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
         p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
+    if remote_profile and max(args.proof_solve_tokens, args.proof_verify_tokens) > 384_000:
+        p.error('DeepInfra DS4 solve and verify limits cannot exceed 384000 output tokens')
     if args.proof_repair_tokens is not None and not 128 <= args.proof_repair_tokens <= args.proof_solve_tokens:
         p.error('--proof-repair-tokens must be between 128 and --proof-solve-tokens')
     if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= (args.proof_repair_tokens or args.proof_solve_tokens):
@@ -303,15 +317,15 @@ def main():
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         p.error('--host must be an http(s) model URL without credentials, query or fragment')
-    if not args.online:
+    if not args.online and not args.allow_remote_model:
         try:
             local_host = host.hostname == 'localhost' or ipaddress.ip_address(host.hostname).is_loopback
         except ValueError:
             local_host = False
         if not local_host:
-            p.error('Offline mode requires a localhost/loopback model --host; use --online explicitly for a remote server')
-        if args.allow_python:
-            p.error('--allow-python requires --online: unrestricted Python can access the network')
+            p.error('Offline mode requires a localhost/loopback model --host; use --allow-remote-model explicitly, or --online for model and web research')
+    if not args.online and args.allow_python:
+        p.error('--allow-python requires --online: unrestricted Python can access the network')
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
@@ -330,8 +344,7 @@ def main():
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
         sandbox = PythonSandbox.from_args(args)
         client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
-                  else MLX(args.host, timeout=args.request_timeout) if args.backend == 'openai' and args.api_profile == 'mlx'
-                  else OpenAICompatible(args.host, timeout=args.request_timeout) if args.backend == 'openai'
+                  else create_profile_client(args.api_profile, args.host, timeout=args.request_timeout) if args.backend == 'openai'
                   else create_client('llamacpp', args.host, timeout=args.request_timeout))
         agent = Agent(client, workspace, args.model, args.ctx, args.predict,
                       not args.no_think, args.mode, args.max_rounds,

@@ -21,12 +21,20 @@ export type AssistantBudget = {
 }
 
 export type Defaults = {
+  api_profile?: string
+  budget_profile?: string
+  effort_presets?: Partial<Record<EffortLevel, {
+    tries: number; minutes: number; tokens: number; research_tokens: number; input: number
+    requests: number; chars: number; solve_tokens: number; verify_tokens: number
+    repair_tokens?: number; proof_seconds?: number; proof_call_seconds?: number
+  }>> | null
   ctx: number
   predict: number
   think: boolean
   proof_rounds: number
   proof_tokens: number | null
   proof_seconds: number
+  proof_call_seconds?: number | null
   proof_solve_tokens: number
   proof_verify_tokens: number
   proof_repair_tokens: number | null
@@ -39,6 +47,38 @@ export type Defaults = {
   research_chars: number
 }
 
+export type TesterAllowance = {
+  limit_nanos: number
+  charged_nanos: number
+  reserved_nanos: number
+  input_tokens: number
+  output_tokens: number
+  input_per_million: string
+  output_per_million: string
+}
+
+export type Account = {
+  email: string
+  logout_url: string
+}
+
+export type Project = {
+  id: string
+  name: string
+  notes: string
+  revision: string
+  folder: string
+  created_at: string
+  updated_at: string
+}
+
+export type FeedbackCategory = 'bug' | 'suggestion' | 'math'
+export type FeedbackImage = { name: string; mime: string; data: string }
+export type FeedbackConfig = { enabled: boolean; delivery_configured: boolean; delivery_mode?: 'slack_files' | 'webhook' | 'saved'; max_images: number; max_image_bytes: number }
+export type FeedbackPreview = { files: { name: string; size: number }[]; size: number; omissions?: { name: string; reason: string }[]; scope?: string; redacted?: boolean }
+export type FeedbackResult = { id: string; status: 'delivered' | 'saved'; delivery_error?: string; archive_url: string }
+export type ImageRef = { sha256: string; mime: string; name: string; width: number; height: number; bytes: number }
+
 export type Status = {
   version: string
   instance: string
@@ -47,12 +87,14 @@ export type Status = {
   model: string
   host: string
   backend: 'ollama' | 'openai' | 'llamacpp'
+  image_support?: boolean
   online: boolean
   online_locked: boolean
   allow_python: boolean
   lan: boolean
   defaults: Defaults
   concurrency?: Concurrency
+  tester_allowance?: TesterAllowance | null
   ollama: { reachable: boolean; models: string[]; error?: string }
   pair_urls?: string[]
   root: string
@@ -346,6 +388,7 @@ export type ResearchDetail = {
 }
 
 export type ChatListItem = {
+  project_id?: string | null
   id: string
   kind: 'critic' | 'explore' | 'free'
   title: string
@@ -371,6 +414,7 @@ export type TranscriptItem = {
   tool_name?: string
   discarded?: boolean
   files?: string[]
+  images?: ImageRef[]
   mode?: RouteMode | 'clarify' | 'free'
   request?: string
   reason?: string
@@ -392,6 +436,7 @@ export type TranscriptItem = {
 }
 
 export type Chat = {
+  project_id?: string | null
   id: string
   mode: 'critic' | 'explore' | 'free'
   title: string
@@ -427,7 +472,7 @@ export type Artifact = {
   stream?: { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; stats: Record<string, unknown> }
 }
 
-export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' }
+export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' }
 
 export class ApiError extends Error {
   status: number
@@ -466,16 +511,41 @@ export function onUnauthorized(listener: () => void) {
 const get = <T,>(path: string) => request<T>('GET', path)
 const post = <T,>(path: string, body: unknown = {}) => request<T>('POST', path, body)
 
+async function zip(path: string, body: unknown): Promise<Blob> {
+  let response: Response
+  try {
+    response = await fetch(path, { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  } catch { throw new ApiError(0, 'The harness is not reachable.') }
+  if (!response.ok) {
+    if (response.status === 401) authListeners.forEach((listener) => listener())
+    const data = await response.json().catch(() => ({}))
+    throw new ApiError(response.status, data.error || 'Could not download the archive.')
+  }
+  return response.blob()
+}
+
 export type StartResult = { task: TaskSummary; id: string | null }
 
 export const api = {
   status: () => get<Status>('/api/status'),
+  account: async (): Promise<Account | null> => {
+    try {
+      const account = await get<Account>('/api/account')
+      return typeof account.email === 'string' && typeof account.logout_url === 'string' ? account : null
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
   login: (token: string) => post<{ ok: boolean }>('/api/login', { token }),
   task: () => get<TaskSnapshot>('/api/task'),
   pause: (task: string) => post<{ task: TaskSummary }>('/api/task/pause', { task }),
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
+  previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
+  imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 
   proofs: () => get<{ jobs: ProofListItem[] }>('/api/proofs'),
   proof: (id: string) => get<ProofDetail>(`/api/proofs/${id}`),
@@ -498,10 +568,10 @@ export const api = {
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
   openFolder: (path: string) => post<{ workspace: string }>('/api/workspace', { path }),
   saveSettings: (read: Partial<ReadSettings>) => post<{ read: ReadSettings }>('/api/settings', { read }),
-  upload: async (file: File) => {
+  upload: async (file: File, project_id?: string | null) => {
     let response: Response
     try {
-      response = await fetch('/api/files/upload?name=' + encodeURIComponent(file.name), {
+      response = await fetch('/api/files/upload?name=' + encodeURIComponent(file.name) + (project_id ? '&project_id=' + encodeURIComponent(project_id) : ''), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
       })
     } catch {
@@ -512,7 +582,7 @@ export const api = {
       if (response.status === 401) authListeners.forEach((listener) => listener())
       throw new ApiError(response.status, data.error || response.statusText)
     }
-    return data as { path: string }
+    return data as { path: string; size?: number; image?: ImageRef }
   },
   templates: () => get<{ templates: Template[] }>('/api/templates'),
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
@@ -532,10 +602,22 @@ export const api = {
   cancelRoute: (id: string, index: number) => post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/cancel`),
   dismissRoute: (id: string, index: number) => post<{ item: TranscriptItem }>(`/api/chats/${id}/routes/${index}/dismiss`),
   chats: () => get<{ chats: ChatListItem[] }>('/api/chats'),
+  projects: () => get<{ projects: Project[] }>('/api/projects'),
+  project: (id: string) => get<{ project: Project }>(`/api/projects/${id}`),
+  createProject: (name: string, notes = '') => post<{ project: Project }>('/api/projects', { name, notes }),
+  saveProject: (id: string, value: { name?: string; notes?: string; revision: string }) => post<{ project: Project }>(`/api/projects/${id}`, value),
   chat: (id: string) => get<Chat>(`/api/chats/${id}`),
+  chatTitle: (id: string, title: string) => post<Chat>(`/api/chats/${id}/title`, { title }),
+  chatProject: (id: string, project_id: string | null) => post<Chat>(`/api/chats/${id}/project`, { project_id }),
   deleteChat: (id: string) => request<{ deleted: string }>('DELETE', `/api/chats/${id}`),
-  createChat: (mode: string, think?: boolean, online?: boolean) => post<Chat>('/api/chats', { mode, think, online }),
+  createChat: (mode: string, think?: boolean, online?: boolean, project_id: string | null = null) => post<Chat>('/api/chats', { mode, think, online, project_id }),
   chatSettings: (id: string, settings: { think?: boolean; online?: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
   send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files, queue: true }),
   review: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/review`, { queue: true }),
+  feedbackConfig: () => get<FeedbackConfig>('/api/feedback/config'),
+  previewFeedbackTrace: (chat_id: string) => post<FeedbackPreview>('/api/feedback/preview', { chat_id }),
+  exportFeedbackTrace: (chat_id: string) => zip('/api/feedback/export', { chat_id }),
+  sendFeedback: (value: { category: FeedbackCategory; description: string; chat_id: string | null; include_trace: boolean; images: FeedbackImage[] }) =>
+    post<FeedbackResult>('/api/feedback', { ...value, chat_id: value.include_trace ? value.chat_id : null }),
+  feedbackArchiveUrl: (id: string) => `/api/feedback/${encodeURIComponent(id)}/archive`,
 }
