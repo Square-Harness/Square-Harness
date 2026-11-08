@@ -423,10 +423,10 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
     <Modal title="Parallel work" onClose={saving ? undefined : onClose}>
       <p>Each conversation or job keeps its full token budget. Work beyond the active limit waits in the queue.</p>
       <NumberField label="Active conversations and jobs" value={chats} onChange={setChats} min={1} max={8}
-        hint="Default: 2. One turn at a time in each conversation." />
+        hint="One turn at a time in each conversation." />
       <NumberField label="Simultaneous model requests" value={requests} onChange={setRequests} min={1} max={8}
-        hint="Default: 2. Includes requests from all active conversations and their workers." />
-      <p className="muted small">Active requests share the model's throughput. Two requests can progress together, but their speeds depend on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>
+        hint="Includes requests from all active conversations and their workers." />
+      <p className="muted small">Active requests share the model's throughput. Requests can progress together, but their speeds depend on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         <button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button>

@@ -5,7 +5,13 @@ Harness by following this file. Do the whole installation yourself, check every
 step, and end with the harness running and its web-app address given to the user.
 For what the harness is, see [guide.md](guide.md).
 
-There are two plans. Choose one in step 1.
+There are three plans. Choose the one the user requested in step 1.
+
+- **Plan C, hosted API:** the harness and web app run on this computer, and
+  DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
+  agrees to send model prompts and selected source text to the provider. No
+  GPU, SSH tunnel or Cloudflare account is needed for a local interface test.
+  Follow the hosted-API section below after installing the harness.
 
 - **Plan A, local:** the model runs on this computer with Ollama. Use it for a
   quick test with a tiny Qwen (any computer, even without a GPU), or for real use
@@ -69,7 +75,8 @@ shadows the system's. Use Python by absolute path (for example
 
 Decide (ask the user only what you cannot tell):
 
-1. **Plan.** Choose B if the user mentioned a cluster, Slurm, SSH or a remote GPU.
+1. **Plan.** Choose C if the user requested the hosted DeepInfra API. Otherwise
+   choose B if the user mentioned a cluster, Slurm, SSH or a remote GPU.
    Choose A otherwise. In Plan A, on Linux with an NVIDIA GPU of 24 GB or more,
    ask whether the user wants HyperQwen
    ([A4](#a4-optional-hyperqwen-instead-of-ollama)), the server the team runs
@@ -150,6 +157,154 @@ Check:
 If this fails with `ModuleNotFoundError: mathagent`, run the harness as
 `PYTHONPATH=$REPO .venv/bin/python -m mathagent` from the repository instead.
 Every command below accepts that form in place of `.venv/bin/square-harness`.
+
+## Plan C: DeepInfra API with a local interface
+
+Create an account at https://deepinfra.com/login, then create a named key at
+https://deepinfra.com/dash/keys. The setup helper defaults to the key name
+`square-harness-local`. Enable `inference`, `models:read` and
+`account_scoped_jwt`; the last permits creation of the restricted test
+credential. Check Billing for the available balance; use a manual top-up only
+with the user's agreement and leave automatic top-up disabled. Do not assume
+signup credits or a particular minimum payment.
+
+Enter the parent key only through the hidden terminal prompt:
+
+```bash
+python3 scripts/setup-deepinfra.py
+```
+
+The parent key is not saved. The helper creates a DS4-only, 24-hour scoped JWT
+with a $1 allowance and stores it at `.local/deepinfra/credential`, mode 0600,
+inside private directories. Use `--key-name NAME` if the dashboard key has a
+different name. An existing credential prevents minting another allowance.
+`--replace` explicitly creates a new allowance; it does not revoke the old JWT.
+The provider's spending limit is distinct from workflow token limits; ongoing
+requests may settle after admission. Changing parallel work does not mint a
+new credential or increase its existing spending allowance.
+
+```bash
+python3 scripts/start-deepinfra.py --profile ds4
+```
+
+This opens the local GUI on port 8780, uses the private workspace
+`.local/deepinfra/workspace`, keeps web research off and selects the DS4
+budgets. It allows five active jobs, five simultaneous model requests across
+all jobs, and up to five independent workers within one Assistant turn.
+Those workers share the global five-request capacity. A Proof run still
+solves and reviews in sequence. Logs and the PID stay under
+`.local/deepinfra/`. The browser receives
+the local GUI session token, never the DeepInfra key. Existing workspaces and
+servers are not used by this launcher. Use `--port N` if 8780 is occupied.
+`--profile ds4` and `--service-tier standard` are the defaults. For Priority
+service, which costs 50% more per token, launch with:
+
+```bash
+python3 scripts/start-deepinfra.py --profile ds4 --service-tier priority
+```
+
+The selection applies to every DeepInfra generation request after launch,
+without changing Proof budgets or the credential's spending limit. Priority
+does not guarantee a particular token rate. Pause active work and stop the old
+GUI before relaunching on the same port; resume the saved jobs afterwards.
+An explicit `--service-tier` is rejected with the Qwen profile. For the old
+Qwen setup, select it explicitly:
+
+```bash
+python3 scripts/start-deepinfra.py --profile qwen
+```
+
+The Qwen GUI opens on port 8781 by default and uses the existing local
+OpenAI-compatible server at
+`http://127.0.0.1:18020`, model `qwen3.8-27b`, and its previous 65,536-token
+context and Proof rules, with one active job, one model request and one
+Assistant worker at a time. Start the model server and SSH tunnel first, as in
+Plan B; selecting this profile does not allocate a GPU or create a tunnel.
+Its isolated workspace, log and PID live under `.local/qwen-test/`; it does
+not need or send a DeepInfra credential. Only one GUI can occupy a port.
+Use `--host URL --model ID` if the Qwen server advertises a different endpoint
+or model ID. `--ctx N` selects a different context supported by that server.
+
+For a manual launch, set `DEEPINFRA_API_KEY_FILE` to the private credential
+file, then use:
+
+```bash
+python -m mathagent --gui --backend openai --api-profile deepinfra \
+  --allow-remote-model --offline --workspace WORKSPACE
+```
+
+Here `--api-profile deepinfra` selects the DS4 transport and budget profile.
+For a manual launch, `SH_DEEPINFRA_SERVICE_TIER=priority` selects Priority;
+unset it or use `standard` for Standard service. The isolated launcher sets
+this value from its flag, so an inherited environment value cannot change its
+default pricing.
+A manual Qwen launch uses `--api-profile default` with the local server and
+model settings from B4. Selecting a different profile never rewrites saved
+jobs or grants them new allowances on resume.
+
+New DS4 Proof jobs use 384,000 tokens for each solve, repair and review from
+Medium upwards. Medium, High, Extra high and Poincaré allow 3, 5, 7 and 10 solver
+passes; Low remains one short solve/review pass. The total output allowance
+includes one possible review-format retry per pass. See the budget table in
+[guide.md](guide.md). The common per-call time guard defaults to three hours;
+use `--proof-call-seconds SECONDS` for an explicit value in either the DS4
+launcher or a manual launch.
+The workflow time allowance is derived from the permitted calls instead of the
+old short effort-specific deadline. Explicit token and time flags remain hard
+limits; they may stop a job before its maximum pass count. The scoped API key's
+spending allowance is separate and remains unchanged by selecting an effort.
+
+The profile pins `deepseek-ai/DeepSeek-V4.1-Flash-1017` at
+`https://api.deepinfra.com/v1/openai`. It uses ordinary streamed Chat
+Completions, with no stored Batch API or optional retained cache. The model
+catalog is read without authentication because scoped inference JWTs are
+rejected by the authenticated catalog route. Prompt preflight uses the native
+tokenizer when available, with additional framing/tool/schema allowances;
+otherwise it is explicitly labelled a UTF-8 byte estimate. Actual input and
+generated-token usage comes from the completed inference response. No exact
+reconstruction of the provider's chat template is claimed.
+
+An older model-restricted credential may permit only V4 Flash 0731. A model
+upgrade therefore needs a credential permitting V4.1 Flash 1017; do not
+silently mint a fresh spending allowance. Existing 0731 jobs retain their
+saved checkpoint and budgets, and require access to that checkpoint when
+resumed. Changing the default model does not rewrite saved work.
+
+If a response stalls, Pause closes the active response socket and preserves
+the partial work. It does not wait for another generated chunk. Connection
+setup and the wait for initial HTTP headers still obey their request timeout.
+After recovering an interrupted turn, use Resume in the same conversation;
+an incomplete fragment is never treated as a completed proof.
+
+This profile makes a small structured routing call for an unassigned new
+Assistant request. It uses at most 1,024 output tokens and 60 seconds, charged
+to the existing allowance. Very elementary identities may stay direct;
+nontrivial proof requests start Proof mode. Explicit `@` selections and the
+existing automatic source/reference routes bypass this extra decision.
+
+After Proof has been selected, Qwen and DS4 prepare a short delegation through
+the existing Assistant tool loop. This stage has its own hard limit: at most
+two calls of 2,048 generated tokens each, including any generated reasoning
+and tool arguments. Preparation also allows at most 16,384 input tokens per
+call and 32,768 in total, from the backend's count or a labelled estimate.
+Larger requests hand off to Proof without truncating the original material.
+The first call may read context; the next must delegate to Proof. The
+model-written brief is at most 4,000 characters and collects definitions,
+the precise target and ambiguities, with at most one short, explicitly
+unproved suggested direction. It must not
+attempt the proof.
+
+If the brief is unavailable or the limit is reached, the controller starts
+Proof from the original request and saved context without another preparation
+attempt; unfinished preparation is not used as the task brief. Original
+hypotheses and exact conversation stay authoritative for
+solving and review. Preparation remains charged to the existing Assistant
+budget; Proof's solve/review allowances do not change. The preparation limits
+persist across pause/resume. An older paused turn already over them hands off
+without receiving another preparation allowance. Resume leaves
+already-created Proof jobs unchanged. Standalone Proof and raw benchmark
+calls retain their direct path. The Proof page's Sources tab shows Original
+request and, when the delegated objective differs, Prepared task.
 
 ## Plan A: local model
 

@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- Default the hosted DeepInfra profile to DeepSeek V4.1 Flash 1017, preserving
+  Proof budgets, service-tier selection and concurrency. Keep V4 Flash 0731
+  available for saved jobs without rewriting their model or allowances.
+
+- Add DS4 launcher `--service-tier standard|priority`, defaulting to Standard.
+  Apply Priority centrally to DeepInfra generation calls when selected, without
+  changing Proof budgets or saved allowances; reject the option for Qwen.
+
+- Bound conversational Proof preparation to two calls of at most 2,048 generated
+  tokens each, 16,384 input tokens per call and 32,768 input tokens overall,
+  then hand off to Proof. Keep model-written briefs within 4,000 characters.
+  Preserve concise context and definitions, fall back to the original request
+  when a brief is unavailable, and keep
+  preparation from consuming the full solver allowance or growing into a proof.
+  Retain preparation limits on resume and pass oversized input to Proof intact.
+
+- Restore the main agent's normal task preparation before conversational
+  Proof delegations with both Qwen and DS4. Preserve the original statement
+  and exact context for solving and review, reuse native delegation and
+  resume, and show the original and prepared tasks in Sources.
+
+- Start the DS4 profile with five active jobs, five shared model-request slots
+  and up to five independent Assistant workers; preserve Qwen's existing
+  concurrency settings and sequential solve/review within each Proof run.
+
+- Give DS4 Proof a full 384,000-token ceiling for solving, repair and review
+  from Medium upwards; effort changes the maximum solver-pass count. Derive
+  the workflow allowance from those calls, including bounded review retries,
+  and preserve Qwen's previous rules and saved-job limits. Add an explicit
+  DS4/Qwen choice to the isolated GUI launcher.
+
+- Route DS4 proof requests through a bounded semantic decision before a long
+  Assistant answer. Start a durable Proof worker for nontrivial proofs, retain
+  direct elementary identities, and preserve the decision and worker on resume.
+
+- Make GUI Pause interrupt a stalled model-response socket, preserving partial
+  work and its unknown-usage reservation while releasing the model slot.
+
+- Add an opt-in DeepInfra DS4 Flash 0731 profile for the local GUI and CLI,
+  with private capped credentials, streamed reasoning and structured output.
+  Separate remote-model consent from web research. Apply DS4-specific context,
+  role and effort budgets while preserving explicit saved allowances.
+
 - Preserve bibliography identifiers in Markdown links and pin retrieved
   references for conversation write-ups. Reuse their metadata and citation keys;
   keep PDFs with unresolved citations or labels explicitly partial.

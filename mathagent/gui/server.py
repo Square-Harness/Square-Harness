@@ -129,6 +129,8 @@ def _text(body, key, limit):
 @route('GET', '/api/status')
 def status(h, body):
     hub, args = h.server.hub, h.server.hub.args
+    from ..model_limits import PROFILE, effort_presets
+    api_profile = getattr(args, 'api_profile', 'default')
     out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            # The default for new work in the interface: online unless launched --offline.
@@ -136,8 +138,12 @@ def status(h, body):
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
            'concurrency': hub.limits(),
            'defaults': {'ctx': args.ctx, 'predict': args.predict, 'think': not args.no_think,
+                        'api_profile': api_profile,
+                        'budget_profile': PROFILE if api_profile == 'deepinfra' else 'default',
+                        'effort_presets': effort_presets(args) if api_profile == 'deepinfra' else None,
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
+                        'proof_call_seconds': getattr(args, 'proof_call_seconds', None),
                         'proof_verify_tokens': args.proof_verify_tokens,
                         'proof_repair_tokens': args.proof_repair_tokens,
                         'proof_min_solve_tokens': args.proof_min_solve_tokens,

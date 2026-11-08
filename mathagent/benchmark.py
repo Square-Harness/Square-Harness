@@ -17,6 +17,9 @@ import threading
 
 from .agent import Agent, AgentError
 from .backends import create_client, TokenBudgetError, openai_thinking_budget_policy
+from .api_profiles import create_profile_client
+from .deepinfra import BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL
+from .model_limits import DEFAULTS as DS4_DEFAULTS
 from .proof import ProofRunner, ProofContext, check_context
 from .proof_policy import COMMON_INSTRUCTION, initial_request
 from .tools import Workspace
@@ -82,6 +85,8 @@ def parser():
     p.add_argument('--output', type=Path)
     p.add_argument('--init-smoke', type=Path, help='Create an external dataset with two synthetic toy statements')
     p.add_argument('--backend', choices=('openai', 'ollama', 'llamacpp'), default='openai')
+    p.add_argument('--api-profile', choices=('default', 'deepinfra'), default='default')
+    p.add_argument('--allow-remote-model', action='store_true', help='Explicitly allow hosted DeepInfra inference')
     p.add_argument('--host', default='http://127.0.0.1:8000')
     p.add_argument('--model', default='square-qwen')
     p.add_argument('--model-revision', default='unrecorded', help='Immutable weights revision for provenance')
@@ -116,12 +121,23 @@ def _source_files():
     return {str(path.relative_to(package)): path.read_bytes() for path in sorted(package.rglob('*.py'))}
 
 
+def _client(args, timeout):
+    if args.backend == 'openai':
+        return create_profile_client(getattr(args, 'api_profile', 'default'), args.host, timeout=timeout)
+    return create_client(args.backend, args.host, timeout=timeout)
+
+
 def preflight(args):
     if args.manifest is None or args.output is None:
         raise ValueError('--manifest and --output are required')
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         raise ValueError('Host must be an http(s) URL without credentials, query or fragment')
+    if getattr(args, 'api_profile', 'default') == 'deepinfra':
+        if args.backend != 'openai' or not args.allow_remote_model:
+            raise ValueError('DeepInfra requires --backend openai and explicit --allow-remote-model')
+        if args.model != DEEPINFRA_MODEL:
+            raise ValueError('Use the pinned DeepSeek V4.1 Flash 1017 model for this profile')
     data = load_manifest(args.manifest)
     output = args.output.resolve()
     if output.exists():
@@ -204,6 +220,14 @@ class GatedClient:
     @thinking_budget_policy.setter
     def thinking_budget_policy(self, value):
         self.client.thinking_budget_policy = value
+
+    @property
+    def reasoning_effort(self):
+        return self.client.reasoning_effort
+
+    @reasoning_effort.setter
+    def reasoning_effort(self, value):
+        self.client.reasoning_effort = value
 
     @property
     def timeout(self):
@@ -350,7 +374,7 @@ def run_job(job, output, args, gate=None):
     # Evidence only: the statement is sent once, through the shared request builder.
     (workspace / 'statement.txt').write_text(problem['text'], encoding='utf-8')
     job_seconds = (args.raw_seconds or args.seconds) if arm == 'raw-single' else args.seconds
-    client = GatedClient(create_client(args.backend, args.host, timeout=min(args.request_timeout, job_seconds)), gate)
+    client = GatedClient(_client(args, timeout=min(args.request_timeout, job_seconds)), gate)
     agent = Agent(client, Workspace(workspace), args.model, args.ctx, args.predict, True,
                   seed=seed, temperature=args.temperature, top_p=args.top_p)
     record = {'id': key, 'problem_id': problem['id'], 'statement_sha256': problem['sha256'],
@@ -427,7 +451,7 @@ def execute(args, data, plan):
         destination = output / 'source' / 'mathagent' / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(raw)
-    client = create_client(args.backend, args.host, timeout=min(args.request_timeout, args.seconds))
+    client = _client(args, timeout=min(args.request_timeout, args.seconds))
     try:
         if args.model not in client.models():
             raise ValueError(f'Model {args.model!r} not offered by the configured server')
@@ -480,6 +504,21 @@ def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
     try:
+        if args.api_profile == 'deepinfra':
+            arguments = sys.argv[1:] if argv is None else argv
+            explicit = {value.split('=', 1)[0] for value in arguments if value.startswith('--')}
+            defaults = {'host': DEEPINFRA_URL, 'model': DEEPINFRA_MODEL,
+                        'ctx': DS4_DEFAULTS['ctx'], 'predict': DS4_DEFAULTS['proof_solve_tokens'],
+                        'verify_tokens': DS4_DEFAULTS['proof_verify_tokens'],
+                        'temperature': DS4_DEFAULTS['temperature'],
+                        'request_timeout': DS4_DEFAULTS['proof_call_seconds']}
+            for name, value in defaults.items():
+                if '--' + name.replace('_', '-') not in explicit:
+                    setattr(args, name, value)
+            if '--tokens' not in explicit:
+                args.tokens = args.rounds * (args.predict + 2 * args.verify_tokens)
+            if '--seconds' not in explicit:
+                args.seconds = 3 * args.rounds * DS4_DEFAULTS['proof_call_seconds']
         if args.init_smoke:
             if args.manifest or args.output:
                 raise ValueError('--init-smoke cannot be combined with --manifest or --output')

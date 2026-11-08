@@ -212,7 +212,7 @@ class OpenAICompatible:
             data['reasoning_effort'] = payload['reasoning_effort']
         if payload.get('tools'):
             data['tools'] = copy.deepcopy(payload['tools'])
-            data['tool_choice'] = 'auto'
+            data['tool_choice'] = copy.deepcopy(payload.get('tool_choice', 'auto'))
         schema = payload.get('format')
         if schema == 'json':
             data['response_format'] = {'type': 'json_object'}
@@ -253,10 +253,11 @@ class OpenAICompatible:
 
     def stream(self, payload):
         data = self._payload(payload)
-        yield from self._stream(data)
+        yield from self._stream(data, output_char_limit=payload.get('_output_char_limit'))
 
-    def _stream(self, data):
+    def _stream(self, data, output_char_limit=None):
         calls, finish, usage = {}, None, None
+        generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = time.monotonic() + self.timeout
         try:
@@ -322,13 +323,18 @@ class OpenAICompatible:
                             if value is not None and not isinstance(value, str):
                                 raise AgentError('Non-text content in model stream')
                             if value:
+                                generated_chars += len(value)
+                                if output_char_limit is not None and generated_chars > output_char_limit:
+                                    raise AgentError('Proof preparation exceeded its short text allowance')
                                 message[target] = value
                         for part in delta.get('tool_calls') or []:
                             index = part.get('index')
                             if type(index) is not int or not 0 <= index < 16:
                                 raise AgentError('Invalid streamed tool call index')
                             call = calls.setdefault(index, {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}})
-                            if part.get('type', 'function') != 'function':
+                            # OpenAI-compatible providers may send null in later
+                            # fragments instead of repeating the tool's type.
+                            if part.get('type') not in {None, 'function'}:
                                 raise AgentError('Unsupported streamed tool type')
                             function = part.get('function') or {}
                             for container, key, value in [(call, 'id', part.get('id')),
@@ -337,6 +343,10 @@ class OpenAICompatible:
                                 if value is not None:
                                     if not isinstance(value, str):
                                         raise AgentError('Malformed streamed tool call fragment')
+                                    if key != 'id':
+                                        generated_chars += len(value)
+                                        if output_char_limit is not None and generated_chars > output_char_limit:
+                                            raise AgentError('Proof preparation exceeded its short tool-argument allowance')
                                     container[key] += value
                         if message:
                             yield {'message': message, 'done': False}

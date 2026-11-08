@@ -21,12 +21,20 @@ export type AssistantBudget = {
 }
 
 export type Defaults = {
+  api_profile?: string
+  budget_profile?: string
+  effort_presets?: Partial<Record<EffortLevel, {
+    tries: number; minutes: number; tokens: number; research_tokens: number; input: number
+    requests: number; chars: number; solve_tokens: number; verify_tokens: number
+    repair_tokens?: number; proof_seconds?: number; proof_call_seconds?: number
+  }>> | null
   ctx: number
   predict: number
   think: boolean
   proof_rounds: number
   proof_tokens: number | null
   proof_seconds: number
+  proof_call_seconds?: number | null
   proof_solve_tokens: number
   proof_verify_tokens: number
   proof_repair_tokens: number | null

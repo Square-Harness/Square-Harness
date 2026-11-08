@@ -1,4 +1,4 @@
-"""Opt-in MLX chat transport; the existing vLLM adapter is unchanged.
+"""Opt-in API dialects; the existing local vLLM adapter is unchanged.
 
 The tokenizer and context_limit extensions below belong to Local LLM Lab.
 Other MLX-compatible servers may omit tokenization; counting then falls back to
@@ -11,13 +11,19 @@ from http.client import HTTPException
 
 from .agent import AgentError
 from .backends import OpenAICompatible
+from .deepinfra import DeepInfra
 
 
 def resolve_api_profile(profile=None):
     selected = os.environ.get('SQUARE_OPENAI_PROFILE', 'default') if profile is None else profile
-    if selected not in {'default', 'mlx'}:
-        raise AgentError('API profile must be default or mlx')
+    if selected not in {'default', 'mlx', 'deepinfra'}:
+        raise AgentError('API profile must be default, mlx or deepinfra')
     return selected
+
+
+def create_profile_client(profile, host, timeout=600):
+    classes = {'default': OpenAICompatible, 'mlx': MLX, 'deepinfra': DeepInfra}
+    return classes[resolve_api_profile(profile)](host, timeout=timeout)
 
 
 class MLX(OpenAICompatible):

@@ -36,7 +36,7 @@ as one payload. Backends determine how their response schema affects input.
         return count, 'conservative character estimate (2.5 per token)'
     if type(count) is not int or count < 0:
         raise AgentError('Invalid exact input token count')
-    return count, 'server token count'
+    return count, getattr(client, 'input_token_count_method', 'server token count')
 
 
 def allocate_call(client, payload, desired, minimum=128, explicit_cap=None):

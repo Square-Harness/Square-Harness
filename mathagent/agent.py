@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .prompts import SYSTEM, MODES
+from .model_limits import input_limit
 
 
 class AgentError(Exception):
@@ -187,7 +188,7 @@ class Agent:
                 # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
                 # without reasoning or tools, asks for the answer instead of returning nothing.
                 answer_now = True
-                recovery_notes = thinking[-4000:]
+                recovery_notes = thinking[-input_limit(self, 'recovery_note', 4000):]
                 emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
                 messages.append({'role': 'user', 'content': ANSWER_NOW})
                 continue

@@ -11,9 +11,9 @@ from mathagent import style
 from mathagent.gui import store
 
 try:
-    from .test_gui import APPROVAL, PROOF, GuiCase, text
+    from .test_gui import APPROVAL, PROOF, GuiCase, text, tool
 except ImportError:  # unittest discover imports test modules as top-level names
-    from test_gui import APPROVAL, PROOF, GuiCase, text
+    from test_gui import APPROVAL, PROOF, GuiCase, text, tool
 
 
 PROFILE = {'format': 'square-style', 'version': 1, 'name': 'My papers', 'created_at': '', 'updated_at': '',
@@ -33,7 +33,10 @@ class ConversationWriteupTests(GuiCase):
 
     def prove_first(self):
         chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL)), text('Reviewed proof returned.')]
+        self.fake.replies = [tool('delegate', {
+            'mode': 'prove', 'request': 'Let x be an arbitrary real number. Give a complete proof that x=x.',
+            'files': [], 'effort': 'medium', 'reason': 'Delegate the precise reflexivity statement to Proof.'}),
+            text(PROOF), text(json.dumps(APPROVAL)), text('Reviewed proof returned.')]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': '@prove For real x, show x=x.', 'mode_call': {'mode': 'prove', 'start': 0}})
         self.assertEqual(self.wait_task()['state'], 'done')
         self.fake.requests.clear()

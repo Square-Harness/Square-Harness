@@ -69,7 +69,7 @@ export function ProofView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'work' && (data.legacy ? <LegacyWork data={data} /> : <Work data={data} ours={ours} onArtifact={setArtifact} />)}
           {active === 'overview' && <div className="ledger-tab"><Overview data={data} onAttempt={focusAttempt} /></div>}
           {active === 'report' && <ProofReport id={id} tick={tick} />}
-          {active === 'sources' && <ProofSources id={id} goal={data.goal} />}
+          {active === 'sources' && <ProofSources id={id} goal={data.goal} reference={data.settings.reference_context} />}
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
@@ -397,17 +397,26 @@ function ProofReport({ id, tick }: { id: string; tick: number }) {
   )
 }
 
-function ProofSources({ id, goal }: { id: string; goal: string }) {
+function ProofSources({ id, goal, reference }: { id: string; goal: string; reference: unknown }) {
   const { data, error } = useLoad(() => api.proofSources(id), [id])
+  const original = reference && typeof reference === 'object' && 'query' in reference
+    && typeof reference.query === 'string' ? reference.query : goal
   return (
     <div className="sources">
       <section>
         <h3 className="section-title">Original request</h3>
-        <pre className="plain">{goal}</pre>
+        <pre className="plain">{original}</pre>
       </section>
+      {goal !== original && (
+        <section>
+          <h3 className="section-title">Prepared task</h3>
+          <Markdown>{goal}</Markdown>
+          <p className="muted small">Prepared by the main agent. The original request and user hypotheses remain authoritative.</p>
+        </section>
+      )}
       <ErrorNote>{error}</ErrorNote>
       {!data && !error && <Loading />}
-      {data && !data.sources.length && <p className="empty-note">No files were pinned. The request above is the whole input.</p>}
+      {data && !data.sources.length && <p className="empty-note">No files were pinned. Saved model requests in Files show the full input, including reference context.</p>}
       {data?.sources.map((source) => (
         <section key={source.path}>
           <h3 className="section-title">{source.path}</h3>

@@ -17,6 +17,74 @@ manuscripts, explains results, writes up notes in LaTeX and runs numerical
 experiments. You use it in a web app (on a computer or a phone) or in the
 terminal. It is experimental (version 0.5.1).
 
+For a temporary hosted-model test, `--backend openai --api-profile deepinfra`
+uses DeepSeek V4.1 Flash 1017 through DeepInfra. The harness, interface and saved
+jobs still run locally; model prompts, selected source text and tool context
+are sent to DeepInfra. Its retention policy applies to that processing. Keep
+the provider credential on the backend, never in the browser or a saved job.
+`--allow-remote-model --offline` permits those model calls while locking web
+research off. See the hosted-API setup in [llm-install.md](llm-install.md).
+
+The current hosted checkpoint is `deepseek-ai/DeepSeek-V4.1-Flash-1017`.
+Existing V4 Flash 0731 jobs keep their saved model and allowances; resuming
+them requires a credential that also permits that older checkpoint.
+
+The DS4 launcher uses Standard service by default. Add
+`--service-tier priority` to request DeepInfra's Priority service for all model
+calls, at a 50% per-token premium. Priority can improve response time during
+busy periods, but does not guarantee a particular generation speed. This choice
+does not change Proof budgets; it applies to subsequent calls after restarting
+the local server. The option is only available with `--profile ds4`.
+
+The DS4 profile starts with capacity for five active conversations or jobs,
+five simultaneous model requests across the interface, and up to five
+independent workers within one Assistant turn. All conversations and worker
+roles share those five model slots. Within one Proof run, solving and review
+remain sequential; this setting does not launch five attempts of the same
+proof. The Qwen launcher keeps its previous single-job settings.
+
+The DS4 profile uses a 1,048,576-token context with separate generation and
+workflow allowances. From Medium upwards, Proof gives every solve, repair and
+review the same 384,000-token output ceiling. Effort changes the maximum number
+of solver passes, not the length available to each pass:
+
+| Proof effort | Solver passes | Solve / repair | Review | Total output allowance |
+| --- | ---: | ---: | ---: | ---: |
+| Low | 1 | 32,768 | 16,384 | 65,536 |
+| Medium | 3 | 384,000 | 384,000 | 3,456,000 |
+| High | 5 | 384,000 | 384,000 | 5,760,000 |
+| Extra high | 7 | 384,000 | 384,000 | 8,064,000 |
+| Poincaré | 10 | 384,000 | 384,000 | 11,520,000 |
+
+These are ceilings, not target lengths. The total allows one solve and up to
+two reviews per pass: a review may be retried once if its response format is
+invalid or it is truncated. A repair or continuation consumes another solver
+pass. A successful review ends the run early; an uncertain review preserves
+the uncertainty. Reasoning tokens count toward generated-token usage.
+
+Medium and higher levels use the same per-call time guard; the workflow time
+allowance grows with the permitted number of calls. The default guard is three
+hours per call, configurable with `--proof-call-seconds`. Low retains a short
+ten-minute workflow. Explicit launch or Advanced limits and the provider's
+spending allowance can stop work earlier. Full input plus output must fit the
+context; the harness reports an insufficient allowance rather than silently
+shrinking a DS4 Proof call. These settings have not been established as optimal
+by a mathematical benchmark. Existing Qwen profiles keep their previous budget
+rules, and paused jobs keep their saved limits when resumed.
+
+Pause interrupts an active model-response stream even if the provider stops
+sending data. The partial response remains unfinished and resumable. If no
+final usage arrived, its reservation stays charged to the local allowance;
+that is conservative harness accounting, not a measurement of the API bill.
+
+For DS4 conversations, a short routing decision distinguishes very elementary
+facts (such as expanding a square) from nontrivial proof requests. The latter
+start the saved Proof workflow before the Assistant attempts an argument.
+Explicit mode selections take priority, and a request to use the raw model
+directly is respected. The routing decision and its usage are saved with the
+turn; resuming does not create a second completed Proof job. A failed routing
+decision pauses the work instead of authorizing an unchecked direct proof.
+
 ## Philosophy
 
 **AI on our own terms.** Open-weights models are now good enough to help, and one
@@ -207,12 +275,41 @@ tasks. It exists in the web app only; in the terminal, `/critic` and `/explore`
 are ordinary chats without workers. The Assistant answers short questions itself. Otherwise it gives a precise
 objective to a worker: a proof, a critique, an exploration, a reference check, a
 reading list, a review, an explanation or a write-up. It then reads the result,
-its status and what remains open, and decides what to do next. Two independent
-workers can run at the same time on a vLLM server (`--assistant-concurrency`,
-1–4). All workers share the conversation's budget, and a worker cannot start
+its status and what remains open, and decides what to do next. Independent
+workers can run at the same time on an OpenAI-compatible server
+(`--assistant-concurrency`: 1–4 for the original profiles, 1–5 for DS4). All
+workers share the conversation's budget, and a worker cannot start
 other workers. Only you can start Python Lab and an explicit sanity check: the
 Assistant cannot. It can open a web address you give it and read the page or its
 bibliography.
+
+Before starting a Proof worker, the Assistant briefly prepares the task, with
+either Qwen or DS4. Preparation allows at most two model calls, each capped at
+2,048 generated tokens: 4,096 tokens in total. The first call may read relevant
+context; the next must hand the task to Proof. Preparation input is limited to
+16,384 tokens per call and 32,768 in total, using the backend's count or its
+labelled estimate. Larger material goes to Proof without trimming the original
+request or hypotheses. These limits apply to preparation, not Proof's context.
+The model-written brief is limited to 4,000 characters and gives the precise
+objective, definitions, conventions and any unresolved ambiguity. It may add
+one short natural direction, clearly labelled as an unproved suggestion; it
+must not begin the proof or add a missing hypothesis.
+
+If preparation reaches its limit or fails to produce a usable delegation,
+Proof starts from the original request and saved context instead of extending
+the preparation. Unfinished preparation is not adopted as a proof or task
+brief. Proof's solve and review allowances are unchanged. The solver
+and reviewer receive the original request and exact conversation as
+authoritative reference context. The Proof page's **Sources** tab shows **Original request**
+and, when the delegation differs from it, **Prepared task**.
+
+Preparation is charged to the shared Assistant budget and uses the existing
+saved delegation mechanism. Its call and token limits persist across pause and
+resume; an older turn already over these limits proceeds to Proof instead of
+getting a fresh preparation allowance. Resume reuses work already delegated;
+it does not rewrite the task of an existing Proof job. When Proof has been selected, the
+Assistant must call that worker rather than substitute a direct proof.
+Standalone Proof jobs and raw benchmark calls retain their direct path.
 
 ### Prove
 
@@ -490,6 +587,10 @@ declaration, and so do the sandbox limits: the text of a skill cannot raise them
 
 ### Effort
 
+The following table describes the original local-model profiles, including
+Qwen. The hosted DS4 Proof profile uses the separate table above; its other
+skills retain their own limits.
+
 | Effort | Attempts / rounds | Working time | Retrieval requests |
 | --- | ---: | ---: | ---: |
 | Low | 1 | 1 min | 20 |
@@ -502,9 +603,9 @@ Each skill translates the level into its own terms. For a proof, it is the numbe
 of attempts. For a quick review, the number of verifier passes. For a detailed
 review, how far down the dependencies the checks go (Low: the main results only;
 Extra high and Poincaré: the appendices too), with twice the working time. There
-is no fixed token allowance, but every model call is still limited by the model's
-context. A paused job resumes with what is left; it never gets a new allowance
-silently.
+is no fixed token allowance for the original profiles unless one was supplied
+explicitly, but every model call is still limited by the model's context. A
+paused job resumes with what is left; it never gets a new allowance silently.
 
 ## Your data
 

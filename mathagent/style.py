@@ -24,6 +24,7 @@ import re
 from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
 from .worker_errors import WorkerInputError
+from .model_limits import input_limit
 
 FORMAT = 'square-style'
 NAME = re.compile(r'[\w][\w .-]{0,59}')
@@ -377,7 +378,7 @@ class StyleRunner(ResearchRunner):
 
     def _room(self, cap):
         """Characters of article text that fit beside the instructions (text runs at 3+ characters a token)."""
-        return max(2000, min(24000, (self.agent.ctx - cap - 3000) * 2))
+        return max(2000, min(input_limit(self.agent, 'style_packet', 24000), (self.agent.ctx - cap - 3000) * 2))
 
     def _article(self, source_id):
         return next(s for s in self.state['sources'] if s['id'] == source_id)

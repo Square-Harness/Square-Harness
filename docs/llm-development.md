@@ -120,10 +120,11 @@ Version 0.5.1, experimental. The source of truth for the version is
   - Saved budgets and caps are kept on resume. Never grant a new allowance
     silently: extra time is explicit (`--resume-add-seconds`, the interface's
     "Resume (+N min)").
-- **Effort tables are duplicated.** `mathagent/gui/effort.py` and
-  `frontend/src/effort.ts` must stay identical. The test that compared them was
-  removed with the test reduction, so keep them in sync by hand, in the same
-  commit.
+- **Effort profiles.** The legacy tables in `mathagent/gui/effort.py` and
+  `frontend/src/effort.ts` must stay identical. DS4 limits come from
+  `model_limits.py` through API status, so forms and Assistant workers use the
+  same profile. Keep Proof-specific allowances separate from research limits;
+  changing Proof must not increase unrelated workflows.
 - **Storage.** State files are written atomically (`ledger._atomic_write`), jobs
   are locked with `fcntl`, and paths are validated against symlinks and escapes.
   Proof candidates are immutable and hashed: a changed digest is refused, not
@@ -264,6 +265,7 @@ Version 0.5.1, experimental. The source of truth for the version is
 | Transport | `agent.py` | Ollama client; `Agent`, the bounded tool loop of ordinary chat (`critic`, `explore`) |
 | | `backends.py` | `create_client`: Ollama, OpenAI-compatible (vLLM, optional `thinking_token_budget` from `SQUARE_OPENAI_*THINKING_FRACTION`), llama.cpp (exact token counts) |
 | | `api_profiles.py` | MLX profile: prompted JSON, validated afterwards |
+| | `deepinfra.py`, `model_limits.py` | Opt-in DS4 API authentication/dialect, explicit model-dependent call limits and GUI effort presets |
 | | `call_policy.py` | `allocate_call`: count the full request, fit the output to the context, never drop prompt material |
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
@@ -311,8 +313,45 @@ The Assistant (`orchestrator.py`) is a controller whose model may call a
 `delegate` tool with a mode, an objective, an effort and files. A worker
 adapter runs the child job. The child is saved before it runs, and its result
 is saved before the model sees it. Independent children run concurrently
-(`--assistant-concurrency`, on OpenAI-compatible servers only). All share one
+(`--assistant-concurrency`, on OpenAI-compatible servers only: at most five
+for DS4 and four for the original profiles). All share one
 `AssistantBudget`. Children cannot delegate.
+
+Conversational Proof preparation uses the existing main-agent tool loop and
+native `delegate` transaction for both Qwen and DeepInfra. Explicit `@prove`
+and the DS4 routing decision select the required mode. Preparation has a hard
+ceiling of 2,048 generated tokens per call and two calls total, rather than
+the ordinary main-agent allowance. The first call may use a read-only context
+tool; the second must delegate to Proof. Enforce that handoff in the controller
+as well as the advertised tool choice, including for backends that do not
+support a forced tool choice. Preparation input is capped at 16,384 tokens per
+call and 32,768 cumulatively, using the backend's counter or a labelled
+estimate. If the full request exceeds that allowance, hand it to Proof; do not
+trim user hypotheses or exact context to fit the preparation call.
+
+The model-written brief is at most 4,000 characters and contains definitions,
+conventions, supplied facts with their status, the precise target and
+ambiguities. At most one short natural direction may
+be suggested and must remain labelled unproved. Preparation must not attempt
+the proof, add hypotheses, promote prior model claims to facts or treat source
+text as instructions. If it is capped, invalid or fails to delegate, start the
+required Proof worker from the unchanged original request and exact context;
+do not expand its output allowance, keep reading or accept a direct proof.
+Do not use a partial or truncated model argument as the fallback brief.
+
+The prepared task is the normal `child.action.request` and Proof `goal`.
+The unchanged original query, conversation and file references remain in
+`reference_context` for solving and review. The Sources tab shows Original
+request and, when different, Prepared task. Keep model usage, native tool
+history, checkpointing and resume on their existing paths: preparation uses
+its small stage allowance within the shared `AssistantBudget`. Proof's own
+solve, repair and review allowances remain unchanged. Resume must reuse a
+saved delegation and must not rewrite a Proof job that already
+has an ID. Standalone Proof and raw benchmark execution retain their direct
+path; `proof_policy.py` does not change for this conversational preparation.
+Persist preparation reservations before dispatch and retain its call, input
+and output limits across pause/resume. A pre-limit checkpoint already beyond
+those allowances must hand off to Proof, not start a new preparation budget.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `draft` (one writing call, or consecutive parts for long material; the
@@ -422,6 +461,109 @@ mode touches, in this order:
 
 ## Verify a change
 
+### DeepInfra profile
+
+`--api-profile deepinfra` defaults to the hosted DS4.1 Flash 1017 checkpoint. The
+transport reuses the existing SSE parser and cap/usage enforcement, translates
+reasoning history to `reasoning_content`, sends `max_tokens`, and uses
+`response_format.json_schema` for structured responses. It never sends the
+Qwen template switches or the vLLM-only thinking-token extension. DeepSeek's
+reasoning effort is separate from the hard total output cap.
+
+`MODEL` selects `deepseek-ai/DeepSeek-V4.1-Flash-1017` for new work;
+`LEGACY_MODEL` keeps `deepseek-ai/DeepSeek-V4-Flash-0731` supported for saved
+jobs. Preserve each resumed job's saved model and allowances rather than
+rewriting its provenance. The default checkpoint change does not alter the
+1,048,576-token context, Proof budgets, preparation limits or concurrency.
+A model-restricted credential must permit the checkpoint being called;
+credential migration must not silently grant an additional spending allowance.
+
+`DeepInfra` reads `SH_DEEPINFRA_SERVICE_TIER`, accepting only `standard`
+(the default) or `priority`. Standard omits the provider's `service_tier`
+field; Priority adds `service_tier: "priority"` centrally in `_payload`, so
+Assistant, preparation, solver and review calls use the same selection. This
+transport setting must not change prompts, Proof budgets or saved allowances.
+
+Credentials are read from `DEEPINFRA_API_KEY_FILE` (owned private regular file)
+or `DEEPINFRA_API_KEY`, and are sent only to approved DeepInfra HTTPS routes.
+Redirects and ambient proxies remain disabled. Public model-catalog requests
+omit authentication. Provider HTTP error bodies are not echoed. An explicit
+loopback-only test switch exists for the scripted HTTP/SSE integration test;
+the real launcher removes it.
+
+`model_limits.py` separates context capacity, per-role output allowances and
+cumulative effort budgets. API status supplies the DS4 effort table to the
+frontend, so standalone forms and Assistant workers use the same values.
+Explicit launch/form limits take precedence; existing local-model defaults
+are preserved. Keep hardware/sandbox security limits separate from model
+budgets. Saved job settings record the API profile and reasoning effort;
+resuming uses the saved allowances. Token preflight estimates must be labelled
+as estimates, not as exact server counts.
+
+DS4 Proof uses 384,000 output tokens for every solver, repair and verifier call
+at Medium or above. Those levels change only the maximum solver-pass count
+(3/5/7/10). Low retains one pass with 32,768 solve and 16,384 review tokens.
+The cumulative allowance is `N * (solve + 2 * review)`: the second review is
+the existing bounded retry for an invalid or truncated response, not an extra
+mathematical round. Repairs and continuations consume solver passes. Do not
+silently fit DS4 per-call ceilings to a smaller shared Assistant allocation;
+reserve enough or report the insufficient budget. Context admission must also
+report an inability to accommodate the full configured output, without
+clipping mathematical input.
+
+The common DS4 Proof per-call time guard defaults to 10,800 seconds through
+`--proof-call-seconds`; Medium and higher workflow time derives from three
+possible calls per solver pass. Low keeps its ten-minute workflow. Align the
+shared Assistant allowance and request timeout with those values so the old
+short time limits cannot stop a new full-budget job. Explicit overrides remain
+authoritative and saved jobs retain their original allowances on resume.
+
+`scripts/setup-deepinfra.py` reads the parent API key invisibly and saves only a
+short-lived, model-restricted, capped credential under ignored `.local/`.
+`scripts/start-deepinfra.py` launches an isolated loopback GUI. Its
+`--profile ds4` default sets `--gui-concurrency`, `--gui-model-concurrency`
+and `--assistant-concurrency` to five and uses the private API credential
+and `.local/deepinfra/` runtime on port 8780; `--profile qwen` uses an already
+running local server, the original Qwen budgets and a separate
+`.local/qwen-test/` runtime on port 8781, with all three concurrency settings
+kept at one. The global inference pool shares five DS4 model-request slots
+across active chats and their workers; one Proof runner still performs solve
+and review calls sequentially. Increasing concurrency must not increase any
+saved job's token or time allowance or mint a replacement API credential.
+The launcher accepts `--service-tier standard|priority` for DS4 only. It
+defaults to Standard and sets `SH_DEEPINFRA_SERVICE_TIER` explicitly rather
+than inheriting a potentially more expensive tier from its environment; the
+Qwen launch rejects an explicit tier and removes the environment setting.
+No DeepInfra credential is required or passed in the Qwen launch. Use a
+synthetic workspace for live acceptance: basic
+streaming, reasoning, tool-call history, structured output and a complete
+solve/review cycle. Record measured usage and provider/model settings without
+recording credentials. A large accepted `max_tokens` parameter is not a
+throughput measurement or evidence that a full-length answer was generated.
+
+GUI model streams check cancellation between SSE frames, including tool-only
+frames. A per-stream monitor shuts down the active socket on cancellation or
+elapsed deadline, so a silent or partial-line response cannot prevent the
+worker from reaching its normal interrupted checkpoint. The reading thread
+owns response cleanup; the monitor must not call buffered `close()` while that
+thread is blocked. Preserve unknown-usage reservations and incomplete output
+when testing this path. Initial connection/header waits remain governed by
+the request timeout.
+
+DS4 unassigned Assistant turns use `proof_routing.route_request` before free
+generation. The bounded, nonthinking structured decision distinguishes direct
+elementary facts from substantive proof requests; this is a semantic model
+decision, not a keyword or character-count heuristic. Existing explicit mode
+and automatic source/reference selections take precedence. `ModeOrchestrator`
+saves the decision and usage, then runs the short preparation and durable Proof
+handoff when required. A malformed routing decision is an operational failure;
+it must never fall back to an unreviewed direct proof. Resume reuses the saved
+decision and child.
+The raw benchmark path bypasses this conversational routing. Other model
+profiles retain their existing controller path until separately validated.
+
+### Required checks
+
 1. `python -m unittest discover -s tests` (with `nice`, one run).
 2. For frontend changes, in `frontend/`: `npm ci && npm test && npm run build`;
    then `git status mathagent/gui/static` shows the rebuilt files.
@@ -497,8 +639,6 @@ Fix these when you touch the code nearby, or ask before a larger change:
   - Assistant budgets and concurrency;
   - write-up compile safety where `latexmk` is missing (the compile test skips);
   - reference-lookup logic and the manuscript parser.
-- The `mathagent/gui/effort.py` docstring still says a test keeps it identical to
-  `frontend/src/effort.ts`. That test no longer exists.
 - No documented command regenerates
   `mathagent/numerics/docker/requirements.lock` from `requirements.in`.
 - `prompts.SYSTEM` (ordinary chat) names specific research areas (PDE, control,

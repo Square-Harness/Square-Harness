@@ -22,11 +22,22 @@ from .call_policy import CallContextError, allocate_call
 from .router import EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
 from .refcheck import standalone_reference_request
+from .model_limits import output_limit, input_limit, is_ds4
 
 
 POLICY = """You are the main mathematical assistant for a research mathematician.
 Answer ordinary questions and elementary proofs directly, briefly and correctly.
 For example, a real square is nonnegative by the sign cases; no worker is needed.
+An immediate algebraic identity such as (a+b)^2=a^2+2ab+b^2 can also be answered directly.
+For a nontrivial lemma, theorem or requested proof search, delegate to prove before
+attempting the argument. The main agent coordinates that work and reports its
+result; it must not substitute its own unreviewed sustained proof attempt.
+Before delegating Proof, prepare a precise task for the child: state the exact
+proof obligation, collect relevant user definitions, notation, hypotheses and
+earlier context, and identify any ambiguity. Put this useful task brief in the
+delegate request. Do not solve the proof in preparation, invent missing
+hypotheses, or promote earlier assistant claims to established facts. The exact
+original request and conversation accompany the brief separately.
 Completeness concerns the mathematical obligations of the argument. Use standard
 elementary identities without rederiving field axioms unless explicitly requested.
 Preserve all hypotheses, definitions, quantifiers and the user's language.
@@ -39,7 +50,8 @@ Do not describe a model's review as a formal proof certificate.
 You can delegate a precise objective to an existing worker when sustained proof
 search, independent criticism, exploration, a precise reference, literature,
 manuscript review or a write-up will help. The available modes are prove, critic,
-explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize. Delegation is optional. Prefer the
+explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
+Delegation is required for nontrivial proof search and otherwise optional. Prefer the
 least effort suitable for the objective; use poincare only when the user requested
 maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, critic, explore, referee
@@ -197,8 +209,9 @@ class Orchestrator:
             raise ValueError('max_actions must be null or a nonnegative integer')
         if max_children is not None and (type(max_children) is not int or max_children < 0):
             raise ValueError('max_children must be null or a nonnegative integer')
-        if type(concurrency) is not int or not 1 <= concurrency <= 4:
-            raise ValueError('concurrency must be an integer between 1 and 4')
+        concurrency_limit = 5 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        if type(concurrency) is not int or not 1 <= concurrency <= concurrency_limit:
+            raise ValueError(f'concurrency must be an integer between 1 and {concurrency_limit}')
         self.agent, self.delegate = agent, delegate
         self.emit = emit or (lambda kind, value: None)
         self.checkpoint = checkpoint or (lambda state: None)
@@ -266,8 +279,7 @@ class Orchestrator:
         }
         self.state['history_prefix_count'] = len(self.state['messages']) - 1
 
-    @staticmethod
-    def _working_history(history):
+    def _working_history(self, history):
         """Keep human premises and written answers; archive prior tool payloads.
 
         Exact native history remains in the checkpoint and is retrievable by
@@ -276,7 +288,7 @@ class Orchestrator:
         messages, archived = [], []
         for index, original in enumerate(history):
             item = copy.deepcopy(original)
-            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > 6000):
+            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > input_limit(self.agent, 'working_note', 6000)):
                 archived.append({'index': index, 'tool': item.get('tool_name'),
                     'role': item['role'],
                     'lines': len(item.get('content', '').splitlines()),
@@ -449,23 +461,28 @@ class Orchestrator:
                 return True
         return False
 
-    def _payload(self, tools):
+    def _payload(self, tools, instruction='', output_cap=None):
         last = self.state.get('last_call') or {}
         partial = last.get('partial') or {}
-        capped = (last.get('stats') or {}).get('done_reason') == 'length'
+        capped = (output_cap is None and not last.get('preparation')
+                  and (last.get('stats') or {}).get('done_reason') == 'length')
         has_results = self._has_findings()
         recovery = ((capped and has_results and bool(partial.get('content', '').strip()) and not partial.get('tool_calls'))
-                    or last.get('final_recovery') is True)
-        if recovery or self.state.get('force_final'):
+                    or last.get('final_recovery') is True) and output_cap is None and not last.get('preparation')
+        if recovery or self.state.get('force_final') and output_cap is None:
             tools = []  # Reuse saved evidence instead of delegating completed work again.
         synthesis = not tools or has_results
-        predict = FINAL_PREDICT if synthesis or capped else MAIN_PREDICT
+        final_predict = output_limit(self.agent, 'assistant_final', FINAL_PREDICT)
+        main_predict = output_limit(self.agent, 'assistant', MAIN_PREDICT)
+        predict = output_cap if output_cap is not None else final_predict if synthesis or capped else main_predict
         if recovery and type(last.get('output_limit')) is int:
             predict = max(predict, last['output_limit'])
         if capped:
-            previous = last.get('output_limit', (last.get('stats') or {}).get('eval_count', MAIN_PREDICT))
+            previous = last.get('output_limit', (last.get('stats') or {}).get('eval_count', main_predict))
             if type(previous) is int and previous > 0:
                 predict = max(predict, previous * 2)
+        if is_ds4(self.agent):
+            predict = min(predict, output_limit(self.agent, 'assistant_recovery', predict))
         remaining = getattr(self.agent.client, 'remaining_tokens', None)
         if isinstance(remaining, (int, float)) and math.isfinite(remaining):
             predict = min(predict, int(remaining))
@@ -473,7 +490,7 @@ class Orchestrator:
             raise AgentError('The shared generated-token budget is exhausted')
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
-            'messages': [{'role': 'system', 'content': POLICY + self._numerics_policy(tools) + (
+            'messages': [{'role': 'system', 'content': (instruction if output_cap is not None else POLICY + instruction) + self._numerics_policy(tools) + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
                 'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (
@@ -548,7 +565,7 @@ class Orchestrator:
         # old turns, slicing a statement or splitting a native tool transaction.
         payload, allocation = allocate_call(self.agent.client, payload, predict,
                                             explicit_cap=getattr(self.agent, 'document_output_cap', None))
-        if tools and self.state['actions'] > 0 and allocation['available_output_tokens'] < FINAL_PREDICT:
+        if output_cap is None and tools and self.state['actions'] > 0 and allocation['available_output_tokens'] < final_predict:
             # Preserve enough physical room for a supported answer before a
             # sequence of new source reads fills the working context entirely.
             self.state['force_final'] = True
@@ -571,7 +588,7 @@ class Orchestrator:
             return ''
         return NUMERICS_POLICY  # The skill's full instructions are in the tool description.
 
-    def _stream(self, payload):
+    def _stream(self, payload, output_char_limit=None):
         self.agent.last_stats = {}
         assistant = {'role': 'assistant', 'content': ''}
         calls, done = [], False
@@ -593,6 +610,9 @@ class Orchestrator:
                     if value:
                         if not isinstance(value, str):
                             raise AgentError('Nontext output from the main mathematical agent')
+                        if (output_char_limit is not None
+                                and sum(len(assistant.get(k, '')) for k in ('content', 'thinking')) + len(value) > output_char_limit):
+                            raise AgentError('Proof preparation exceeded its short text allowance')
                         assistant[key] = assistant.get(key, '') + value
                         self.emit(kind, value)
                 calls.extend(copy.deepcopy(message.get('tool_calls') or []))
