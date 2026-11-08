@@ -86,6 +86,7 @@
 .task-error { font-size: 12px; color: var(--red); }
 
 .workspace {
+  position: relative;
   border-top: 1px solid var(--line); background: var(--paper-3);
   padding: 10px 14px calc(12px + env(safe-area-inset-bottom)); display: grid; gap: 6px;
 }
@@ -97,6 +98,26 @@
 .model-ok { background: var(--green); }
 .model-bad { background: var(--red); }
 .pair-url { font-size: 13px; overflow-wrap: anywhere; background: var(--code-bg); padding: 4px 6px; border-radius: 4px; display: inline-block; }
+.account-menu { position: relative; min-width: 0; margin-top: 3px; }
+.account-button { display: flex; align-items: center; gap: 9px; padding: 7px 5px; border-radius: 7px; cursor: pointer; list-style: none; }
+.account-button::-webkit-details-marker { display: none; }
+.account-button:hover, .account-menu[open] .account-button { background: var(--hover); }
+.account-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.account-avatar { display: grid; place-items: center; width: 29px; height: 29px; flex: none; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--ink-soft); color: var(--ink); font-size: 13px; font-weight: 700; }
+.account-email { min-width: 0; flex: 1; font-size: 12px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.account-more { flex: none; font-size: 20px; color: var(--text-3); }
+.account-popover { position: absolute; z-index: 35; left: -6px; right: -6px; bottom: calc(100% + 7px); max-height: calc(100dvh - 120px); overflow-y: auto; display: grid; gap: 14px; padding: 15px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper); box-shadow: var(--shadow-lg); }
+.account-menu:not([open]) .account-popover { display: none; }
+.account-heading { display: grid; gap: 3px; }
+.account-heading strong { font-size: 13px; overflow-wrap: anywhere; }
+.account-allowance { display: grid; gap: 7px; }
+.account-allowance p { margin: 0; }
+.account-budget-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.account-budget-title span, .account-usage dd { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.account-usage { display: grid; gap: 5px; margin: 3px 0; font-size: 12.5px; }
+.account-usage > div { display: flex; justify-content: space-between; gap: 10px; }
+.account-usage dt { color: var(--text-3); }
+.account-usage dd { margin: 0; }
 
 .topbar {
   display: none; align-items: center; gap: 10px; flex: none;

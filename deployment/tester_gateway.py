@@ -168,7 +168,20 @@ class Handler(BaseHTTPRequestHandler):
         email = self.server.verifier.email(assertions[0])
         if email not in settings.tenants:
             raise ValueError('Identity is not invited')
-        return settings.tenants[email]
+        return email, settings.tenants[email]
+
+    def account(self, email):
+        body = json.dumps({'email': email, 'logout_url': 'https://' + self.server.settings.hostname
+                           + '/cdn-cgi/access/logout'}).encode()
+        self.send_response_only(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'private, no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def proxy(self):
         connection = None
@@ -192,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
             try:
-                tenant = self.identity()
+                email, tenant = self.identity()
             except (ValueError, KeyError, jwt.PyJWTError, OSError):
                 return self.refuse(403)
             lengths = self.headers.get_all('Content-Length', [])
@@ -205,6 +218,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length else None
             if body is not None and len(body) != length:
                 return self.refuse(400)
+            if target.path == '/api/account':
+                return self.account(email) if self.command in {'GET', 'HEAD'} else self.refuse(405)
             token = tenant.token()
             origin = 'http://127.0.0.1:' + str(tenant.port)
             headers = {name: value for name, value in self.headers.items() if name.lower() in REQUEST_HEADERS}

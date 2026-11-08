@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, type ChatListItem, type TaskSummary } from '../api'
+import { api, ApiError, type Account, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
 import { ago, count, duration } from '../format'
@@ -355,6 +355,77 @@ export function WorkspaceSwitch() {
   )
 }
 
+function PilotAllowance({ allowance, detailed = false }: { allowance: TesterAllowance; detailed?: boolean }) {
+  const outputUnit = 1000 * Number(allowance.output_per_million)
+  if (!Number.isFinite(outputUnit) || outputUnit <= 0) return null
+  const inputWeight = Number(allowance.input_per_million) / Number(allowance.output_per_million)
+  const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString(undefined, { maximumFractionDigits: 3 })
+  const hint = `Across all conversations. Each input token counts as ${inputShare} of an output token; output includes thinking. This conservative pilot allowance uses Standard list prices; actual billing may be lower. The meter includes reservations.`
+  const money = (nanos: number) => '$' + (nanos / 1e9).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  return (
+    <div className={detailed ? 'account-allowance' : undefined} title={hint}>
+      {detailed && <div className="account-budget-title"><strong>Pilot allowance (USD)</strong><span>{money(allowance.limit_nanos)}</span></div>}
+      <Meter label={detailed ? 'Output-equivalent tokens' : 'Pilot allowance'}
+        used={(allowance.charged_nanos + allowance.reserved_nanos) / outputUnit / 1e6}
+        limit={allowance.limit_nanos / outputUnit / 1e6} unit="M" decimals={3} title={hint} />
+      {detailed && <dl className="account-usage">
+        <div><dt>Used</dt><dd>{money(allowance.charged_nanos)}</dd></div>
+        <div><dt>Reserved</dt><dd>{money(allowance.reserved_nanos)}</dd></div>
+        <div><dt>Remaining</dt><dd>{money(Math.max(0, allowance.limit_nanos - allowance.charged_nanos - allowance.reserved_nanos))}</dd></div>
+      </dl>}
+      <p className="muted small">Output-equivalent tokens: {count(allowance.charged_nanos / outputUnit)} used.</p>
+      {allowance.reserved_nanos > 0 && <p className="muted small">{count(allowance.reserved_nanos / outputUnit)} reserved for unfinished or unreported calls.</p>}
+      {detailed && <>
+        <p className="muted small">{count(allowance.input_tokens)} input · {count(allowance.output_tokens)} output tokens, including thinking.</p>
+        <p className="muted small">Each input token counts as {inputShare} of an output token. Unused reservations are released when usage is known.</p>
+      </>}
+    </div>
+  )
+}
+
+function AccountMenu({ account, allowance }: { account: Account; allowance?: TesterAllowance | null }) {
+  const menu = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (menu.current && !menu.current.contains(event.target as Node)) menu.current.open = false
+    }
+    // A restored document must reauthenticate before showing any saved history.
+    const hide = () => { document.documentElement.style.visibility = 'hidden' }
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) { hide(); window.location.reload() }
+    }
+    document.addEventListener('pointerdown', dismiss)
+    window.addEventListener('pagehide', hide)
+    window.addEventListener('pageshow', restore)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      window.removeEventListener('pagehide', hide)
+      window.removeEventListener('pageshow', restore)
+      document.documentElement.style.visibility = ''
+    }
+  }, [])
+  return (
+    <details className="account-menu" ref={menu} onKeyDown={(event) => {
+      if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus() }
+    }}>
+      <summary className="account-button" title={account.email} aria-label={`Account for ${account.email}`}>
+        <span className="account-avatar" aria-hidden="true">{account.email.slice(0, 1).toUpperCase()}</span>
+        <span className="account-email">{account.email}</span>
+        <span className="account-more" aria-hidden="true">···</span>
+      </summary>
+      <div className="account-popover">
+        <div className="account-heading"><span className="muted small">Signed in</span><strong>{account.email}</strong></div>
+        {allowance ? <PilotAllowance allowance={allowance} detailed />
+          : <p className="muted small">This account has no tester spending limit.</p>}
+        <button type="button" className="btn btn-block" onClick={() => {
+          document.documentElement.style.visibility = 'hidden'
+          window.location.replace('/cdn-cgi/access/logout')
+        }}>Sign out</button>
+      </div>
+    </details>
+  )
+}
+
 function WorkspacePanel() {
   const app = useApp()
   const { status } = app
@@ -362,6 +433,30 @@ function WorkspacePanel() {
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
   const [access, setAccess] = useState(false)
+  const [account, setAccount] = useState<Account | null>(null)
+  const accountEmail = useRef<string | null>(null)
+  useEffect(() => {
+    let current = true
+    const load = () => { void api.account().then((value) => {
+      if (!current) return
+      if (accountEmail.current && (!value || accountEmail.current !== value.email)) {
+        document.documentElement.style.visibility = 'hidden'
+        window.location.replace('/')
+        return
+      }
+      accountEmail.current = value?.email || null
+      setAccount(value)
+    }).catch((error: unknown) => {
+      if (current && accountEmail.current && error instanceof ApiError && [401, 403].includes(error.status)) {
+        document.documentElement.style.visibility = 'hidden'
+        window.location.replace('/')
+      }
+    }) }
+    const focus = () => { if (accountEmail.current) load() }
+    load()
+    window.addEventListener('focus', focus)
+    return () => { current = false; window.removeEventListener('focus', focus) }
+  }, [status?.instance])
   const hasAllowance = Boolean(status?.tester_allowance)
   useEffect(() => {
     if (!hasAllowance) return
@@ -370,10 +465,6 @@ function WorkspacePanel() {
   }, [hasAllowance])
   if (!status) return null
   const allowance = status.tester_allowance
-  const outputUnit = allowance ? 1000 * Number(allowance.output_per_million) : 0
-  const inputWeight = allowance ? Number(allowance.input_per_million) / Number(allowance.output_per_million) : 0
-  const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString(undefined, { maximumFractionDigits: 3 })
-  const allowanceHint = `Across all conversations. Each input token counts as ${inputShare} of an output token; output includes thinking. This conservative pilot allowance uses list prices; actual billing may be lower. The meter includes reservations.`
   const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
   const readLabel = readable.length === 4 ? 'Reads all file types' : readable.length ? 'Reads ' + readable.join(', ') : 'Reads no files by itself'
   const reachable = status.ollama.reachable
@@ -401,14 +492,8 @@ function WorkspacePanel() {
       <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
         Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
       </button>
-      {allowance && outputUnit > 0 && (
-        <div title={allowanceHint}>
-          <Meter label="Pilot allowance" used={(allowance.charged_nanos + allowance.reserved_nanos) / outputUnit / 1e6}
-            limit={allowance.limit_nanos / outputUnit / 1e6} unit="M" decimals={3} title={allowanceHint} />
-          <p className="muted small">Output-equivalent tokens: {count(allowance.charged_nanos / outputUnit)} used.</p>
-          {allowance.reserved_nanos > 0 && <p className="muted small">{count(allowance.reserved_nanos / outputUnit)} reserved for unfinished or unreported calls.</p>}
-        </div>
-      )}
+      {account ? <AccountMenu account={account} allowance={allowance} />
+        : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a hosted account menu with verified email, Access logout, dollar allowance
+  details and input/output usage. Preserve local GUI behavior and all saved
+  work, model settings and Proof budgets.
+
 - Add an optional Cloudflare Access gateway for hosted pilots. Verify signed
   identities before routing to fixed, separate backend workspaces; keep pairing
   credentials server-side and preserve streamed responses and same-origin checks.

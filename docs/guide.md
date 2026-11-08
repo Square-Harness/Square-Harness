@@ -36,10 +36,16 @@ Conversations and files remain saved there when the browser closes. Separate
 service accounts and sandbox runtimes are required for isolation between testers;
 the Access login alone does not provide that isolation.
 
+In a hosted pilot, the account button at the bottom of the sidebar shows the
+verified email and opens the user's allowance details and Sign out action.
+Signing out ends the browser's Access session; saved files, conversations and
+running work remain on the server. A local installation without the hosted
+gateway keeps its existing interface.
+
 Hosted testers may have a separate allowance shared across their conversations.
 Its meter counts output-equivalent tokens, including thinking, with input
 weighted by the configured input/output price ratio. At conservative Standard
-list prices of $0.20/M input and $0.60/M output, a $2.50 allowance is 4.167M
+list prices of $0.20/M input and $0.60/M output, a $2 allowance is 3.333M
 output-equivalent tokens; each input token consumes one third of an output token.
 This is conservative allowance accounting, not the provider's bill: cached input
 uses the uncached price and promotional charges may be lower. Active calls reserve
@@ -47,6 +53,8 @@ their worst-case allowance; complete usage releases the unused part. Unreported
 or interrupted calls retain reservations. A small remaining balance may therefore
 be insufficient to start a full-length call. This pilot limit is separate from
 each Proof job's existing solve/review budgets.
+The account menu separates used, reserved and available amounts, with actual
+input/output counts and the same output-equivalent token meter.
 
 The DS4 launcher uses Standard service by default. Add
 `--service-tier priority` to request DeepInfra's Priority service for all model

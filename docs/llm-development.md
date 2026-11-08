@@ -63,7 +63,7 @@ Version 0.5.1, experimental. The source of truth for the version is
     `deployment/requirements-testers.txt` dependency to exercise the gateway
     checks rather than skip them.
 
-  `npm test` in `frontend/` runs one test.
+  `npm test` in `frontend/` runs the frontend interaction tests.
 - Add a test only when it drives real entry points and would fail on a genuine
   regression of user-visible behaviour. Prefer extending an existing end-to-end
   test to adding a unit test. Do not add tests that restate implementation
@@ -473,6 +473,12 @@ Pairing credentials stay in private files. Check the public Host and mutating
 request Origin before rewriting them for the backend; strip client credentials,
 backend cookies and pairing redirects. Preserve SSE streaming and disable caching.
 The optional JWT dependency belongs to this deployment layer, not SH's core.
+
+`GET /api/account` exposes only the validated email and a logout URL derived
+from the configured hostname. It applies the same identity checks as workspace
+requests. Local 404 responses disable the account menu. Hosted documents reload
+after a restored browser-cache entry or an identity change, and lose their old
+content before browser caching; signing out does not mutate server history.
 
 `hosted_quota.py` is opt-in through `SH_DEEPINFRA_QUOTA_FILE`. It reserves
 the full context input ceiling plus configured output before model dispatch,

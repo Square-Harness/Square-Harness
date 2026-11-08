@@ -158,6 +158,7 @@ class TesterGatewayTests(unittest.TestCase):
         for token in bad:
             with self.subTest(token_kind=bad.index(token)):
                 self.assertEqual(self.request(token=token)[0], 403)
+                self.assertEqual(self.request(path='/api/account', token=token)[0], 403)
         self.assertEqual(self.request(headers={'Cf-Access-Jwt-Assertion': ''})[0], 403)
         self.assertEqual(self.request(headers={'Host': 'evil.example.test'})[0], 403)
         self.assertEqual(self.request('POST', headers={'Origin': 'https://evil.example.test'}, body=b'x')[0], 403)
@@ -178,6 +179,19 @@ class TesterGatewayTests(unittest.TestCase):
             self.assertEqual(self.request()[0], 503)
         finally:
             token_file.chmod(0o600)
+        self.assertFalse(any(backend.seen for backend in self.backends))
+
+        code, headers, body = self.request(path='/api/account',
+            headers={'Cf-Access-Authenticated-User-Email': 'bob@example.test'})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body), {'email': 'alice@example.test',
+            'logout_url': 'https://sh.example.test/cdn-cgi/access/logout'})
+        self.assertEqual(headers['Cache-Control'], 'private, no-store')
+        self.assertNotIn('Set-Cookie', headers)
+        self.assertNotIn(self.backends[0].token.encode(), body)
+        self.assertEqual(json.loads(self.request(path='/api/account', token=self.token('bob@example.test'))[2])['email'],
+                         'bob@example.test')
+        self.assertEqual(self.request('POST', path='/api/account', body=b'{}')[0], 405)
         self.assertFalse(any(backend.seen for backend in self.backends))
 
         code, headers, body = self.request('POST', '/api/files/upload?name=note.txt', body=b'alice only',

@@ -130,6 +130,13 @@ through Tunnel, with no public backend ports. Copy existing mail DNS records
 before moving nameservers, and migrate DNSSEC rather than leaving an old DS key.
 Do not cache private app responses or enable prompt/body logging.
 
+The authenticated gateway endpoint `GET /api/account` returns only the verified
+email and the configured application's same-origin Access logout URL. It never
+returns a JWT, provider key or workspace token. The frontend uses this optional
+endpoint for its account menu; ordinary local backends return 404 and keep the
+local interface. A public presentation website and a protected app subdomain can
+share a domain while only the app is routed through this gateway.
+
 For a capped Standard-service tester, configure `SH_DEEPINFRA_QUOTA_FILE` as an
 absolute file outside served workspaces, inside a tenant-owned mode-0700 directory.
 The created SQLite file is mode 0600. `SH_DEEPINFRA_QUOTA_USD` defaults to `2.50`;

@@ -57,6 +57,11 @@ export type TesterAllowance = {
   output_per_million: string
 }
 
+export type Account = {
+  email: string
+  logout_url: string
+}
+
 export type Status = {
   version: string
   instance: string
@@ -489,6 +494,15 @@ export type StartResult = { task: TaskSummary; id: string | null }
 
 export const api = {
   status: () => get<Status>('/api/status'),
+  account: async (): Promise<Account | null> => {
+    try {
+      const account = await get<Account>('/api/account')
+      return typeof account.email === 'string' && typeof account.logout_url === 'string' ? account : null
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
   login: (token: string) => post<{ ok: boolean }>('/api/login', { token }),
   task: () => get<TaskSnapshot>('/api/task'),
   pause: (task: string) => post<{ task: TaskSummary }>('/api/task/pause', { task }),
