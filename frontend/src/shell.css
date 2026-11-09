@@ -5,9 +5,7 @@
 
 .app { display: flex; height: 100dvh; width: 100%; }
 .nav { display: contents; }
-.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper); }
-.app-tools { display: flex; flex: none; align-items: center; justify-content: flex-end; gap: 10px; min-height: 44px; padding: 4px 16px; border-bottom: 1px solid var(--line); background: var(--paper-2); }
-.app-tools > .topbar { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; }
+.main { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper); }
 
 .splash, .login { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
 
@@ -150,8 +148,8 @@
 .draft-backup { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
 .picker-project-hint { margin: 4px 8px 8px; }
 
-.app-tools .feedback-open { display: flex; flex: none; align-items: center; gap: 6px; min-height: 36px; padding: 0 8px; border-radius: 6px; }
-.feedback-open:hover { background: var(--hover); }
+.main > .feedback-open { position: absolute; top: 4px; right: 16px; z-index: 10; display: flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--text-3); }
+.main > .feedback-open:hover { background: var(--hover); color: var(--ink); text-decoration: none; }
 .feedback-open:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .feedback-open > span { font-size: 17px; line-height: 1; }
 .feedback-dialog .field { margin-bottom: 16px; }
@@ -208,14 +206,14 @@
 }
 
 @media (max-width: 760px) {
-  .app-tools { padding: calc(6px + env(safe-area-inset-top)) 10px 6px; }
+  .main > .feedback-open { top: calc(6px + env(safe-area-inset-top)); right: 10px; min-height: 36px; }
   .nav {
     display: flex; position: fixed; z-index: 50; inset: 0 auto 0 0; max-width: 100vw;
     transform: translateX(-104%); transition: transform 0.22s ease; box-shadow: var(--shadow-lg);
   }
   .nav-open { transform: none; }
   .sidebar, .sidebar-inner { width: min(292px, calc(100vw - 20px)); }
-  .topbar { display: flex; }
+  .topbar { display: flex; padding-right: 112px; }
   .side-hide, .side-spine { display: none; }
 }
 

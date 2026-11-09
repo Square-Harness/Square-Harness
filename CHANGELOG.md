@@ -5,7 +5,8 @@
 - Continue a manuscript review from the conversation without attaching the
   manuscript again. Replies to referee comments keep the previous review and
   reassess the disputed points in a linked follow-up.
-- Keep Feedback visible when the sidebar is hidden, and retain the originating
+- Keep Feedback visible as a small upper-right button when the sidebar is hidden,
+  and retain the originating
   conversation when reporting from a worker result. Add optional screenshot
   capture with region selection, alongside existing screenshot paste and upload.
 - Show skill descriptions on hover and keyboard focus, with consistent title

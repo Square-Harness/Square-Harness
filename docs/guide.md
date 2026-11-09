@@ -185,9 +185,10 @@ precedence. Request a further critique or review through the conversation or an
 explicit `@` skill. Saved reviews and Proof's solver/reviewer cycle remain
 available.
 
-The **Feedback** button stays visible above the work area, including when the
-sidebar is hidden. It accepts a bug report, suggestion or a problem with a
-mathematical answer. You can paste or attach up to three screenshots. On browsers
+The small **Feedback** button stays visible in the work area's upper-right
+corner, including when the sidebar is hidden. It accepts a bug report,
+suggestion or a problem with a mathematical answer. You can paste or attach up to
+three screenshots. On browsers
 that support screen capture, **Take screenshot** temporarily hides the form:
 choose the tab or window in the browser's sharing dialog, then select a region
 from the captured image. Confirm the region to attach it, or cancel to return to

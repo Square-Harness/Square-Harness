@@ -341,7 +341,8 @@ is checkpointed privately, and only acknowledged messages and files count as
 delivered. Webhook-only installations retain their previous summary fallback.
 Trace preview is optional; the unchecked-by-default checkbox remains the consent.
 
-Keep one Feedback dialog owner outside the collapsible sidebar. Resolve its
+Keep one Feedback dialog owner outside the collapsible sidebar, with a compact
+floating opener in the work area's upper-right corner. Resolve its
 conversation from the current chat or a validated worker page's originating
 chat, and freeze that context when the form opens. Screenshot capture must be
 started by an explicit click, stop every media track after a single frame, and

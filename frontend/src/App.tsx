@@ -56,10 +56,8 @@ export function App() {
       {listHidden && <SideSpine route={route} />}
       {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
       <main className="main">
-        <div className="app-tools">
-          <TopBar route={route} onMenu={() => setDrawer(true)} />
-          <FeedbackButton chatId={feedbackChatId} chatTitle={app.chats?.find((chat) => chat.id === feedbackChatId)?.title} />
-        </div>
+        <TopBar route={route} onMenu={() => setDrawer(true)} />
+        <FeedbackButton chatId={feedbackChatId} chatTitle={app.chats?.find((chat) => chat.id === feedbackChatId)?.title} />
         {app.connection === 'reconnecting' && (
           <div className="connection" role="status">Reconnecting to the harness. Saved work is safe; live updates resume when it answers.</div>
         )}
