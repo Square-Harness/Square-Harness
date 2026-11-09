@@ -45,5 +45,4 @@ Maintainers decide what is merged. Public access allows proposed changes and
 forks; it does not grant write access to this repository. Contributions use the
 project's [PolyForm Noncommercial License 1.0.0](LICENSE.md). Contributors retain
 their copyright. This policy does not grant maintainers additional commercial
-or relicensing rights over contributions. Existing Apache-2.0 permissions are
-described in [NOTICE](NOTICE).
+or relicensing rights over contributions.

@@ -55,17 +55,19 @@ jobs:
           assert files('mathagent').joinpath('numerics', 'docker', 'requirements.lock').is_file()
           static = files('mathagent').joinpath('gui', 'static')
           for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt',
-                       'LICENSE.txt', 'LICENSE-APACHE-2.0.txt', 'NOTICE.txt'):
+                       'LICENSE.txt', 'NOTICE.txt'):
               assert static.joinpath(name).is_file(), name
           assert any(item.name.endswith('.js') for item in static.joinpath('assets').iterdir())
           print('The visual interface is present in the installed wheel.')
           dist = distribution('square-harness')
-          assert dist.metadata['License-Expression'] == 'PolyForm-Noncommercial-1.0.0 AND Apache-2.0'
+          assert dist.metadata['License-Expression'] == 'PolyForm-Noncommercial-1.0.0'
           docker = files('mathagent').joinpath('numerics', 'docker')
-          for name in ('LICENSE.md', 'LICENSE-APACHE-2.0', 'NOTICE'):
+          for name in ('LICENSE.md', 'NOTICE'):
               installed = next(path for path in dist.files if str(path).endswith('.dist-info/licenses/' + name))
               assert dist.locate_file(installed).read_bytes() == docker.joinpath(name).read_bytes(), name
-          print('Both licenses and notices are present in the wheel and Docker build context.')
+          assert set(dist.metadata.get_all('License-File')) == {'LICENSE.md', 'NOTICE'}
+          assert not any('LICENSE-APACHE-2.0' in str(path) for path in dist.files)
+          print('PolyForm license and notices are present in the wheel and Docker build context.')
           PY
 
   interface:

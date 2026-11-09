@@ -8,7 +8,7 @@ prune .mathagent
 global-exclude .env .env.* *.pem *.key
 recursive-include mathagent/gui/static *
 recursive-include mathagent/skills *.md
-recursive-include mathagent/numerics/docker Dockerfile *.py *.in *.lock LICENSE.md LICENSE-APACHE-2.0 NOTICE
+recursive-include mathagent/numerics/docker Dockerfile *.py *.in *.lock LICENSE.md NOTICE
 include frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.tests.json frontend/vite.config.ts frontend/index.html
 recursive-include frontend/src *
 recursive-include frontend/public *

@@ -105,8 +105,6 @@ decide which contributions are merged.
 [PolyForm Noncommercial License 1.0.0](LICENSE.md): free use, modification and
 redistribution for noncommercial purposes, including personal research and use
 by universities and public research organisations. Commercial use requires a
-separate license from the relevant copyright holders. Previously published
-Apache-2.0 code retains its permissions; see [NOTICE](NOTICE) and
-[LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
+separate license from the relevant copyright holders.
 Model weights, dependencies and retrieved papers retain their own licenses.
 See [NOTICE](NOTICE) for attribution.
