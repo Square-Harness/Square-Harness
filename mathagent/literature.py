@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Bounded, opt-in literature retrieval with local, source-addressable evidence.
 
 Network responses are untrusted source data, never agent instructions. Credentials

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Bounded mathematical assistant with resumable delegation to existing modes.
 
 The controller owns the model conversation and scheduling decisions. A caller

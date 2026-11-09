@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Style profiles: condense an author's earlier .tex articles into a small reusable file.
 
 The controller extracts what can be read exactly (macro definitions and how often the

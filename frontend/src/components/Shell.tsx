@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, type Account, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'

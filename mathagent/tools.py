@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Explicit tool registry; workspace-scoped text access and approved mutations."""
 import difflib
 import json

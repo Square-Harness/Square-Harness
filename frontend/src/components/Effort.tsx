@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 // Effort: one control instead of budget fields. The levels and their budgets are in effort.ts.
 import { useEffect, useRef, type KeyboardEvent } from 'react'
 import type { Defaults } from '../api'

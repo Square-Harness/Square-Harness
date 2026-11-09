@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Relicense Square Harness under the PolyForm Noncommercial License 1.0.0
+  (`LICENSE.md`, also served by the interface at `/LICENSE.txt`), replacing the
+  Apache License 2.0. Source files carry an SPDX licence header. Version 1.0.0
+  and earlier remain available under the Apache License 2.0.
+
 - Keep image attachments on their original conversation message. Text-only
   follow-ups no longer inherit a new attachment or move earlier images to the
   latest model request; saved conversations and paused work retain their sources.

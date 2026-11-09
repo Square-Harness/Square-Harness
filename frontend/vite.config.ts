@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 

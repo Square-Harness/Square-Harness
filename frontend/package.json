@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "description": "Visual interface for Square Harness, built into mathagent/gui/static",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "engines": {
     "node": ">=22.18.0"

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type FolderListing, type ReadSettings } from '../api'
 import { workspaceBusy } from '../concurrency'

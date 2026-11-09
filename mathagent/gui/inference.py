@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Fair, cancelable admission to the GUI's shared inference connections.
 
 Each task keeps its own token budget. This pool only bounds simultaneous model

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Manage the Python sandbox: ``python -m mathagent.numerics <command>``.
 
   build              Build the pinned sandbox image

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Conservative source-task selection and a bounded, source-addressable overview.
 
 The overview is a navigation aid, not a claim to have read a whole manuscript.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 // Write the licences of every production dependency next to the built bundle.
 // The minified bundle keeps no licence comments, and MIT/ISC/OFL require the notices.
 import { execFileSync } from 'node:child_process'

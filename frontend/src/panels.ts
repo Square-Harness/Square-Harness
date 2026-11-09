@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 // Side panels the reader can slide away on wide screens: the notebook's list on the
 // left and a job's overview (budget, candidates, checks) on the right. Remembered
 // per browser; phones and narrow windows ignore it.

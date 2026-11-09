@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Direct and proof v0.5 benchmark on the pinned HyperQwen A10 serving profile."""
 import argparse
 import hashlib

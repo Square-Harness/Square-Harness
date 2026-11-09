@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Read-only web pages and paginated bibliography evidence.
 
 Retrieval, public-address validation, offline permission and budgets belong to

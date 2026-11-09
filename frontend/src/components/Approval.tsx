@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 // The browser's version of the terminal's "Approve this action? [y/N]".
 import { useState } from 'react'
 import { api } from '../api'

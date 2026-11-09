@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+/* Copyright (c) 2026 ENPC / SquareHarness */
+
 .mode-message { position: relative; flex: 1; min-width: 0; }
 .mode-message textarea { display: block; width: 100%; }
 .selected-mode-wrap { position: relative; display: block; width: fit-content; max-width: 100%; margin-bottom: 7px; }

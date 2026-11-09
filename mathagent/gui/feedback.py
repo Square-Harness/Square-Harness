@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Private, explicit-consent feedback snapshots. Never follows workspace references."""
 import base64
 import binascii

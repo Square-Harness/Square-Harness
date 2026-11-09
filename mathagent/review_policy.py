@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Prompts and JSON schemas of the four review kinds: quick check, paper review, detailed review, explanation.
 
 Kept apart from proof_policy.py on purpose: that file's hash is part of every saved

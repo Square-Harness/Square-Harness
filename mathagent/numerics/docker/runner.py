@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """In-container driver: run one untrusted experiment, report one framed JSON result.
 
 stdin: ``{code, nonce, timeout, seed, parameters, limits}``. stdout (the protocol):

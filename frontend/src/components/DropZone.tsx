@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { beginUpload, dropTarget, useUploadsPending } from '../drop'

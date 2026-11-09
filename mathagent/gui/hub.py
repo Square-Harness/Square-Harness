@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Bridge the synchronous engine to browser clients: events, workers, approvals.
 
 The engine is unchanged. For each task the hub builds the same objects as the

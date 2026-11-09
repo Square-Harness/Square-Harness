@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 export function ago(iso: string | number | null | undefined): string {
   if (!iso) return ''
   const time = typeof iso === 'number' ? iso * 1000 : Date.parse(iso)

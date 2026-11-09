@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Literature review: a verified, themed reading list for a mathematical topic.
 
 The controller does the systematic work: keyword sweeps over Crossref, arXiv,

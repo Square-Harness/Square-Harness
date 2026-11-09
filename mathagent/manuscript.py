@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """A map of a manuscript: sections, numbered statements, their proofs and what each proof uses.
 
 Pure and deterministic: no model call, no network. The review workflows use it so

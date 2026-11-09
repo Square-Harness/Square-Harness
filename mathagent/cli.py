@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Small terminal UI; optional Rich/prompt_toolkit, plain fallback without installs."""
 import argparse
 import copy

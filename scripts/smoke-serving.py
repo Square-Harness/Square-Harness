@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Accept a llama.cpp endpoint only after protocol, context and observed-decoding checks.
 
 API contract: llama.cpp 2145525a4081d66ff1a87cf43ef809f95a85ac0c,

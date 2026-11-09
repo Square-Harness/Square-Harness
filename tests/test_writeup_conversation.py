@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Compile a conversation write-up with figures, a table, citations and honest draft status."""
 import base64
 import json

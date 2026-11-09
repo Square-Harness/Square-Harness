@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Run the legacy V100 serving preset with matched initial solves and extra proof verification."""
 import argparse
 import hashlib

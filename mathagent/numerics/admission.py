@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Optional process-wide numerical capacity shared by separate SH accounts.
 
 The administrator creates the directory and lock files; clients only lock them.

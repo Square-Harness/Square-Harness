@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Write-up: turn checked material into a LaTeX document in the user's notation and style.
 
 The material is what the user has checked: pinned notes, a draft or a PDF, or the record of an

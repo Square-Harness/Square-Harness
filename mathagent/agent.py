@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Native Ollama HTTP client and bounded, backend-independent agent loop."""
 import copy
 import json

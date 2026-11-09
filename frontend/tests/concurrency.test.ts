@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 ENPC / SquareHarness
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { TaskEntry, TaskSnapshot, TaskSummary } from '../src/api.ts'

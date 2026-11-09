@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Skills with Agent Skills style metadata (``SKILL.md`` YAML frontmatter).
 
 The report skills (literature, review, ...) are plain Markdown loaded by their

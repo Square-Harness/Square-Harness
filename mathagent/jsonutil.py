@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Decode model JSON without depending on provider grammar support.
 
 Extraction tolerates prose, Markdown fences and thinking blocks. Consumers

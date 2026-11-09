@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 ENPC / SquareHarness
+
 """Four review workflows: a quick proof check, paper review, detailed review and explanation.
 
 The controller does the systematic work. It maps the manuscript (manuscript.py), picks
