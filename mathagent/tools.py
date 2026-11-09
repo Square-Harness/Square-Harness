@@ -48,14 +48,16 @@ codecs.register_error('square-cp1252', _windows_1252)
 def _codec(name):
     name = name.strip().decode('ascii', errors='ignore').lower()
     name = INPUTENC.get(name) or TEX_ENCODINGS.get(name) or name
+    if name in ('utf8', 'utf8x', 'utf-8 unicode'):
+        return 'utf-8'
     try:
-        return codecs.lookup(name).name if name not in ('utf8', 'utf-8', 'utf-8 unicode') else None
+        return codecs.lookup(name).name
     except LookupError:
         return None
 
 
 def _declared_encoding(data):
-    """The 8-bit encoding a TeX source declares: \\usepackage[latin1]{inputenc} or % !TEX encoding = ..."""
+    """The encoding a TeX source declares, including explicit UTF-8; None if undeclared."""
     for line in data.splitlines():
         magic = _MAGIC.match(line)
         if magic:
@@ -63,8 +65,6 @@ def _declared_encoding(data):
         code = re.split(rb'(?<!\\)%', line, maxsplit=1)[0]
         for options, name in _DECLARATION.findall(code):
             for option in reversed((options or name).split(b',')):
-                if option.strip().lower() in (b'utf8', b'utf8x'):
-                    return None
                 codec = _codec(option)
                 if codec:
                     return codec
@@ -83,6 +83,8 @@ def decode_text(data, name):
             text, encoding = data.decode('utf-8-sig'), None
         except UnicodeDecodeError:
             encoding = _declared_encoding(data) or FALLBACK
+            if encoding in ('utf-8', 'utf-8-sig'):
+                encoding = FALLBACK  # Keep recovering older accented bytes in files declaring UTF-8.
             text = data.decode('utf-8', errors='square-cp1252') if encoding == FALLBACK else data.decode(encoding, errors='replace')
     if '\x00' in text:
         raise ValueError(f'{name} is not a text file (it contains NUL bytes)')
@@ -90,11 +92,11 @@ def decode_text(data, name):
 
 
 def unicode_source(text, encoding):
-    """A decoded copy of a file that declared an 8-bit encoding now declares UTF-8, as it is written out.
+    """A decoded copy of a legacy or UTF-16 file declares UTF-8 when written out.
 
     Only copies pinned or saved by jobs: the user's own file keeps its encoding and declaration.
     """
-    if encoding in (None, FALLBACK, 'utf-16'):
+    if encoding in (None, FALLBACK):
         return text
     return _TEXT_DECLARATION.sub(lambda m: (m.group(1) + 'utf8' + m.group(2) if m.group(1) else
                                             m.group(3) + 'utf8' + m.group(4) if m.group(3) else m.group(5) + 'UTF-8'), text)
@@ -234,13 +236,14 @@ class Workspace:
         original = p.stat() if p.exists() else None
         old = self.text(p) if original is not None else ''
         encoding = self.encodings.get(p) if original is not None else None
-        kept = 'utf-8' if encoding in (None, FALLBACK) else encoding  # a declared encoding stays true
+        # The replacement may explicitly change/remove its declaration, or be a new file.
+        kept = _declared_encoding(content.encode('utf-8')) or 'utf-8'
         try:
             data = content.encode(kept)
         except UnicodeEncodeError as exc:
-            raise ValueError(f'{path} is encoded in {ENCODING_NAMES.get(kept, kept)}, which cannot hold '
+            raise ValueError(f'{path} declares {ENCODING_NAMES.get(kept, kept)}, which cannot hold '
                              f'{content[exc.start:exc.end]!r}; no file changed. Save the file as UTF-8 first.') from None
-        note = (f' (kept in {ENCODING_NAMES.get(kept, kept)})' if kept != 'utf-8' else
+        note = (f' (saved as {ENCODING_NAMES.get(kept, kept)})' if kept != 'utf-8' else
                 ' (saved as UTF-8; it was not valid UTF-8)' if encoding == FALLBACK else '')
         diff = ''.join(difflib.unified_diff(old.splitlines(True), content.splitlines(True),
                                            fromfile=path + ' (old)', tofile=path + ' (new)'))

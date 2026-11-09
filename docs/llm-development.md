@@ -137,7 +137,10 @@ Version 1.0. The source of truth for the machine-readable version is
   `tools.decode_text`: UTF-8, else the 8-bit encoding the file declares, else
   UTF-8 with Windows-1252 for the bytes that are not UTF-8; every error names the
   file. Pinned and saved copies are Unicode and declare UTF-8
-  (`tools.unicode_source`); `write_file` keeps a file's declared encoding. Chat attachments remain structured in the
+  (`tools.unicode_source`), including copies decoded from UTF-16. `write_file`
+  uses the replacement content's declared encoding (explicit UTF-8 included),
+  or UTF-8 if absent; unrepresentable characters fail before approval or writes.
+  Chat attachments remain structured in the
   transcript and retained for continued discussion and explicit review requests.
   Re-run document cards retain their previous download job IDs until chat
   deletion, so cleanup includes old copies without deleting work during retry.
