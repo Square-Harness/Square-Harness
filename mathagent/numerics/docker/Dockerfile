@@ -30,7 +30,7 @@ RUN python -m pip install --require-hashes --only-binary=:all: --no-deps -r /tmp
  && find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 
 # Matplotlib font cache built once, copied to the writable /tmp at start (read-only root).
-COPY LICENSE.md LICENSE-APACHE-2.0 NOTICE /usr/share/licenses/square-harness/
+COPY LICENSE.md NOTICE /usr/share/licenses/square-harness/
 COPY runner.py /opt/sandbox/runner.py
 RUN mkdir -p /opt/sandbox/mplconfig \
  && MPLCONFIGDIR=/opt/sandbox/mplconfig MPLBACKEND=Agg python -c "import matplotlib.pyplot as plt; plt.figure(); plt.close('all')" \
@@ -40,7 +40,7 @@ RUN mkdir -p /opt/sandbox/mplconfig \
 LABEL org.squareharness.sandbox="python-numerics" \
       org.squareharness.sandbox.version="2" \
       org.opencontainers.image.title="Square Harness Python sandbox" \
-      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0 AND Apache-2.0"
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0"
 
 USER 10001:10001
 WORKDIR /tmp
