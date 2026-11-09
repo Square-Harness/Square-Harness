@@ -37,6 +37,7 @@ from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
 from .model_limits import output_limit, input_limit
+from .source_tasks import _instruction_text
 
 # 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
 VARIANTS = ('quick', 'review', 'journal', 'explain')
@@ -45,6 +46,26 @@ SKILLS = {'quick': 'review-quick', 'review': 'review', 'journal': 'referee', 'ex
 TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'journal': 'Detailed referee report', 'explain': 'Explanation'}
 MANUSCRIPT_VARIANTS = ('review', 'journal')  # they need a pinned manuscript
 LEVELS = ('low', 'medium', 'high', 'xhigh', 'poincare')
+
+
+def full_review_requested(query):
+    """A repeated review is new work only when the human requests a full rerun."""
+    for clause in re.split(r'[;.!?\n]', _instruction_text(query)):
+        if re.search(r"\b(?:do not|don.t|without|sans|ne\b.*\bpas)\b", clause):
+            continue
+        if re.search(r'\b(?:do|give|write|perform|run|start|make|produce|provide|want|need|redo|repeat|rerun|re-run)\b.{0,40}'
+                     r'\b(?:new|another|fresh|full|complete)\s+(?:referee\s+)?(?:review|report)\b|'
+                     r'^\s*(?:please\s+)?(?:a\s+)?(?:new|another|fresh|full|complete)\s+(?:review|report)\b|'
+                     r'\b(?:review|referee|read|assess)\s+(?:(?:the|this|that|same|whole|entire)\s+){0,2}'
+                     r'(?:paper|manuscript|article)\b.{0,30}\b(?:again|from scratch|once more)\b|'
+                     r'\b(?:review|read|assess)\b.{0,30}\b(?:whole|entire)\s+(?:paper|manuscript)\b|'
+                     r'\b(?:re-review|rereview|reread|re-read)\s+(?:(?:the|this|that|same)\s+)?(?:paper|manuscript|article)\b|'
+                     r'\b(?:fais|faire|ecris|ecrire|donne|donner)\b.{0,40}\b(?:nouvelle|nouveau|complet|complete)\b.{0,30}\b(?:relecture|revue|rapport)\b|'
+                     r'\b(?:refais|refaire|recommence|recommencer)\s+(?:moi\s+)?'
+                     r'(?:(?:tout|toute|le|la|un|une|ce|cette)\s+){0,3}(?:rapport|relecture|revue)\b|'
+                     r'\b(?:relis|relire)\s+(?:tout\s+)?(?:le\s+|cet\s+|ce\s+|l.)?(?:article|papier|manuscrit)\b', clause):
+            return True
+    return False
 # Per effort: verifier passes (quick), how far the journal review goes, and the optional extras.
 EFFORT = {
     'low': dict(passes=1, confirm=False, depth=0, appendix=False, main_passes=1, other_passes=1,
@@ -216,7 +237,9 @@ class ReviewBase(ResearchRunner):
         if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
             raise ValueError('Additional working time must be between 0 and 86400 seconds')
         if self.state['status'] in ('partial', 'budget_exhausted'):
-            if self.VARIANT in MANUSCRIPT_VARIANTS:
+            if (self.state.get('review_reference') or {}).get('followup'):
+                phase = 'followup'
+            elif self.VARIANT in MANUSCRIPT_VARIANTS:
                 phase = 'read' if self._unread_parts() else 'scope'
                 self.state['write'] = None
             elif self.VARIANT == 'quick':
@@ -2376,6 +2399,137 @@ class SummaryReviewRunner(JournalRunner):
     VARIANT = 'review'
     PIPELINE = PIPELINES['review']
     CHECK_PROOFS = False
+
+    def start(self, goal, *, review_reference=None, **kwargs):
+        self._review_reference = None
+        if review_reference is not None:
+            reference = _reference_snapshot({'query': goal, 'messages': [], 'files': [],
+                                             'review': review_reference})[0]['review']
+            source = reference.get('source') or {}
+            path = Path(source.get('path', ''))
+            if (not reference.get('job_id') or not isinstance(reference.get('report'), str)
+                    or type(reference.get('followup')) is not bool or not source.get('id')
+                    or not isinstance(source.get('content'), str) or not path.name or path.is_absolute()
+                    or any(part == '..' or part.startswith('.') for part in path.parts)
+                    or hashlib.sha256(source['content'].encode()).hexdigest() != source.get('sha256')):
+                raise WorkerInputError('The previous review manuscript snapshot is invalid.', code='needs_source')
+            if kwargs.get('source_files'):
+                raise WorkerInputError('Choose either a new manuscript or the saved review manuscript.', code='ambiguous_source')
+            self._review_reference = reference
+        return super().start(goal, **kwargs)
+
+    def _pin(self, names, prefix):
+        return [] if self._review_reference else super()._pin(names, prefix)
+
+    def _extra_sources(self):
+        return [self._review_reference['source']] if self._review_reference else super()._extra_sources()
+
+    def _extra_state(self):
+        state = super()._extra_state()
+        if self._review_reference:
+            state.update(review_reference={key: value for key, value in self._review_reference.items() if key != 'source'},
+                         followup_ranges=None, followup_responses=[], followup_usable=False)
+        return state
+
+    def _progress(self):
+        if (self.state.get('review_reference') or {}).get('followup'):
+            return {'phase': self.state['phase'], 'completed': int(self.state.get('followup_usable', False)),
+                    'total': 1, 'unit': 'review follow-up', 'scope': self.state['goal'],
+                    'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
+                    'resumable': self.state['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
+        return super()._progress()
+
+    def _step(self, phase):
+        if not (self.state.get('review_reference') or {}).get('followup'):
+            return super()._step(phase)
+        if phase == 'plan':
+            source = self.state['sources'][0]
+            self.state['map'] = manuscript.build(source['content'], source['path'])
+            self.state['phase'] = 'followup'
+        elif phase == 'followup':
+            self._followup()
+            self.state['phase'] = 'done'
+        else:
+            raise ValueError('Unknown review follow-up phase: ' + phase)
+
+    def _followup(self):
+        s = self.state
+        previous = '\n\nPREVIOUS REPORT (fallible evidence):\n' + s['review_reference']['report']
+        sid = s['sources'][0]['id']
+        if s['followup_ranges'] is None:
+            prompt = (P.FOLLOWUP_PLAN_POLICY + previous + '\n\nMANUSCRIPT OUTLINE (navigation only):\n'
+                      + manuscript.outline(s['map']) + f'\nTotal lines: {len(self._lines(sid))}.')
+            result = self._ask('followup-plan', prompt, cap=self._metadata_cap(),
+                               schema=P.FOLLOWUP_PLAN_SCHEMA, key='followup-plan')
+            value = result['value']
+            if not isinstance(value, dict) or not isinstance(value.get('ranges'), list):
+                self._warn('The follow-up source selection was incomplete; no reassessment was adopted.')
+                return
+            ranges = []
+            for item in value['ranges'][:8]:
+                if not isinstance(item, dict):
+                    continue
+                a, b = _int(item.get('start_line')), _int(item.get('end_line'))
+                if 1 <= a <= b <= len(self._lines(sid)) and b - a < 120:
+                    ranges.append([a, b])
+            s['followup_ranges'] = ranges
+            self._save()
+        excerpts = '\n\n'.join(self._numbered(sid, a, b) for a, b in s['followup_ranges'])
+        prompt = P.FOLLOWUP_POLICY + previous + '\n\nMANUSCRIPT EXCERPTS:\n' + (excerpts or '[No passage selected.]')
+        result = self._ask('followup', prompt, cap=self._model_cap('review_write', 4000),
+                           schema=P.FOLLOWUP_SCHEMA, key='followup')
+        value = result['value']
+        if not isinstance(value, dict) or not isinstance(value.get('responses'), list) or not value['responses']:
+            self._warn('The follow-up answer was incomplete; no reassessment was adopted.')
+            return
+        allowed = {n for a, b in s['followup_ranges'] for n in range(a, b + 1)}
+        responses, usable = [], len(value['responses']) <= 12
+        def excerpt_in(quote, text):
+            return bool(quote.strip()) and ' '.join(quote.split()) in ' '.join(text.split())
+        for item in value['responses'][:12]:
+            if not isinstance(item, dict) or any(not isinstance(item.get(k), str) for k in ('prior_comment', 'decision', 'answer', 'quote')):
+                usable = False
+                continue
+            row = {key: item[key] for key in ('prior_comment', 'decision', 'answer', 'quote')}
+            row.update(start_line=_int(item.get('start_line')), end_line=_int(item.get('end_line')))
+            a, b = row['start_line'], row['end_line']
+            located = (1 <= a <= b <= len(self._lines(sid)) and all(n in allowed for n in range(a, b + 1))
+                       and len(row['quote']) >= 4 and excerpt_in(row['quote'], '\n'.join(self._lines(sid)[a - 1:b])))
+            identified = excerpt_in(row['prior_comment'], s['review_reference']['report'])
+            if not row['answer'].strip() or row['decision'] not in ('maintain', 'revise', 'withdraw', 'unresolved') or not identified:
+                usable = False
+                row['decision'] = 'unresolved'
+                row['answer'] = 'The intended previous comment or reassessment was not identified reliably. ' + row['answer']
+            if row['decision'] != 'unresolved' and not located:
+                row['decision'] = 'unresolved'
+                row['answer'] += ' No matching quote from the selected manuscript passages supports a decision.'
+            row['located'] = bool(located)
+            responses.append(row)
+        s.update(followup_responses=responses, followup_usable=bool(responses) and usable)
+
+    def _complete(self):
+        if (self.state.get('review_reference') or {}).get('followup'):
+            return self.state.get('followup_usable', False)
+        return super()._complete()
+
+    def _render(self):
+        if not (self.state.get('review_reference') or {}).get('followup'):
+            return super()._render()
+        s = self.state
+        source = s['sources'][0]
+        body = ['## Response to the previous review', '',
+                'This follow-up addresses understanding and presentation. The proofs were not checked.', '',
+                f'Manuscript: `{source["path"]}` (the saved version used for the previous review).', '']
+        decisions = {'maintain': 'Maintained', 'revise': 'Revised', 'withdraw': 'Withdrawn', 'unresolved': 'Unresolved'}
+        for n, row in enumerate(s.get('followup_responses', []), 1):
+            body += [f'### Point {n}: {decisions[row["decision"]]}', '',
+                     '> ' + row['prior_comment'].replace('\n', '\n> '), '', row['answer'], '']
+            if row['located']:
+                body += [self._loc(source['id'], row['start_line'], row['end_line']) + ' “' + row['quote'] + '”', '']
+        if not s.get('followup_responses'):
+            body += ['*No completed response is available yet.*', '']
+        return body, ['## Scope', '', 'Only the selected passages were reread for this reply. '
+                      'The original report is unchanged; no new full review or proof verification is claimed.']
 
     def _render_summary(self, body, write, sid):
         s = self.state

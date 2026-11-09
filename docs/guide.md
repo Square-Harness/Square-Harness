@@ -185,8 +185,14 @@ precedence. Request a further critique or review through the conversation or an
 explicit `@` skill. Saved reviews and Proof's solver/reviewer cycle remain
 available.
 
-The sidebar's **Feedback** button accepts a bug report, suggestion or a problem
-with a mathematical answer. You can paste or attach up to three screenshots.
+The **Feedback** button stays visible above the work area, including when the
+sidebar is hidden. It accepts a bug report, suggestion or a problem with a
+mathematical answer. You can paste or attach up to three screenshots. On browsers
+that support screen capture, **Take screenshot** temporarily hides the form:
+choose the tab or window in the browser's sharing dialog, then select a region
+from the captured image. Confirm the region to attach it, or cancel to return to
+the unchanged draft. Capture stops after one frame; the image is sent only when
+you submit the report. Upload and paste remain available on other browsers.
 When a conversation is open, **Include this conversation and its diagnostic
 trace** is off by default. If selected, you can send immediately. Previewing the
 file list and downloading the diagnostic ZIP are optional. It includes the
@@ -544,6 +550,13 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
   what it says, the idea, a walk through the proof (every line of a short proof),
   the standard facts used, and where each hypothesis matters. An accuracy pass
   compares the explanation with the source.
+
+To discuss a completed report, select `@referee` again and explain which comments
+you dispute. When the target is unambiguous, the follow-up reuses the reviewed
+manuscript and keeps the original report. It addresses the contested comments
+rather than silently replacing the earlier review. Ask explicitly for a full new
+review to reread the whole paper. New attachments take precedence; when the target
+is ambiguous, the interface asks which manuscript to use.
 
 ### Write-up
 

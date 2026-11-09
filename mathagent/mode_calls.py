@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Durable explicit calls, source selection and bounded hosted-model proof routing."""
+import copy
 import re
 
 from .agent import AgentError
@@ -223,6 +224,8 @@ class ModeOrchestrator(Orchestrator):
 
     def _child(self, pending, args):
         child = super()._child(pending, args)
+        if args['mode'] == 'referee' and self.state.get('review_reference'):
+            child['context']['review_reference'] = copy.deepcopy(self.state['review_reference'])
         if args['mode'] == 'prove' and self.state.get('proof_preparation', {}).get('status') == 'fallback':
             # Keep the exact original history in history, and all user/source
             # material in messages. Old runaway parent prose is not a premise.
@@ -318,6 +321,8 @@ class ModeOrchestrator(Orchestrator):
 
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)
+        if self.required_mode == 'referee' and getattr(self.agent, 'review_reference', None):
+            self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         action = ({'mode': self.required_mode, 'request': query, 'files': list(files),
                    'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'), 'reason': 'User explicitly selected @' + self.required_mode + '.'}
                   if self.required_mode is not None else
@@ -338,6 +343,16 @@ class ModeOrchestrator(Orchestrator):
         self._prepare_calls({'role': 'assistant', 'content': '', 'tool_calls': [
             {'id': self.state['id'] + '_mode_call', 'type': 'function',
              'function': {'name': 'delegate', 'arguments': action}}]})
+
+    def _document_answer(self):
+        if (self.state.get('required_mode') == 'referee'
+                and (self.state.get('review_reference') or {}).get('followup')):
+            child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == 'referee'), None)
+            if child is not None and child['status'] == 'complete':
+                answer = (child.get('result') or {}).get('answer')
+                if isinstance(answer, str) and answer.strip():
+                    return self._worker_reply(child, answer)
+        return super()._document_answer()
 
     def _complete_pending(self, allow_tools=True):
         """Finish native transactions, then enforce the DS4 routing decision.

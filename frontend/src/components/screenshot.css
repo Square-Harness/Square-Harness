@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors */
+
+.feedback-screenshot-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.screenshot-crop-frame { display: flex; justify-content: center; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-3); }
+.screenshot-crop-area { position: relative; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; }
+.screenshot-crop-area canvas { display: block; width: 100%; height: auto; }
+.screenshot-crop-selection { position: absolute; pointer-events: none; border: 2px solid var(--focus); box-sizing: border-box; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4); }

@@ -88,7 +88,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">{String(data.variant) === 'summary' ? 'Summary' : 'Write-up'}</span>
+        <span className="job-stop">{String(data.variant) === 'summary' ? 'Summary' : 'Write-Up'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">

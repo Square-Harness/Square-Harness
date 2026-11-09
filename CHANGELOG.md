@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Continue a manuscript review from the conversation without attaching the
+  manuscript again. Replies to referee comments keep the previous review and
+  reassess the disputed points in a linked follow-up.
+- Keep Feedback visible when the sidebar is hidden, and retain the originating
+  conversation when reporting from a worker result. Add optional screenshot
+  capture with region selection, alongside existing screenshot paste and upload.
+- Show skill descriptions on hover and keyboard focus, with consistent title
+  capitalization across the interface.
+
 - Follow the replacement text's encoding declaration for approved file edits,
   including conversions to UTF-8 and newly created files; undeclared text is
   saved as UTF-8. Normalize UTF-16 template copies' declarations to UTF-8 too.

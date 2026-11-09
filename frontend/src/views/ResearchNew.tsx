@@ -42,7 +42,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
   },
   journal: {
-    title: 'Detailed review',
+    title: 'Detailed Review',
     lede: 'Everything the review does, then the proofs are checked one at a time, main results first, with each alleged error re-checked. The report identifies the checks completed and any work still pending. It allows twice the working time of a review at the same effort.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (TeX, Markdown, text or PDF). Its snapshot stays fixed for the whole job.',

@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { ApprovalDialog } from './components/Approval'
 import { DropZone } from './components/DropZone'
+import { FeedbackButton } from './components/Feedback'
 import { Login } from './components/Login'
 import { JobNavigation } from './components/JobNavigation'
 import { BrandMark, SideSpine, Sidebar, TopBar } from './components/Shell'
@@ -40,6 +41,8 @@ export function App() {
   const route = useRoute()
   const [drawer, setDrawer] = useState(false)
   const listHidden = usePanelHidden('sidebar')
+  const feedbackChatId = ['free', 'critic', 'explore'].includes(route.mode) ? route.id
+    : app.chats?.some((chat) => chat.id === route.from) ? route.from : null
   useEffect(() => setDrawer(false), [route.mode, route.id])
   if (app.auth === 'checking') {
     return <div className="splash paper"><BrandMark size={56} /></div>
@@ -53,7 +56,10 @@ export function App() {
       {listHidden && <SideSpine route={route} />}
       {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
       <main className="main">
-        <TopBar route={route} onMenu={() => setDrawer(true)} />
+        <div className="app-tools">
+          <TopBar route={route} onMenu={() => setDrawer(true)} />
+          <FeedbackButton chatId={feedbackChatId} chatTitle={app.chats?.find((chat) => chat.id === feedbackChatId)?.title} />
+        </div>
         {app.connection === 'reconnecting' && (
           <div className="connection" role="status">Reconnecting to the harness. Saved work is safe; live updates resume when it answers.</div>
         )}

@@ -11,7 +11,6 @@ import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
 import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus, useApp, type AppState, type Theme } from '../store'
 import { ProjectList } from './Projects'
-import { FeedbackButton } from './Feedback'
 import { ErrorNote, Meter, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
@@ -105,7 +104,7 @@ export function Sidebar({ route }: { route: Route }) {
           <SideList route={route} app={app} />
         </div>
         <TaskPanel />
-        <WorkspacePanel route={route} />
+        <WorkspacePanel />
       </div>
     </aside>
   )
@@ -462,7 +461,7 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
   )
 }
 
-function WorkspacePanel({ route }: { route: Route }) {
+function WorkspacePanel() {
   const app = useApp()
   const { status } = app
   const limits = concurrencyLimits(app.snapshot, status)
@@ -528,8 +527,6 @@ function WorkspacePanel({ route }: { route: Route }) {
       <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
         Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
       </button>
-      <FeedbackButton chatId={['free', 'critic', 'explore'].includes(route.mode) ? route.id : null}
-        chatTitle={app.chats?.find((chat) => chat.id === route.id)?.title} />
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}

@@ -341,6 +341,16 @@ is checkpointed privately, and only acknowledged messages and files count as
 delivered. Webhook-only installations retain their previous summary fallback.
 Trace preview is optional; the unchecked-by-default checkbox remains the consent.
 
+Keep one Feedback dialog owner outside the collapsible sidebar. Resolve its
+conversation from the current chat or a validated worker page's originating
+chat, and freeze that context when the form opens. Screenshot capture must be
+started by an explicit click, stop every media track after a single frame, and
+preserve the draft on cancellation or failure. Region selection works on the
+frozen image; it must not keep screen sharing active or upload before submission.
+Use the existing screenshot validation and delivery path, with upload/paste as
+the fallback. Skill hover/focus descriptions reuse the `MODE_CALLS` summaries;
+display capitalization must not change stored mode identifiers.
+
 The gateway overwrites `X-SH-User-Email` from the verified JWT and permits
 cross-account feedback archives only for explicitly configured `feedback_admins`.
 Archive targets resolve to fixed tenant ports and private pairing files, never
@@ -465,6 +475,17 @@ path; `proof_policy.py` does not change for this conversational preparation.
 Persist preparation reservations before dispatch and retain its call, input
 and output limits across pause/resume. A pre-limit checkpoint already beyond
 those allowances must hand off to Proof, not start a new preparation budget.
+
+An explicit `@referee` continuation binds the preceding review's manuscript text
+and report at submission, before queue admission. Persist this reference in the
+Assistant checkpoint and child context; a resumed turn must not resolve a newer
+upload or reread a replaced path. Explicit new or named sources take precedence,
+and competing reviewed targets require clarification. The ordinary Review runner
+uses a focused follow-up phase for replies to comments: first select source line
+ranges, then reassess the quoted previous comments against those passages.
+Unsupported quotes remain unresolved. Keep the original report, the existing
+budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
+Only an explicit request for a full new review follows the complete-review path.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `draft` (one writing call, or consecutive parts for long material; the

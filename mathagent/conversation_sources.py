@@ -11,7 +11,7 @@ from .worker_errors import WorkerInputError
 _NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt|sty|cls|bib|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
 
 
-def conversation_sources(query, supplied, transcript):
+def conversation_sources(query, supplied, transcript, *, mode=None):
     """Inherit only an unambiguous user attachment for a source-dependent follow-up.
 
     Worker output, workspace discovery and attached document contents cannot
@@ -39,7 +39,7 @@ def conversation_sources(query, supplied, transcript):
     pointer = bool(re.search(r'\b(?:this|that|attached|same|previous|the|cet|cette|ce|le|la|meme|precedent)\s+'
                              r'(?:article|paper|manuscript|document|proof|result|preuve|resultat|image|screenshot|picture|capture)\b', text))
     plural = bool(re.search(r'\b(?:these |those |all (?:the )?|ces |tous les |toutes les )(?:articles|papers|manuscripts|documents)\b', text))
-    if not (target or pointer or plural):
+    if not (target or pointer or plural or mode == 'referee'):
         return []
     previous = next((item.get('files', []) for item in reversed(transcript)
                      if item.get('role') == 'user' and item.get('files')), [])

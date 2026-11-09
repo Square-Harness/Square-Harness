@@ -10,19 +10,19 @@ export const coverOf = (mode: RouteMode): Cover =>
   mode === 'quick_review' || mode === 'detailed_review' || mode === 'explain' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
-  { mode: 'check', label: 'Literature check', summary: 'Find or verify a reference for a known result.' },
+  { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },
   { mode: 'literature', label: 'Literature', summary: 'Build a verified reading list on a topic.' },
-  { mode: 'quick_review', label: 'Quick review', summary: 'Check whether a given proof is correct: verdict and located issues.' },
+  { mode: 'quick_review', label: 'Quick Review', summary: 'Check whether a given proof is correct: verdict and located issues.' },
   { mode: 'referee', label: 'Review', summary: 'Review a manuscript: overview of the paper, typos and presentation.' },
-  { mode: 'detailed_review', label: 'Detailed review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },
+  { mode: 'detailed_review', label: 'Detailed Review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
-  { mode: 'writeup', label: 'Write-up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
+  { mode: 'writeup', label: 'Write-Up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
   { mode: 'summarize', label: 'Summarize', summary: 'Summarize the important results obtained so far as a .tex file.' },
   { mode: 'critic', label: 'Critique', summary: 'Check an argument for unjustified steps and counterexamples.' },
   { mode: 'explore', label: 'Explore', summary: 'Explore approaches, with heuristics labelled.' },
   // User-only: the Assistant cannot start these itself.
   { mode: 'python_lab', label: 'Python Lab', summary: 'Run Python in an isolated sandbox: computations, simulations and plots.' },
-  { mode: 'sanity_check', label: 'Sanity check', summary: 'Try to falsify a claim with quick numerical experiments.' },
+  { mode: 'sanity_check', label: 'Sanity Check', summary: 'Try to falsify a claim with quick numerical experiments.' },
 ]
 /** Exact names and id prefixes take precedence over words inside a label. */
 export const modeOptions = (query: string) => {

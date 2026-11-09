@@ -50,12 +50,12 @@ export const MODES: Record<Mode, ModeInfo> = {
     newLabel: 'New review', empty: 'No reviews yet.',
   },
   writeup: {
-    mode: 'writeup', label: 'Write-up', historyLabel: 'Write-up history', glyph: '§', kind: 'writeup',
+    mode: 'writeup', label: 'Write-Up', historyLabel: 'Write-Up history', glyph: '§', kind: 'writeup',
     summary: 'Turn notes, drafts or PDFs into clean LaTeX in your own template style.',
     newLabel: 'New write-up', empty: 'No write-ups yet.',
   },
   style: {
-    mode: 'style', label: 'Writing style', historyLabel: 'Writing styles', glyph: '≅', kind: 'style',
+    mode: 'style', label: 'Writing Style', historyLabel: 'Writing Styles', glyph: '≅', kind: 'style',
     summary: 'Condense your earlier articles into a style per domain: macros, structure and how you explain.',
     newLabel: 'New style', empty: 'No styles learnt yet.',
   },

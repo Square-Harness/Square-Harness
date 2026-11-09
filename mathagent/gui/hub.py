@@ -34,7 +34,7 @@ from ..literature import LiteratureTools
 from ..proof import ProofRunner
 from ..litreview import ReviewRunner
 from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
-from ..review import ReviewBase, runner_class as review_runner, runner_for_state
+from ..review import ReviewBase, runner_class as review_runner, runner_for_state, full_review_requested
 from ..research import ResearchRunner
 from ..style import StyleRunner, load_choice, style_path
 from ..mode_calls import USER_MODES, ModeOrchestrator
@@ -1254,6 +1254,30 @@ class Hub:
             raise ValueError('This Assistant turn is not paused or recoverable.')
         return self._assistant_turn(chat_id, state['query'], state.get('files', ()), resume=True)
 
+    def _review_reference(self, chat, content, files):
+        # Only a conversation's own review cards can select a saved manuscript.
+        # An explicit source starts from that source instead of an older snapshot.
+        if files or conversation_sources(content, [], []):
+            return None
+        reviews = []
+        for item in reversed(chat['transcript']):
+            if item.get('role') == 'user' and reviews:
+                break
+            if (item.get('role') == 'route' and item.get('mode') == 'referee'
+                    and item.get('status') == 'done' and item.get('job_id')):
+                state = store.research_state(self.root, item['job_id'])
+                if state.get('variant') == 'review' and state.get('draft') and state.get('status') in ('reviewed', 'partial'):
+                    reviews.append(state)
+        if not reviews:
+            return None
+        targets = {(s['sources'][0]['path'], s['sources'][0]['sha256']) for s in reviews if s.get('sources')}
+        if len(targets) != 1:
+            raise WorkerInputError('Which reviewed manuscript should I use? Name it or attach it to this message.',
+                                   code='ambiguous_source', details={'sources': sorted(p for p, _ in targets)})
+        previous = reviews[0]
+        return {'job_id': previous['id'], 'source': copy.deepcopy(previous['sources'][0]),
+                'report': previous['draft'], 'followup': not full_review_requested(content)}
+
     def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None, required_effort=None):
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
@@ -1261,7 +1285,10 @@ class Hub:
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters.')
         saved = chat.get('assistant_state') or {}
-        selected = conversation_sources(content, list(files), chat['transcript']) if not resume else list(files)
+        review_reference = (copy.deepcopy(saved.get('review_reference')) if resume else
+                            self._review_reference(chat, content, files) if required_mode == 'referee' else None)
+        selected = (list(files) if resume else [] if review_reference else
+                    conversation_sources(content, list(files), chat['transcript'], mode=required_mode))
         if not files and not resume:
             selected = [name for name in selected if (self.root / name).is_file()]
         try:
@@ -1324,6 +1351,7 @@ class Hub:
             if previous:
                 online = online and bool(previous.get('online', False))
             main, _ = self._engine(task, mode='explore', think=False, online=online)
+            main.review_reference = review_reference
             main.project_snapshot = project_snapshot
             main.project_context = projects.context(project_snapshot)
             images.bind(main, image_refs)
@@ -1677,7 +1705,10 @@ class Hub:
                                       variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                       style_choice=load_choice(self.base))
                     if mode not in ('writeup', 'summarize'):
-                        kwargs['reference_context'] = context
+                        kwargs['reference_context'] = {key: value for key, value in context.items()
+                                                       if key != 'review_reference'}
+                        if mode == 'referee' and context.get('review_reference'):
+                            kwargs['review_reference'] = context['review_reference']
                     elif context.get('project_snapshot') is not None or context.get('images'):
                         # The bounded visible conversation above is the writer's
                         # source. Pin its notebook separately without duplicating

@@ -6,6 +6,7 @@ import { api, ApiError, type FeedbackCategory, type FeedbackConfig, type Feedbac
 import { bytes } from '../format'
 import { ErrorNote, Modal } from './common'
 import { CloseIcon, PlusIcon } from './Icons'
+import { captureScreenshot, ScreenshotCrop } from './ScreenshotCapture'
 
 type Image = FeedbackImage & { preview: string }
 
@@ -22,12 +23,12 @@ const readImage = (file: File) => new Promise<Image>((resolve, reject) => {
 export function FeedbackButton({ chatId, chatTitle }: { chatId: string | null; chatTitle?: string }) {
   const [context, setContext] = useState<{ id: string | null; title?: string } | null>(null)
   useEffect(() => {
-    const open = () => setContext({ id: chatId, title: chatTitle })
+    const open = () => setContext((existing) => existing ?? { id: chatId, title: chatTitle })
     window.addEventListener('square-feedback', open)
     return () => window.removeEventListener('square-feedback', open)
   }, [chatId, chatTitle])
   return <>
-    <button type="button" className="workspace-access feedback-open" onClick={() => setContext({ id: chatId, title: chatTitle })}>
+    <button type="button" className="workspace-access feedback-open" onClick={() => setContext((existing) => existing ?? { id: chatId, title: chatTitle })}>
       <span aria-hidden="true">◇</span> Feedback
     </button>
     {context && <FeedbackDialog chatId={context.id} chatTitle={context.title} onClose={() => setContext(null)} />}
@@ -41,11 +42,14 @@ function FeedbackDialog({ chatId, chatTitle, onClose }: { chatId: string | null;
   const [images, setImages] = useState<Image[]>([])
   const [includeTrace, setIncludeTrace] = useState(false)
   const [preview, setPreview] = useState<FeedbackPreview | null>(null)
-  const [busy, setBusy] = useState<'images' | 'preview' | 'download' | 'send' | null>(null)
+  const [busy, setBusy] = useState<'images' | 'capture' | 'preview' | 'download' | 'send' | null>(null)
   const [result, setResult] = useState<FeedbackResult | null>(null)
   const [error, setError] = useState('')
   const [discard, setDiscard] = useState(false)
   const input = useRef<HTMLInputElement>(null)
+  const capture = useRef<AbortController | null>(null)
+  const [screenshot, setScreenshot] = useState<HTMLCanvasElement | null>(null)
+  useEffect(() => () => capture.current?.abort(), [])
   useEffect(() => {
     let current = true
     api.feedbackConfig().then((value) => { if (current) setConfig(value) }, (reason: Error) => {
@@ -69,6 +73,25 @@ function FeedbackDialog({ chatId, chatTitle, onClose }: { chatId: string | null;
     try { const added = await Promise.all(files.map(readImage)); setImages((existing) => [...existing, ...added]) }
     catch (reason) { setError((reason as Error).message) }
     finally { setBusy(null) }
+  }
+  async function takeScreenshot() {
+    if (busy || images.length >= Math.min(3, config?.max_images ?? 3)) return
+    const controller = new AbortController()
+    capture.current = controller
+    setBusy('capture'); setError('')
+    try {
+      const frame = await captureScreenshot(controller.signal)
+      if (!controller.signal.aborted) setScreenshot(frame)
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        const error = reason as Error
+        setError(error.name === 'NotAllowedError' ? 'Screenshot capture was cancelled or denied. You can still paste or attach a screenshot.'
+          : error.name === 'InvalidStateError' ? 'Bring this tab to the front and click Take screenshot again. You can also paste or attach a screenshot.' : error.message)
+      }
+    } finally {
+      if (capture.current === controller) capture.current = null
+      if (!controller.signal.aborted) setBusy(null)
+    }
   }
   const stopDrop = (event: DragEvent) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.stopPropagation() } }
   async function inspect() {
@@ -97,6 +120,12 @@ function FeedbackDialog({ chatId, chatTitle, onClose }: { chatId: string | null;
     catch (reason) { setError((reason as Error).message) }
     finally { setBusy(null) }
   }
+  if (screenshot) return <ScreenshotCrop source={screenshot} maxBytes={Math.min(3 * 1024 * 1024, config?.max_image_bytes ?? 3 * 1024 * 1024)}
+    onCancel={() => setScreenshot(null)} onDone={async (file) => {
+      const image = await readImage(file)
+      setImages((existing) => [...existing, image]); setScreenshot(null)
+    }} />
+  if (busy === 'capture') return null
   return <Modal title="Feedback" onClose={busy ? undefined : close} wide>
     <div className="feedback-dialog" data-feedback-dialog onDragEnter={stopDrop} onDragLeave={stopDrop} onDragOver={stopDrop}
       onDrop={(event) => { stopDrop(event); void add([...event.dataTransfer.files]) }}
@@ -124,7 +153,10 @@ function FeedbackDialog({ chatId, chatTitle, onClose }: { chatId: string | null;
           </figure>)}
         </div>
         <input ref={input} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={(event) => { void add([...(event.target.files || [])]); event.target.value = '' }} />
-        <button type="button" className="btn btn-small" disabled={!!busy || images.length >= Math.min(3, config?.max_images ?? 3)} onClick={() => input.current?.click()}><PlusIcon size={15} /> Add screenshots</button>
+        <div className="feedback-screenshot-actions">
+          {typeof navigator.mediaDevices?.getDisplayMedia === 'function' && <button type="button" className="btn btn-small" disabled={!!busy || images.length >= Math.min(3, config?.max_images ?? 3)} onClick={() => void takeScreenshot()}>Take screenshot</button>}
+          <button type="button" className="btn btn-small" disabled={!!busy || images.length >= Math.min(3, config?.max_images ?? 3)} onClick={() => input.current?.click()}><PlusIcon size={15} /> Add screenshots</button>
+        </div>
         <p className="muted small">Up to three PNG, JPEG or WebP images, 3 MB each.</p>
         <div className="feedback-trace">
           <label className="feedback-checkbox"><input type="checkbox" checked={includeTrace} disabled={!chatId || !!busy} onChange={(event) => { setIncludeTrace(event.target.checked); setPreview(null) }} />

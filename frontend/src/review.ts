@@ -10,7 +10,7 @@ import type { Variant } from './components/Square'
 export const VARIANTS: ReviewVariant[] = ['quick', 'review', 'journal', 'explain']
 
 export const VARIANT_NAMES: Record<ReviewVariant, string> = {
-  quick: 'Quick check', review: 'Review', journal: 'Detailed review', explain: 'Explanation',
+  quick: 'Quick Check', review: 'Review', journal: 'Detailed Review', explain: 'Explanation',
 }
 
 /** A quick check ends with a verdict on the proof, shown with the notebook's squares. */

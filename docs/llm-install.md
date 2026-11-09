@@ -193,6 +193,12 @@ folder. Reports and ZIPs have mode 0600. A report is durable before notification
 Slack failure does not delete it. Screenshots are limited to three PNG/JPEG/WebP
 files of 3 MiB each; consented diagnostic traces are limited to 32 MiB.
 
+The optional **Take screenshot** control uses browser display capture on HTTPS
+or loopback origins. The browser asks the user which tab or window to share;
+the interface then crops one captured frame and stops sharing. It requires no
+new backend service or permission configured by the operator. Browsers without
+display capture retain screenshot upload, drop and paste.
+
 For hosted downloads, add a `feedback_admins` list of existing invited maintainer
 emails to the private gateway configuration. It defaults to no administrators.
 Set `SH_FEEDBACK_REPORT_BASE_URL` in each backend to the protected application

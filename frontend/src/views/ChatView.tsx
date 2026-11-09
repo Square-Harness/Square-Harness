@@ -58,17 +58,17 @@ type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_
 // `cover` names the mark (components/Glyph.tsx) and its colour class.
 const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   answer: { noun: 'an answer', label: 'Answer', cover: 'free' },
-  check: { noun: 'a literature check', label: 'Literature check', cover: 'check' },
+  check: { noun: 'a literature check', label: 'Literature Check', cover: 'check' },
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
-  literature: { noun: 'a literature report', label: 'Literature report', cover: 'literature' },
+  literature: { noun: 'a literature report', label: 'Literature Report', cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
-  detailed_review: { noun: 'a detailed review', label: 'Detailed review', cover: 'referee' },
-  quick_review: { noun: 'a quick review', label: 'Quick review', cover: 'referee' },
+  detailed_review: { noun: 'a detailed review', label: 'Detailed Review', cover: 'referee' },
+  quick_review: { noun: 'a quick review', label: 'Quick Review', cover: 'referee' },
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
-  writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
+  writeup: { noun: 'a write-up', label: 'Write-Up', cover: 'writeup' },
   summarize: { noun: 'a summary', label: 'Summary', cover: 'writeup' },
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
-  sanity_check: { noun: 'a numerical sanity check', label: 'Numerical sanity check', cover: 'sanity_check' },
+  sanity_check: { noun: 'a numerical sanity check', label: 'Numerical Sanity Check', cover: 'sanity_check' },
 }
 const kindOf = (mode: RouteMode | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
@@ -340,9 +340,12 @@ function Intro({ mode, onPick, onSkill }: { mode: ChatMode; onPick: (text: strin
         <p className="lede">{intro.text}</p>
         {mode === 'free' && <>
           <p className="muted intro-skill-hint">Choose a skill below, or type <code>@</code> in your message, to request one explicitly.</p>
-          <div className="intro-skills" aria-label="Available skills">{MODE_CALLS.map((skill) => <button key={skill.mode} type="button" className="intro-skill" title={skill.summary} onClick={() => onSkill(skill.mode)}>
-            <span className={`route-cover mode-${coverOf(skill.mode)}`} aria-hidden="true"><Glyph mode={coverOf(skill.mode)} /></span>{skill.label}
-          </button>)}</div>
+          <div className="intro-skills" aria-label="Available skills">{MODE_CALLS.map((skill) => <span key={skill.mode} className="intro-skill-option">
+            <button type="button" className="intro-skill" aria-describedby={`intro-skill-${skill.mode}`} onClick={() => onSkill(skill.mode)}>
+              <span className={`route-cover mode-${coverOf(skill.mode)}`} aria-hidden="true"><Glyph mode={coverOf(skill.mode)} /></span>{skill.label}
+            </button>
+            <span id={`intro-skill-${skill.mode}`} className="intro-skill-summary" role="tooltip">{skill.summary}</span>
+          </span>)}</div>
           <p className="muted small intro-feedback">Found an issue or have an idea? <button type="button" className="link-btn" onClick={() => window.dispatchEvent(new Event('square-feedback'))}>Send feedback</button>.</p>
         </>}
         {intro.examples.length > 0 && <div className="examples">
@@ -409,7 +412,7 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
     if (!blocks.length) return
     out.push(
       <div key={'answer' + key} className="entry message message-model">
-        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'check' ? 'Literature check' : MODES[mark].label}><Glyph mode={mark} /></span>
+        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'check' ? 'Literature Check' : MODES[mark].label}><Glyph mode={mark} /></span>
         <div className="message-body">{blocks}</div>
       </div>,
     )

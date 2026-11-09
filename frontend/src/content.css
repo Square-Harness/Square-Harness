@@ -273,9 +273,13 @@
 .chat-inner { padding-bottom: 32px; }
 .intro .examples { display: grid; gap: 8px; margin-top: 6px; max-width: 66ch; }
 .intro-skill-hint { margin: 20px 0 12px; font-size: 14px; line-height: 1.5; }
-.intro-skills { display: flex; flex-wrap: wrap; gap: 8px; max-width: 66ch; }
+.intro-skills { position: relative; display: flex; flex-wrap: wrap; gap: 8px; max-width: 66ch; }
+.intro-skill-option { display: inline-flex; }
+.intro-skill-summary { position: absolute; z-index: 5; left: 0; bottom: calc(100% + 8px); width: min(320px, 100%); padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--sheet); color: var(--text); box-shadow: var(--shadow-sm); font: 13px/1.5 var(--font-ui); visibility: hidden; pointer-events: none; }
+.intro-skill-option:hover .intro-skill-summary, .intro-skill-option:focus-within .intro-skill-summary { visibility: visible; }
 .intro-skill { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 5px 10px 5px 6px; background: var(--sheet); color: var(--text-2); border: 1px solid var(--line); border-radius: 7px; font: 13px var(--font-ui); cursor: pointer; }
 .intro-skill:hover { color: var(--text); border-color: var(--ink); background: var(--hover); }
+.intro-skill:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .intro-skill .route-cover { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 4px; color: #fff; }
 .intro-skill .route-cover svg { width: 17px; height: 17px; }
 .intro-feedback { margin-top: 22px; }
