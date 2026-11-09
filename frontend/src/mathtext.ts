@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Copyright (c) 2026 SquareHarness Team
+// Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 // Pure text preparation for typeset mathematics (no React; testable with node).
 

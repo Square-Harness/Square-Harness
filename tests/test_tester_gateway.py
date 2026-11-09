@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Copyright (c) 2026 SquareHarness Team
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """The optional external gateway authenticates and isolates real HTTP traffic."""
 import http.client

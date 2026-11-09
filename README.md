@@ -10,7 +10,7 @@ inspection. Around it, the same principles serve literature checks, reading
 lists, manuscript reviews, explanations, LaTeX write-ups and numerical
 experiments.
 
-**Version 1.0. Self-host first.** Run the model, harness and workspace on your own
+**Version 1.1.0. Self-host first.** Run the model, harness and workspace on your own
 computer or research server. This setup needs no model-provider API key.
 
 <picture>
@@ -105,6 +105,8 @@ decide which contributions are merged.
 [PolyForm Noncommercial License 1.0.0](LICENSE.md): free use, modification and
 redistribution for noncommercial purposes, including personal research and use
 by universities and public research organisations. Commercial use requires a
-separate license from the copyright holder.
+separate license from the relevant copyright holders. Previously published
+Apache-2.0 code retains its permissions; see [NOTICE](NOTICE) and
+[LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
 Model weights, dependencies and retrieved papers retain their own licenses.
 See [NOTICE](NOTICE) for attribution.

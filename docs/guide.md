@@ -15,7 +15,7 @@ The model runs on your computer or on a GPU in your lab. The assistant proves
 statements and checks the proofs, finds and verifies references, builds reading
 lists, referees manuscripts, explains results, writes up notes in LaTeX and runs
 numerical experiments. You use it in a web app (on a computer or a phone) or in
-the terminal. The current release is version 1.0.
+the terminal. The current release is version 1.1.0.
 
 Self-hosting on your own computer or research GPU is the primary setup. For a
 temporary hosted-model test, `--backend openai --api-profile deepinfra`

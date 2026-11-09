@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Copyright (c) 2026 SquareHarness Team
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Durable explicit calls, source selection and bounded hosted-model proof routing."""
 import re

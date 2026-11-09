@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Copyright (c) 2026 SquareHarness Team
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Smoke test of real Docker isolation and resource limits."""
 from dataclasses import replace

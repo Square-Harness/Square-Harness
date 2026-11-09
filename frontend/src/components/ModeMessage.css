@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
-/* Copyright (c) 2026 SquareHarness Team */
+/* Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors */
 
 .mode-message { position: relative; flex: 1; min-width: 0; }
 .mode-message textarea { display: block; width: 100%; }

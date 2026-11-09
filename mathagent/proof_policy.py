@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Copyright (c) 2026 SquareHarness Team
-
 """The two prompts used by proof mode; neither can change controller state."""
 
 COMMON_INSTRUCTION = (

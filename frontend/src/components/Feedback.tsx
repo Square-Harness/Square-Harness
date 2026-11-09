@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Copyright (c) 2026 SquareHarness Team
+// Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { api, ApiError, type FeedbackCategory, type FeedbackConfig, type FeedbackImage, type FeedbackPreview, type FeedbackResult } from '../api'

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Copyright (c) 2026 SquareHarness Team
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Feedback's real HTTP flow and private filesystem/trace boundaries, without model calls."""
 import base64

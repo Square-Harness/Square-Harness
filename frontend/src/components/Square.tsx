@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Copyright (c) 2026 SquareHarness Team
+// Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 // Status is a square: the mathematician's end-of-proof mark in its states.
 import type { Candidate, ReviewIssue } from '../api'

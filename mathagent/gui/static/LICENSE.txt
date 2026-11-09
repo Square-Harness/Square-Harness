@@ -1,4 +1,4 @@
-Required Notice: Copyright (c) 2026 SquareHarness Team
+Required Notice: Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 # PolyForm Noncommercial License 1.0.0
 

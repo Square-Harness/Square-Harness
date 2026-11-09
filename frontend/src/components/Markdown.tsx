@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Copyright (c) 2026 SquareHarness Team
+// Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 // Markdown with typeset mathematics. Model and source text is untrusted:
 // no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.

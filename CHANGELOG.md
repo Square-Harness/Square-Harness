@@ -2,10 +2,16 @@
 
 ## Unreleased
 
-- Relicense Square Harness under the PolyForm Noncommercial License 1.0.0
-  (`LICENSE.md`, also served by the interface at `/LICENSE.txt`), replacing the
-  Apache License 2.0. Source files carry an SPDX licence header. Version 1.0.0
-  and earlier remain available under the Apache License 2.0.
+## 1.1.0 — 2026-11-09
+
+- Offer the project distribution under the PolyForm Noncommercial License 1.0.0
+  (`LICENSE.md`, also served by the interface at `/LICENSE.txt`). Previously
+  published code through commit `f9049c3` retains its Apache-2.0 permissions;
+  preserve its license text and attribution in `LICENSE-APACHE-2.0` and `NOTICE`.
+  Credit Vincent Boulard, Louis Carillo, and contributors. Source files carry an
+  SPDX header, except the hash-pinned proof policy and model-facing skill files.
+  Keep the proof policy unchanged so paused proofs remain resumable.
+- Include the legal notices in the sandbox image and interface distribution.
 
 - Keep image attachments on their original conversation message. Text-only
   follow-ups no longer inherit a new attachment or move earlier images to the

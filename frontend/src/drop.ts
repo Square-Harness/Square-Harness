@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Copyright (c) 2026 SquareHarness Team
+// Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 // One drop target at a time: the form or composer on screen decides what a dropped
 // file is for (a pinned source, a template, an attachment). Files are always saved

@@ -288,7 +288,7 @@ Fallbacks:
 Check:
 
 ```bash
-.venv/bin/square-harness --version        # prints: Square Harness 1.0.0
+.venv/bin/square-harness --version        # prints: Square Harness 1.1.0
 ```
 
 If this fails with `ModuleNotFoundError: mathagent`, run the harness as

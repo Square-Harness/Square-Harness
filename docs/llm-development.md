@@ -15,7 +15,7 @@ simpler or equally simple, explicit about what it guarantees, and consistent
 with its surroundings. When a feature would make the code hard to reason about,
 propose a simpler version first.
 
-Version 1.0. The source of truth for the machine-readable version is
+Version 1.1.0. The source of truth for the machine-readable version is
 `mathagent/__init__.py` (`__version__`). `frontend/package.json` and
 `CITATION.cff` carry the same number.
 
@@ -242,11 +242,15 @@ Version 1.0. The source of truth for the machine-readable version is
 
   ```
   # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-  # Copyright (c) 2026 SquareHarness Team
+  # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
   ```
 
   Skill files (`SKILL.md` and their references) are model prompts: leave them
-  without the header.
+  without the header. Leave `mathagent/proof_policy.py` byte-identical when only
+  licensing changes: saved proofs pin its full-file hash and must remain resumable.
+  Its licensing is recorded by the root legal files. Keep the legal copies in
+  `frontend/public/` and `mathagent/numerics/docker/` synchronized with the root
+  files; rebuild `mathagent/gui/static/` after changing the public copies.
 
 ## Architecture
 
