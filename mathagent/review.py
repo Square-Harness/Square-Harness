@@ -31,6 +31,7 @@ from .proof import count_input
 from .router import repair_latex
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
+from .tools import decode_text
 from .reporting import usage_footer
 from .model_limits import output_limit, input_limit
 
@@ -590,7 +591,7 @@ class ReviewBase(ResearchRunner):
                 try:
                     path = self.agent.workspace.path(name)
                     if path.is_file() and path.stat().st_size <= 2_000_000:
-                        bibliography_sources.append({'path': name, 'content': path.read_text(encoding='utf-8')})
+                        bibliography_sources.append({'path': name, 'content': decode_text(path.read_bytes(), name)[0]})
                 except (ValueError, OSError, UnicodeError):
                     self._warn('The bibliography source could not be read: ' + name)
             for bib_source in bibliography_sources:

@@ -23,6 +23,7 @@ import re
 
 from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
+from .tools import unicode_source
 from .worker_errors import WorkerInputError
 from .model_limits import input_limit
 from . import images
@@ -236,20 +237,33 @@ def style_path(root, name):
 
 def read_template(workspace, paths):
     """Workspace files to keep as a style's LaTeX template: a preamble .tex and/or .sty, .cls, .bib files."""
-    files = []
+    files, problems = [], []
     for name in dict.fromkeys(str(p) for p in paths):
         path = workspace.path(name)
         if path.suffix.lower() not in TEMPLATE_FILES:
             raise ValueError('A template is made of .tex, .sty, .cls or .bib files')
-        content = workspace.text(path)
+        try:
+            content = unicode_source(workspace.text(path), workspace.encodings.get(path))  # saved as Unicode
+        except (OSError, ValueError) as exc:
+            problems.append(_unreadable(name, exc))  # a partial template could break write-ups: report them all
+            continue
         if len(content) > 500_000:
             raise ValueError('Each template file must be text of at most 500 KB')
         if any(f['name'] == path.name for f in files):
             raise ValueError('Two template files have the same name: ' + path.name)
         files.append({'name': path.name, 'content': content})
+    if problems:
+        raise ValueError('These template files could not be read: ' + '; '.join(problems) +
+                         '. Remove them from the template or save them as text.')
     if len(files) > 8:
         raise ValueError('A template has at most 8 files')
     return files
+
+
+def _unreadable(name, exc):
+    """Why a chosen file could not be read, naming it."""
+    message = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+    return message if name in message else f'{name}: {message}'
 
 
 def set_template(root, name, files):
@@ -363,13 +377,25 @@ class StyleRunner(ResearchRunner):
             raise ValueError('Choose .tex articles or screenshots to learn the writing style from')
         if any(Path(n).suffix.lower() != '.tex' for n in names):
             raise ValueError('A style is learnt from .tex articles only')
+        # An unreadable article is left out and named; the style is learnt from the others.
+        readable, self._skipped = [], []
+        for article in names:
+            try:
+                self.agent.workspace.text(self.agent.workspace.path(article))
+                readable.append(article)
+            except (OSError, ValueError) as exc:
+                self._skipped.append(_unreadable(article, exc))
+        if names and not readable and not getattr(self.agent, 'image_refs', None):
+            raise ValueError('None of the chosen articles could be read: ' + '; '.join(self._skipped) +
+                             '. Remove them or save them as text.')
         self._name = name
         return super().start(goal.strip() or f'Condense my writing style "{name}" from these articles.', kind='style',
-                             source_files=names, **budgets)
+                             source_files=readable, **budgets)
 
     def _extra_state(self):
         return {'phase': 'scan', 'style_name': self._name, 'articles': [], 'domains': [],
-                'observations': {}, 'profile': None, 'saved_to': None, 'template': self._template}
+                'observations': {}, 'profile': None, 'saved_to': None, 'template': self._template,
+                'skipped': self._skipped}
 
     def _material(self, role):
         # Each call carries exactly what it needs; the generic research index adds nothing here.
@@ -406,6 +432,7 @@ class StyleRunner(ResearchRunner):
             raise ValueError('Unknown style phase: ' + phase)
 
     def _scan(self):
+        self.state['warnings'] += [f'Not used for the style: {problem}.' for problem in self.state.get('skipped', [])]
         self.state['articles'] = [{'id': s['id'], 'path': s['path'], **scan(s['content'])} for s in self.state['sources']]
         for article in self.state['articles']:
             if article['inputs']:

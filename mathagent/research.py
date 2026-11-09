@@ -21,7 +21,7 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID
 from .proof import count_input
-from .tools import schema
+from .tools import schema, unicode_source
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError
 from .model_limits import input_limit, is_ds4, output_limit
@@ -265,7 +265,8 @@ class ResearchRunner:
                 content = '\n'.join(lines)
             else:
                 path = self.agent.workspace.path(str(rel))
-                content = self.agent.workspace.text(path)
+                # The pinned copy is Unicode, and declares it.
+                content = unicode_source(self.agent.workspace.text(path), self.agent.workspace.encodings.get(path))
             sources.append({'id': f'{prefix}{index}', 'path': str(rel), 'content': content,
                             'sha256': hashlib.sha256(content.encode()).hexdigest()})
         return sources
