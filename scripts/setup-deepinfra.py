@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Create a capped DeepInfra test credential without saving the parent API key.
 
 The secret is read from a terminal and sent only to DeepInfra over verified

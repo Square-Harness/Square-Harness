@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 # Square Harness Python sandbox (shared by python-lab and numerical-sanity-check).
 #
 # Build (current architecture):

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Durable inference accounting shared by a concurrent Assistant tree."""
 import json
 import math

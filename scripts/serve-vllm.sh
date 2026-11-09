@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 # Optional H100 BF16 deployment. Incompatible with V100; use serve-llama.sh there.
 # One text-only model server; all benchmark arms use this same endpoint.
 set -euo pipefail

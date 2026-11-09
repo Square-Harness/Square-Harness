@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Durable, versioned storage for bounded proof attempts.
 
 The JSON state is the controller's source of truth. Mathematical arguments live

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Bounded local research workflows with durable, inspectable source evidence.
 
 The controller checks budgets and provenance, not the truth of the report. A

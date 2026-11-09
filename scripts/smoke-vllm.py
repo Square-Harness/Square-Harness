@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Live protocol smoke checks; run after installing Square Harness with pip -e ."""
 import argparse
 import json

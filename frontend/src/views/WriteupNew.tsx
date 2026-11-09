@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type Template } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'

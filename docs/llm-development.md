@@ -234,6 +234,19 @@ Version 1.0. The source of truth for the machine-readable version is
   saved data needs it, and say which data.
 - Commit subjects are imperative and describe the user-visible effect ("Show
   sandbox figures in conversations; raise sandbox memory limits").
+- The project is licensed under PolyForm Noncommercial 1.0.0 (`LICENSE.md`;
+  `frontend/public/LICENSE.txt` is the copy the interface serves). Every source
+  file (Python, shell, TypeScript, JavaScript, CSS, HTML, Dockerfile) starts with
+  this header in its own comment syntax, after any shebang, Docker parser
+  directive or doctype:
+
+  ```
+  # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+  # Copyright (c) 2026 SquareHarness Team
+  ```
+
+  Skill files (`SKILL.md` and their references) are model prompts: leave them
+  without the header.
 
 ## Architecture
 

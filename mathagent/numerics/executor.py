@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Run untrusted Python in a locked-down, throwaway Docker container.
 
 Each run is a fresh container started from a fixed argument array: no network,

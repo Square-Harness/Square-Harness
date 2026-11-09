@@ -1,7 +1,8 @@
 Square Harness
-Copyright 2026 Vincent Boulard and Louis Carillo
+Copyright (c) 2026 SquareHarness Team
 
-Licensed under the Apache License, Version 2.0. See LICENSE.
+Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.md or
+https://polyformproject.org/licenses/noncommercial/1.0.0.
 
 This distribution contains the harness, its documentation, and its bundled
 workflow instructions. External models, dependencies, and retrieved papers

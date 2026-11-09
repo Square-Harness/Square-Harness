@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Experiment records: a small, bounded, managed directory per workspace.
 
 Layout: ``<workspace>/.mathagent/experiments/<experiment-id>/`` holding

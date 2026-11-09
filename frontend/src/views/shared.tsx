@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { activeTasks, concurrencyLimits } from '../concurrency'
 import { api, type Artifact, type Review, type ToolCall } from '../api'

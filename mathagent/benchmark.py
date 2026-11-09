@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Private, bounded mathematical benchmark runner; no reference answers are loaded."""
 import argparse
 from contextlib import nullcontext

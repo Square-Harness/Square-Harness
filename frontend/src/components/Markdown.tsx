@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 // Markdown with typeset mathematics. Model and source text is untrusted:
 // no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.
 // The one image source allowed is an image saved by a sandbox run in this folder, which the

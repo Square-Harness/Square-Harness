@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import { useMemo, useState, type ReactNode } from 'react'
 import { api, type ResearchDetail } from '../api'
 import { ErrorNote, Loading, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'

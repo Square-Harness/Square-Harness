@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Hosted model streams settle reported usage and retain unknown-usage reservations."""
 import os
 from pathlib import Path

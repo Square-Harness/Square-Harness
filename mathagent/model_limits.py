@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Explicit DS4 deployment defaults; existing local-model limits stay unchanged.
 
 Context capacity, per-call generation and cumulative workflow allowances are

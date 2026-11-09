@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 // Application state fed by one Server-Sent Events connection.
 import { useSyncExternalStore } from 'react'
 import {

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Read-only views of saved proof and research jobs, and the interface's chats.
 
 Job views never write engine state. Chat sessions are the interface's own

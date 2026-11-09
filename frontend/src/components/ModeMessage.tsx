@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { MODE_CALLS, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'

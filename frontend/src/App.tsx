@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import { useEffect, useState } from 'react'
 import { ApprovalDialog } from './components/Approval'
 import { DropZone } from './components/DropZone'

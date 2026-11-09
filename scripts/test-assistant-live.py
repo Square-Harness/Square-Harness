@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Small opt-in Assistant smoke tests using the configured local model endpoint.
 
 Every case uses its own temporary offline workspace. This script does not

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 # CUDA 12 retains Volta compilation support. Source and base are supplied from
 # llama-v100.lock.json by build-llama.sh; no mutable model or source tag is used.
 ARG CUDA_BASE_IMAGE

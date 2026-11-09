@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 // Artifacts of sandbox runs: files the interface shows from model or tool output.
 // The server validates the run id and the file name again, and serves each type with
 // headers that keep it inert (images; HTML only in a sandboxed frame; text for data).

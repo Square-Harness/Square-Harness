@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 // A small stroke icon set; everything else in the interface is typographic.
 import type { ReactNode } from 'react'
 

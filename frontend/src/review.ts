@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import type { Budget, ReviewVariant } from './api'
 import type { EffortLevel } from './effort'
 import type { Variant } from './components/Square'

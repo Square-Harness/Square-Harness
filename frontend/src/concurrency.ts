@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 import type { Activity, Concurrency, LiveStep, TaskEntry, TaskSnapshot, TaskSummary, TranscriptItem } from './api.ts'
 
 export const taskRunning = (task: TaskSummary | null | undefined) =>

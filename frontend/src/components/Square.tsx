@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 SquareHarness Team
+
 // Status is a square: the mathematician's end-of-proof mark in its states.
 import type { Candidate, ReviewIssue } from '../api'
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 SquareHarness Team
+
 """Literature check: recall, per-guess verification and the controller's evidence levels."""
 import copy
 import json
