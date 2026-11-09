@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Pinned, text-only llama.cpp deployment for two 32 GiB V100 GPUs.
 
 Uses only the Python standard library on the host. Model data and launch records

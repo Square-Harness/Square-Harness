@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Solve, verify, and repair one proof, with immutable candidates and finite work.
 
 The controller enforces provenance and budgets. A model review is not a proof

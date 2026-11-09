@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Optional durable allowance for a hosted tester; stores amounts, never content.
 
 Calls reserve their worst-case cost before dispatch. Only complete, bounded

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Start the isolated GUI with DS4/DeepInfra or the existing local Qwen server."""
 import argparse
 import math

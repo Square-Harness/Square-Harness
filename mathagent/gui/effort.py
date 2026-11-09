@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Effort levels: depth and time behind Low … Poincaré.
 
 The interface's forms use the same legacy table (frontend/src/effort.ts).

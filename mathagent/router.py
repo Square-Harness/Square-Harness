@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Guess which workflows a free-form request needs, and restate each self-contained.
 
 One short structured call to the same local model. The guess is shown to the

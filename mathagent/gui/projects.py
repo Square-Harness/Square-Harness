@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Small, user-owned project notebooks inside an existing workspace.
 
 Projects organize one user's work; they are not additional file-access sandboxes.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Bounded semantic proof routing, separate from mathematical proof generation.
 
 The current user request is classified without changing its text. The caller

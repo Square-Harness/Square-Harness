@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Publish saved-job changes and live model output by watching .mathagent/.
 
 The engine saves state atomically and fsyncs every streamed event before it is

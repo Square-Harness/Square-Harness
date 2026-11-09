@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Opt-in live check of the numerical skills with a real model and the real sandbox.
 
 Each case runs in its own temporary workspace through the same path as a terminal

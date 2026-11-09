@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Bind the shared sandbox to one skill and policy, and expose it as model tools.
 
 Only controller code calls ``PythonSandbox.bind``. The skill, and therefore the

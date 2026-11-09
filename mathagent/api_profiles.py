@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Opt-in API dialects; the existing local vLLM adapter is unchanged.
 
 The tokenizer and context_limit extensions below belong to Local LLM Lab.

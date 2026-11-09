@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Live checks against an explicitly loaded local model, without server changes."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor

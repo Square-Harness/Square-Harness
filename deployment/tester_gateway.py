@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Cloudflare Access entry point for fixed, separately isolated SH workspaces.
 
 Only this optional deployment layer needs PyJWT. SH remains a loopback service

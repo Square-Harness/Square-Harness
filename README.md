@@ -1,6 +1,6 @@
 # Square Harness
 
-**An open-source harness for mathematical research with open-weights models.**
+**A source-available harness for mathematical research with open-weights models.**
 
 Square Harness turns a language model running on your computer, or on a GPU in
 your lab, into a research assistant for mathematics. Its core is a simple proof
@@ -10,7 +10,7 @@ inspection. Around it, the same principles serve literature checks, reading
 lists, manuscript reviews, explanations, LaTeX write-ups and numerical
 experiments.
 
-**Version 1.0. Self-host first.** Run the model, harness and workspace on your own
+**Version 1.1.0. Self-host first.** Run the model, harness and workspace on your own
 computer or research server. This setup needs no model-provider API key.
 
 <picture>
@@ -102,6 +102,11 @@ Created by **Vincent Boulard**, with **Louis Carillo**. See
 [CONTRIBUTING.md](CONTRIBUTING.md) and [CITATION.cff](CITATION.cff). Maintainers
 decide which contributions are merged.
 
-[Apache License 2.0](LICENSE): free scientific and commercial reuse under its terms.
+[PolyForm Noncommercial License 1.0.0](LICENSE.md): free use, modification and
+redistribution for noncommercial purposes, including personal research and use
+by universities and public research organisations. Commercial use requires a
+separate license from the relevant copyright holders. Previously published
+Apache-2.0 code retains its permissions; see [NOTICE](NOTICE) and
+[LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
 Model weights, dependencies and retrieved papers retain their own licenses.
 See [NOTICE](NOTICE) for attribution.

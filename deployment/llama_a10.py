@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Separate single-A10 Q4 profile; the two-V100 Q8 profile remains available.
 
 One server slot executes queued requests from three independent proof branches.

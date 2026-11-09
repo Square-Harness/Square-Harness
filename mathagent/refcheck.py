@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
 """Literature check: a qualified standard reference or a precise citation check.
 
 A standard lookup recalls alternatives, verifies bibliographic records, discovers
