@@ -311,7 +311,14 @@ one with a message.
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
   `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Dropped files are attached to your next
-  message.
+  message. Text files are best saved as UTF-8; older files in Latin-1 or
+  Windows-1252 (accents saved by an older editor) are read too, in the encoding
+  their `\usepackage[…]{inputenc}` declares when they declare one. A file that
+  cannot be read as text is named in the error so that you can remove it.
+  Approved file edits use the replacement text's encoding declaration, or UTF-8
+  if none is present. Changing a declaration to `utf8` also converts the saved
+  bytes; characters unavailable in the requested encoding are refused before
+  the file changes. Saved template copies use UTF-8, including UTF-16 originals.
 - **Learn my writing style**, below New conversation, teaches write-ups how you
   write (see [Writing styles](#writing-styles)).
 - **Job pages** show live output, every attempt and review, sources, budgets and
@@ -619,7 +626,10 @@ for each kind of paper you write, how you announce, explain and phrase things.
 Choose main article files, ideally two or more per kind of paper; `\input` parts
 are not followed, so pin them as well. A style can also keep a LaTeX template (an
 article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
-style build on unless you attach one.
+style build on unless you attach one. An article that cannot be read as text
+(binary, over 1 MB) is left out and named in the job's warnings; the style is
+learnt from the others. If no article or a template file cannot be read, the
+job does not start and lists every such file.
 
 With the DS4.1 vision profile you can also choose screenshots of articles to
 learn visible phrasing and layout. Exact macro and environment definitions

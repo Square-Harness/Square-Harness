@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Explicit tool registry; workspace-scoped text access and approved mutations."""
+import codecs
 import difflib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -22,6 +24,85 @@ SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
 _WRITE_LOCK = Lock()
+
+# Reading user files. UTF-8 first; otherwise the 8-bit encoding the file declares; otherwise UTF-8
+# with Windows-1252 for the bytes that are not UTF-8 (French accents saved by an older editor).
+FALLBACK = 'utf-8+cp1252'
+INPUTENC = {'latin1': 'latin-1', 'latin9': 'iso8859-15', 'ansinew': 'cp1252', 'cp1252': 'cp1252',
+            'applemac': 'mac-roman', 'macce': 'mac-latin2', 'cp850': 'cp850', 'cp437': 'cp437', 'latin2': 'iso8859-2'}
+TEX_ENCODINGS = {'isolatin': 'latin-1', 'iso latin 1': 'latin-1', 'windows latin 1': 'cp1252',
+                 'mac os roman': 'mac-roman', 'iso latin 9': 'iso8859-15', 'iso latin 2': 'iso8859-2'}
+ENCODING_NAMES = {'iso8859-1': 'Latin-1', 'iso8859-15': 'Latin-9', 'cp1252': 'Windows-1252', 'mac-roman': 'Mac Roman',
+                  'mac-latin2': 'Mac Central European', 'cp850': 'DOS (CP850)', 'cp437': 'DOS (CP437)',
+                  'iso8859-2': 'Latin-2', 'utf-16': 'UTF-16', FALLBACK: 'UTF-8, with Windows-1252 for its accented bytes'}
+_DECLARATION = re.compile(rb'\\usepackage\s*\[([^\]]*)\]\s*\{inputenc\}|\\inputencoding\s*\{([^}]*)\}')
+_MAGIC = re.compile(rb'^\s*%\s*!TEX\s+encoding\s*=\s*(.+?)\s*$', re.I)
+_TEXT_DECLARATION = re.compile(r'(\\usepackage\s*\[)[^\]]*(\]\s*\{inputenc\})|(\\inputencoding\s*\{)[^}]*(\})'
+                               r'|^(\s*%\s*!TEX\s+encoding\s*=\s*).+$', re.I | re.M)
+
+
+def _windows_1252(error):
+    return error.object[error.start:error.end].decode('cp1252', errors='replace'), error.end
+
+
+codecs.register_error('square-cp1252', _windows_1252)
+
+
+def _codec(name):
+    name = name.strip().decode('ascii', errors='ignore').lower()
+    name = INPUTENC.get(name) or TEX_ENCODINGS.get(name) or name
+    if name in ('utf8', 'utf8x', 'utf-8 unicode'):
+        return 'utf-8'
+    try:
+        return codecs.lookup(name).name
+    except LookupError:
+        return None
+
+
+def _declared_encoding(data):
+    """The encoding a TeX source declares, including explicit UTF-8; None if undeclared."""
+    for line in data.splitlines():
+        magic = _MAGIC.match(line)
+        if magic:
+            return _codec(magic.group(1))
+        code = re.split(rb'(?<!\\)%', line, maxsplit=1)[0]
+        for options, name in _DECLARATION.findall(code):
+            for option in reversed((options or name).split(b',')):
+                codec = _codec(option)
+                if codec:
+                    return codec
+    return None
+
+
+def decode_text(data, name):
+    """The text of a user file and the encoding read, None for UTF-8 (see FALLBACK above).
+
+    A byte-order mark decides first. A file containing NUL bytes is binary; the error names it.
+    """
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text, encoding = data.decode('utf-16', errors='replace'), 'utf-16'
+    else:
+        try:
+            text, encoding = data.decode('utf-8-sig'), None
+        except UnicodeDecodeError:
+            encoding = _declared_encoding(data) or FALLBACK
+            if encoding in ('utf-8', 'utf-8-sig'):
+                encoding = FALLBACK  # Keep recovering older accented bytes in files declaring UTF-8.
+            text = data.decode('utf-8', errors='square-cp1252') if encoding == FALLBACK else data.decode(encoding, errors='replace')
+    if '\x00' in text:
+        raise ValueError(f'{name} is not a text file (it contains NUL bytes)')
+    return text, encoding
+
+
+def unicode_source(text, encoding):
+    """A decoded copy of a legacy or UTF-16 file declares UTF-8 when written out.
+
+    Only copies pinned or saved by jobs: the user's own file keeps its encoding and declaration.
+    """
+    if encoding in (None, FALLBACK):
+        return text
+    return _TEXT_DECLARATION.sub(lambda m: (m.group(1) + 'utf8' + m.group(2) if m.group(1) else
+                                            m.group(3) + 'utf8' + m.group(4) if m.group(3) else m.group(5) + 'UTF-8'), text)
 
 
 def schema(name, description, properties, required=()):
@@ -52,6 +133,7 @@ class Workspace:
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
         self.pinned = set()
+        self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
         if self.literature is None:
             self.readable.discard('.pdf')  # PDF extraction uses the literature backend
 
@@ -81,12 +163,15 @@ class Workspace:
                              'ask them to pin the file or enable that file type')
 
     def text(self, p):
+        name = p.relative_to(self.root).as_posix() if p.is_relative_to(self.root) else p.name
         st = p.stat()
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:
-            raise ValueError('Only regular text files up to 1 MB can be read')
-        value = p.read_text(encoding='utf-8')
-        if '\x00' in value:
-            raise ValueError('Binary file excluded')
+            raise ValueError(f'{name}: only regular text files up to 1 MB can be read')
+        value, encoding = decode_text(p.read_bytes(), name)
+        if encoding:
+            self.encodings[p] = encoding
+        else:
+            self.encodings.pop(p, None)
         return value
 
     def files(self, suffixes=None):
@@ -153,9 +238,19 @@ class Workspace:
         p = self.path(path)
         original = p.stat() if p.exists() else None
         old = self.text(p) if original is not None else ''
+        encoding = self.encodings.get(p) if original is not None else None
+        # The replacement may explicitly change/remove its declaration, or be a new file.
+        kept = _declared_encoding(content.encode('utf-8')) or 'utf-8'
+        try:
+            data = content.encode(kept)
+        except UnicodeEncodeError as exc:
+            raise ValueError(f'{path} declares {ENCODING_NAMES.get(kept, kept)}, which cannot hold '
+                             f'{content[exc.start:exc.end]!r}; no file changed. Save the file as UTF-8 first.') from None
+        note = (f' (saved as {ENCODING_NAMES.get(kept, kept)})' if kept != 'utf-8' else
+                ' (saved as UTF-8; it was not valid UTF-8)' if encoding == FALLBACK else '')
         diff = ''.join(difflib.unified_diff(old.splitlines(True), content.splitlines(True),
                                            fromfile=path + ' (old)', tofile=path + ' (new)'))
-        if not self.approve(f'WRITE {p}\n{diff or "(no textual changes)"}'):
+        if not self.approve(f'WRITE {p}{note}\n{diff or "(no textual changes)"}'):
             return 'User denied the write. No file changed.'
         with _WRITE_LOCK:
             target = self.path(path)
@@ -168,17 +263,17 @@ class Workspace:
             p.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix='.square-write-', dir=p.parent)
             try:
-                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                with os.fdopen(fd, 'wb') as stream:
                     if original is not None:
                         os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode))
-                    stream.write(content)
+                    stream.write(data)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, p)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
-        return f'Wrote {path} ({len(content.encode())} bytes)'
+        return f'Wrote {path} ({len(data)} bytes)'
 
     def run_python(self, code):
         if not self.allow_python:

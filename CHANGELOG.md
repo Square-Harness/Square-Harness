@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Follow the replacement text's encoding declaration for approved file edits,
+  including conversions to UTF-8 and newly created files; undeclared text is
+  saved as UTF-8. Normalize UTF-16 template copies' declarations to UTF-8 too.
+- Read text files that are not UTF-8 instead of failing with a bare
+  "'utf-8' codec can't decode byte 0xe9": a file declaring Latin-1 (or another
+  8-bit encoding) through `inputenc` is read in that encoding; otherwise the
+  bytes that are not UTF-8 are read as Windows-1252, the usual case of French
+  accents. A file that cannot be read as text is named in the error, pinned
+  and saved copies (style templates included) declare UTF-8, and model edits
+  keep a file's declared encoding. Applies to styles, reviews,
+  explanations, write-ups and the model's file tools. Learning a writing style
+  leaves out an unreadable article with a warning naming it; when no article,
+  or a template file, can be read, the error lists every such file.
+
 ## 1.1.0 — 2026-11-09
 
 - License the current project distribution under the PolyForm Noncommercial

@@ -29,6 +29,8 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
 
+from .tools import ENCODING_NAMES, decode_text
+
 BACKEND_VERSION = 'literature-v1'
 QUOTA_HOSTS = {'api.semanticscholar.org': 'semantic_scholar'}
 MAX_BYTES = 10_000_000
@@ -955,9 +957,11 @@ class LiteratureTools:
         if source.suffix.lower() == '.pdf':
             text, extractor = self._pdf(body)
         else:
-            text, extractor = body.decode('utf-8'), 'UTF-8 local text'
-            if '\x00' in text:
-                raise LiteratureError('Binary manuscript excluded')
+            try:
+                text, encoding = decode_text(body, relative.as_posix())
+            except ValueError as exc:  # names the file
+                raise LiteratureError(str(exc)) from None
+            extractor = 'UTF-8 local text' if encoding is None else f'local text ({ENCODING_NAMES.get(encoding, encoding)})'
         if not text.strip() or len(text.encode('utf-8')) > MAX_TEXT:
             raise LiteratureError('Manuscript extraction is empty or exceeds 4 MB')
         metadata = {'document_id': document_id, 'canonical_identifier': source_url,
