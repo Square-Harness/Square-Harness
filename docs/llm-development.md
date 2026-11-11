@@ -456,7 +456,7 @@ documented together when releasing these features.
 | | `gui/hub.py` | Tasks, queue and threads; `EventBus`; approvals; engine wiring; interruptible clients |
 | | `gui/inference.py`, `gui/store.py`, `gui/watch.py`, `gui/effort.py` | Fair model-request admission; read-only job views, chats, settings, uploads, templates; watching `.mathagent/`; effort budgets |
 | Frontend | `frontend/src` | `store.ts` (state from one SSE stream), `api.ts` (types mirror `gui/store.py`), `router.ts`, `modes.ts`, `modeCalls.ts`, `effort.ts`, `views/`, `components/` |
-| Benchmarks | `benchmark.py`, `scripts/`, `deployment/` | See [Benchmarks](#benchmarks) |
+| Benchmarks | `benchmark.py`, `lemmabench.py`, `scripts/`, `deployment/` | See [Benchmarks](#benchmarks) |
 
 ### How a skill runs
 
@@ -825,7 +825,7 @@ profiles retain their existing controller path until separately validated.
 `python -m mathagent.benchmark` compares two arms on statement-only problems:
 
 - `raw-single`: one direct, thinking-enabled solve;
-- `proof`: the same first solve, then verification and bounded repair.
+- `proof`: a first solve with the same settings, then verification and bounded repair.
 
 Both arms require the full configured initial output allowance; an input that
 cannot fit is rejected consistently rather than fitting only the Proof arm.
@@ -835,7 +835,10 @@ An active socket may take up to its configured timeout to return.
 
 Both arms use the same instruction (`proof_policy.COMMON_INSTRUCTION`), model,
 context, sampling and per-problem seed. The proof arm deliberately has more
-compute, so this is not an equal-budget comparison.
+compute, so this is not an equal-budget comparison. Initial calls are sampled
+separately; neither matching seeds nor a shared prompt guarantees identical
+answers from a hosted provider. To isolate repair effects, also grade Proof's
+saved initial candidate against its selected final candidate.
 
 - **Dataset**: keep it outside the repository. The manifest is
   `{"version": 1, "name": …, "problems": [{"id": "P1", "statement": "problems/P1.md"}]}`,
@@ -848,13 +851,117 @@ compute, so this is not an equal-budget comparison.
   - A new `--output` directory is required. Failed jobs are never silently
     retried.
   - Run one job at a time (`--workers 1 --max-in-flight 1`).
-  - Record `--model-revision`, `--server-image` and `--dtype`.
+  - Record `--model-revision`, `--server-image` and `--dtype` truthfully. Keep
+    unknown provider-managed values explicit rather than inventing an immutable
+    serving revision.
 - **Keep**: `plan.json`, `outputs.jsonl`, `summary.json`, every answer, request
   and stream, and the anonymised grading files with the private mapping
   (submission ID → problem and arm).
 - **Grade** blind to the arm where possible. Count correct answers damaged by a
   repair as well as incorrect answers repaired. A timeout, a budget or context
   stop, or an interrupted request is an operational outcome, not a refutation.
+
+### LemmaBench preparation and export
+
+`python -m mathagent.lemmabench` adapts an external LemmaBench JSONL file without
+loading reference solutions into any model workspace. Both subcommands are
+offline file operations: no model calls, automatic judging or benchmark launch.
+Keep the input, prepared bundle, run outputs and exports outside the repository.
+
+Preparation requires an explicit `--selection all-accepted` or `--selection all`.
+The former requires at least one recorded dataset judgment, with every verdict
+true; it is an eligibility filter, not independent verification that a lemma is
+correct. Freeze the selection before inference and retain the exclusion record. Never select
+rows after inspecting model answers.
+
+For example, with a source file already placed in an external private folder:
+
+```sh
+BENCH_ROOT="$HOME/square-harness-bench"
+python -m mathagent.lemmabench prepare \
+  --input "$BENCH_ROOT/lemmas.jsonl" \
+  --output "$BENCH_ROOT/prepared" \
+  --selection all-accepted
+```
+
+The prepared bundle separates `dataset/manifest.json` and statement files from
+`evaluation/source.jsonl` and `evaluation/metadata.jsonl`. Preparation uses the
+complete, exact lemma when the assumptions already occur there verbatim; it does
+not duplicate that context. Otherwise it joins the unchanged assumptions and
+lemma with structural labels. This is the full-context statement, not a rewritten
+or simplified task. Original records, reference material and judging metadata stay
+in `evaluation/`. Selected records containing recognized proof environments are
+refused; an explicit, repeatable `--exclude-line N` can quarantine source records
+before preparation. Hashes, selection and exclusions remain in `preparation.json`.
+Do not attach the evaluation directory to Proof or copy it into a solver workspace.
+
+The following dry-run template explicitly selects a three-pass DS4 comparison,
+one replicate and seed 20261111. These are a reproducible example, not a launch
+instruction or evidence that the provider allowance is sufficient:
+
+```sh
+SH_DEEPINFRA_REASONING_EFFORT=high SH_DEEPINFRA_SERVICE_TIER=standard \
+python -m mathagent.benchmark \
+  --backend openai --api-profile deepinfra --allow-remote-model \
+  --host https://api.deepinfra.com/v1/openai \
+  --model deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --manifest "$BENCH_ROOT/prepared/dataset/manifest.json" \
+  --output "$BENCH_ROOT/run" \
+  --arms raw-single proof --ctx 1048576 \
+  --predict 384000 --repair-tokens 384000 --verify-tokens 384000 \
+  --rounds 3 --tokens 3456000 \
+  --temperature 1 --verify-temperature 1 --top-p 0.95 \
+  --seconds 97200 --raw-seconds 10800 --request-timeout 10800 \
+  --workers 1 --max-in-flight 1 --replicates 1 --seed 20261111 \
+  --dry-run
+```
+
+The per-call output ceiling includes reasoning. Proof's cumulative ceiling is
+`3 * (384000 + 2 * 384000)`, including one possible review-format retry per pass;
+it does not request two mathematical reviews every time. The raw call has the
+same initial output and request-time limits. Proof can use up to three solver
+passes, with a 27-hour workflow ceiling; the per-request ceiling is three hours.
+These are upper bounds, not target consumption. For `N` statements and `R`
+replicates, both arms together permit at most `N * R * 3840000` generated tokens.
+
+The plan records the effective model ID, reasoning effort and service tier;
+execution refuses a changed backend profile. Use the same frozen values for every
+job. Provider-managed model revisions and latency remain an external source of
+variation. A dry run performs no model or tokenizer calls and does not confirm
+credentials, remaining credit or account limits. Confirm the intended replication
+count and provider allowance before a
+separately authorized launch.
+
+After an authorized run, export its answers locally:
+
+```sh
+python -m mathagent.lemmabench export \
+  --run "$BENCH_ROOT/run" --prepared "$BENCH_ROOT/prepared" \
+  --output "$BENCH_ROOT/solutions" --include-proof-initial --blind
+```
+
+The exporter preserves each written response as one `proof_steps` item, without
+splitting, rewriting or including reasoning traces or Proof reviewer verdicts.
+Original LemmaBench fields, including its dataset self-containedness judgments,
+remain unchanged; those judgments do not assess the generated answer.
+
+Without `--blind`, the solution files are `raw-single.proofs.jsonl`,
+`proof.proofs.jsonl` and optionally `proof-initial.proofs.jsonl`. With `--blind`,
+the exporter instead writes one shuffled `proofs.jsonl`, with anonymous model
+labels and submission identifiers. Share only that file with a blind grader.
+Keep `grading-key.private.json`, `coverage.json` and `failures.jsonl` private
+until grading is complete: they disclose arms or operational status. Wording
+inside an answer can still reveal that a review occurred, so anonymous labels
+alone do not guarantee blinding.
+
+Check coverage and the explicit failure ledger, including planned jobs with no
+result. Empty or unfinished responses are not exported as fake solutions.
+Complete written candidates remain gradable when a Proof review is uncertain;
+this does not turn their review status into a correctness judgment. Mathematical
+scores still come from the agreed external evaluation.
+
+### Earlier serving profiles
+
 - **Frozen serving profiles** for past runs:
   - `deployment/hyperqwen-a10.lock.json` with `scripts/run-hyperqwen-benchmark.py`
     (HyperQwen, one A10, 40,960 context);

@@ -20,7 +20,8 @@ import threading
 from .agent import Agent, AgentError
 from .backends import create_client, TokenBudgetError, openai_thinking_budget_policy
 from .api_profiles import create_profile_client
-from .deepinfra import BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL
+from .deepinfra import (BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL,
+                        CONTEXT_TOKENS as DEEPINFRA_CONTEXT, MAX_OUTPUT_TOKENS as DEEPINFRA_OUTPUT)
 from .model_limits import DEFAULTS as DS4_DEFAULTS
 from .proof import ProofRunner, ProofContext, check_context
 from .proof_policy import COMMON_INSTRUCTION, initial_request
@@ -129,6 +130,24 @@ def _client(args, timeout):
     return create_client(args.backend, args.host, timeout=timeout)
 
 
+def backend_settings(args):
+    """Record nonsecret serving controls without opening a client or reading a key."""
+    profile = getattr(args, 'api_profile', 'default')
+    settings = {'api_profile': profile, 'backend': args.backend,
+                'host': args.host.rstrip('/'), 'model': args.model}
+    if profile == 'deepinfra':
+        effort = os.environ.get('SH_DEEPINFRA_REASONING_EFFORT', 'high')
+        tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
+        if effort not in {'none', 'low', 'high', 'max'}:
+            raise ValueError('DeepSeek reasoning effort must be none, low, high or max')
+        if tier not in {'standard', 'priority'}:
+            raise ValueError('DeepInfra service tier must be standard or priority')
+        settings.update(reasoning_effort=effort, service_tier=tier)
+        if openai_thinking_budget_policy():
+            raise ValueError('DeepInfra does not support vLLM thinking-budget fractions')
+    return settings
+
+
 def preflight(args):
     if args.manifest is None or args.output is None:
         raise ValueError('--manifest and --output are required')
@@ -140,6 +159,9 @@ def preflight(args):
             raise ValueError('DeepInfra requires --backend openai and explicit --allow-remote-model')
         if args.model != DEEPINFRA_MODEL:
             raise ValueError('Use the pinned DeepSeek V4.1 Flash 1017 model for this profile')
+        if args.ctx > DEEPINFRA_CONTEXT or max(args.predict, args.verify_tokens,
+                args.repair_tokens or args.predict) > DEEPINFRA_OUTPUT:
+            raise ValueError('DeepInfra supports at most 1048576 context and 384000 output tokens per call')
     data = load_manifest(args.manifest)
     output = args.output.resolve()
     if output.exists():
@@ -181,6 +203,7 @@ def preflight(args):
         if prompt_bytes > (args.ctx - args.predict - 512) * 3:
             raise ValueError(f'Context/output envelope too small for {problem["id"]}; reduce predict or increase ctx')
     settings = {key: value for key, value in vars(args).items() if key not in {'manifest', 'output', 'init_smoke', 'dry_run'}}
+    serving = backend_settings(args)
     code = {name: hashlib.sha256(raw).hexdigest() for name, raw in _source_files().items()}
     package = Path(__file__).resolve().parent
     checkout = None
@@ -194,8 +217,12 @@ def preflight(args):
     return data, {'version': 2, 'protocol': 'square-harness-0.5',
             'manifest': {k: v for k, v in data.items() if k != 'problems'},
             'problems': [{k: v for k, v in item.items() if k != 'text'} for item in data['problems']],
-            'settings': settings, 'common_instruction': COMMON_INSTRUCTION, 'code_sha256': code, 'checkout': checkout,
-            'provenance_warning': ('Checkpoint/server provenance is incomplete; suitable for software smoke tests only.'
+            'settings': settings, 'backend_settings': serving,
+            'common_instruction': COMMON_INSTRUCTION, 'code_sha256': code, 'checkout': checkout,
+            'provenance_warning': ((
+                'Hosted model ID is recorded, but immutable weights/serving revisions are provider-managed and not independently verified.'
+                if serving['api_profile'] == 'deepinfra' else
+                'Checkpoint/server provenance is incomplete; suitable for software smoke tests only.')
                 if 'unrecorded' in {args.model_revision, args.server_image, args.dtype} else None),
             'output': str(output), 'jobs': len(data['problems']) * args.replicates * len(args.arms),
             'generated_token_ceiling': len(data['problems']) * args.replicates * sum(
@@ -463,6 +490,8 @@ def export_grading(output, records, problems, seed):
 
 
 def execute(args, data, plan):
+    if backend_settings(args) != plan.get('backend_settings', backend_settings(args)):
+        raise ValueError('Backend reasoning effort or service tier changed after preflight; create a fresh plan')
     policy = openai_thinking_budget_policy() if args.backend == 'openai' else {}
     if policy != plan.get('openai_thinking_budget_policy', {}):
         raise ValueError('Thinking budget policy changed after preflight')

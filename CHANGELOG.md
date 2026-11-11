@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Prepare external LemmaBench JSONL data as statement-only benchmark inputs,
+  preserving reference and judging material separately. Export exact written
+  answers in solution JSONL format, with optional initial Proof candidates,
+  anonymized grading and explicit coverage/failure records. Keep preparation
+  and export offline, and record the effective DS4 model, reasoning effort and
+  service tier in benchmark plans.
 - Focus Proof verification on mathematical risks while retaining whole-proof
   checking, and ask for clearer proof structure and rigorous counterexamples
   when appropriate. Give later repairs a bounded, fallible history of earlier

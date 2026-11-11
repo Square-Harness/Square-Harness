@@ -861,6 +861,27 @@ proved **3 of 22** answering directly and **11 of 22** inside Square Harness
 (14% → 50%). This is one run on a small set. The protocol for reproducible runs is
 in [llm-development.md](llm-development.md#benchmarks).
 
+For a new comparison, the benchmark runner gives raw inference and Proof the same
+initial instructions, model, sampling and output allowance. Raw inference makes
+one call; Proof can review and repair its answer, spending more compute. The
+initial calls are sampled separately, so matching seeds do not ensure identical
+answers. Record correctness, failures, tokens and time, and agree on the grading
+rubric before reading the answers.
+
+LemmaBench JSONL data can be prepared with `python -m mathagent.lemmabench prepare`.
+Choose explicitly between all rows and rows accepted by every recorded dataset
+judge. Preparation preserves the lemma as the full statement when it already
+contains the exact assumptions; otherwise it includes both without rewriting
+them. Original records and judging metadata stay in a separate private evaluation
+directory. This filter records a dataset selection, not a mathematical guarantee.
+After a run, `python -m mathagent.lemmabench export` writes solution JSONL files
+with each exact written answer in `proof_steps`. It can also export Proof's first
+candidate for comparison with its final answer, and anonymize submissions for a
+grader. Its failure ledger distinguishes missing or failed jobs from solutions;
+it never invents a proof for an empty response. Preparation and export are local
+file operations: neither starts inference or evaluates mathematical correctness.
+See the [benchmark preparation commands](llm-development.md#lemmabench-preparation-and-export).
+
 ## Limits
 
 - The solver and the verifier are the same model in separate contexts, so they
