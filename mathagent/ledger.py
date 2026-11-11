@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 from typing import Iterator
 import uuid
 import warnings
@@ -34,7 +35,7 @@ class _VersionError(LedgerError):
     """A future schema must never be overwritten using an older backup."""
 
 
-MAX_FILE_BYTES = 4 * 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_STREAM_BYTES = 64 * 1024 * 1024
 _ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 _ARTIFACT = re.compile(r"[0-9]{4,}-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.(?:md|jsonl)\Z")
@@ -230,6 +231,8 @@ class ProofStore:
             "initial_candidate": None, "selected_candidate": None, "selection_history": [], "pending": None,
         }
         _validate(state, proof_id)
+        # Reject oversized accepted material before publishing a job directory.
+        _bytes(json.dumps(state, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
         base = workspace / ".mathagent"
         _directory(base, create=True)
         _directory(base / "proofs", create=True)
@@ -292,10 +295,15 @@ class ProofStore:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise LedgerError(f"Unsafe proof lock: {path}")
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise LedgerError("This proof is already in use by another operation; try again after it finishes.") from exc
+            deadline = time.monotonic() + 0.1
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise LedgerError("This proof is already in use by another operation; try again after it finishes.") from exc
+                    time.sleep(0.005)
             yield
         finally:
             os.close(fd)
@@ -389,29 +397,37 @@ class ProofStore:
             except FileNotFoundError:
                 pass
 
-    def append_stream(self, filename: str, event: dict) -> None:
-        """Append and flush an event; a killed process may leave a partial last line."""
+    @contextmanager
+    def stream_writer(self, filename: str):
+        """Hold one safe journal descriptor; sync every half second and on exit.
+
+        Reservations are durable before dispatch. A power loss may lose the last
+        half second of journal events; their unknown usage remains reserved.
+        """
         self._writable()
         self._check_paths()
         if (not isinstance(filename, str) or not _ARTIFACT.fullmatch(filename)
                 or ".." in filename or not filename.endswith(".jsonl")):
             raise LedgerError("Invalid proof stream filename.")
-        if not isinstance(event, dict):
-            raise LedgerError("A proof stream event must be an object.")
-        try:
-            data = _bytes(json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n")
-        except (TypeError, ValueError) as exc:
-            raise LedgerError(f"Cannot serialize proof stream event: {exc}") from exc
         path = self.directory / "artifacts" / filename
         _regular(path)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                    raise LedgerError(f"Unsafe proof stream: {path}")
-                if info.st_size + len(data) > MAX_STREAM_BYTES:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise LedgerError(f"Unsafe proof stream: {path}")
+            size, synced = info.st_size, time.monotonic()
+
+            def append(event):
+                nonlocal size, synced
+                if not isinstance(event, dict):
+                    raise LedgerError("A proof stream event must be an object.")
+                try:
+                    data = _bytes(json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n")
+                except (TypeError, ValueError) as exc:
+                    raise LedgerError(f"Cannot serialize proof stream event: {exc}") from exc
+                if size + len(data) > MAX_STREAM_BYTES:
                     raise LedgerError(f"Proof stream exceeds {MAX_STREAM_BYTES} bytes.")
                 remaining = memoryview(data)
                 while remaining:
@@ -419,11 +435,24 @@ class ProofStore:
                     if written == 0:
                         raise LedgerError("Failed to append a proof stream event.")
                     remaining = remaining[written:]
-                os.fsync(fd)
+                size += len(data)
+                if time.monotonic() - synced >= 0.5 or event.get('done'):
+                    os.fsync(fd)
+                    synced = time.monotonic()
+
+            try:
+                yield append
             finally:
-                os.close(fd)
+                os.fsync(fd)
         except OSError as exc:
             raise LedgerError(f"Cannot append proof stream: {exc}") from exc
+        finally:
+            os.close(fd)
+
+    def append_stream(self, filename: str, event: dict) -> None:
+        """Append one event durably; streaming callers can share stream_writer."""
+        with self.stream_writer(filename) as append:
+            append(event)
 
     def read_artifact(self, filename: str) -> str:
         self._check_paths()

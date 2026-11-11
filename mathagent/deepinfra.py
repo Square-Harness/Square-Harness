@@ -125,7 +125,7 @@ class DeepInfra(OpenAICompatible):
                      429: 'The provider rate, capacity or spending limit was reached.'}
             hint = hints.get(exc.code, 'The provider request failed; check its service status.')
             raise AgentError(f'DeepInfra HTTP {exc.code}: {hint}') from None
-        except (URLError, TimeoutError, OSError) as exc:
+        except (URLError, TimeoutError, OSError, HTTPException) as exc:
             raise AgentError('Cannot reach DeepInfra: ' + self._redact(exc)) from None
 
     def _payload(self, payload, *, include_images=True):
@@ -172,7 +172,30 @@ class DeepInfra(OpenAICompatible):
         return len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
 
     def _quota_input_cap(self, payload, data):
-        """Only the tiny, non-thinking title shape can reserve less than full context."""
+        """Only validated nonthinking title/routing shapes use a smaller reserve."""
+        if '_sh_bounded_routing' in payload:
+            from .proof_routing import POLICY, SCHEMA, OUTPUT_TOKENS
+            messages, options = payload.get('messages'), payload.get('options')
+            valid = (payload['_sh_bounded_routing'] is True and payload.get('think') is False
+                     and payload.get('stream') is True and not getattr(self, 'image_refs', None)
+                     and payload.get('format') == SCHEMA
+                     and not set(payload) - {'model', 'messages', 'options', 'think', 'stream', 'format', '_sh_bounded_routing'}
+                     and isinstance(options, dict) and not set(options) - {'num_ctx', 'num_predict', 'temperature'}
+                     and type(data['max_tokens']) is int and 0 < data['max_tokens'] <= OUTPUT_TOKENS
+                     and isinstance(messages, list) and len(messages) == 2)
+            if valid:
+                valid = all(isinstance(message, dict) and {'role', 'content'} <= set(message)
+                            and not set(message) - {'role', 'content', 'images'}
+                            and message['role'] == role and isinstance(message['content'], str)
+                            and message.get('images', []) == []
+                            for message, role in zip(messages, ('system', 'user')))
+            if valid and messages[0]['content'] == POLICY:
+                bound = (self._bytes(data['messages']) + 1024 + 128 * len(messages)
+                         + 2 * self._bytes({'response_format': data['response_format']}))
+                if bound <= 65_536:
+                    return bound
+            # An invalid marker never reduces an ordinary call's reservation.
+            return CONTEXT_TOKENS
         if '_sh_bounded_title' not in payload:
             return CONTEXT_TOKENS
         messages, options = payload.get('messages'), payload.get('options')
@@ -203,6 +226,11 @@ class DeepInfra(OpenAICompatible):
         """
         # Count text and image-processing allowance, never the base64 transport encoding.
         data = self._payload(payload, include_images=False)
+        if '_sh_bounded_routing' in payload:
+            bound = self._quota_input_cap(payload, data)
+            if bound < CONTEXT_TOKENS:
+                self.input_token_count_method = 'Bounded routing UTF-8 byte and framing/schema estimate'
+                return bound
         if '_sh_bounded_title' in payload:
             self.input_token_count_method = 'Bounded title UTF-8 byte and framing estimate'
             return self._quota_input_cap(payload, data)
@@ -217,8 +245,12 @@ class DeepInfra(OpenAICompatible):
                                   for _, attached in message_images(refs, payload['messages']))
             image_method = ' + conservative 4096-token/image vision allowance (not base64 text tokens)'
         if self._tokenize_supported is not False:
-            response = self._request_url(self.tokenize_url, {'model': data['model'], 'messages': data['messages'],
-                                                           'return_token_strs': False}, optional=True)
+            request = {'model': data['model'], 'messages': data['messages'], 'return_token_strs': False}
+            cached = self._cached_token_count(request)
+            if cached is not None:
+                self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate' + image_method
+                return cached + framing + extra_allowance + image_allowance
+            response = self._request_url(self.tokenize_url, request, optional=True)
             if response is not None:
                 try:
                     with response:
@@ -230,6 +262,7 @@ class DeepInfra(OpenAICompatible):
                     raise AgentError('Malformed tokenizer response from DeepInfra') from None
                 self._tokenize_supported = True
                 self.observed_context_tokens = min(context, CONTEXT_TOKENS)
+                self._remember_token_count(request, count)
                 self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate' + image_method
                 return count + framing + extra_allowance + image_allowance
             self._tokenize_supported = False
@@ -251,7 +284,14 @@ class DeepInfra(OpenAICompatible):
                 with closing(super().stream(payload)) as stream:
                     for event in stream:
                         if event.get('done'):
-                            quota.settle(reservation, event.get('prompt_eval_count'), event.get('eval_count'))
+                            try:
+                                quota.settle(reservation, event.get('prompt_eval_count'), event.get('eval_count'))
+                            except AgentError:
+                                # The provider already completed. Keep the full
+                                # reservation and deliver the billed answer and
+                                # its usage instead of losing finished work.
+                                event = {**event, 'accounting_warning':
+                                    'Tester allowance settlement failed; the full reservation was retained.'}
                         yield event
         except AgentError as exc:
             redacted = self._redact(exc)

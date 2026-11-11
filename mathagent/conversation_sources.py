@@ -46,7 +46,8 @@ def conversation_sources(query, supplied, transcript, *, mode=None):
     previous = list(dict.fromkeys(previous))
     if len(previous) <= 1:
         return previous
-    if plural:
+    primary = [f for f in previous if not f.lower().endswith(('.bib', '.sty', '.cls'))]
+    if plural or len(primary) == 1:
         return previous
     raise WorkerInputError('Which source should I use: ' + ', '.join(previous) + '?',
                            code='ambiguous_source', details={'sources': previous})

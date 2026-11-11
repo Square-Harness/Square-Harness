@@ -16,11 +16,11 @@ import textwrap
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
-from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema
+from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, decode_page, line_matches
 from .worker_errors import WorkerInputError
 
 
-VERSION = 'web-v2'
+VERSION = 'web-v3'
 PAGE_ID = re.compile(r'page-[0-9a-f]{24}')
 RESULT_BYTES = 8192
 META_BYTES = 12_000_000
@@ -54,7 +54,11 @@ def _safe_error(exc):
     message = str(exc) if isinstance(exc, LiteratureError) else 'Web reading failed; check source availability and arguments.'
     lower = message.lower()
     code, retryable = 'web_unavailable', False
-    if 'offline' in lower:
+    if isinstance(exc, LiteratureError) and exc.code == 'source_unavailable':
+        code, retryable = 'retrieval_failed', True
+    elif isinstance(exc, LiteratureError) and exc.code in ('workflow_budget', 'request_budget'):
+        code = 'web_budget_exhausted'
+    elif 'offline' in lower:
         code = 'offline_uncached'
     elif 'robots.txt' in lower:
         code = 'source_access_denied'
@@ -142,9 +146,13 @@ class _HTMLPage(HTMLParser):
         self.root = _Node('document', check=check)
         self.stack = [self.root]
         self.nodes = 1
+        self.math_skip = 0
 
     def handle_starttag(self, tag, attrs):
         self.check()
+        if self.math_skip:
+            self.math_skip += tag not in _VOID
+            return
         implied = {'p': {'p'}, 'li': {'li'}, 'dt': {'dt', 'dd'}, 'dd': {'dt', 'dd'},
                    'tr': {'tr'}, 'td': {'td', 'th'}, 'th': {'td', 'th'}, 'option': {'option'}}
         stops = {'li': {'ul', 'ol'}, 'dt': {'dl'}, 'dd': {'dl'},
@@ -163,6 +171,10 @@ class _HTMLPage(HTMLParser):
         self.nodes += 1
         if tag not in _VOID:
             self.stack.append(node)
+        if tag == 'math' and (node.attrs.get('alttext') or node.attrs.get('aria-label')):
+            # The readable TeX alternative replaces its entire MathML tree.
+            # Counting every hidden MathML node rejected otherwise bounded papers.
+            self.math_skip = 1
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
@@ -171,6 +183,11 @@ class _HTMLPage(HTMLParser):
 
     def handle_endtag(self, tag):
         self.check()
+        if self.math_skip:
+            self.math_skip -= 1
+            if self.math_skip:
+                return
+            tag = 'math'
         for index in range(len(self.stack) - 1, 0, -1):
             if self.stack[index].tag == tag:
                 del self.stack[index:]
@@ -178,6 +195,8 @@ class _HTMLPage(HTMLParser):
 
     def handle_data(self, data):
         self.check()
+        if self.math_skip:
+            return
         children = self.stack[-1].children
         if children and isinstance(children[-1], str):
             children[-1] += data
@@ -423,6 +442,8 @@ class WebTools:
 
     def execute(self, name, arguments, *, on_result=None):
         try:
+            if self._cap() < 100:
+                raise WebError('The evidence output budget is exhausted.', code='web_budget_exhausted')
             if name not in WEB_NAMES:
                 raise WebError('Unknown web tool.', code='invalid_arguments')
             if isinstance(arguments, str):
@@ -434,7 +455,7 @@ class WebTools:
             if len(value.encode()) > self._cap():
                 raise WebError('The requested page result exceeds the remaining evidence output budget; '
                                'request smaller source excerpts.', code='web_budget_exhausted')
-        except (WorkerInputError, LiteratureError, OSError, ValueError, TypeError, UnicodeError) as exc:
+        except (WorkerInputError, LiteratureError, OSError, ValueError, TypeError, UnicodeError, AttributeError, KeyError, IndexError) as exc:
             if isinstance(exc, (ValueError, TypeError)) and not isinstance(exc, (WorkerInputError, LiteratureError)):
                 exc = WebError('Invalid web tool arguments.', code='invalid_arguments')
             # Control errors contain no new source data and remain valid JSON
@@ -472,7 +493,7 @@ class WebTools:
                 raise WebError('Cached original document changed; extraction refused.', code='source_integrity_error')
             if document['original_file'].endswith('.html'):
                 parser = _HTMLPage(self.literature._remaining_timeout)
-                decoded = body.decode('utf-8', errors='replace')
+                decoded = decode_page(body, document.get('content_type', ''))
                 for offset in range(0, len(decoded), 8192):
                     self.literature._remaining_timeout()
                     parser.feed(decoded[offset:offset + 8192])
@@ -569,22 +590,14 @@ class WebTools:
         query = self._query(query, 1)
         metadata, lines = self._page(page_id)
         hits = []
-        links_by_line = {}
-        for link in metadata['links']:
-            for line in range(max(1, link['start_line']), min(link['end_line'], len(lines)) + 1):
-                links_by_line.setdefault(line, []).append(link)
         total = 0
-        for index, line in enumerate(lines, 1):
-            pos = line.casefold().find(query.casefold())
-            if pos < 0:
-                continue
+        for match in line_matches(lines, query):
             total += 1
             if len(hits) >= 8:
                 continue
-            start = max(0, pos - 160)
-            hits.append({'line': index, 'citation': f'{page_id}:L{index}', 'passage': line[start:start + 500],
-                         'partial_line': start > 0 or len(line) > 500,
-                         'links': copy.deepcopy(links_by_line.get(index, []))})
+            hits.append({**match, 'citation': f'{page_id}:L{match["line"]}-L{match["end_line"]}',
+                         'links': copy.deepcopy([link for link in metadata['links']
+                             if link['start_line'] <= match['end_line'] and link['end_line'] >= match['line']])})
         result = {**self._source(metadata), 'query': query, 'matches': hits[:8], 'total_matches': total,
                   'truncated': total > 8}
         while result['matches'] and len(json.dumps(result, ensure_ascii=False).encode()) > self._cap():
@@ -606,6 +619,8 @@ class WebTools:
         selected = copy.deepcopy(references[start - 1:start - 1 + limit])
         for reference in selected:
             reference['citation'] = f'{page_id}:L{reference["start_line"]}-L{reference["end_line"]}'
+            reference['links'] = [{'text': link['text'], 'url': link['url']}
+                                  for link in reference['links']]
         result = {**self._source(metadata), 'references': selected, 'total': total, 'start': start,
                   'coverage': coverage['kind'], 'warning': coverage['warning']}
         while True:
@@ -632,7 +647,24 @@ class WebTools:
         # The existing provider cache is available offline, and lack of a key
         # never affects open_url for a supplied source URL.
         query = self._query(query, limit)
-        return self.literature.search_web(query, limit)
+        result = copy.deepcopy(self.literature.search_web(query, limit))
+        # Fit descriptive fields before dropping complete identities. A normal
+        # long search result must not become a false budget-exhausted error.
+        cap = self._cap()
+        size = lambda: len(json.dumps(result, ensure_ascii=False).encode())
+        while size() > cap:
+            descriptions = [r for r in result.get('results', []) if r.get('description')]
+            if descriptions:
+                record = max(descriptions, key=lambda r: len(r['description']))
+                record['description'] = record['description'][:len(record['description']) // 2]
+                record['description_truncated'] = True
+            elif result.get('results'):
+                result['results'].pop()
+                result['results_omitted'] = result.get('results_omitted', 0) + 1
+            else:
+                break
+            result['truncated'] = True
+        return result
 
     def _query(self, query, limit):
         try:

@@ -21,6 +21,11 @@ const SELECTIONS: Record<string, string> = {
   first_written_candidate: 'first written answer',
   finished_response_replaces_fragment: 'a finished answer replaces an unfinished one',
   whole_proof_review_found_no_issue: 'the whole-proof review found no issue',
+  uncertain_repair_replaces_candidate_with_known_issue: 'an uncertain repair replaces an answer with a concrete objection',
+}
+
+function outputCap(settings: ProofDetail['settings'], cap: number) {
+  return Math.min(cap, settings.specialist_output_cap ?? cap)
 }
 
 type Attempt = { index: number; candidate?: Candidate; reviews: Review[]; calls: Call[]; pending: Pending | null }
@@ -112,8 +117,8 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
         {data.sources.map((source) => <span key={source.path} className="fact-file">{source.path}</span>)}
         <span>{String(settings.model)}</span>
         <span>Context {count(settings.ctx)}</span>
-        {!data.legacy && settings.max_predict !== undefined && <span>Solve up to {count(settings.max_predict)} tokens</span>}
-        {!data.legacy && settings.verify_tokens !== undefined && <span>Review up to {count(settings.verify_tokens)} tokens</span>}
+        {!data.legacy && settings.max_predict !== undefined && <span>Solve up to {count(outputCap(settings, settings.max_predict))} tokens</span>}
+        {!data.legacy && settings.verify_tokens !== undefined && <span>Review up to {count(outputCap(settings, settings.verify_tokens))} tokens</span>}
         {data.legacy && <span>v0.4 engine</span>}
         <span>Started {ago(data.created_at)}</span>
       </div>
@@ -351,8 +356,8 @@ function Overview({ data, onAttempt }: { data: ProofDetail; onAttempt: (index: n
         <UsageMeters budget={b} />
         {!data.legacy && settings.max_predict !== undefined && (
           <p className="muted small">
-            Each solve reserves {count(settings.max_predict)} tokens{settings.repair_tokens !== undefined && settings.repair_tokens !== settings.max_predict ? `, each repair ${count(settings.repair_tokens)}` : ''}
-            {settings.verify_tokens !== undefined ? ` and each review ${count(settings.verify_tokens)}` : ''}; unused reservations are refunded when a call ends.
+            Each solve reserves up to {count(outputCap(settings, settings.max_predict))} tokens{settings.repair_tokens !== undefined && settings.repair_tokens !== settings.max_predict ? `, each repair up to ${count(outputCap(settings, settings.repair_tokens))}` : ''}
+            {settings.verify_tokens !== undefined ? ` and each review up to ${count(outputCap(settings, settings.verify_tokens))}` : ''}. Unused capacity is released when final usage is known; interrupted calls retain unknown usage.
           </p>
         )}
       </section>

@@ -21,14 +21,13 @@ from xml.etree.ElementTree import ParseError
 from .jsonutil import complete_fields, loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
-from .agent import AgentError
 from .literature import ARXIV_ID, LiteratureError, _fold
 from .research import ResearchRunner, ResearchBudget, _reference_prompt, remaining_limit
 
 PIPELINE = 'reading-list-v1'
 PHASES = ('scope', 'sweep', 'graph', 'screen', 'organise', 'annotate', 'write', 'done')
-EXPOSITORY = re.compile(r'\b(?:survey|introduction|lecture|lectures|notes|review|primer|handbook|monograph|'
-                        r'textbook|course|overview|tutorial|elements|foundations|theory of)\b', re.I)
+EXPOSITORY = re.compile(r'^(?:(?:a|an|the)\s+)?(?:survey|introduction|lectures?|notes on|review of|primer|handbook|'
+                        r'monograph|textbook|course|overview|tutorial)\b|:\s*(?:a[n]?\s+)?(?:survey|overview|tutorial)\b', re.I)
 ROLES = ('entry', 'core', 'deeper', 'exclude')
 
 SCOPE_SCHEMA = {
@@ -154,6 +153,12 @@ class ReviewRunner(ResearchRunner):
 
     def _json(self, result):
         text = result.get('text', '')
+        try:
+            value = loads(text)
+        except (ValueError, TypeError):
+            value = None
+        if isinstance(value, dict):
+            return value  # A length/whitespace stop may follow a complete object.
         if result.get('complete') is False:
             # Keep only fully decoded leading items; never complete a partial item.
             match = re.search(r'"items"\s*:\s*\[', text)
@@ -169,10 +174,6 @@ class ReviewRunner(ResearchRunner):
                     items.append(item)
                     tail = tail[end:].lstrip().removeprefix(',')
             return {'items': items} if items else None
-        try:
-            value = loads(text)
-        except (ValueError, TypeError):
-            return None
         return value if isinstance(value, dict) else None
 
     def _cancel(self):
@@ -196,23 +197,24 @@ class ReviewRunner(ResearchRunner):
             log[previous] = entry
 
     def _fetch(self, source, query, call):
-        """Log source failures as coverage gaps; time-outs pause at the current checkpoint.
+        """Log source failures as coverage gaps; only the workflow deadline stops the job.
         A source out of quota is not asked again in this job."""
         self._cancel()
         self._check_time()
-        if source in self.state['down']:
-            self._log(source, query, error='skipped: unavailable earlier in this job')
-            return []
+        # Let provider caches answer even after another query failed/offline.
+        # LiteratureTools refuses further uncached requests to an unavailable source.
         try:
             results = call()
         except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
             self._log(source, query, error=message[:200])
-            if 'workflow time budget' in message.lower() or self._elapsed() >= self.state['settings']['max_seconds']:
+            if (isinstance(exc, LiteratureError) and exc.code == 'workflow_budget'
+                    or 'workflow time budget' in message.lower()
+                    or self._elapsed() >= self.state['settings']['max_seconds']):
                 raise ResearchBudget(message) from exc
-            if re.search(r'timed out|timeout', message, re.I):
-                raise AgentError(message) from exc
-            if re.search(r'rate limited|budget used up|HTTP 429|request budget exhausted|Offline', message):
+            if (source not in self.state['down'] and
+                    (isinstance(exc, LiteratureError) and exc.code == 'source_unavailable'
+                     or re.search(r'rate limited|budget used up|HTTP (?:429|50[0-9])', message))):
                 self.state['down'].append(source)
             return []
         if not isinstance(results, list):
@@ -429,11 +431,15 @@ class ReviewRunner(ResearchRunner):
         phrase = lambda tokens: ' ' + ' '.join(tokens) + ' '
         requested = phrase(words(self.state['goal']))
         private = [phrase(words(source['content'])) for source in self.state['sources']]
+        if self.state.get('reference_context'):
+            private.append(phrase(words(_reference_prompt(self.state['reference_context']))))
         allowed = []
         for query in queries:
             tokens = words(query)
-            copied = any(phrase(tokens[i:i + 8]) in text and phrase(tokens[i:i + 8]) not in requested
-                         for i in range(max(0, len(tokens) - 7)) for text in private)
+            width = min(5, len(tokens))
+            copied = bool(width >= 3 and any(
+                phrase(tokens[i:i + width]) in text and phrase(tokens[i:i + width]) not in requested
+                for i in range(len(tokens) - width + 1) for text in private))
             if copied:
                 self.state['warnings'].append('A generated public query copied a long phrase from pinned source text and was not sent.')
             else:

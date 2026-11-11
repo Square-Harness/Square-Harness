@@ -58,17 +58,17 @@ def precise_reference_request(text):
         r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?])*"),
         '', text, flags=re.I)
     return re.search(_unaccented(
-        r'\b(?:exact\w*|precise|précis\w*|precis\w*)\b.{0,90}'
-        r'(?:reference|référence|citation|place|location|locator|chapter|chapitre|section|theorem|théorème|page)'
+        r'\b(?:exact|precise|précis\w*|precis\w*)\s+(?:(?:bibliographic|theorem|lemma)\s+)?'
+        r'(?:reference|référence|citation|place|location|locator|chapter|chapitre|section|page|number|edition)\b'
         r'|\b(?:theorem|thm|lemma|proposition|section|chapter|chapitre|théorème|page)\s+(?:number|numéro|\d)'
         r'|\b(?:verify|check|confirm|vérif\w*)\b.{0,60}(?:citation|attribution)'
         r'|\b(?:verify|check|confirm|vérif\w*)\s+(?:this|that|the|the given|a|cette|la|une)\s+(?:reference|référence)\b'
         r'|\b(?:check|verify|confirm|vérif\w*)\s+(?:whether|if)\b.{0,50}(?:reference|référence|citation)'
         r'|\b(?:give|find|provide|identify|locate|donne\w*|trouve\w*)\s+(?:me\s+)?(?:the|la|le)\s+(?:page|section|chapter|chapitre)\b'
         r'|\b(?:which|what|quel\w*)\b.{0,40}(?:chapter|chapitre|section|page|theorem number|numéro du théorème)'
-        r'|\b(?:reference|citation|theoreme|lemme|proposition|section|page)\b.{0,25}\bexact\w*\b'
+        r'|\b(?:reference|citation|theoreme|lemme|proposition|section|page)\s+(?:(?:is|must be|should be|soit)\s+)?exact\w*\b'
         r'|\bnumero\s+(?:du|de la)\s+(?:theoreme|lemme|proposition|section|page)\b'
-        r'|\b(?:edition|édition)\b'), text, re.I | re.S) is not None
+        r'|\b(?:which|what|quelle|verify|check|confirm)\b.{0,25}\bedition\b'), text, re.I | re.S) is not None
 
 
 def standalone_reference_request(text):
@@ -119,7 +119,7 @@ def standalone_reference_request(text):
         return False
     # Asking whether something is right is a check of that thing, whatever book it comes from.
     if re.search(r'\b(?:any|a|some)\s+(?:mistakes?|errors?|typos?)\b|\b(?:is|are)\s+(?:this|these|it|that|my|the)\b'
-                 r'.{0,60}\b(?:right|correct|true|valid|wrong)\b|\bcomput\w*|\bcalculat\w*', value):
+                 r'.{0,60}\b(?:right|correct|true|valid|wrong)\b', value):
         return False
     if re.search(r'\b(?:for|pour)\s+(?:(?:theorem|result)\s+)?a\s+(?:and|et)\s+'
                  r'(?:(?:theorem|result)\s+)?b\b', value):
@@ -288,7 +288,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, **overrides):
         if lookup not in ('standard', 'precise'):
             raise ValueError('lookup must be standard or precise')
-        level = EFFORTS.get(effort, EFFORTS['high'] if effort in ('xhigh', 'poincare') else EFFORTS['medium'])
+        if effort not in EFFORTS:
+            raise ValueError('Choose low, medium or high effort')
+        level = EFFORTS[effort]
         if lookup == 'standard':
             level = {**level, 'candidates': 3, 'verify_rounds': 1, 'discover': False,
                      'seconds': level['seconds'], 'requests': 12, 'chars': 50000}
@@ -469,7 +471,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if self.state['standard_author']:
                 self.state['candidates'] = []
         def candidate_key(c):
-            return (_fold(' '.join(c['authors'])), _fold(c['title']) if standard else _number(c['locator']))
+            return (_fold(' '.join(c['authors'])), _fold(c['title']),
+                    None if standard else _fold(c['locator']))
         seen = {candidate_key(c) for c in self.state['candidates']}
         candidates = [] if self.state.get('standard_author') else value.get('candidates')
         for item in candidates if isinstance(candidates, list) else []:
@@ -683,12 +686,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         for r in self._records(evidence):
             if self.state['check'].get('lookup') == 'standard' and not self._standard_eligible(r, candidate):
                 continue
-            authors = _fold(' '.join(str(a) for a in r['authors']))
-            if surnames and not any(n in authors for n in surnames):
+            authors = {_fold(n) for n in _surnames(r['authors'])}
+            if surnames and not set(surnames).issubset(authors):
                 continue
             overlap = len(words & _words(r['title']))
             if words and not overlap:
                 continue
+            if not words or overlap < max(min(2, len(words)), .8 * len(words)):
+                continue  # A surname and one shared word do not identify a work.
             if self.state['check'].get('lookup') == 'standard':
                 # One common title word and an author do not identify a work.
                 # An ambiguous hit must leave the recalled source unverified.
@@ -749,9 +754,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             metadata, _ = self.literature._document(document_id)
         except (ValueError, OSError, AttributeError):
             return False
-        canonical = str(metadata.get('canonical_identifier') or '').casefold()
-        identifiers = [str((record or {}).get(k) or '').casefold() for k in ('identifier', 'doi', 'arxiv_id')]
-        if canonical and any(canonical.removeprefix('doi:').removeprefix('arxiv:') == value.removeprefix('doi:').removeprefix('arxiv:') for value in identifiers if value):
+        def identity(value):
+            from urllib.parse import unquote
+            value = str(value or '').casefold()
+            value = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', value).removeprefix('doi:')
+            value = re.sub(r'^https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/', '', value).removeprefix('arxiv:')
+            return re.sub(r'v\d+$', '', value) if re.fullmatch(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', value) else unquote(value)
+        canonical = identity(metadata.get('canonical_identifier'))
+        identifiers = [identity((record or {}).get(k)) for k in ('identifier', 'doi', 'arxiv_id')]
+        if canonical and canonical in identifiers:
             return True
         words = lambda title: set(re.findall(r'[a-z0-9]+', _fold(title)))
         actual = words(metadata.get('title'))
@@ -820,7 +831,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 if level == 'contradicted':
                     names = _surnames(c['authors']) or ['']
                     keys = [k for n in names if n for k in bibliography_keys(full or [], n, c['title'])]
-                    if number and not _has_number(text, number):
+                    if not number:
+                        reasons.append('the claimed contradiction has no checkable theorem or section number')
+                        level = 'located'
+                    elif not _has_number(text, number):
                         reasons.append(f'the passage claimed to contradict the place does not contain {number}')
                         level = 'located'
                     elif not (self._document_is_work(doc, c, record) or any(cites_place(text, number, n, keys) for n in names)):
@@ -857,8 +871,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                         used = [k for n in names for k in cited_keys(text, number, n, keys)] or (keys if len(keys) == 1 else [])
                         entry = next((e for e in (bibliography_entry(full or [], k) for k in used) if e), '')
         if level == 'located' and not record:
-            if self.literature is not None and getattr(self.literature, 'down', None):
-                reasons.append('no record was found, but ' + ', '.join(sorted(self.literature.down)) + ' failed: not conclusive')
+            failed = set(getattr(self.literature, 'down', ())) | set(self._standard_health())
+            if failed:
+                reasons.append('no record was found, but ' + ', '.join(sorted(failed)) + ' failed: not conclusive')
                 level = 'inconclusive'
             else:
                 reasons.append('no record of the work was found')
@@ -872,6 +887,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if alt['level'] == 'cited':
                 return {**alt, 'corrected_from': c['locator']}
         edition = None
+        if level not in ('read', 'cited', 'contradicted'):
+            quote, entry = '', ''  # Rejected passages remain in the evidence log.
         if entry and level == 'cited':
             cited_year = re.findall(r'(?<![\d\-–:])(?:19|20)\d\d(?![\d:a-z\-–])', entry)
             known = str((record or {}).get('year') or c['year'] or '')
@@ -938,7 +955,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if not chosen:
             out.append('**No reference could be confirmed.** The guesses below were checked; treat them as leads only.')
         elif all(c['verdict']['level'] == 'located' for c in chosen):
-            out += ['**No exact place was confirmed.** These works exist and their contents fit the topic; '
+            out += ['**No exact place was confirmed.** These work records were found; '
                     'the theorem or section is the model\'s guess.', '']
         for n, c in enumerate(chosen, 1):
             v = c['verdict']
@@ -1055,9 +1072,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     reason = 'Author lookup finished; recency uses original arXiv submission dates.'
                 self.state['stop_reason'] = reason
             else:
-                self.state['status'] = 'answered' if chosen and not gaps else 'partial'
+                assessed = bool(self.state.get('standard_selection_done') and self.state.get('standard_selection_usable'))
+                records = bool(chosen) and all((c.get('verdict') or {}).get('record') for c in chosen)
+                self.state['status'] = 'answered' if records and assessed and not gaps else 'partial'
                 self.state['stop_reason'] = (
                     'No suitable scholarly reference was confirmed in this bounded search.' if not chosen else
+                    'Recalled leads remain unverified; no bibliographic record was confirmed.' if not records else
+                    'Bibliographic records were located, but relevance selection was not completed.' if not assessed else
                     'Relevant bibliographic records found; part of the requested scope remains unconfirmed.' if gaps else
                     'One standard-reference lookup finished; precise locations remain unconfirmed.')
             return

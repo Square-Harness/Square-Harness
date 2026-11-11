@@ -33,7 +33,7 @@ def _kind(name, fallback=''):
 
 
 TYPE_WORDS = '|'.join(name.capitalize() for name in KNOWN) + '|Théorème|Theoreme|Lemme|Corollaire|Définition|Satz'
-NUMBER = r'(?:[A-Z]\.\d+(?:\.\d+)*|\d+(?:\.\d+)*|[A-Z])'
+NUMBER = r'(?:[A-Z]\.\d+(?:\.\d+)*|\d+(?:\.\d+)*|[A-Z])(?![A-Za-z0-9_])'
 TEXT_STATEMENT = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(' + TYPE_WORDS + r')(?:\s+(' + NUMBER + r'))?'
                             r'(?:[*_]{0,2}\s*(\([^()]{0,90}(?:\([^()]*\)[^()]{0,40})?\))[*_]{0,2}\s*[.:]?|\.|:|[*_]{2})[*_]{0,2}(?=\s|$)', re.I)
 PROOF_WORD = r'(?:proof|preuve|démonstration|demonstration)'
@@ -42,8 +42,8 @@ INLINE_PROOF = re.compile(r'(?<!\w)[*_]{0,2}' + PROOF_WORD + r'\b[*_]{0,2}\s*[.:
 TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{2,90})$')
 TEXT_SUBSECTION = re.compile(r'^\s*((?:\d+|[A-Z])(?:\.\d+)+)\.?\s+([A-Z][^.]{1,90})\.(?:\s|$)')
 MD_HEADING = re.compile(r'^\s*(#{1,6})\s+(.*\S)')
-END_MARK = re.compile(r'[□∎■]|\\qed\b|\bQ\.E\.D\.?')
-TEXT_REF = re.compile(r'\b(' + TYPE_WORDS + r')s?\s+(' + NUMBER + r'(?:\s*(?:,|and|&|or)\s*' + NUMBER + r')*)')
+END_MARK = re.compile(r'[□∎■]\s*[*_]*\s*$|\\qed\b|\bQ\.E\.D\.?')
+TEXT_REF = re.compile(r'\b(' + TYPE_WORDS + r')s?\s+(' + NUMBER + r'(?:\s*(?:,|and|&|or)\s*' + NUMBER + r')*)', re.I)
 TEXT_CITE = re.compile(r'\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)(?:\s*,\s*([^\[\]]{1,80}?))?\]')
 TEXT_EQUATION = re.compile(r'\((\d+\.\d+|[A-Z]\.\d+)\)')
 PLACE = re.compile(r'\b(?:Theorem|Thm|Lemma|Proposition|Prop|Corollary|Cor|Section|Sec|Chapter|Ch|Definition|'
@@ -110,6 +110,8 @@ def _finish(result):
 
 def _mark_main(result):
     units = result['units']
+    for unit in units:
+        unit['main'] = False
     flagged = [u for u in units if re.search(r'\bmain\b', (u['label'] + ' ' + u['title']).lower())]
     theorems = [u for u in units if u['type'] == 'theorem']
     first = result['sections'][0]['number'] if result['sections'] else None
@@ -149,6 +151,9 @@ def _tex_theorems(clean):
         envs[env.strip()] = {'type': kind, 'name': name, 'counter': counter,
                              'within': (opts.get('numberwithin') or opts.get('parent') or '').strip(),
                              'numbered': opts.get('numbered', 'yes').strip() != 'no'}
+    for env, within in re.findall(r'\\(?:numberwithin|counterwithin)\s*\{([^}]+)\}\s*\{([^}]+)\}', text):
+        if env in envs:
+            envs[env]['within'] = within.strip()
     declared = bool(envs)
     for env, kind in DEFAULT_ENVS.items():
         envs.setdefault(env, {'type': kind, 'name': kind.capitalize(), 'counter': env, 'within': '',
@@ -156,14 +161,52 @@ def _tex_theorems(clean):
     return envs, declared
 
 
+def _active_tex(lines):
+    """Exclude literal false/comment blocks and post-document scraps, retaining line numbers."""
+    clean, false_depth, comment, ended = [], 0, False, False
+    token = re.compile(r'\\(?:iffalse\b|if[a-zA-Z]*\b|else\b|fi\b|begin\{comment\}|end\{comment\}|end\{document\})')
+    for raw in lines:
+        line = _strip_comment(raw)
+        if ended:
+            clean.append('')
+            continue
+        kept, start = [], 0
+        for match in token.finditer(line):
+            if not false_depth and not comment:
+                kept.append(line[start:match.start()])
+            text = match.group()
+            if text == r'\begin{comment}':
+                comment = True
+            elif text == r'\end{comment}':
+                comment = False
+            elif not comment:
+                if text == r'\iffalse' or (false_depth and text.startswith(r'\if')):
+                    false_depth += 1
+                elif text == r'\fi' and false_depth:
+                    false_depth -= 1
+                elif text == r'\else' and false_depth == 1:
+                    false_depth = 0
+                elif text == r'\end{document}' and not false_depth:
+                    ended = True
+                    break
+                elif not false_depth:
+                    kept.append(text)
+            start = match.end()
+        if not ended and not false_depth and not comment:
+            kept.append(line[start:])
+        clean.append(''.join(kept))
+    return clean
+
+
 def _parse_tex(lines):
-    clean = [_strip_comment(line) for line in lines]
+    clean = _active_tex(lines)
     envs, declared = _tex_theorems(clean)
     result = {'format': 'tex', 'lines': len(lines), 'sections': [], 'units': [], 'bibliography': {},
               'abstract': None, 'labels': {}, 'equations': {}, 'warnings': []}
     if not declared:
         result['warnings'].append('No \\newtheorem declarations found; statements are named by their labels, without numbers.')
-    counters, section, appendix, section_number = {}, None, False, 0
+    counters, section, appendix = {}, None, False
+    section_numbers = {'section': 0, 'subsection': 0, 'subsubsection': 0}
     units, open_unit, open_proof, proof_owner, open_env = [], None, None, None, []
     equation_start, abstract_start, bib_key, bib_start = None, None, None, None
     body_started = not any('\\begin{document}' in line for line in clean)
@@ -173,22 +216,37 @@ def _parse_tex(lines):
                 body_started = True
             continue
         if '\\appendix' in line:
-            appendix, section_number = True, 0
-        match = TEX_SECTION.search(line)
-        if match and open_proof is None:
-            title = _braced(line, match.end() - 1)
-            if match.group(1) == 'section':
-                if not match.group(2):
-                    section_number += 1
-                    section = chr(64 + section_number) if appendix else str(section_number)
-                    for name, value in list(counters.items()):
-                        if value.get('within') == 'section':
-                            counters[name]['n'] = 0
-                else:
-                    section = title
+            appendix = True
+            section_numbers = dict.fromkeys(section_numbers, 0)
+        for match in TEX_SECTION.finditer(line):
+            if open_proof is not None:
+                continue
+            title, level = _braced(line, match.end() - 1), match.group(1)
+            levels = list(section_numbers)
+            if not match.group(2):
+                section_numbers[level] += 1
+                for child in levels[levels.index(level) + 1:]:
+                    section_numbers[child] = 0
+                for value in counters.values():
+                    if value.get('within') in levels[levels.index(level):]:
+                        value['n'] = 0
+            if level == 'section':
+                section = (chr(64 + section_numbers['section']) if appendix else str(section_numbers['section'])) if not match.group(2) else title
                 result['sections'].append({'number': section, 'title': title, 'line': number, 'appendix': appendix})
                 if re.match(r'\s*(references|bibliography)\s*$', title, re.I):
                     appendix = True
+        # A proof may open on its statement's closing line. Close the statement
+        # before assigning the following proof on that same source line.
+        if open_unit is not None:
+            close = line.find('\\end{' + open_unit['_env'] + '}')
+            proof = line.find(r'\begin{proof}')
+            if 0 <= close < proof:
+                open_unit['statement'][1] = number
+                kind = open_unit['type'].capitalize()
+                open_unit['name'] = f'{kind} {open_unit["number"]}' if open_unit['number'] else f'{kind} at line {open_unit["statement"][0]}'
+                del open_unit['_env']
+                units.append(open_unit)
+                open_unit = None
         for label in TEX_LABEL.findall(line):
             result['labels'][label] = number
         for env in TEX_BEGIN.findall(line):
@@ -204,23 +262,38 @@ def _parse_tex(lines):
                 labels = [lab for group in TEX_REF.findall(option) for lab in group.split(',')]
                 owner = next((u for u in units for lab in labels if u['label'] == lab.strip()), None)
                 if owner is None and option:
-                    owner = _owner_by_name(units, option)
-                if owner is None:
+                    _mark_main({'units': units, 'sections': result['sections']})
+                    owner = _owner_by_name(units, option) or resolve({'units': units}, option)
+                    if owner is None and re.search(r'\bmain\b', option, re.I):
+                        mains = [u for u in units if u['main']]
+                        owner = mains[0] if len(mains) == 1 else None
+                if owner is None and not option:
                     owner = _pending_owner(units, proof_owner)
+                if owner is None and option:
+                    result['warnings'].append(f'Line {number}: named proof {option!r} has no unambiguous statement in the map.')
                 if owner is None:
                     owner = _unit('proof', f'Proof at line {number}', '', '', option.strip(), number, section, appendix)
                     owner['statement'] = None
                     units.append(owner)
                 open_proof, proof_owner = [number, number], owner
                 open_env.append('proof')
-            elif env in envs and open_unit is None and open_proof is None:
+            elif env in envs and open_unit is None:
                 spec = envs[env]
                 shown = ''
                 if spec['numbered'] and declared:
                     counter = counters.setdefault(spec['counter'], {'n': 0, 'within': envs.get(spec['counter'], spec)['within']})
                     counter['n'] += 1
                     within = counter['within'] or spec['within']
-                    shown = f'{section}.{counter["n"]}' if within == 'section' and section else str(counter['n'])
+                    if within in section_numbers:
+                        levels = list(section_numbers)
+                        prefix = [str(section_numbers[level]) for level in levels[:levels.index(within) + 1]]
+                        if appendix and section_numbers['section']:
+                            prefix[0] = chr(64 + section_numbers['section'])
+                        shown = '.'.join(prefix + [str(counter['n'])])
+                    else:
+                        shown = str(counter['n'])
+                        if within:
+                            result['warnings'].append(f'Unsupported theorem counter parent {within!r}; use labels rather than inferred numbers.')
                 tail = line[line.find('\\begin{' + env + '}') + len(env) + 8:]
                 title = tail[tail.find('[') + 1:tail.find(']')] if tail.lstrip().startswith('[') else ''
                 open_unit = _unit(spec['type'], '', shown, '', title.strip(), number, section, appendix)
@@ -271,6 +344,8 @@ def _parse_tex(lines):
         result['warnings'].append(f'A proof starting at line {open_proof[0]} is not closed.')
     if open_unit is not None:
         result['warnings'].append(f'A statement starting at line {open_unit["statement"][0]} is not closed.')
+    if any(re.search(r'\\begin\{pf\}|\\(?:textbf|emph)\{Proof[.:]', line, re.I) for line in clean):
+        result['warnings'].append('Proofs outside the proof environment were detected; their ownership is not mapped. Inspect those passages separately.')
     by_label = {u['label']: u for u in units if u['label']}
     for unit in units:
         unit['equations'] = [result['equations'][r] for r in dict.fromkeys(unit['refs']) if r in result['equations']]
@@ -318,7 +393,11 @@ def _parse_text(lines, fmt):
             continue
         heading = MD_HEADING.match(line) if fmt == 'markdown' else None
         statement = TEXT_STATEMENT.match(line)
+        if statement and not statement.group(2) and statement.group(1)[0].islower() and not re.match(r'^\s*(?:#|\*\*|__)', line):
+            statement = None
         proof = TEXT_PROOF.match(line) if not statement else None
+        if proof and re.match(r'^\s*(?:proof|preuve|démonstration|demonstration)\b', line) and len(stripped.split()) > 1:
+            proof = None
         if statement:
             events.append(('statement', number, statement))
             boundaries.add(number)
@@ -420,37 +499,24 @@ def _parse_text(lines, fmt):
         end = next_boundary(number) - 1
         stop = next((n for n in range(number, end + 1) if END_MARK.search(lines[n - 1])), None)
         if stop is None:
-            # A claim with its own proof does not close the enclosing proof.
-            # Extend only when matching end marks establish the nesting.
-            depth = 1
-            proof_starts = {n for event, n, _ in events if event == 'proof' and n > number}
-            section_starts = {n for event, n, _ in events if event in ('section', 'references') and n > number}
-            for n in range(number + 1, len(lines) + 1):
-                if n in section_starts:
-                    break
-                if n in proof_starts:
-                    depth += 1
-                if END_MARK.search(lines[n - 1]):
-                    depth -= 1
-                    if depth == 0:
-                        stop = n
-                        break
+            result['warnings'].append(f'A proof starting at line {number} has no end mark before the next structural boundary; its mapped extent stops there.')
         target['proofs'].append([number, stop or end])
         owner = target
     if references_line:
         result['bibliography'] = _text_bibliography(lines, references_line)
     keys = set(result['bibliography'])
+    equation_index = _text_equation_index(lines)
     lookup = {(u['type'], u['number']): u for u in units if u['number']}
     for unit in units:
         for a, b in unit['proofs']:
             text = '\n'.join(lines[a - 1:b])
             unit['refs'] += _text_refs(text, lookup, unit)
             unit['cites'] += _text_cites(lines, a, b, keys)
-            unit['equations'] += _text_equations(lines, text, a, b)
+            unit['equations'] += _text_equations(lines, text, a, b, equation_index)
         if unit['statement']:
             a, b = unit['statement']
             unit['statement_refs'] = _text_refs('\n'.join(lines[a - 1:b]), lookup, unit)
-            unit['equations'] += _text_equations(lines, '\n'.join(lines[a - 1:b]), a, b)
+            unit['equations'] += _text_equations(lines, '\n'.join(lines[a - 1:b]), a, b, equation_index)
         unit['refs'] = list(dict.fromkeys(unit['refs']))
         unit['statement_refs'] = list(dict.fromkeys(unit['statement_refs']))
         unit['equations'] = [list(r) for r in dict.fromkeys(tuple(r) for r in unit['equations'])]
@@ -489,18 +555,25 @@ def _text_cites(lines, a, b, keys):
     return found
 
 
-def _text_equations(lines, text, a, b):
-    """Lines where the equations a passage cites are displayed: '(2.27)' at a line start or end."""
-    wanted = set(TEXT_EQUATION.findall(text))
+def _text_equation_index(lines):
+    """Index displayed equation tags once, rather than rescanning per proof."""
+    found = {}
+    for number, line in enumerate(lines, 1):
+        for match in TEXT_EQUATION.finditer(line):
+            before, after = line[:match.start()], line[match.end():]
+            if (not before.strip() and after[:1].isspace()) or (before[-1:].isspace() and not after.strip()):
+                found.setdefault(match.group(1), []).append(number)
+    return found
+
+
+def _text_equations(lines, text, a, b, equation_index=None):
+    """Locations of displayed equations cited outside the current passage."""
+    index = _text_equation_index(lines) if equation_index is None else equation_index
     found = []
-    for tag in sorted(wanted):
-        pattern = re.compile(r'^\s*\(' + re.escape(tag) + r'\)\s|\s\(' + re.escape(tag) + r'\)\s*$')
-        for number, line in enumerate(lines, 1):
-            if a <= number <= b:
-                continue
-            if pattern.search(line):
-                found.append([max(1, number - 2), min(len(lines), number + 1)])
-                break
+    for tag in sorted(set(TEXT_EQUATION.findall(text))):
+        number = next((n for n in index.get(tag, []) if not a <= n <= b), None)
+        if number is not None:
+            found.append([max(1, number - 2), min(len(lines), number + 1)])
     return found
 
 

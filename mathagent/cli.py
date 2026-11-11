@@ -152,7 +152,7 @@ COMMAND_ALIASES = {'/python-lab': 'python_lab', '/sanity-check': 'sanity_check',
 
 
 def parser():
-    p = argparse.ArgumentParser(description='Square Harness: a small local mathematics agent')
+    p = argparse.ArgumentParser(description='Square Harness: a small local mathematics agent', allow_abbrev=False)
     p.add_argument('--version', action='version', version='Square Harness ' + __version__)
     p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
                    help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
@@ -201,7 +201,7 @@ def parser():
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/4/6/10 rounds map to Low/Medium/High/Extra high/Poincaré (default: 3 for Quick review/Explain, 6 otherwise)')
+    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise)')
     p.add_argument('--research-tokens', type=int, help='Optional cumulative generated-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')

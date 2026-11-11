@@ -3,6 +3,7 @@
 
 """Model transports with the harness's native message/event interface."""
 import copy
+import hashlib
 import json
 import math
 import os
@@ -13,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
 
 from .agent import AgentError, Ollama, _NoModelRedirects
+from .jsonutil import loads_strict
 
 
 def openai_thinking_budget_policy():
@@ -112,7 +114,7 @@ def _messages(messages):
 def _arguments(value):
     if isinstance(value, str):
         try:
-            value = json.loads(value)
+            value = loads_strict(value)
         except (ValueError, TypeError) as exc:
             raise AgentError('Malformed JSON tool arguments') from exc
     if not isinstance(value, dict):
@@ -133,6 +135,7 @@ class OpenAICompatible:
         self.timeout = timeout
         self.thinking_budget_policy = openai_thinking_budget_policy() if self.backend == 'openai' else {}
         self._tokenize_supported = None
+        self._token_count_cache = {}
         self.opener = build_opener(ProxyHandler({}), _NoModelRedirects())
 
     def request(self, endpoint, data=None):
@@ -150,7 +153,7 @@ class OpenAICompatible:
                 if optional and exc.code in {404, 405}:
                     return None
             raise AgentError(f'Model server HTTP {exc.code}: {detail}') from exc
-        except (URLError, TimeoutError, OSError) as exc:
+        except (URLError, TimeoutError, OSError, HTTPException) as exc:
             raise AgentError(f'Cannot reach model server at {self.host}: {exc}') from exc
 
     def models(self):
@@ -176,6 +179,12 @@ class OpenAICompatible:
         data = self._payload(payload)
         request = {key: data[key] for key in ('model', 'messages', 'chat_template_kwargs', 'tools') if key in data}
         request.update(add_generation_prompt=True, add_special_tokens=False)
+        cached = self._cached_token_count(request)
+        if cached is not None:
+            requested = payload.get('options', {}).get('num_ctx')
+            if type(requested) is int and requested > self.observed_context_tokens:
+                raise AgentError(f'Requested context {requested} exceeds server context {self.observed_context_tokens}')
+            return cached
         root = self.base_url[:-3]  # base_url always ends in /v1, retain proxy path prefixes
         response = self._request_url(root + '/tokenize', request, optional=True)
         if response is None:
@@ -191,10 +200,24 @@ class OpenAICompatible:
         except (ValueError, KeyError, TypeError, OSError, HTTPException) as exc:
             raise AgentError('Malformed tokenizer response from model server') from exc
         self.observed_context_tokens = context
+        self._remember_token_count(request, count)
         requested = payload.get('options', {}).get('num_ctx')
         if type(requested) is int and requested > context:
             raise AgentError(f'Requested context {requested} exceeds server context {context}')
         return count
+
+    def _cached_token_count(self, request):
+        key = hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        cached = self._token_count_cache.get(key)
+        if cached is not None and cached[1] == getattr(self, 'observed_context_tokens', None):
+            return cached[0]
+        return None
+
+    def _remember_token_count(self, request, count):
+        key = hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if len(self._token_count_cache) >= 8:
+            self._token_count_cache.clear()
+        self._token_count_cache[key] = (count, getattr(self, 'observed_context_tokens', None))
 
     def _payload(self, payload):
         if getattr(self, 'image_refs', None) and getattr(self, 'profile', None) != 'deepinfra':
@@ -427,9 +450,19 @@ class LlamaCpp(OpenAICompatible):
         return copy.deepcopy(self._properties)
 
     def _count_input_tokens(self, data):
+        # Output and sampling controls do not change the rendered input. Keep
+        # the server's exact count for repeated preflight/dispatch checks.
+        request = {k: v for k, v in data.items() if k not in {
+            'max_tokens', 'temperature', 'top_p', 'top_k', 'min_p', 'seed',
+            'presence_penalty', 'frequency_penalty', 'repeat_penalty', 'repetition_penalty',
+            'stop', 'stream', 'stream_options'}}
+        cached = self._cached_token_count(request)
+        if cached is not None:
+            return cached
         count = self._json('/chat/completions/input_tokens', data).get('input_tokens')
         if type(count) is not int or count < 0:
             raise AgentError('llama.cpp must return an integer input_tokens count')
+        self._remember_token_count(request, count)
         return count
 
     def count_input_tokens(self, payload):

@@ -173,6 +173,11 @@ export function toolLine(call: ToolCall): string {
   if (typeof fn.arguments === 'string') {
     try { args = JSON.parse(fn.arguments) } catch { return `${fn.name} ${fn.arguments}` }
   } else args = fn.arguments || {}
+  if (fn.name === 'delegate') {
+    const mode = typeof args.mode === 'string' ? args.mode.replaceAll('_', ' ') : 'task'
+    const effort = typeof args.effort === 'string' ? ` · ${args.effort} effort` : ''
+    return `Start ${mode}${effort}`
+  }
   const parts = Object.entries(args).map(([key, value]) => `${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`)
   return `${fn.name}${parts.length ? ': ' + parts.join(', ') : ''}`
 }

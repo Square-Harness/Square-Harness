@@ -31,7 +31,6 @@ from .ledger import _atomic_write, _bytes, _read
 from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion, _job_directory, _read_state
 from .call_policy import allocate_call, CallContextError
 from .proof import count_input
-from .router import repair_latex
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .tools import decode_text
@@ -86,9 +85,9 @@ RANK = {'invalid_inference': 2, 'missing_justification': 1, 'uncertainty': 0}
 
 
 def level_for(rounds):
-    """The effort level behind a number of tries (Low 1, Medium 3, High 5, Extra high 7, Poincaré 10)."""
+    """The effort level for a new review (Low 1, Medium 3, High 5 or more)."""
     rounds = int(rounds)
-    return 'low' if rounds <= 1 else 'medium' if rounds <= 3 else 'high' if rounds <= 5 else 'xhigh' if rounds <= 7 else 'poincare'
+    return 'low' if rounds <= 1 else 'medium' if rounds <= 3 else 'high'
 
 
 def runner_class(variant):
@@ -106,29 +105,13 @@ def runner_for_state(state):
     return runner_class(variant) if variant else ResearchRunner
 
 
-_ESCAPE = re.compile(r'\\(?:(["\\/bfnrt])|(u[0-9a-fA-F]{4}))|\\')
-
-
-def _repair(value):
-    if isinstance(value, str):
-        return repair_latex(value)
-    if isinstance(value, list):
-        return [_repair(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _repair(v) for k, v in value.items()}
-    return value
-
-
 def loads(text):
-    """JSON from a model that writes TeX in strings: a lone backslash (\\| or \\langle) is doubled,
-    control characters are accepted, and TeX commands read as \\t, \\f, \\b, \\r are restored."""
-    for attempt in (text, _ESCAPE.sub(lambda m: m.group(0) if m.group(1) or m.group(2) else '\\\\', text)):
-        try:
-            value = json_loads(attempt)
-        except ValueError:
-            continue
-        return _repair(value) if isinstance(value, dict) else None
-    return None
+    """Shared model JSON decoder; review callers accept object answers only."""
+    try:
+        value = json_loads(text)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 _LOOP = re.compile(r'(.{3,40}?)\1{12,}', re.S)
@@ -228,6 +211,7 @@ class ReviewBase(ResearchRunner):
     def resume(self, job_id, *, additional_seconds=0):
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
+        self._restore_literature()
         self._validate_transport_resume()
         # Reject an invalid resume before changing its saved phase or report.
         if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
@@ -278,8 +262,7 @@ class ReviewBase(ResearchRunner):
         has_paste = bool(manuscript.checkable(manuscript.build(goal, 'pasted-text.md')))
         if not source_files and not has_paste and self.VARIANT not in MANUSCRIPT_VARIANTS:
             # "Check Lemma 2 in notes.md": a named workspace file is the source, not the pasted text.
-            named = re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', goal)
-            source_files = [n for n in dict.fromkeys(named) if (self.agent.workspace.root / n).is_file()]
+            source_files = self._inferred_sources(goal)
         self._pasted = not source_files and self.VARIANT not in MANUSCRIPT_VARIANTS
         return super().start(goal, kind='referee', source_files=source_files,
                              reference_context=reference_context, **budgets)

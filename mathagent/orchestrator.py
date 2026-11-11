@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .agent import AgentError
 from .backends import ToolCallError
 from .call_policy import CallContextError, allocate_call
-from .router import EFFORTS, JOB_MODES, TASK_SCHEMA
+from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4
@@ -55,8 +55,7 @@ search, independent criticism, exploration, a precise reference, literature,
 manuscript review or a write-up will help. The available modes are prove, critic,
 explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
-least effort suitable for the objective; use poincare only when the user requested
-maximum effort. State the complete objective and its hypotheses. Children cannot
+least effort suitable for the objective: low, medium or high. High is the maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, critic, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. writeup and summarize
@@ -160,7 +159,10 @@ DEFAULT_ACTIONS = None
 
 
 _PROMISE = re.compile(r"(?:(?:now|next|then|first|so)\s*,?\s+)?(?:let me|let's|i will|i'll|i am going to|i'm going to|"
-                      r"i need to|i must|we will|we'll|je vais|laissez-moi|nous allons)\s+\S", re.I)
+                      r"i need to|i must|we will|we'll|je vais|laissez-moi|nous allons)\s+"
+                      r"(?:(?:now|next|first)\s+)?(?:check|verify|search|look|read|ask|delegate|run|test|"
+                      r"investigate|examine|analyse|analyze|compute|calculate|prove|review|prepare|write|"
+                      r"summarize|do|v[ée]rifier|chercher|lire|examiner|calculer|prouver|demander)\b", re.I)
 _POLITE = re.compile(r"\b(?:let me know|feel free|happy to|glad to|if you (?:want|wish|like|need|prefer)|"
                      r"hope (?:this|that)|n'h[ée]sitez)", re.I)
 
@@ -174,7 +176,7 @@ def _ends_with_work_plan(text):
     """
     paragraph = text.strip().split('\n\n')[-1].strip()
     sentences = [s for s in re.split(r'(?<=[.!?])\s+', paragraph) if s.strip()]
-    last = sentences[-1].strip() if sentences else ''
+    last = sentences[-1].strip().replace('’', "'") if sentences else ''
     if not last or len(last) > 400 or _POLITE.search(last):
         return False
     if ':' in last and len(last.split(':', 1)[1].split()) > 3:
@@ -283,7 +285,7 @@ class Orchestrator:
             'children': [], 'pending_calls': [], 'actions': 0, 'main_calls': 0,
             'answer': '', 'warnings': [], 'last_call': None, 'blockers': [], 'force_final': False,
             'empty_final_retried': False,
-            'continuation_final_retried': False, 'tool_call_retried': False,
+            'continuation_final_retried': False, 'continuation_recovery_pending': False, 'tool_call_retried': False,
             'tool_call_recovery_pending': False, 'rejected_tool_calls': [],
             'tool_cache': {}, 'observed_results': [], 'stagnant_actions': 0,
             'limits': {'actions': self.max_actions, 'children': self.max_children,
@@ -294,6 +296,22 @@ class Orchestrator:
             self.state['project_snapshot'] = copy.deepcopy(project)
         self.state['images'] = copy.deepcopy(getattr(self.agent, 'image_refs', []))
         self.state['history_prefix_count'] = len(self.state['messages']) - 1
+
+    @staticmethod
+    def _conversation_text(record):
+        """Readable, line-addressable worker answers with their saved status."""
+        text = record.get('content', '')
+        if record.get('role') == 'tool':
+            try:
+                value = loads(text)
+                result = value.get('result') if isinstance(value, dict) else None
+                if isinstance(result, dict) and isinstance(result.get('answer'), str):
+                    metadata = {key: value[key] for key in ('job_id', 'mode') if key in value}
+                    metadata['status'] = result.get('status')
+                    return json.dumps(metadata, ensure_ascii=False) + '\n' + result['answer']
+            except (ValueError, TypeError):
+                pass
+        return text
 
     def _working_history(self, history):
         """Keep human premises and written answers; archive prior tool payloads.
@@ -307,7 +325,7 @@ class Orchestrator:
             if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > input_limit(self.agent, 'working_note', 6000)):
                 archived.append({'index': index, 'tool': item.get('tool_name'),
                     'role': item['role'],
-                    'lines': len(item.get('content', '').splitlines()),
+                    'lines': len(self._conversation_text(item).splitlines()),
                     'sha256': hashlib.sha256(item.get('content', '').encode()).hexdigest()})
                 continue
             item.pop('tool_calls', None)
@@ -339,12 +357,14 @@ class Orchestrator:
             raise ValueError('Resume must preserve the assistant action and child limits')
         state['limits']['concurrency'] = self.concurrency
         self.state = state
+        self.state['resumed_checkpoint'] = True
         from . import images
         images.restore(self.agent, self.state)
         self.state.setdefault('blockers', [])
         self.state.setdefault('force_final', False)
         self.state.setdefault('empty_final_retried', False)
         self.state.setdefault('continuation_final_retried', False)
+        self.state.setdefault('continuation_recovery_pending', False)
         self.state.setdefault('tool_call_retried', False)
         self.state.setdefault('tool_call_recovery_pending', False)
         self.state.setdefault('rejected_tool_calls', [])
@@ -527,7 +547,7 @@ class Orchestrator:
                 '\nThe preceding reply ended with a plan to do more work. Carry out the next step '
                 'using an available tool, or give the actual answer and its limitations from saved evidence. '
                 'A promise to search or verify later is not a final answer.\n'
-                if self.state.get('continuation_final_retried') else '') + (
+                if self.state.get('continuation_recovery_pending') else '') + (
                 '\nFINAL ANSWER REQUIRED NOW: further tools are unavailable for this turn. '
                 'Use the saved results to answer the original request. Preserve evidence levels, '
                 'identify unconfirmed details and provider failures, and say where the investigation '
@@ -566,7 +586,7 @@ class Orchestrator:
                 'and was rejected before execution. No tools ran from that response. Choose the '
                 'next action again from the unchanged request and saved results. Use one short, '
                 'valid JSON object for each tool call; do not repeat phrases or guess missing arguments.'})
-        if self.state.get('continuation_final_retried'):
+        if self.state.get('continuation_recovery_pending'):
             # End the stalled assistant turn explicitly. Some chat templates
             # otherwise continue/repeat its final planning sentence. This is a
             # transient controller request; native history stays unchanged.
@@ -719,14 +739,12 @@ class Orchestrator:
             raise ValueError('delegate requires exactly mode, request, files, effort and reason')
         if args['mode'] not in JOB_MODES:
             raise ValueError('Unknown worker mode')
-        if args['effort'] not in EFFORTS:
-            raise ValueError('Unknown worker effort')
-        if args['effort'] == 'poincare':
-            from .source_tasks import _instruction_text
-            human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
-            if (getattr(self, 'required_effort', None) != 'poincare' and self.state.get('required_effort') != 'poincare') and not any(re.search(r'poincar[eé]|\b(?:maximum|maximal|max) effort\b|\beffort (?:maximal|maximum)\b', text, re.I)
-                       for text in map(_instruction_text, human)):
-                raise ValueError('Poincaré effort requires the user to request maximum effort; fix the failed operation instead of escalating its label.')
+        saved_effort = (self.state.get('required_effort')
+                        or self.state.get('proof_routing', {}).get('effort'))
+        if args['effort'] not in EFFORTS and not (
+                args['effort'] in LEGACY_EFFORTS and args['effort'] == saved_effort
+                and self.state.get('resumed_checkpoint')):
+            raise ValueError('Unknown worker effort; choose low, medium or high')
         for key, maximum in (('request', 8000), ('reason', 400)):
             if not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > maximum:
                 raise ValueError(f'{key} must be nonempty text of at most {maximum} characters; no text was truncated')
@@ -802,7 +820,8 @@ class Orchestrator:
             'source_key': source_key,
             'context': {'query': self.state['query'], 'history': copy.deepcopy(self.state['history']),
                         'files': copy.deepcopy(self.state['files']),
-                        'messages': copy.deepcopy(self.state['messages'][:-1]),
+                        'messages': copy.deepcopy(self.state['messages'][self.state.get('history_prefix_count', 0):-1]),
+                        'messages_scope': 'current_turn',
                         'images': copy.deepcopy(self.state.get('images', []))},
         }
         if self.state.get('project_snapshot') is not None:
@@ -888,7 +907,7 @@ class Orchestrator:
                 if not 0 <= index < len(self.state['history']) or not 1 <= start <= end:
                     raise ValueError('Invalid archived conversation range')
                 record = self.state['history'][index]
-                lines = record.get('content', '').splitlines()
+                lines = self._conversation_text(record).splitlines()
                 if start > len(lines) or end > len(lines) or end - start >= 200:
                     raise ValueError('Read an existing range of at most 200 complete lines')
                 key = self._tool_key(name, args)
@@ -1165,7 +1184,7 @@ class Orchestrator:
         if not rendered:
             self.state['messages'].append({'role': 'assistant', 'content': answer})
         self.state['answer_source'] = provenance
-        self.agent.history = copy.deepcopy(self.state['messages'])
+        self.agent.history = self.conversation_history()
         for item in self.agent.history:
             item.pop('thinking', None)
         self.agent.last_stats = {}
@@ -1234,6 +1253,7 @@ class Orchestrator:
                     self._save()
                     continue
                 self.state['tool_call_recovery_pending'] = False
+                self.state['continuation_recovery_pending'] = False
                 if warning:
                     self.state['last_call']['status'] = 'incomplete'
                     return self._finish('incomplete', assistant['content'], warning)
@@ -1259,6 +1279,7 @@ class Orchestrator:
                     self.state['last_call']['status'] = 'incomplete'
                     if not self.state['continuation_final_retried']:
                         self.state['continuation_final_retried'] = True
+                        self.state['continuation_recovery_pending'] = True
                         self._warning('The reply announced further work without performing it; continuing once from the saved results.')
                         self._save()
                         continue
@@ -1271,6 +1292,23 @@ class Orchestrator:
                 return self._finish('complete', assistant['content'])
             return self._finish('failed', warning='The assistant call budget is exhausted; work remains unfinished. '
                                 'The saved work is available for a new request.')
+        except CallContextError as exc:
+            children = [c for c in self.state['children'] if c.get('status') == 'complete'
+                        and isinstance((c.get('result') or {}).get('answer'), str)
+                        and c['result']['answer'].strip()]
+            if children:
+                self._warning('The saved worker result is shown directly because a synthesis could not fit the model context.')
+                answer = '\n\n'.join('### ' + c['action']['mode'] + ' — ' +
+                    str(c['result'].get('status', 'saved')) + '\n\n' + c['result']['answer'] for c in children)
+                if self.state.get('required_mode') and len(children) == len(self.state['children']):
+                    return self._worker_reply(children[-1], answer)
+                self.emit('start', '')
+                self.emit('text', answer)
+                self.emit('end', '')
+                return self._finish('incomplete', answer, str(exc))
+            self.state['status'] = 'failed'
+            self._save()
+            raise
         except BaseException as exc:
             self.state['status'] = ('interrupted' if isinstance(exc, KeyboardInterrupt) else
                                     'failed' if isinstance(exc, CallContextError) else 'incomplete')

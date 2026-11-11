@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApprovalDialog } from './components/Approval'
 import { DropZone } from './components/DropZone'
 import { FeedbackButton } from './components/Feedback'
@@ -40,17 +40,36 @@ export function App() {
   const app = useApp()
   const route = useRoute()
   const [drawer, setDrawer] = useState(false)
+  const navigation = useRef<HTMLDivElement>(null)
   const listHidden = usePanelHidden('sidebar')
   const feedbackChatId = ['free', 'critic', 'explore'].includes(route.mode) ? route.id
     : app.chats?.some((chat) => chat.id === route.from) ? route.from : null
   useEffect(() => setDrawer(false), [route.mode, route.id])
+  useEffect(() => {
+    if (!drawer) return
+    const previous = document.activeElement as HTMLElement | null
+    const controls = () => Array.from(navigation.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), [tabindex="0"]') || [])
+      .filter((element) => element.getClientRects().length > 0)
+    controls()[0]?.focus()
+    const keydown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setDrawer(false) }
+      if (event.key !== 'Tab') return
+      const items = controls(), first = items[0], last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+    }
+    document.addEventListener('keydown', keydown)
+    return () => { document.removeEventListener('keydown', keydown); if (previous?.isConnected) previous.focus() }
+  }, [drawer])
   if (app.auth === 'checking') {
     return <div className="splash paper"><BrandMark size={56} /></div>
   }
   if (app.auth === 'needed') return <Login />
   return (
     <div className={'app' + (listHidden ? ' list-hidden' : '')}>
-      <div className={'nav' + (drawer ? ' nav-open' : '')}>
+      <div ref={navigation} className={'nav' + (drawer ? ' nav-open' : '')}
+        role={drawer ? 'dialog' : undefined} aria-modal={drawer || undefined} aria-label={drawer ? 'Navigation' : undefined}>
         <Sidebar route={route} />
       </div>
       {listHidden && <SideSpine route={route} />}

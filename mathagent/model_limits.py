@@ -32,7 +32,7 @@ DEFAULTS = {
     'ctx': 1_048_576, 'predict': 32_768, 'temperature': 1.0,
     'proof_solve_tokens': PROOF_OUTPUT_TOKENS, 'proof_verify_tokens': PROOF_OUTPUT_TOKENS,
     'proof_call_seconds': PROOF_CALL_SECONDS,
-    'proof_tokens': 11_520_000, 'proof_seconds': 30 * PROOF_CALL_SECONDS,
+    'proof_tokens': 5_760_000, 'proof_seconds': 15 * PROOF_CALL_SECONDS,
     'research_tokens': 2_097_152, 'research_input_tokens': 33_554_432,
     'research_seconds': 1_800, 'research_chars': 200_000,
     'assistant_tokens': 12_568_576, 'assistant_input_tokens': 33_554_432,
@@ -47,6 +47,9 @@ EFFORTS = {
     'high': dict(tries=5, minutes=60, tokens=5_760_000, research_tokens=524_288,
                  input=8_388_608, requests=80, chars=240_000,
                  solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
+}
+# Paused workers retain the allowances they started with.
+LEGACY_EFFORTS = {
     'xhigh': dict(tries=7, minutes=120, tokens=8_064_000, research_tokens=1_048_576,
                   input=16_777_216, requests=120, chars=400_000,
                   solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
@@ -62,7 +65,7 @@ def proof_limits(name, args):
     One solver pass may have one review-format retry, so its durable allowance
     covers a solve and two reviews. A repair is itself another solver pass.
     """
-    effort = EFFORTS.get(name, EFFORTS['medium'])
+    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['medium']))
     solve = min(args.proof_solve_tokens, effort['solve_tokens'])
     verify = min(args.proof_verify_tokens, effort['verify_tokens'])
     tokens = effort['tries'] * (solve + 2 * verify)
@@ -120,7 +123,7 @@ def apply_defaults(args, arguments):
         args.request_timeout = args.proof_call_seconds
     # GUI launch caps accommodate every effort; terminal jobs derive their
     # cumulative allowance from their actual number of solver passes.
-    rounds = 10 if getattr(args, 'gui', False) else args.proof_rounds
+    rounds = 5 if getattr(args, 'gui', False) else args.proof_rounds
     if '--proof-tokens' not in explicit:
         args.proof_tokens = rounds * (args.proof_solve_tokens + 2 * args.proof_verify_tokens)
     if '--proof-seconds' not in explicit:

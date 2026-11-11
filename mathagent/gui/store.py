@@ -142,6 +142,7 @@ def locked(directory):
 def parse_stream(text):
     """Accumulate an Ollama NDJSON stream; a killed writer may leave a partial last line."""
     out = {'text': '', 'thinking': '', 'tool_calls': [], 'done': False, 'stats': {}}
+    fragments = {'text': [], 'thinking': []}
     for line in text.splitlines():
         try:
             event = json.loads(line)
@@ -152,13 +153,14 @@ def parse_stream(text):
         message = event.get('message') if isinstance(event.get('message'), dict) else {}
         for key, field in (('text', 'content'), ('thinking', 'thinking')):
             if isinstance(message.get(field), str):
-                out[key] += message[field]
+                fragments[key].append(message[field])
         if isinstance(message.get('tool_calls'), list):
             out['tool_calls'].extend(message['tool_calls'])
         if event.get('done'):
             out['done'] = True
             out['stats'] = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'done_reason', 'eval_duration')
                             if k in event}
+    out.update({key: ''.join(parts) for key, parts in fragments.items()})
     return out
 
 
@@ -317,6 +319,8 @@ def proof_detail(root, proof_id, active=None):
     selected = next((c for c in s['candidates'] if c['id'] == s['selected_candidate']), None)
     detail.update(candidates=s['candidates'], reviews=s['reviews'], pending=s['pending'],
                   selected_candidate=s['selected_candidate'], initial_candidate=s['initial_candidate'],
+                  selected_review_status=selected.get('review_status', 'unreviewed') if selected else 'unreviewed',
+                  claim_outcome='unclassified',
                   selection_history=s.get('selection_history', []),
                   answer=_candidate_text(store, selected) if selected else None)
     return detail
@@ -359,12 +363,12 @@ def proof_stream(root, proof_id, name, start=0):
 
 # -- literature and referee reports ----------------------------------------
 
-def research_state(root, job_id):
+def research_state(root, job_id, *, verify=True):
     if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
         raise ValueError('Invalid research ID')
     if not (Path(root) / '.mathagent' / 'research' / job_id).exists():
         raise NotFound('Unknown research job')
-    return _read_research(_job_directory(root, job_id), job_id)
+    return _read_research(_job_directory(root, job_id), job_id, verify=verify)
 
 
 def list_research(root, active=None):
@@ -377,7 +381,7 @@ def list_research(root, active=None):
         if not _ID.fullmatch(path.name) or path.is_symlink():
             continue
         try:
-            state = _cached(path / 'state.json', lambda: research_state(root, path.name))
+            state = _cached(path / 'state.json', lambda: research_state(root, path.name, verify=False))
         except (OSError, ValueError, KeyError, NotFound):
             continue
         running = state['status'] == 'running' and (path.name == active or locked(path))
@@ -1112,7 +1116,7 @@ def set_style_template(root, workspace, name, paths):
 _RESULT_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'check': 'Literature check',
                  'literature': 'Literature report', 'referee': 'Review', 'detailed_review': 'Detailed review',
                  'quick_review': 'Quick review', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
-_PROOF_STATUS = {'candidate_complete': 'the model review found no issue', 'uncertain': 'the model review is uncertain',
+_PROOF_STATUS = {'candidate_complete': 'response reviewed; it may be a proof or counterexample', 'uncertain': 'the model review is uncertain',
                  'review_unavailable': 'not reviewed'}
 
 

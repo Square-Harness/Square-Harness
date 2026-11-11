@@ -81,13 +81,13 @@ of solver passes, not the length available to each pass:
 | Low | 1 | 32,768 | 16,384 | 65,536 |
 | Medium | 3 | 384,000 | 384,000 | 3,456,000 |
 | High | 5 | 384,000 | 384,000 | 5,760,000 |
-| Extra high | 7 | 384,000 | 384,000 | 8,064,000 |
-| Poincaré | 10 | 384,000 | 384,000 | 11,520,000 |
 
 These are ceilings, not target lengths. The total allows one solve and up to
 two reviews per pass: a review may be retried once if its response format is
-invalid or it is truncated. A repair or continuation consumes another solver
-pass. A successful review ends the run early; an uncertain review preserves
+invalid or it is truncated. A repair or output-limit continuation consumes another solver
+pass. Resuming an interrupted call keeps the same solver pass; interrupted
+reviews do not consume the one format retry. Their unknown token usage remains
+reserved, so repeated interruptions can still exhaust the saved token budget. A successful review ends the run early; an uncertain review preserves
 the uncertainty. Reasoning tokens count toward generated-token usage.
 
 Medium and higher levels use the same per-call time guard; the workflow time
@@ -104,6 +104,10 @@ Pause interrupts an active model-response stream even if the provider stops
 sending data. The partial response remains unfinished and resumable. If no
 final usage arrived, its reservation stays charged to the local allowance;
 that is conservative harness accounting, not a measurement of the API bill.
+Waiting for an inference slot does not reserve Proof output or consume its
+active working time. After a crash, resume charges saved active time, never
+the hours the program was stopped. SIGTERM and terminal hangup request the
+same saved shutdown as Ctrl+C.
 
 For DS4 conversations, a short routing decision distinguishes very elementary
 facts (such as expanding a square) from nontrivial proof requests. The latter
@@ -249,7 +253,7 @@ saved in your folder. You can pause work and resume it later with the budget it
 had left, and you can always see exactly what the model saw and wrote.
 
 **Bounded work.** Every job has a budget of attempts, working time and retrieval
-requests. You pick an effort level, from Low to Poincaré, instead of tuning token
+requests. You pick an effort level, Low, Medium or High, instead of tuning token
 counts. Nothing runs without limit by accident.
 
 **Text is data, never instructions.** Manuscripts, papers, web pages and model
@@ -458,10 +462,16 @@ How it works: **solve → verify → repair**.
 3. If it finds no issue, that proof is returned unchanged. Concrete objections go
    back to the solver, which repairs the proof or argues the objection is
    mistaken. The new version is reviewed again.
-4. An uncertain review stops the job and keeps the answer.
+4. An uncertain review stops the job. If the earlier answer had a concrete
+   objection, the uncertain repaired answer becomes the export; the original
+   and both reviews remain available.
 
 Every version is kept, and the first answer is never lost. Effort sets the number
-of attempts and the working time.
+of attempts and the working time. “Response reviewed” means the verifier found
+no issue in the selected response. The response can prove the statement or
+refute it with a counterexample; this status does not assert the statement is
+true and is never a formal certificate. Read the response and its attributed
+review. Conflicting JSON verdicts or retractions are not accepted as a pass.
 
 ### Critique and Explore
 
@@ -741,16 +751,15 @@ skills retain their own limits.
 | Low | 1 | 1 min | 20 |
 | Medium | 3 | 15 min | 50 |
 | High | 5 | 30 min | 80 |
-| Extra high | 7 | 1 h | 120 |
-| Poincaré | 10 | 2 h | 160 |
 
 Each skill translates the level into its own terms. For a proof, it is the number
 of attempts. For a quick review, the number of verifier passes. For a detailed
 review, how far down the dependencies the checks go (Low: the main results only;
-Extra high and Poincaré: the appendices too), with twice the working time. There
+High: deeper dependencies), with twice the working time. There
 is no fixed token allowance for the original profiles unless one was supplied
 explicitly, but every model call is still limited by the model's context. A
 paused job resumes with what is left; it never gets a new allowance silently.
+Older saved Extra high and Poincaré jobs remain readable and retain their saved allowances.
 
 ## Your data
 
@@ -774,7 +783,7 @@ work.
 What leaves your computer:
 
 - **Search requests**: short public queries to arXiv, Semantic Scholar, zbMATH,
-  Crossref and OpenCitations; downloads of open-access papers; web pages you ask
+  Crossref, OpenCitations and Open Library (book metadata); downloads of open-access papers; web pages you ask
   the Assistant to open; and, only with a `BRAVE_SEARCH_API_KEY`, general web
   search. In the web app this is on unless you launch with `--offline`; the
   reading-list and review form can also turn it off for one job. In the terminal

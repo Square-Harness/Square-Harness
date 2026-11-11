@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import sys
@@ -1113,6 +1114,12 @@ def serve(args):
         print('Python enabled: each snippet requires approval in the interface and runs with your account permissions.')
     if not args.no_browser:
         threading.Timer(0.4, webbrowser.open, [local + query]).start()
+    previous_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        def stop_signal(signum, frame):
+            raise KeyboardInterrupt
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous_handlers[signum] = signal.signal(signum, stop_signal)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -1122,4 +1129,6 @@ def serve(args):
         hub.shutdown()
         server.watcher.stop()
         server.server_close()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
     return 0

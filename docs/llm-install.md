@@ -398,7 +398,7 @@ model settings from B4. Selecting a different profile never rewrites saved
 jobs or grants them new allowances on resume.
 
 New DS4 Proof jobs use 384,000 tokens for each solve, repair and review from
-Medium upwards. Medium, High, Extra high and Poincaré allow 3, 5, 7 and 10 solver
+Medium upwards. Medium and High allow 3 and 5 solver
 passes; Low remains one short solve/review pass. The total output allowance
 includes one possible review-format retry per pass. See the budget table in
 [guide.md](guide.md). The common per-call time guard defaults to three hours;

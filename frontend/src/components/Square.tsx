@@ -37,7 +37,7 @@ export function proofLook(status: string, running = false, version = 2): Look {
   if (running) return { variant: 'running', label: 'Running' }
   if (version === 1 && status === 'candidate_complete') return { variant: 'complete', label: 'Complete candidate, audited by the v0.4 engine' }
   switch (status) {
-    case 'candidate_complete': return { variant: 'complete', label: 'The model review found no issue' }
+    case 'candidate_complete': return { variant: 'complete', label: 'Response reviewed; proof or counterexample' }
     case 'uncertain': return { variant: 'uncertain', label: 'The model review is uncertain' }
     case 'review_unavailable': return { variant: 'spent', label: 'No usable review' }
     case 'attempts_exhausted': return { variant: 'spent', label: 'Attempts used up' }

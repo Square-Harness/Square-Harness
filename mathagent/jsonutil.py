@@ -10,6 +10,38 @@ import json
 import re
 
 
+def loads_single(text):
+    """One complete answer, allowing a preamble and a surrounding code fence.
+
+    Multiple answers and a retraction after the JSON are ambiguous. Callers
+    that make a workflow or verdict decision must reject them.
+    """
+    if not isinstance(text, str):
+        raise TypeError('Expected JSON text')
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.S)
+    candidates = list(_objects(text))
+    if len(candidates) != 1:
+        raise ValueError('Expected exactly one complete JSON answer')
+    candidate = candidates[0]
+    end = text.find(candidate) + len(candidate)
+    if text[end:].strip() not in ('', '```'):
+        raise ValueError('Unexpected text after JSON answer')
+    return loads_strict(candidate)
+
+
+def loads_strict(text):
+    """Decode the whole JSON value, sharing the model's TeX escape repair."""
+    def unique_fields(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Duplicate JSON field: ' + key)
+            value[key] = item
+        return value
+    decoder = json.JSONDecoder(strict=False, object_pairs_hook=unique_fields)
+    return _repair_values(decoder.decode(_repair_latex(text)))
+
+
 def loads(text):
     if not isinstance(text, str):
         raise TypeError('Expected JSON text')
@@ -113,14 +145,30 @@ def _objects(text):
 
 def _repair_latex(text):
     # Leave JSON escapes intact, including escaped quotes and backslashes.
-    return re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', text)
+    return re.sub(r'\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})|\\',
+                  lambda m: m.group() if len(m.group()) > 1 else '\\\\', text)
 
 
 def repair_latex(text):
-    controls = {'\f': 'f', '\b': 'b', '\t': 't', '\r': 'r'}
-    suffixes = ('abla', 'eq', 'otin', 'ot', 'mid', 'geq', 'leq', 'ewline', 'oindent', 'subseteq', 'otag', 'onumber')
-    text = re.sub('[\f\b\t\r](?=[A-Za-z])', lambda m: '\\' + controls[m.group()], text)
-    return re.sub('\n(?=(?:' + '|'.join(suffixes) + r')(?![A-Za-z]))', r'\\n', text)
+    # Restore recognised TeX commands, not arbitrary escaped tabs/newlines in
+    # valid code or prose. A tab before ``print`` must remain an indentation.
+    commands = {
+        '\f': ('frac', 'forall', 'fbox', 'fcolorbox', 'footnote', 'footnotesize'),
+        '\b': ('begin', 'beta', 'bar', 'binom', 'big', 'bigl', 'bigr', 'bigg', 'biggl',
+               'biggr', 'bigcap', 'bigcup', 'bmod', 'boldsymbol', 'boxed', 'bullet'),
+        '\t': ('tau', 'theta', 'to', 'times', 'tilde', 'top', 'tanh', 'tan', 'tag',
+               'text', 'textbf', 'textit', 'textnormal', 'textrm', 'textsf', 'texttt',
+               'textwidth', 'tiny', 'today'),
+        '\r': ('rho', 'right', 'rangle', 'ref', 'renewcommand', 'rule', 'rightarrow'),
+        '\n': ('nabla', 'ne', 'neq', 'neg', 'ni', 'nu', 'notin', 'not', 'nmid', 'ngeq',
+               'nleq', 'newline', 'newcommand', 'newenvironment', 'noindent', 'nsubseteq',
+               'notag', 'nonumber', 'nolimits', 'natural', 'nexists'),
+    }
+    for control, names in commands.items():
+        suffixes = '|'.join(re.escape(name[1:]) for name in names)
+        text = re.sub(re.escape(control) + '(?=(?:' + suffixes + r')(?![A-Za-z]))',
+                      lambda m, first=names[0][0]: '\\' + first, text)
+    return text
 
 
 def _repair_values(value):

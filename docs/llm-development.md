@@ -116,6 +116,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
   paused proof. Change it only deliberately, together with
   `proof.POLICY_VERSION` and a migration rule, as done for version 7 → 8. Other
   source hashes (controller, transports) are provenance only.
+- **Proof recovery and exports.** Transport interruptions do not consume solver
+  passes or verifier protocol retries. Redispatch uses a new journal key and
+  retains the interrupted call's reservation; never increase a saved allowance.
+  A continuation packs notes only after reserving useful solver output space.
+  The export's selected candidate carries its own review status. An uncertain
+  repair can replace a candidate with a concrete objection; retain both immutable
+  artifacts. `candidate_complete` means a reviewed response (proof or disproof),
+  not certification of the requested claim. One complete JSON verdict is required;
+  trailing retractions and competing objects are protocol errors. Cosmetic length
+  and extra-field deviations can be normalized without weakening verdict checks.
 - **Saved jobs stay readable.**
   - Old proof jobs (v0.4) remain inspectable but cannot resume.
   - Old chat kinds (`critic`, `explore`, Default route cards) are still listed
@@ -130,6 +140,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   changing Proof must not increase unrelated workflows.
 - **Storage.** State files are written atomically (`ledger._atomic_write`), jobs
   are locked with `fcntl`, and paths are validated against symlinks and escapes.
+  State and text artifacts have a bounded 64 MiB ceiling; reject an oversized
+  initial state before publishing its job directory. Stream journals hold one
+  validated descriptor, synchronize at most every half second and on exit, and
+  retain durable reservations if the last events are lost. Liveness probes may
+  briefly hold a shared lock, so exclusive acquisition retries for 100 ms.
   Proof candidates are immutable and hashed: a changed digest is refused, not
   re-reviewed.
   Workspace write approvals are tied to the original target and contents;
@@ -182,6 +197,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   sources, requests, a selected style and a sole saved template. The browser
   loads them into a fresh KaTeX scope per conversation, including sidebar
   previews; `trust` stays false and expansion limits stay in force.
+- **File tools.** Inferred source names must exist locally and obey read-type
+  settings; a URL or a missing filename is not an implicit attachment. File and
+  directory responses expose pagination, including columns within long lines.
+  `replace_text` makes one exact targeted replacement through the same approval
+  and encoding path as `write_file`; preserve CRLF and existing file modes. New files remain private.
 - **Web retrieval.** HTML parsing and extraction check the workflow deadline.
   Ordinary webpages consult cached per-origin robots.txt through the standard
   library's prefix-rule parser, within the same HTTPS, request and time bounds.
@@ -191,6 +211,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Retries archive rejected records and preserve their R identifiers on rediscovery.
   Latest-author requests use arXiv author queries with `sort=newest`, a separate
   expiring cache and ordering by original submission date, rather than model recall.
+  Source errors carry typed codes and do not masquerade as model outages.
+  Source refusal prevents a false “not found” conclusion; other providers and
+  usable cached queries remain eligible. Metadata caches expire after seven
+  days; ordinary pages and unversioned papers after one day. Rate gates are
+  shared across jobs in one process and respect robots crawl-delay; independent
+  server processes do not share a rate limiter.
   Source-only follow-ups return the worker's qualified answer directly, preserving
   its metadata and limits instead of inviting unverified bibliographic additions.
 - **Compile retries.** Missing-command retries require a new inferred definition
@@ -668,7 +694,7 @@ as estimates, not as exact server counts.
 
 DS4 Proof uses 384,000 output tokens for every solver, repair and verifier call
 at Medium or above. Those levels change only the maximum solver-pass count
-(3/5/7/10). Low retains one pass with 32,768 solve and 16,384 review tokens.
+(3/5). Low retains one pass with 32,768 solve and 16,384 review tokens.
 The cumulative allowance is `N * (solve + 2 * review)`: the second review is
 the existing bounded retry for an invalid or truncated response, not an extra
 mathematical round. Repairs and continuations consume solver passes. Do not
@@ -753,6 +779,12 @@ profiles retain their existing controller path until separately validated.
 
 - `raw-single`: one direct, thinking-enabled solve;
 - `proof`: the same first solve, then verification and bounded repair.
+
+Both arms require the full configured initial output allowance; an input that
+cannot fit is rejected consistently rather than fitting only the Proof arm.
+Ctrl+C cancels queued jobs and stops new request admission; active results,
+partial journals, `outputs.jsonl`, summary and grading exports are retained.
+An active socket may take up to its configured timeout to return.
 
 Both arms use the same instruction (`proof_policy.COMMON_INSTRUCTION`), model,
 context, sampling and per-problem seed. The proof arm deliberately has more

@@ -5,7 +5,7 @@
 import type { Defaults } from './api'
 
 export type EffortKind = 'proof' | 'research' | 'writeup' | 'style'
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'poincare'
+export type EffortLevel = 'low' | 'medium' | 'high'
 
 // Effort sets checking depth, attempts, and time. Token estimates remain in this
 // table for older integrations; they are not cumulative limits for new work.
@@ -16,8 +16,6 @@ export const EFFORTS: {
   { id: 'low', label: 'Low', hint: 'One quick try', tries: 1, minutes: 1, tokens: 30_000, input: 120_000, requests: 20, chars: 15_000 },
   { id: 'medium', label: 'Medium', hint: 'Several passes with independent checks', tries: 3, minutes: 15, tokens: 60_000, input: 240_000, requests: 50, chars: 30_000 },
   { id: 'high', label: 'High', hint: 'Deeper checking and more approaches', tries: 5, minutes: 30, tokens: 100_000, input: 400_000, requests: 80, chars: 60_000 },
-  { id: 'xhigh', label: 'Extra high', hint: 'Thorough checking and alternative approaches', tries: 7, minutes: 60, tokens: 150_000, input: 600_000, requests: 120, chars: 100_000 },
-  { id: 'poincare', label: 'Poincaré', hint: 'The deepest investigation, in honour of Henri Poincaré', tries: 10, minutes: 120, tokens: 200_000, input: 800_000, requests: 160, chars: 150_000 },
 ]
 
 export const LEVELS = EFFORTS.map((effort) => effort.id)

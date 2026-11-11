@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from threading import Lock
 
 TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', '.yml', '.toml', '.csv'}
@@ -31,7 +32,7 @@ FALLBACK = 'utf-8+cp1252'
 INPUTENC = {'latin1': 'latin-1', 'latin9': 'iso8859-15', 'ansinew': 'cp1252', 'cp1252': 'cp1252',
             'applemac': 'mac-roman', 'macce': 'mac-latin2', 'cp850': 'cp850', 'cp437': 'cp437', 'latin2': 'iso8859-2'}
 TEX_ENCODINGS = {'isolatin': 'latin-1', 'iso latin 1': 'latin-1', 'windows latin 1': 'cp1252',
-                 'mac os roman': 'mac-roman', 'iso latin 9': 'iso8859-15', 'iso latin 2': 'iso8859-2'}
+                 'mac os roman': 'mac-roman', 'macosroman': 'mac-roman', 'isolatin9': 'iso8859-15', 'iso latin 9': 'iso8859-15', 'iso latin 2': 'iso8859-2'}
 ENCODING_NAMES = {'iso8859-1': 'Latin-1', 'iso8859-15': 'Latin-9', 'cp1252': 'Windows-1252', 'mac-roman': 'Mac Roman',
                   'mac-latin2': 'Mac Central European', 'cp850': 'DOS (CP850)', 'cp437': 'DOS (CP437)',
                   'iso8859-2': 'Latin-2', 'utf-16': 'UTF-16', FALLBACK: 'UTF-8, with Windows-1252 for its accented bytes'}
@@ -54,7 +55,12 @@ def _codec(name):
     if name in ('utf8', 'utf8x', 'utf-8 unicode'):
         return 'utf-8'
     try:
-        return codecs.lookup(name).name
+        codec = codecs.lookup(name)
+        # Exclude registered byte transforms such as hex, base64 and rot13.
+        if not getattr(codec, '_is_text_encoding', True):
+            raise ValueError(f'{name!r} is a byte transformation, not a text encoding')
+        ''.encode(codec.name)
+        return codec.name
     except LookupError:
         return None
 
@@ -64,7 +70,9 @@ def _declared_encoding(data):
     for line in data.splitlines():
         magic = _MAGIC.match(line)
         if magic:
-            return _codec(magic.group(1))
+            codec = _codec(magic.group(1))
+            if codec:
+                return codec
         code = re.split(rb'(?<!\\)%', line, maxsplit=1)[0]
         for options, name in _DECLARATION.findall(code):
             for option in reversed((options or name).split(b',')):
@@ -85,7 +93,10 @@ def decode_text(data, name):
         try:
             text, encoding = data.decode('utf-8-sig'), None
         except UnicodeDecodeError:
-            encoding = _declared_encoding(data) or FALLBACK
+            try:
+                encoding = _declared_encoding(data) or FALLBACK
+            except ValueError as exc:
+                raise ValueError(f'{name}: {exc}') from None
             if encoding in ('utf-8', 'utf-8-sig'):
                 encoding = FALLBACK  # Keep recovering older accented bytes in files declaring UTF-8.
             text = data.decode('utf-8', errors='square-cp1252') if encoding == FALLBACK else data.decode(encoding, errors='replace')
@@ -128,6 +139,7 @@ class Workspace:
         # Set by the interface for answers: runs a literature check (a nested,
         # separately budgeted verifier) and returns its compact JSON result.
         self.checker = None
+        self.cancelled = lambda: False
         groups = set(READ_GROUPS) if read_types is None else set(read_types)
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
@@ -182,17 +194,32 @@ class Workspace:
                              and not (Path(folder) / d).is_symlink())
             for name in sorted(files):
                 p = Path(folder) / name
-                if name.startswith('.') or p.is_symlink() or p.suffix.lower() not in allowed:
+                if name.startswith('.') or p.suffix.lower() not in allowed or p.is_symlink():
                     continue
                 yield p
                 count += 1
                 if count >= 2000:
                     return
 
-    def list_files(self):
-        return '\n'.join(str(p.relative_to(self.root)) for p in self.files(self.readable)) or '(no readable files)'
+    def list_files(self, offset=0, limit=100):
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError('Use a nonnegative file offset and a limit from 1 to 200')
+        names = [str(p.relative_to(self.root)) for p in self.files(self.readable)]
+        selected, size = [], 0
+        for name in names[offset:offset + limit]:
+            if selected and size + len(name) + 1 > MAX_RESULT - 300:
+                break
+            selected.append(name)
+            size += len(name) + 1
+        next_offset = offset + len(selected)
+        suffix = (f'\n[Continue list_files with offset={next_offset}]' if next_offset < len(names) else '')
+        return ('\n'.join(selected) or '(no readable files at this offset)') + suffix
 
-    def read_file(self, path, start_line=1, end_line=100):
+    def read_file(self, path, start_line=1, end_line=None, start_column=1):
+        if end_line is None:
+            end_line = start_line + 99 if type(start_line) is int else 100
+        if type(start_column) is not int or start_column < 1:
+            raise ValueError('start_column must be a positive character position on the first line')
         if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
             raise ValueError('Line bounds must be positive integers with start <= end')
         p = self.path(path, pdf=True)
@@ -205,42 +232,83 @@ class Workspace:
             lines = self.text(p).splitlines()
         end = min(end_line, start_line + 199, len(lines))
         result = f'{path}: {len(lines)} total lines; requested excerpt {start_line}-{end}\n'
-        return result + '\n'.join(f'{i+1}: {lines[i]}' for i in range(start_line-1, end))
+        remaining = MAX_RESULT - len(result) - 250
+        selected = []
+        for index in range(start_line - 1, end):
+            column = start_column if index == start_line - 1 else 1
+            text = lines[index][column - 1:]
+            prefix = f'{index + 1}: ' if column == 1 else f'{index + 1} (from column {column}): '
+            if len(prefix) + len(text) + 1 > remaining:
+                if selected:
+                    return result + '\n'.join(selected) + f'\n[Continue read_file at start_line={index + 1}, start_column={column}]'
+                take = max(1, remaining - len(prefix) - 1)
+                return result + prefix + text[:take] + f'\n[Partial line; continue read_file at start_line={index + 1}, start_column={column + take}]'
+            selected.append(prefix + text)
+            remaining -= len(prefix) + len(text) + 1
+        return result + '\n'.join(selected)
 
-    def search_text(self, pattern):
+    def search_text(self, pattern, offset=0):
         if not isinstance(pattern, str) or not pattern:
             raise ValueError('Provide nonempty literal search text (not regex)')
-        hits = []
+        if type(offset) is not int or offset < 0:
+            raise ValueError('Use a nonnegative file offset')
+        hits, needle = [], pattern.casefold()
+        deadline = time.monotonic() + 10
         # PDFs are searched in their local text extraction (as read_file reads them): pinned ones,
         # and all readable ones when the user allows PDFs. Nothing is uploaded.
         pdfs = [] if self.literature is None else [q for q in self.pinned if q.suffix.lower() == '.pdf']
         if self.literature is not None and '.pdf' in self.readable:
             pdfs += [q for q in self.files({'.pdf'}) if q not in pdfs]
-        for p in list(self.files(self.readable - {'.pdf'})) + pdfs:
+        paths = list(dict.fromkeys(list(self.files(self.readable - {'.pdf'}))
+                                  + sorted(self.pinned - set(pdfs)) + pdfs))
+        for index, p in enumerate(paths[offset:], offset):
+            if self.cancelled():
+                raise KeyboardInterrupt()
+            if time.monotonic() >= deadline:
+                return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}]'
             try:
                 if p.suffix.lower() == '.pdf':
-                    summary = self.literature.import_local(str(p.relative_to(self.root)))
-                    lines = self.literature._document(summary['document_id'])[1]
+                    previous = self.literature.deadline
+                    self.literature.deadline = min(deadline, previous) if previous is not None else deadline
+                    try:
+                        summary = self.literature.import_local(str(p.relative_to(self.root)))
+                        lines = self.literature._document(summary['document_id'])[1]
+                    finally:
+                        self.literature.deadline = previous
                 else:
-                    lines = self.text(p).splitlines()
+                    text = self.text(p)
+                    if needle not in text.casefold():
+                        continue
+                    lines = text.splitlines()
             except (OSError, ValueError, UnicodeError):  # LiteratureError is a ValueError
                 continue
             for i, line in enumerate(lines, 1):
-                if pattern.casefold() in line.casefold():
+                if needle in line.casefold():
                     hits.append(f'{p.relative_to(self.root)}:{i}: {line[:500]}')
                     if len(hits) >= 50:
                         return '\n'.join(hits) + '\n[50-match limit]'
         return '\n'.join(hits) or '(no matches in supported files scanned)'
 
     def write_file(self, path, content):
-        if not isinstance(content, str) or len(content.encode()) > 100_000:
-            raise ValueError('Content must be text, at most 100 KB')
+        return self._write_file(path, content, max_bytes=100_000)
+
+    def _write_file(self, path, content, *, max_bytes, expected=None):
+        if not isinstance(content, str) or len(content.encode()) > max_bytes:
+            raise ValueError(f'Content must be text, at most {max_bytes} bytes')
         p = self.path(path)
         original = p.stat() if p.exists() else None
         old = self.text(p) if original is not None else ''
+        if expected is not None and old != expected:
+            raise ValueError(f'{path} changed before the edit preview; read it again. No file changed.')
         encoding = self.encodings.get(p) if original is not None else None
+        # Preserve an existing CRLF convention; normalize only the displayed diff.
+        if '\r\n' in old and '\n' not in old.replace('\r\n', ''):
+            content = content.replace('\r\n', '\n').replace('\n', '\r\n')
         # The replacement may explicitly change/remove its declaration, or be a new file.
-        kept = _declared_encoding(content.encode('utf-8')) or 'utf-8'
+        try:
+            kept = _declared_encoding(content.encode('utf-8')) or 'utf-8'
+        except ValueError as exc:
+            raise ValueError(f'{path}: {exc}; no file changed') from None
         try:
             data = content.encode(kept)
         except UnicodeEncodeError as exc:
@@ -248,7 +316,7 @@ class Workspace:
                              f'{content[exc.start:exc.end]!r}; no file changed. Save the file as UTF-8 first.') from None
         note = (f' (saved as {ENCODING_NAMES.get(kept, kept)})' if kept != 'utf-8' else
                 ' (saved as UTF-8; it was not valid UTF-8)' if encoding == FALLBACK else '')
-        diff = ''.join(difflib.unified_diff(old.splitlines(True), content.splitlines(True),
+        diff = ''.join(difflib.unified_diff(old.replace('\r\n', '\n').splitlines(True), content.replace('\r\n', '\n').splitlines(True),
                                            fromfile=path + ' (old)', tofile=path + ' (new)'))
         if not self.approve(f'WRITE {p}{note}\n{diff or "(no textual changes)"}'):
             return 'User denied the write. No file changed.'
@@ -274,6 +342,19 @@ class Workspace:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
         return f'Wrote {path} ({len(data)} bytes)'
+
+    def replace_text(self, path, old_text, new_text):
+        """A unique exact replacement with write_file's approval and race checks."""
+        if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+            raise ValueError('Provide a nonempty old_text and a text replacement')
+        p = self.path(path)
+        self._readable(p)
+        old = self.text(p)
+        if old.count(old_text) != 1:
+            raise ValueError('old_text must match exactly once; read a larger unique passage first')
+        if max(len(old_text.encode()), len(new_text.encode())) > 100_000:
+            raise ValueError('The changed passage must be at most 100 KB')
+        return self._write_file(path, old.replace(old_text, new_text, 1), max_bytes=MAX_BYTES, expected=old)
 
     def run_python(self, code):
         if not self.allow_python:
@@ -317,21 +398,23 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         string = {'type': 'string'}
         integer = {'type': 'integer'}
         kinds = ', '.join(sorted(self.readable))
-        result = [] if not self.readable else [
-            schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000).', {}),
+        result = [] if not self.readable and not self.pinned else [
+            schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000). Continue with offset when paginated.', {'offset': integer, 'limit': integer}),
             schema('search_text', 'Case-insensitive literal search in allowed files'
                    + (', including the extracted text of attached or readable PDFs' if self.literature is not None else ' (not PDFs)')
-                   + '; max 50 matches.',
-                   {'pattern': string}, ['pattern']),
+                   + '; max 50 matches and 10 seconds. Continue with the returned file offset.',
+                   {'pattern': string, 'offset': integer}, ['pattern']),
         ]
         if self.readable or self.pinned:
             result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
                    + (', including extracted PDF text' if self.literature is not None else '')
                    + '. At most 200 lines / 6000 characters.',
-                   {'path': string, 'start_line': integer, 'end_line': integer}, ['path']))
+                   {'path': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['path']))
         result += [
             schema('write_file', 'Create/replace a text file ONLY when requested by the user; shows a diff for approval.',
                    {'path': string, 'content': string}, ['path', 'content']),
+            schema('replace_text', 'Replace one exact unique passage in an allowed file; shows a diff for approval.',
+                   {'path': string, 'old_text': string, 'new_text': string}, ['path', 'old_text', 'new_text']),
         ]
         if self.allow_python and (self.literature is None or self.literature.online):
             result.append(schema('run_python', 'Run Python after explicit approval. Not sandboxed. 30s timeout.',

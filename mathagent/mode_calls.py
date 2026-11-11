@@ -9,7 +9,7 @@ from .agent import AgentError
 from .call_policy import CallContextError
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
-from .router import JOB_MODES, EFFORTS
+from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
 from .source_tasks import automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
@@ -145,7 +145,7 @@ class ModeOrchestrator(Orchestrator):
     def __init__(self, *args, required_mode=None, required_effort=None, **kwargs):
         if required_mode is not None and required_mode not in JOB_MODES + USER_MODES:
             raise ValueError('Unknown selected mode call')
-        if required_effort is not None and required_effort not in EFFORTS:
+        if required_effort is not None and required_effort not in EFFORTS + LEGACY_EFFORTS:
             raise ValueError('Unknown selected effort')
         self.required_mode = required_mode
         self.required_effort = required_effort

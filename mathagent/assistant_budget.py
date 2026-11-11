@@ -6,6 +6,7 @@ import json
 import math
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 
 from .agent import AgentError
 from .backends import TokenBudgetError, ToolCallError
@@ -24,6 +25,25 @@ class _Pool:
         self.checkpoint = checkpoint
         self.started = time.monotonic()
         self.seconds_before = state['seconds']
+        self.excluded_seconds = 0
+        self.excluded_since = None
+        self.queue_waiters = 0
+        self.active_inference = 0
+
+    def admission_change(self, *, queued=0, active=0):
+        """Exclude the union of Proof queue waits only while no inference runs."""
+        with self.lock:
+            now = time.monotonic()
+            if self.excluded_since is not None:
+                self.excluded_seconds += now - self.excluded_since
+            self.queue_waiters += queued
+            self.active_inference += active
+            self.excluded_since = now if self.queue_waiters and not self.active_inference else None
+
+    def seconds(self):
+        now = time.monotonic()
+        pending = now - self.excluded_since if self.excluded_since is not None else 0
+        return self.seconds_before + now - self.started - self.excluded_seconds - pending
 
 
 class BudgetClient:
@@ -32,6 +52,7 @@ class BudgetClient:
                  allowance=None, usage=None, adaptive_limits=None, deadline=None):
         self.client = client
         self.deadline = deadline
+        self._admitted = threading.local()
         budget = dict(state or {'tokens': 0, 'input_tokens': 0, 'seconds': 0,
                                'max_tokens': max_tokens, 'max_input_tokens': max_input_tokens,
                                'max_seconds': max_seconds})
@@ -110,39 +131,72 @@ class BudgetClient:
     def remaining_seconds(self):
         remaining = self.pool.state['max_seconds'] - self.snapshot()['seconds']
         if self.deadline is not None:
-            remaining = min(remaining, self.deadline - time.monotonic())
+            waiting = getattr(self._admitted, 'waiting_since', None)
+            extension = time.monotonic() - waiting if waiting is not None else 0
+            remaining = min(remaining, self.deadline + extension - time.monotonic())
         return max(0, remaining)
 
     def snapshot(self):
         with self.pool.lock:
-            return {**self.pool.state, 'seconds': self.pool.seconds_before + time.monotonic() - self.pool.started}
+            return {**self.pool.state, 'seconds': self.pool.seconds()}
 
-    def stream(self, payload):
+    @contextmanager
+    def inference_slot(self, *, deadline=None):
+        """Acquire tree capacity before GUI capacity, reentrantly per worker.
+
+        Proof calls this before reserving a generation, without a deadline, to
+        exclude capacity waiting. Ordinary calls retain their bounded wait.
+        """
+        if getattr(self._admitted, 'active', False):
+            yield
+            return
         cancel = getattr(self.client, 'cancel', None)
         if cancel is not None and cancel.is_set():
             raise KeyboardInterrupt
-        while not self.pool.slots.acquire(timeout=0.1):
-            if getattr(self.client, 'cancel', None) is not None and self.client.cancel.is_set():
-                raise KeyboardInterrupt
-            if self.remaining_seconds <= 0:
-                raise AssistantBudget('Assistant time budget exhausted while waiting for inference.')
+        if self.remaining_seconds <= 0:
+            raise AssistantBudget('Assistant time budget exhausted before inference admission.')
+        exempt = deadline is None
+        if exempt:
+            self._admitted.waiting_since = time.monotonic()
+            self.pool.admission_change(queued=1)
+        acquired, active, waiting = False, False, exempt
         try:
+            while not self.pool.slots.acquire(timeout=0.05):
+                if cancel is not None and cancel.is_set():
+                    raise KeyboardInterrupt
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError('Assistant inference wait exceeded its deadline')
+            acquired = True
             if cancel is not None and cancel.is_set():
                 raise KeyboardInterrupt
-            # The GUI's global inference queue is separate from this turn's
-            # token pool. Admit before reserving tokens, so an undispatched
-            # pause or expired deadline cannot consume its output allowance.
             admission = getattr(self.client, 'inference_slot', None)
-            if admission is None:
-                yield from self._stream(payload)
-            else:
-                try:
-                    with admission(deadline=time.monotonic() + self.remaining_seconds):
-                        yield from self._stream(payload)
-                except TimeoutError as exc:
-                    raise AssistantBudget('Assistant time budget exhausted while waiting for inference.') from exc
+            with admission(deadline=deadline) if admission is not None else nullcontext():
+                if exempt:
+                    elapsed = time.monotonic() - self._admitted.waiting_since
+                    if self.deadline is not None:
+                        self.deadline += elapsed
+                    self._admitted.waiting_since = None
+                self.pool.admission_change(queued=-int(waiting), active=1)
+                active, waiting = True, False
+                self._admitted.active = True
+                yield
         finally:
-            self.pool.slots.release()
+            self._admitted.active = False
+            if waiting:
+                elapsed = time.monotonic() - self._admitted.waiting_since
+                if self.deadline is not None:
+                    self.deadline += elapsed
+                self._admitted.waiting_since = None
+            self.pool.admission_change(queued=-int(waiting), active=-int(active))
+            if acquired:
+                self.pool.slots.release()
+
+    def stream(self, payload):
+        try:
+            with self.inference_slot(deadline=time.monotonic() + self.remaining_seconds):
+                yield from self._stream(payload)
+        except TimeoutError as exc:
+            raise AssistantBudget('Assistant time budget exhausted while waiting for inference.') from exc
 
     def _stream(self, payload):
         cap = payload.get('options', {}).get('num_predict')
@@ -180,7 +234,7 @@ class BudgetClient:
         try:
             events = self.client.stream(payload)
             for event in events:
-                if self.remaining_seconds <= 0:
+                if not event.get('done') and self.remaining_seconds <= 0:
                     raise AssistantBudget('Assistant time budget exhausted during generation.')
                 if event.get('done'):
                     if charged:

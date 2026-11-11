@@ -42,7 +42,8 @@ class StandardReferenceSearch:
         return False
 
     def _standard_kind(self):
-        value = self.state['goal'].casefold()
+        human = (self.state.get('reference_context') or {}).get('query')
+        value = (human if isinstance(human, str) and human.strip() else self.state['goal']).casefold()
         book = re.search(r'\b(?:books?|textbooks?|monographs?|livres?|ouvrage)\b', value)
         paper = re.search(r'\b(?:articles?|papers?)\b', value)
         return 'book' if book and not paper else 'article' if paper and not book else 'any'
@@ -78,7 +79,7 @@ class StandardReferenceSearch:
             if provider and value.get('error'):
                 error = str(value['error'])
                 # A missing work is not a provider outage.
-                if re.search(r'timeout|timed out|HTTP (?:429|50[0-9])|rate limited|unavailable|resolve|reach|network|operation failed', error, re.I):
+                if value.get('error_code') == 'source_unavailable' or re.search(r'timeout|timed out|HTTP (?:401|403|429|50[0-9])|rate limited|unavailable|resolve|reach|network|operation failed', error, re.I):
                     failed[provider] = error
         return failed
 
@@ -128,6 +129,8 @@ class StandardReferenceSearch:
                 if item in archive:
                     archive.remove(item)
                     pool.append(item)
+                if candidate_index is not None and item.get('candidate_index') is None:
+                    item['candidate_index'] = candidate_index
                 return
         # Retrieval is already bounded by the workflow's request and character
         # budgets. A first-come cutoff here hid later providers' relevant hits.
@@ -154,6 +157,14 @@ class StandardReferenceSearch:
             index = s['current']
             candidate = s['candidates'][index]
             evidence = [e for e in s['evidence'] if e.get('candidate') == index]
+            # A recalled title is only a retrieval hint. Every eligible fetched
+            # record must reach relevance selection, including longer real titles.
+            for item in evidence:
+                pooled = s.setdefault('standard_pooled_evidence_ids', [])
+                if item['id'] not in pooled:
+                    for fetched in self._records([item]):
+                        self._standard_pool_add(fetched)
+                    pooled.append(item['id'])
             record = self._record(candidate, evidence)
             if record and self._standard_eligible(record, candidate):
                 candidate['verdict'] = self._gate(index, {'level': 'located', 'locator': candidate['locator']})
@@ -243,7 +254,7 @@ class StandardReferenceSearch:
         attempts = ([('arxiv', query), ('zbmath', query)] if author else
                     [('openlibrary', query), ('crossref', query), ('zbmath', query),
                      ('openlibrary', alternate), ('crossref', alternate)] if kind == 'book' else
-                    [('crossref', query), ('crossref', alternate), ('crossref', relaxed), ('arxiv', query), ('zbmath', query)]
+                    [('crossref', query), ('zbmath', query), ('arxiv', query), ('crossref', alternate), ('crossref', relaxed)]
                     + ([('openlibrary', query)] if kind == 'any' else []))
         stage = s.get('standard_discovery_stage', 0)
         successes = sum(1 for e in evidence if any(self._standard_eligible(record)
@@ -265,6 +276,13 @@ class StandardReferenceSearch:
         s = self.state
         pool = s.get('standard_pool', [])
         if not pool:
+            s['phase'] = 'answer'
+            return
+        from .literature import _digest
+        signature = _digest(json.dumps(sorted(
+            [(item['id'], item['record']) for item in pool + s.get('standard_record_archive', [])],
+            key=lambda item: item[0]), ensure_ascii=False, sort_keys=True))
+        if signature == s.get('standard_selection_signature'):
             s['phase'] = 'answer'
             return
         s['standard_selection_calls'] = s.get('standard_selection_calls', 0) + 1
@@ -350,6 +368,7 @@ class StandardReferenceSearch:
             selected.append(item['id'])
         s['standard_selection_done'] = True
         s['standard_selection_usable'] = True
+        s['standard_selection_signature'] = signature
         s['standard_unresolved'] = str(value.get('unresolved') or '')[:1200] if isinstance(value, dict) else ''
         partial = any(candidate.get('selected') and candidate.get('suitability', {}).get('coverage') == 'partial'
                       for candidate in s['candidates'])
@@ -390,7 +409,8 @@ class StandardReferenceSearch:
             record = verdict.get('record') or {}
             source = {**candidate, **{key: record.get(key) or '' for key in ('authors', 'title', 'year')}} if record else candidate
             suitability = candidate.get('suitability') or {}
-            heading = ('Reference lead (scope unconfirmed): ' if suitability.get('coverage') in ('partial', 'unknown')
+            heading = ('Unverified recalled lead: ' if not record else
+                       'Reference lead (scope unconfirmed): ' if suitability.get('coverage') != 'supported'
                        else 'Suggested reference: ')
             if len(chosen) > 1:
                 heading = str(index) + '. ' + heading

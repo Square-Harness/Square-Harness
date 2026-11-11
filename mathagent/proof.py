@@ -7,6 +7,7 @@ The controller enforces provenance and budgets. A model review is not a proof
 certificate, and preservation of an answer does not establish its correctness.
 """
 import copy
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -14,7 +15,7 @@ from pathlib import Path
 import time
 
 from . import __version__, images
-from .jsonutil import loads
+from .jsonutil import loads_single
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_input
@@ -25,24 +26,6 @@ from .proof_policy import (
 )
 
 POLICY_VERSION = 8
-# Reviewed policy-7 transport at review HEAD a9ff7e4, and this migration's
-# compatible target. Unknown source changes never acquire inference permission.
-LEGACY_CONTROLLER_SHA256 = '721a53df9dad81ec0a165c0ff40fd9729c8536a40aa01b61c29c6ec6e0ce452d'
-LEGACY_TRANSPORT_SHA256 = {
-    'agent.py': '490a6dff6eecdfc182939a935099bb890dd1426e7ddcc1520390a04cf19c5a00',
-    'backends.py': '5fa0edbebbfb991b94033f677501b2697a85ec6101c89830614e8212262f3821',
-}
-# Exact pre-recovery sources remain compatible: this upgrade only reports
-# invalid tool batches to the Assistant, while proof jobs expose no tools.
-PRE_TOOL_RECOVERY_CONTROLLER_SHA256 = '95765d48c23437da8a8f327211a2e72bba5d20ed0df2c4c765cbb04681a4d10b'
-PRE_TOOL_RECOVERY_TRANSPORT_SHA256 = {
-    'agent.py': 'ee94911232b161db26798aaad3168d0f780a90befa01f5bb432920926f86ae2b',
-    'backends.py': '04e520784b297e2e97790bd383a9a9444fd67c93359f248676baf2a05c9e02f4',
-}
-COMPATIBLE_TRANSPORT_SHA256 = {
-    'agent.py': 'ee94911232b161db26798aaad3168d0f780a90befa01f5bb432920926f86ae2b',
-    'backends.py': '1dbb58fd778be7c5c6f9dffbf655e5b0dbe0f0b6b24f700c82a81d93769ca099',
-}
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 
@@ -81,7 +64,32 @@ def _validate(value, spec, path='response'):
 
 def validate_review(text):
     """Positive explanation is allowed; contradictory verdicts are unavailable."""
-    value = loads(text)
+    value = loads_single(text)
+    def bounded(value, limit):
+        marker = ' [truncated; full review in journal]'
+        return value if len(value) <= limit else value[:limit - len(marker)] + marker
+    # Extra fields and display lengths are formatting, never new permissions.
+    # Preserve all raw output in the journal and keep substantive checks strict.
+    if isinstance(value, dict) and all(k in value for k in VERIFIER_SCHEMA['properties']):
+        value = {k: value[k] for k in VERIFIER_SCHEMA['properties']}
+        if isinstance(value['explanation'], str):
+            value['explanation'] = bounded(value['explanation'], 4000)
+        if isinstance(value['issues'], list):
+            cleaned = []
+            for issue in value['issues']:
+                if not isinstance(issue, dict) or not all(k in issue for k in ('kind', 'location', 'evidence')):
+                    raise ValueError('Invalid review issue')
+                item = {k: issue[k] for k in ('kind', 'location', 'evidence')}
+                for key, limit in (('location', 400), ('evidence', 1500)):
+                    if isinstance(item[key], str):
+                        item[key] = bounded(item[key], limit)
+                cleaned.append(item)
+            # Do not discard a concrete issue hidden beyond five uncertainties.
+            if len(cleaned) > 5:
+                cleaned.sort(key=lambda i: i['kind'] == 'uncertainty')
+            value['issues'] = cleaned[:5]
+            if value['verdict'] == 'issues_found' and cleaned and all(i['kind'] == 'uncertainty' for i in cleaned):
+                value['verdict'] = 'uncertain'
     _validate(value, VERIFIER_SCHEMA)
     verdict, issues = value['verdict'], value['issues']
     if verdict == 'no_issue_found' and issues:
@@ -139,7 +147,8 @@ class ProofRunner:
 
     def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
-              min_solve_tokens=None, verify_temperature=None, repair_tokens=None, reference_context=None):
+              min_solve_tokens=None, verify_temperature=None, repair_tokens=None, reference_context=None,
+              initial_min_solve_tokens=None):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 60000:
             raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
         for name, value, lower, upper in (
@@ -154,7 +163,10 @@ class ProofRunner:
             repair_tokens = max_predict
         if type(repair_tokens) is not int or not 128 <= repair_tokens <= max_predict:
             raise ValueError('repair_tokens must be an integer between 128 and max_predict')
-        initial_min_solve_tokens = min_solve_tokens if min_solve_tokens is not None else 128
+        if initial_min_solve_tokens is None:
+            initial_min_solve_tokens = min_solve_tokens if min_solve_tokens is not None else 128
+        if type(initial_min_solve_tokens) is not int or not 128 <= initial_min_solve_tokens <= max_predict:
+            raise ValueError('initial_min_solve_tokens must be between 128 and max_predict')
         if min_solve_tokens is None:
             min_solve_tokens = 128
         if type(min_solve_tokens) is not int or not 128 <= min_solve_tokens <= repair_tokens:
@@ -198,10 +210,11 @@ class ProofRunner:
         if self.state['status'] in TERMINAL:
             return self._run()  # Viewing a finished run never needs its model server.
         saved = self.state['settings']
-        if saved.get('api_profile', 'default') != self._provenance().get('api_profile', 'default'):
+        current_provenance = self._provenance()
+        if saved.get('api_profile', 'default') != current_provenance.get('api_profile', 'default'):
             raise ValueError('Cannot resume with changed api_profile; select the original --api-profile. Saved artifacts remain readable.')
         for key in ('host', 'backend'):
-            if saved.get(key) != self._provenance()[key]:
+            if saved.get(key) != current_provenance[key]:
                 raise ValueError(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
         for key in ('model', 'ctx', 'seed', 'temperature', 'top_p'):
             setattr(self.agent, key, saved[key])
@@ -210,7 +223,6 @@ class ProofRunner:
             self.agent.client.thinking_budget_policy = copy.deepcopy(saved['thinking_budget_policy'])
         if saved.get('api_profile') == 'deepinfra':
             self.agent.client.reasoning_effort = saved['reasoning_effort']
-        current_provenance = self._provenance()
         # Source hashes record provenance, not a compatibility contract. Only a
         # deliberate execution-policy change invalidates an unfinished proof.
         if saved.get('policy_version') not in (7, POLICY_VERSION):
@@ -283,8 +295,8 @@ class ProofRunner:
                 return self._result()
             if self.state['status'] in TERMINAL:
                 return self._result()
-            if self.state['status'] == 'running' and self.state.get('active_checkpoint_wall'):
-                self.state['seconds_used'] += max(0, time.time() - self.state['active_checkpoint_wall'])
+            # Only checkpointed active work is charged after an unclean stop.
+            # Wall-clock downtime is not evidence of computation.
             self._seconds_before = self.state['seconds_used']
             self._clock = time.monotonic()
             self.state['status'] = 'running'
@@ -317,7 +329,7 @@ class ProofRunner:
             except TokenBudgetError as exc:
                 self._stop('budget_violation', str(exc))
             except KeyboardInterrupt:
-                self._stop('paused', 'Interrupted by the user. Saved calls will not be repeated; unfinished calls retain their full token reservation.')
+                self._stop('paused', 'Interrupted by the user. Completed calls will not be repeated; unfinished calls retain their full token reservation and resume may issue a new call from saved work.')
             except AgentError as exc:
                 if self._elapsed() >= self.state['settings']['max_seconds']:
                     self._stop('budget_exhausted', 'Elapsed-time budget exhausted: ' + str(exc))
@@ -385,20 +397,17 @@ class ProofRunner:
         allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
         cap = self._attempt_cap(pending['kind'])
-        if settings.get('full_output_ceiling'):
+        if settings.get('full_output_ceiling') or pending['kind'] == 'initial':
             if self._remaining() < self._call_cap(cap) + self._call_cap(settings['verify_tokens']):
                 raise ProofBudget('Insufficient budget for the full solve and review allowances; no smaller call was dispatched')
             pending['solver_cap'] = cap
             return cap
         if pending['kind'] != 'initial':
             cap = min(cap, self._remaining() - self._call_cap(settings['verify_tokens']))
-        if pending['kind'] not in {'initial', 'retry'}:
-            floor = settings.get('min_solve_tokens', cap)
-            try:
-                _, allocation = allocate_call(self.agent.client, self._payload('solver', messages, cap), cap, minimum=floor)
-            except CallContextError as exc:
-                raise ProofContext(str(exc) + ' Candidates retained.') from exc
-            cap = allocation['output_tokens']
+        if self._call_cap(cap) < self._call_cap(settings['min_solve_tokens']):
+            raise ProofBudget('Insufficient remaining allowance for useful solver output and verification; saved work was retained.')
+        # _dispatch_call performs the final context fit on this exact payload;
+        # counting it here too needlessly uploads the full mathematical input.
         pending['solver_cap'] = cap
         return cap
 
@@ -446,8 +455,7 @@ class ProofRunner:
             raise ProofContext('The previous generation reached its output limit without reusable written text or working notes. '
                                'Repeating the same allowance cannot advance this proof; its artifacts were retained.')
         settings = self.state['settings']
-        floor = (self._call_cap(self._attempt_cap('continue')) if settings.get('full_output_ceiling')
-                 else settings['min_solve_tokens'])
+        floor = self._call_cap(self._attempt_cap('continue'))
         ctx = self.agent.ctx
         observed_context = getattr(self.agent.client, 'observed_context_tokens', None)
         if type(observed_context) is int and observed_context > 0:
@@ -497,7 +505,7 @@ class ProofRunner:
         if existing:
             return existing
         artifact = self.store.write_artifact('proof-candidate', result['text'])
-        candidate = {'id': f'P{pending["index"]}', 'attempt': pending['index'], 'call': call_key,
+        candidate = {'id': f'P{len(self.state["candidates"]) + 1}', 'attempt': pending['index'], 'call': call_key,
                      'artifact': artifact, 'sha256': _digest(result['text']), 'parent': pending['parent'],
                      'kind': pending['kind'], 'transport_complete': bool(result['complete'] and result['text'].strip() and not result['calls']),
                      'review_status': 'unreviewed'}
@@ -535,7 +543,7 @@ class ProofRunner:
             return
         result = self._call('verifier', messages, cap, format_schema=VERIFIER_SCHEMA)
         try:
-            if not result['complete'] or result['calls']:
+            if not result['done'] or result['calls']:
                 raise ValueError('Review generation did not finish a standalone response')
             response = validate_review(result['text'])
         except (ValueError, TypeError, RecursionError) as exc:
@@ -545,7 +553,8 @@ class ProofRunner:
             error = None
         review = {'id': f'V{len(self.state["reviews"]) + 1}', 'candidate': candidate['id'],
                   'candidate_sha256': candidate['sha256'], 'call': self._call_key('verifier'),
-                  'response': response, 'protocol_error': error}
+                  'response': response, 'protocol_error': error,
+                  'complete_json_at_output_limit': bool(response and not result['complete'])}
         self.state['reviews'].append(review)
         pending['review'] = review['id']
         if error:
@@ -561,8 +570,12 @@ class ProofRunner:
             candidate['review_status'] = verdict
             if verdict == 'no_issue_found':
                 self._select(candidate, 'whole_proof_review_found_no_issue')
-                self._stop('candidate_complete', 'The whole-proof verifier found no issue. This is a model assessment, not a formal certificate.')
+                self._stop('candidate_complete', 'The verifier found no issue in this response, which may be a proof or a counterexample. This does not certify the requested claim.')
             elif verdict == 'uncertain':
+                selected_id = self.state['selected_candidate']
+                selected = self._get_candidate(selected_id) if selected_id else None
+                if selected is None or selected['review_status'] == 'issues_found':
+                    self._select(candidate, 'uncertain_repair_replaces_candidate_with_known_issue')
                 self._stop('uncertain', 'The verifier is uncertain; uncertainty does not trigger an automatic mathematical rewrite. Candidate and review retained.')
             else:
                 pending['phase'] = 'repair'
@@ -570,12 +583,17 @@ class ProofRunner:
 
     def _call_key(self, role):
         pending = self.state['pending']
-        return f'{pending["index"]}-{role}-{pending["review_attempt"] if role == "verifier" else 0}'
+        base = f'{pending["index"]}-{role}-{pending["review_attempt"] if role == "verifier" else 0}'
+        dispatch = pending.get(role + '_dispatch', 0)
+        return base + (f'-resume-{dispatch}' if dispatch else '')
 
     def _read_stream(self, filename):
         result = {'text': '', 'thinking': '', 'calls': [], 'complete': False, 'done': False,
                   'stats': {}, 'stream': filename}
-        for line in self.store.read_artifact(filename).splitlines():
+        fragments = {'text': [], 'thinking': []}
+        raw = self.store.read_artifact(filename)
+        result['journal_nonempty'] = bool(raw.strip())
+        for line in raw.splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
@@ -587,12 +605,13 @@ class ProofRunner:
                 fragment = message.get(field) or ''
                 if not isinstance(fragment, str):
                     raise AgentError('Model returned a non-text response fragment')
-                result[target] += fragment
+                fragments[target].append(fragment)
             result['calls'].extend(message.get('tool_calls') or [])
             if event.get('done') is True:
                 result['done'] = True
                 result['complete'] = event.get('done_reason') == 'stop'
-                result['stats'] = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'eval_duration', 'done_reason') if k in event}
+                result['stats'] = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'eval_duration', 'done_reason', 'accounting_warning') if k in event}
+        result.update({key: ''.join(parts) for key, parts in fragments.items()})
         return result
 
     def _charge_completed(self, call, result):
@@ -613,15 +632,50 @@ class ProofRunner:
             result = self._read_stream(call['stream'])
             if result['done']:
                 self._charge_completed(call, result)
-            elif not self.store.read_artifact(call['stream']).strip():
-                self.state['tokens_charged'] -= call.get('charged_tokens', call['reserved_tokens'])
-                self.state['calls'].remove(call)
             else:
-                call['status'] = 'interrupted'
-                call['charged_tokens'] = call['reserved_tokens']
+                call.update(status='interrupted', charged_tokens=call['reserved_tokens'])
+                pending = self.state.get('pending')
+                role = call['role']
+                if pending and call['key'] == self._call_key(role):
+                    if role == 'solver' and (result['text'] or result['thinking']):
+                        candidate = self._candidate(result, pending)
+                        pending.update(kind='continue', parent=candidate['id'])
+                    # A transport interruption is neither a mathematical attempt
+                    # nor a verifier-format failure. The old charge is retained.
+                    # Empty journals also have unknown usage: dispatch can fail
+                    # before its first event or the last unsynced events be lost.
+                    pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
         self._save()
 
+    @contextmanager
+    def _inference_slot(self):
+        client = self.agent.client
+        admission = getattr(client, 'inference_slot', None)
+        if admission is None:
+            yield
+            return
+        self._seconds_before = self._elapsed()
+        self._clock = None
+        self.state['seconds_used'] = self._seconds_before
+        self.state['active_checkpoint_wall'] = None
+        self._save()
+        try:
+            with admission():
+                self._clock = time.monotonic()
+                yield
+        finally:
+            if self._clock is None:
+                self._clock = time.monotonic()
+
     def _call(self, role, messages, cap, format_schema=None):
+        if self._find_call(self._call_key(role)) is not None:
+            return self._read_stream(self._find_call(self._call_key(role))['stream'])
+        # Admission precedes durable generation reservations. Queue waiting is
+        # cancelable and does not consume the workflow's active-time allowance.
+        with self._inference_slot():
+            return self._dispatch_call(role, messages, cap, format_schema)
+
+    def _dispatch_call(self, role, messages, cap, format_schema=None):
         key = self._call_key(role)
         previous = next((c for c in self.state['calls'] if c['key'] == key), None)
         if previous is not None:
@@ -656,7 +710,10 @@ class ProofRunner:
                 client.timeout = old_timeout
         if self._elapsed() >= self.state['settings']['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted before generation')
-        request = self.store.write_artifact(role + '-request', json.dumps(payload, ensure_ascii=False))
+        try:
+            request = self.store.write_artifact(role + '-request', json.dumps(payload, ensure_ascii=False))
+        except LedgerError as exc:
+            raise ProofContext(str(exc) + ' No model call was dispatched; saved candidates remain available.') from exc
         stream_file = self.store.start_stream(role)
         call = {'key': key, 'role': role, 'round': self.state['rounds_started'], 'status': 'running',
                 'reserved_tokens': cap, 'request': request, 'stream': stream_file, 'context': context}
@@ -670,22 +727,22 @@ class ProofRunner:
         self.emit('start', '')
         try:
             stream = client.stream(payload)
-            for event in stream:
-                self.store.append_stream(stream_file, event)
-                message = event.get('message', {})
-                if message.get('thinking'):
-                    self.emit('thinking', message['thinking'])
-                if message.get('content') and role == 'solver':
-                    self.emit('text', message['content'])
-                if not event.get('done') and self._elapsed() >= self.state['settings']['max_seconds']:
-                    raise ProofBudget('Elapsed-time budget exhausted during generation')
+            with self.store.stream_writer(stream_file) as append:
+                for event in stream:
+                    append(event)
+                    message = event.get('message', {})
+                    if message.get('thinking'):
+                        self.emit('thinking', message['thinking'])
+                    if message.get('content') and role == 'solver':
+                        self.emit('text', message['content'])
+                    if not event.get('done') and self._elapsed() >= self.state['settings']['max_seconds']:
+                        raise ProofBudget('Elapsed-time budget exhausted during generation')
             result = self._read_stream(stream_file)
             if not result['done']:
                 raise AgentError('Model stream ended without completion; exact partial work was saved')
             self._charge_completed(call, result)
             self.agent.last_stats = result['stats']
-            if self._elapsed() >= self.state['settings']['max_seconds']:
-                raise ProofBudget('Elapsed-time budget exhausted during generation')
+            # Apply a complete result even when its final event meets the deadline.
             return result
         except BaseException as exc:
             if isinstance(exc, TokenBudgetError):
@@ -734,7 +791,7 @@ class ProofRunner:
             marker = ' (selected)' if candidate['id'] == selected_id else ''
             lines.append(f'- [{candidate["id"]}](artifacts/{candidate["artifact"]}){marker}: '
                          f'{candidate["review_status"]}; transport complete={candidate["transport_complete"]}; SHA-256 `{candidate["sha256"]}`.')
-        lines += ['', 'The initial candidate is retained. A finished written response is preferred to an unfinished fragment; once a finished candidate exists, only a whole-proof no_issue_found verdict replaces it. '
+        lines += ['', 'The initial candidate is retained. A finished written response is preferred to an unfinished fragment; once a finished candidate exists, a passing review replaces it, and an uncertain repair is preferred to a candidate with a concrete objection. '
                   'Earlier objections below remain attributed to their candidate; a later pass does not erase their history.', '']
         for selection in self.state.get('selection_history', []):
             lines.append(f'- Selection: {selection["previous"] or "none"} → {selection["selected"]}; {selection["reason"]}.')
@@ -755,6 +812,8 @@ class ProofRunner:
         return {'id': self.state['id'], 'status': self.state['status'], 'stop_reason': self.state.get('stop_reason', ''),
                 'directory': str(self.store.directory), 'report_path': str(self.store.directory / 'report.md'),
                 'proof_path': str(self.store.directory / 'proof.md'), 'answer': answer, 'report': report,
+                'selected_review_status': selected['review_status'] if selected else 'unreviewed',
+                'claim_outcome': 'unclassified',
                 'initial_candidate': copy.deepcopy(initial), 'selected_candidate': copy.deepcopy(selected),
                 'tokens_charged': self.state['tokens_charged'], 'seconds_used': self.state['seconds_used'],
                 'rounds_started': self.state['rounds_started']}

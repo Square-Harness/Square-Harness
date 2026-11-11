@@ -15,7 +15,8 @@ from .model_limits import output_limit
 
 JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
 ROUTE_MODES = JOB_MODES + ('clarify',)
-EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
+EFFORTS = ('low', 'medium', 'high')
+LEGACY_EFFORTS = ('xhigh', 'poincare')  # Read saved jobs without offering these levels for new work.
 MAX_TASKS = 4
 ROUTE_PREDICT = 1600
 
@@ -79,8 +80,7 @@ need from the context. Keep the user's language. Do not solve or answer anything
 `files` lists workspace files the task needs: the user's attachments and files named in the
 message or context, spelled exactly as listed.
 `effort` sizes the job: low for a quick check or a routine statement, medium for ordinary
-work, high for a hard problem or a long manuscript, xhigh for research-level problems, and
-poincare only when the user asks for the maximum effort.
+work, and high for a hard problem, a long manuscript or an explicit maximum-effort request.
 `reason` explains the choice in one sentence.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""

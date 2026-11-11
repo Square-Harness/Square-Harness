@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Keep new effort choices to Low, Medium and High, retaining saved older jobs.
+- Repair Proof crash/pause recovery, queued-inference accounting, continuation
+  packing, verdict parsing and uncertain-repair exports. Keep proof-policy bytes
+  unchanged; label reviewed responses without asserting the claim is true.
+- Buffer stream journals with periodic synchronization, parse fragments linearly,
+  avoid duplicate tokenizer requests and improve reusable research prefixes.
+- Preserve literature allowances on resume; support bounded larger saved state
+  and stream recovery; reject oversized initial jobs before creating them.
+- Fix long arXiv HTML reading, source-outage classification, reference matching,
+  DOI/arXiv canonicalization and cache freshness; disclose Open Library queries.
+- Enforce read-type permissions on inferred sources, isolate PDF extraction,
+  paginate file tools and add approved exact text replacements. Preserve CRLF,
+  declared encodings and existing file permissions.
+- Correct manuscript mapping for inactive TeX, nested numbering, repeated
+  references and proof ownership; index equation tags once per document.
+- Retain completed Assistant worker answers when synthesis cannot fit, fix
+  context duplication and source follow-ups, and clarify usage and worker cards.
+- Make benchmark cancellation retain results and stop queued work; require the
+  same full first-solve cap in both arms and reject abbreviated CLI flags.
+
 - Continue a manuscript review from the conversation without attaching the
   manuscript again. Replies to referee comments keep the previous review and
   reassess the disputed points in a linked follow-up.
@@ -59,7 +79,7 @@
 - Make feedback trace preview optional and deliver formatted reports, screenshots
   and consented trace ZIPs directly to the configured private Slack thread.
 
-- Reduce the automated suite from 50 cases to 12 core smoke checks; remove
+- Reduce the automated suite from 50 cases to 11 core smoke checks; remove
   redundant test files and unused fixtures rather than combining or hiding them.
 - Show the project selector in every conversation, simplify the project sidebar,
   and place a live Markdown preview beside the project notes editor.

@@ -3,7 +3,6 @@
 
 """Private, bounded mathematical benchmark runner; no reference answers are loaded."""
 import argparse
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import hashlib
@@ -83,7 +82,7 @@ def load_manifest(filename):
 
 
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument('--manifest', type=Path)
     p.add_argument('--output', type=Path)
     p.add_argument('--init-smoke', type=Path, help='Create an external dataset with two synthetic toy statements')
@@ -209,8 +208,9 @@ def preflight(args):
 
 class GatedClient:
     """Optional gate for direct requests; preflight bounds every process partition."""
-    def __init__(self, client, gate):
+    def __init__(self, client, gate, cancel=None):
         self.client, self.request_gate = client, gate
+        self.cancel = cancel or threading.Event()
         self.host, self.backend = client.host, client.backend
 
     def __getattr__(self, name):
@@ -248,8 +248,22 @@ class GatedClient:
         return counter(payload) if callable(counter) else None
 
     def stream(self, payload):
-        with self.request_gate if self.request_gate is not None else nullcontext():
-            yield from self.client.stream(payload)
+        acquired = False
+        try:
+            if self.request_gate is not None:
+                while not acquired:
+                    if self.cancel.is_set():
+                        raise KeyboardInterrupt
+                    acquired = self.request_gate.acquire(timeout=0.05)
+            if self.cancel.is_set():
+                raise KeyboardInterrupt
+            for event in self.client.stream(payload):
+                if self.cancel.is_set():
+                    raise KeyboardInterrupt
+                yield event
+        finally:
+            if acquired:
+                self.request_gate.release()
 
 
 def _usage(calls):
@@ -320,6 +334,8 @@ def _raw(client, goal, path, args, cap, seed, max_seconds=None):
         count = call['stats'].get('eval_count')
         if type(count) is int and count > cap:
             raise TokenBudgetError(call['stats'], cap)
+    except KeyboardInterrupt:
+        call.update(status='interrupted', error='Interrupted by the operator; partial output retained')
     except TokenBudgetError as exc:
         call.update(status='budget_violation', error=str(exc), stats=exc.stats)
     except (AgentError, OSError, ValueError) as exc:
@@ -348,7 +364,8 @@ def _proof(agent, goal, path, args):
     result = ProofRunner(agent).start(goal, max_rounds=args.rounds, max_tokens=args.tokens,
         max_seconds=args.seconds, source_files=(), max_predict=args.predict,
         verify_tokens=args.verify_tokens, min_solve_tokens=args.min_solve_tokens,
-        verify_temperature=args.verify_temperature, repair_tokens=args.repair_tokens)
+        verify_temperature=args.verify_temperature, repair_tokens=args.repair_tokens,
+        initial_min_solve_tokens=args.predict)
     usage, states = _proof_usage(agent.workspace.root)
     answer_path = path / 'answer.md'
     answer_path.write_text(result['answer'], encoding='utf-8')
@@ -367,7 +384,7 @@ def _proof(agent, goal, path, args):
     return outcome
 
 
-def run_job(job, output, args, gate=None):
+def run_job(job, output, args, gate=None, cancel=None):
     problem, arm, replicate, seed = job
     key = f'{problem["id"]}--r{replicate + 1}--{arm}'
     path = output / 'jobs' / key
@@ -377,7 +394,7 @@ def run_job(job, output, args, gate=None):
     # Evidence only: the statement is sent once, through the shared request builder.
     (workspace / 'statement.txt').write_text(problem['text'], encoding='utf-8')
     job_seconds = (args.raw_seconds or args.seconds) if arm == 'raw-single' else args.seconds
-    client = GatedClient(_client(args, timeout=min(args.request_timeout, job_seconds)), gate)
+    client = GatedClient(_client(args, timeout=min(args.request_timeout, job_seconds)), gate, cancel)
     agent = Agent(client, Workspace(workspace), args.model, args.ctx, args.predict, True,
                   seed=seed, temperature=args.temperature, top_p=args.top_p)
     record = {'id': key, 'problem_id': problem['id'], 'statement_sha256': problem['sha256'],
@@ -402,6 +419,11 @@ def run_job(job, output, args, gate=None):
         answer = Path(record['answer_path'])
         text = answer.read_text(encoding='utf-8') if answer.is_file() else ''
         (path / 'answer.md').write_text(text, encoding='utf-8')
+    except KeyboardInterrupt:
+        record.update(status='interrupted', error='Interrupted by the operator')
+        if arm == 'proof':
+            record.update(_proof_usage(workspace)[0])
+        (path / 'answer.md').touch(exist_ok=True)
     except Exception as exc:
         # Keep independent trials and conservatively account every saved request.
         record.update(status='error', error=f'{type(exc).__name__}: {exc}')
@@ -469,24 +491,67 @@ def execute(args, data, plan):
     random.Random(args.seed).shuffle(jobs)
     records = []
     request_gate = threading.BoundedSemaphore(args.max_in_flight)
-    # All direct model calls share the configured admission gate.
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_job, job, output, args, request_gate): job for job in jobs}
-        with (output / 'outputs.jsonl').open('w', encoding='utf-8') as log:
+    # Stop admission on Ctrl+C, cancel queued jobs, and retain active results.
+    cancel = threading.Event()
+    interrupted = False
+    pool = ThreadPoolExecutor(max_workers=args.workers)
+    futures = {}
+    with (output / 'outputs.jsonl').open('w', encoding='utf-8') as log:
+        retained = {}
+        def retain_record(record):
+            if record['id'] in retained:
+                return
+            retained[record['id']] = record
+            records.append(record)
+            log.write(json.dumps(record, ensure_ascii=False) + '\n')
+            log.flush()
+            os.fsync(log.fileno())
+            print(f'{record["id"]}: {record["status"]}', flush=True)
+        def retain(future):
+            if not future.cancelled():
+                retain_record(future.result())
+        seen = set()
+        try:
+            for job in jobs:
+                futures[pool.submit(run_job, job, output, args, request_gate, cancel)] = job
             for future in as_completed(futures):
-                record = future.result()
-                records.append(record)
+                retain(future)
+                seen.add(future)
+        except KeyboardInterrupt:
+            interrupted = True
+            cancel.set()
+            for future in futures:
+                future.cancel()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            for future in futures:
+                if future not in seen:
+                    retain(future)
+            # An interrupt may land after submit() but before its future is
+            # recorded. Its durable result still belongs in the run export.
+            for path in sorted((output / 'jobs').glob('*/result.json')):
+                record = json.loads(path.read_text(encoding='utf-8'))
+                if record['id'] not in retained and record.get('status') != 'running':
+                    retain_record(record)
+            # Canonicalize after cleanup: an interrupt may have split a log
+            # write or landed between retaining a record and marking its future.
+            records = list(retained.values())
+            log.seek(0)
+            log.truncate()
+            for record in records:
                 log.write(json.dumps(record, ensure_ascii=False) + '\n')
-                log.flush()
-                print(f'{record["id"]}: {record["status"]}', flush=True)
+            log.flush()
+            os.fsync(log.fileno())
     export_grading(output, records, data['problems'], args.seed + 1)
-    _json(output / 'summary.json', {'completed_jobs': len(records), 'error_jobs': sum(r['status'] == 'error' for r in records),
+    _json(output / 'summary.json', {'interrupted': interrupted, 'planned_jobs': len(jobs), 'completed_jobs': len(records), 'error_jobs': sum(r['status'] == 'error' for r in records),
         'tokens_charged': sum(r.get('tokens_charged', 0) for r in records),
         'measured_completion_tokens': sum(r.get('measured_completion_tokens', 0) for r in records),
         'prompt_tokens': sum(r.get('prompt_tokens', 0) for r in records),
         'request_count': sum(r.get('request_count', 0) for r in records),
         'reserved_unmeasured_tokens': sum(r.get('reserved_unmeasured_tokens', 0) for r in records),
         'note': 'No mathematical scores inferred. Complete the blinded human grading sheet.'})
+    if interrupted:
+        raise KeyboardInterrupt
     return records
 
 
@@ -533,6 +598,9 @@ def main(argv=None):
             return 0
         records = execute(args, data, plan)
         return 1 if any(r['status'] == 'error' for r in records) else 0
+    except KeyboardInterrupt:
+        print('Benchmark interrupted; completed and partial results were retained.', file=sys.stderr)
+        return 130
     except (AgentError, OSError, ValueError) as exc:
         print(f'Benchmark error: {exc}', file=sys.stderr)
         return 2

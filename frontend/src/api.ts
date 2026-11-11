@@ -277,6 +277,7 @@ export type ProofDetail = {
   revision: number
   settings: Record<string, unknown> & {
     max_rounds: number; model: string; ctx: number; max_predict?: number; verify_tokens?: number
+    specialist_output_cap?: number | null
     repair_tokens?: number; verify_temperature?: number; harness_version?: string
   }
   budget: { rounds: Budget; tokens: Budget; seconds: Budget; context?: Budget }

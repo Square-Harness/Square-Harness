@@ -836,6 +836,7 @@ class Hub:
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root),
                               numerics=numerics)
+        workspace.cancelled = task.cancel.is_set
         client_class = INTERRUPTIBLE[args.backend]
         if args.backend == 'openai':
             profile = resolve_api_profile(getattr(args, 'api_profile', None))
@@ -1381,7 +1382,7 @@ class Hub:
             configured = {key: getattr(self.args, argument, None) for key, argument in (
                 ('max_tokens', 'assistant_tokens'), ('max_input_tokens', 'assistant_input_tokens'),
                 ('max_seconds', 'assistant_seconds'))}
-            adaptive_seconds = max(effort.level(mode, 'poincare', self.args)['minutes'] * 60 for mode in JOB_MODES) + 300
+            adaptive_seconds = max(effort.level(mode, 'high', self.args)['minutes'] * 60 for mode in JOB_MODES) + 300
             adaptive = {'max_seconds': adaptive_seconds} if configured['max_seconds'] is None else {}
             budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
                                   max_tokens=configured['max_tokens'],
@@ -1503,7 +1504,8 @@ class Hub:
                 'Return the requested mathematical findings and any unresolved obligations.\n\n'
                 'ORIGINAL USER REQUEST (reference):\n' + context['query'] +
                 '\n\nEXACT CONVERSATION (reference; worker outputs are fallible):\n' +
-                json.dumps(context['messages'], ensure_ascii=False) +
+                json.dumps((context.get('history', []) if context.get('messages_scope') == 'current_turn' else [])
+                           + context['messages'], ensure_ascii=False) +
                 '\n\nDELEGATED OBJECTIVE:\n' + action['request'])
         goal += projects.context(context.get('project_snapshot'))
         with state_lock:
@@ -1569,6 +1571,11 @@ class Hub:
             if action['effort'] == 'low':
                 agent.think = False
         level = effort.level(mode, action['effort'], self.args)
+        if mode == 'prove' and child.get('job_id'):
+            saved = ProofStore.load(root, child['job_id']).state
+            # New selectable profiles must not shorten a paused worker's saved
+            # time allowance (including the retired seven/ten-pass profiles).
+            level['minutes'] = max(0, saved['settings']['max_seconds'] - saved['seconds_used']) / 60
         if mode in ('critic', 'explore') and agent.client.backend == 'openai' and getattr(agent.client, 'profile', 'default') == 'default':
             agent.client.thinking_budget_policy.setdefault('ordinary', 0.6)
         reserve = min(300, 0.1 * budget.pool.state['max_seconds'])
@@ -1640,10 +1647,11 @@ class Hub:
                         max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
                         verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
                         verify_temperature=self.args.proof_verify_temperature)
-                outcome = {'candidate_complete': 'The model review found no issue.', 'uncertain': 'The model review is uncertain.',
+                outcome = {'candidate_complete': 'The verifier found no issue in the response; read it to distinguish a proof from a counterexample.', 'uncertain': 'The model review is uncertain.',
                            'review_unavailable': 'Review unavailable; the candidate is preserved.'}.get(result['status'], result['stop_reason'] or result['status'])
                 result = {'status': result['status'], 'answer': result['answer'], 'job_id': result['id'],
-                          'review_status': result['status'], 'warnings': [result['stop_reason']],
+                          'review_status': result.get('selected_review_status'),
+                          'outcome': result.get('outcome', 'unclassified'), 'warnings': [result['stop_reason']],
                           'artifact': str(Path(result['proof_path']).relative_to(root))}
             elif mode == 'check':
                 # A quick verified lookup: its own small budgets (refcheck.EFFORTS), capped by
@@ -1954,8 +1962,10 @@ def _check_proof(args, *, tokens, solve, verify, ctx):
     """The terminal's checks for a new proof, made before the job exists."""
     if getattr(args, 'api_profile', None) == 'deepinfra' and max(solve, verify) > 384_000:
         raise ValueError('DeepInfra DS4 solve and review ceilings cannot exceed 384000 output tokens')
-    if tokens is not None and tokens < solve + verify:
-        raise ValueError(f'The token budget must cover one full solve and its review: at least {solve + verify} tokens')
+    cap = getattr(args, 'specialist_output_tokens', None)
+    required = min(solve, cap) + min(verify, cap) if cap is not None else solve + verify
+    if tokens is not None and tokens < required:
+        raise ValueError(f'The token budget must cover one full solve and its review: at least {required} tokens')
     repair = args.proof_repair_tokens
     if getattr(args, 'api_profile', None) == 'deepinfra':
         repair = min(solve, repair or solve)

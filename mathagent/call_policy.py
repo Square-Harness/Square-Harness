@@ -38,7 +38,7 @@ as one payload. Backends determine how their response schema affects input.
         material = json.dumps({key: payload[key] for key in ('messages', 'tools', 'format') if key in payload},
                               ensure_ascii=False)
         # About 3-4 characters a token for English and 2.5-3 for LaTeX; other scripts about one each.
-        ascii_chars = sum(1 for char in material if ord(char) < 128)
+        ascii_chars = len(material.encode('ascii', 'ignore'))
         count = -(-ascii_chars * 2 // 5) + (len(material) - ascii_chars) + 256
         return count, 'conservative character estimate (2.5 per token)'
     if type(count) is not int or count < 0:

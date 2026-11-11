@@ -8,10 +8,12 @@ stay in HTTP headers. HTTPS connects to a validated address with the original
 hostname for TLS, so a second DNS lookup cannot turn a public URL into localhost.
 """
 from datetime import datetime, timezone
+from bisect import bisect_right
 import hashlib
 from html import unescape
 from html.parser import HTMLParser
 import http.client
+from functools import lru_cache
 import ipaddress
 import json
 import os
@@ -25,14 +27,22 @@ import sys
 import textwrap
 import tempfile
 import time
-from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
+import threading
+import zlib
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
 
 from .tools import ENCODING_NAMES, decode_text
 
 BACKEND_VERSION = 'literature-v1'
-QUOTA_HOSTS = {'api.semanticscholar.org': 'semantic_scholar'}
+QUOTA_HOSTS = {'api.semanticscholar.org': 'semantic_scholar', 'api.crossref.org': 'crossref',
+               'api.zbmath.org': 'zbmath', 'export.arxiv.org': 'arxiv', 'arxiv.org': 'arxiv',
+               'openlibrary.org': 'openlibrary', 'api.opencitations.net': 'opencitations',
+               'api.search.brave.com': 'brave'}
+_RATE_LOCK = threading.Lock()
+_LAST_REQUEST = {}
+_HOST_LOCKS = {}
 MAX_BYTES = 10_000_000
 MAX_TEXT = 4_000_000
 MAX_RESULT = 8000
@@ -46,6 +56,80 @@ DOC_ID = re.compile(r'doc-[0-9a-f]{24}')
 
 class LiteratureError(ValueError):
     """A safe user-visible error (never containing request credentials)."""
+    def __init__(self, message, *, code='source_error'):
+        super().__init__(message)
+        self.code = code
+
+
+@lru_cache(maxsize=1)
+def _tls_context():
+    return ssl.create_default_context()
+
+
+def decode_page(body, content_type=''):
+    """Decode declared web charsets, falling back to the shared text decoder."""
+    match = re.search(r'charset\s*=\s*[\"\']?([A-Za-z0-9_.-]+)', content_type, re.I)
+    if match is None:
+        match = re.search(br'<meta\b[^>]*charset\s*=\s*[\"\']?([A-Za-z0-9_.-]+)', body[:8192], re.I)
+    if match:
+        encoding = match[1].decode('ascii') if isinstance(match[1], bytes) else match[1]
+        try:
+            return body.decode(encoding)
+        except (UnicodeError, LookupError):
+            pass
+    return decode_text(body, 'public source')[0]
+
+
+def line_matches(lines, query):
+    """Literal, whitespace-tolerant matches with exact original line ranges."""
+    text, starts, cursor = '\n'.join(lines), [], 0
+    for line in lines:
+        starts.append(cursor)
+        cursor += len(line) + 1
+    previous = -1
+    pattern = r'\s+'.join(re.escape(word) for word in query.split())
+    for match in re.finditer(pattern, text, re.I):
+        first = bisect_right(starts, match.start()) - 1
+        if first == previous:
+            continue
+        previous = first
+        last = bisect_right(starts, match.end() - 1) - 1
+        begin, end = max(starts[first], match.start() - 160), starts[last] + len(lines[last])
+        yield {'line': first + 1, 'end_line': last + 1, 'passage': text[begin:min(end, begin + 500)],
+               'partial_line': begin > starts[first] or end > begin + 500 or last >= first + 80}
+
+
+def arxiv_query(query):
+    """Conjoin plain topic words, preserving explicit fields and Boolean syntax."""
+    if re.search(r'\b(?:all|ti|au|abs|co|jr|cat|rn|id|submittedDate):', query):
+        return query
+    tokens = list(re.finditer(r'"[^"\n]*"|[()]|[^\s()"]+', query))
+    parts, depth, operand, cursor = [], 0, False, 0
+    for match in tokens:
+        if query[cursor:match.start()].strip():
+            raise LiteratureError('Unbalanced quotes in arXiv search query')
+        token, cursor = match[0], match.end()
+        if token == ')':
+            if not depth or not operand:
+                raise LiteratureError('Invalid arXiv Boolean query')
+            depth -= 1
+        elif token in ('AND', 'OR', 'ANDNOT'):
+            if not operand:
+                raise LiteratureError('Invalid arXiv Boolean query')
+            operand = False
+        else:
+            if operand:
+                parts.append('AND')
+            if token == '(':
+                depth += 1
+                operand = False
+            else:
+                token = 'all:' + (token if token.startswith('"') else json.dumps(token, ensure_ascii=False))
+                operand = True
+        parts.append(token)
+    if depth or not operand or query[cursor:].strip():
+        raise LiteratureError('Unbalanced or incomplete arXiv search query')
+    return ' '.join(parts)
 
 
 def _stamp():
@@ -141,21 +225,10 @@ def bibliography_entry(lines, key):
 def cited_keys(text, number, surname, keys=()):
     """The bibliography keys under which the text cites this number."""
     found = [key for key, place in keyed_citations(text, keys) if re.search(_num(number), place)]
-    for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
-        for part in bracket.split(';'):
-            key, comma, place = part.partition(',')
-            if comma and _author_key(key.strip(), surname) and re.search(_num(number), place):
-                found.append(key.strip())
     match = re.search(PLACE_WORDS + r'\.?\s*' + _num(number) + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I)
-    if match:
+    if match and match.group(1).strip() in keys:
         found.append(match.group(1).strip())
     return list(dict.fromkeys(found))
-
-
-def _author_key(key, surname):
-    """An alphabetic key built from the surname, such as Bre11 or Bre for Brezis."""
-    key, name = _fold(key), _fold(surname)
-    return len(name) >= 3 and bool(re.fullmatch(r'[a-z]{2,4}[+]?\d{0,4}[a-z]?', key)) and key[:3] == name[:3]
 
 
 def keyed_citations(text, keys):
@@ -180,17 +253,19 @@ def _limit_output():
 
 def cites_place(text, number, surname, keys=()):
     """Whether the text cites the author's work at this number (not merely an equation (9.26))."""
+    if not number:
+        return False
     n = _num(number)
     if any(re.search(n, place) for _, place in keyed_citations(text, keys)):
         return True
     for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
         for part in bracket.split(';'):
             key, comma, place = part.partition(',')
-            if comma and _author_key(key.strip(), surname) and re.search(n, place):
-                return True
+            if comma and re.search(n, place):
+                return key.strip() in keys
     if re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I):
         key = re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I).group(1).strip()
-        return not keys or key in keys
+        return key in keys
     if keys or not surname:
         return False  # the paper's own keys for this work were known and none cites this place
     # Without keys: the surname as a whole word ("Stein", not "Einstein"), with the place next to it.
@@ -389,7 +464,7 @@ class LiteratureTools:
                 raise LiteratureError('Tool arguments must be an object')
             result = getattr(self, name)(**args)
         except LiteratureError as exc:
-            result = {'error': str(exc)}
+            result = {'error': str(exc), 'error_code': exc.code}
         except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ET.ParseError, http.client.HTTPException):
             # Third-party exceptions can embed URLs/headers; never echo them.
             result = {'error': 'Literature operation failed. Check arguments, network availability, provider access, and document format.'}
@@ -508,22 +583,27 @@ class LiteratureTools:
     def _cache_search(self, provider, query, limit, fetch):
         key = _digest(json.dumps([provider, query, limit]))
         parts = ('searches', key + '.json')
-        raw = self._read(parts, 3_000_000)
+        try:
+            raw = self._read(parts, 3_000_000)
+        except UnicodeError:
+            raw = None
         if raw is not None:
-            result = json.loads(raw)
-            volatile = provider in ('arxiv-recent', 's2-citations') or not result.get('results')
             try:
+                result = json.loads(raw)
+                if not isinstance(result, dict) or not isinstance(result.get('results'), list):
+                    raise ValueError('Invalid search cache')
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(result['retrieved_at'])).total_seconds()
             except (ValueError, KeyError, TypeError):
+                result = None
                 age = float('inf')
-            stale = volatile and age >= 86400
-            if not stale or not self.online:
+            stale = age >= (86400 if provider in ('arxiv-recent', 's2-citations', 'brave') or not (result or {}).get('results') else 7 * 86400)
+            if result is not None and (not stale or not self.online):
                 result['cached'] = True
                 if stale:
                     result['stale_cache'] = True
                 return result
         if not self.online:
-            raise LiteratureError('Offline mode: this search is not cached. Enable online research explicitly to access the internet.')
+            raise LiteratureError('Offline mode: this search is not cached or its cache is damaged. Enable online research explicitly to access the internet.', code='offline_uncached')
         results = fetch()
         result = {'provider': provider, 'query': query, 'results': results,
                   'retrieved_at': _stamp(), 'backend_version': BACKEND_VERSION,
@@ -540,13 +620,19 @@ class LiteratureTools:
         if sort == 'newest':
             return self._cache_search('arxiv-recent', query, limit,
                                       lambda: self._search('arxiv', query, limit, recent=True))
-        return self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
+        result = self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
+        if provider == 'crossref':
+            result['results'] = [{key: value for key, value in record.items()
+                                  if key not in ('references', 'reference_texts')}
+                                 for record in result['results']]
+        return result
 
     def _search(self, provider, query, limit, recent=False):
         if provider == 'crossref':
             # Reuse the controller's normalized DOI records and its bounded
             # transport. The public search envelope is cached independently.
-            return self.crossref(query=query, limit=limit)
+            return [{key: value for key, value in record.items() if key not in ('references', 'reference_texts')}
+                    for record in self.crossref(query=query, limit=limit)]
         if provider == 'openlibrary':
             params = {'q': query, 'limit': limit,
                       'fields': 'key,title,author_name,first_publish_year,publisher'}
@@ -581,11 +667,17 @@ class LiteratureTools:
                                 'source': 'Open Library work catalog; edition unspecified'})
             return records
         if provider == 'arxiv':
-            params = {'search_query': query if re.search(r'\b(?:all|ti|au|abs|cat|id):', query) else 'all:' + query,
+            # An unfielded phrase is a conjunction; arXiv's implicit operators
+            # otherwise broaden all but the first word to unrelated records.
+            expression = arxiv_query(query)
+            params = {'search_query': expression,
                       'start': 0, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
             body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=1_000_000)
             atom = {'a': 'http://www.w3.org/2005/Atom'}
             feed = ET.fromstring(body)
+            total = feed.findtext('{http://a9.com/-/spec/opensearch/1.1/}totalResults')
+            if not feed.findall('a:entry', atom) and total and total.isdigit() and int(total) > 0:
+                raise LiteratureError('arXiv returned an incomplete search feed; try later or another provider.', code='source_unavailable')
             results = []
             for entry in feed.findall('a:entry', atom)[:limit]:
                 identifier = (entry.findtext('a:id', '', atom)).rsplit('/abs/', 1)[-1]
@@ -860,11 +952,17 @@ class LiteratureTools:
         value = value.strip()
         if value.lower().startswith('arxiv:'):
             value = value[6:]
+        if value.lower().startswith('doi:'):
+            value = value[4:]
         if ARXIV_ID.fullmatch(value):
             return 'arxiv:' + value, 'https://arxiv.org/html/' + value, value
         if value.startswith('10.') and '/' in value:
-            value = 'https://doi.org/' + quote(value, safe='/():._-')
+            value = 'https://doi.org/' + quote(value.lower(), safe='/():._-')
         split = self._url(value)
+        if split.hostname in ('doi.org', 'dx.doi.org'):
+            doi = unquote(split.path).lstrip('/').lower()
+            canonical = 'https://doi.org/' + quote(doi, safe='/():._-')
+            return canonical, canonical, None
         if split.hostname in ('arxiv.org', 'www.arxiv.org', 'export.arxiv.org'):
             match = re.fullmatch(r'/(?:abs|pdf|html)/(.+?)(?:\.pdf)?/?', split.path)
             if match and ARXIV_ID.fullmatch(match.group(1)):
@@ -878,12 +976,27 @@ class LiteratureTools:
 
     def open_paper(self, identifier_or_url):
         canonical, url, arxiv_id = self._canonical(identifier_or_url)
-        document_id = 'doc-' + _digest(canonical)[:24]
+        canonical_id = document_id = 'doc-' + _digest(canonical)[:24]
+        index = self._read(('document-index', canonical_id + '.json'), 1000)
+        if index is not None:
+            document_id = json.loads(index).get('document_id')
+            if not isinstance(document_id, str) or not DOC_ID.fullmatch(document_id):
+                raise LiteratureError('Invalid cached document index')
+        metadata = None
         raw = self._read(('documents', document_id + '.json'), 100_000)
         if raw is not None:
             metadata = json.loads(raw)
-            metadata['cached'] = True
-            return self._document_summary(metadata)
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(metadata['retrieved_at'])).total_seconds()
+            except (KeyError, ValueError, TypeError):
+                age = float('inf')
+            immutable = bool(arxiv_id and re.search(r'v\d+$', arxiv_id))
+            stale = not immutable and age >= 86400
+            if not stale or not self.online:
+                metadata['cached'] = True
+                if stale:
+                    metadata['stale_cache'] = True
+                return self._document_summary(metadata)
         if not self.online:
             raise LiteratureError('Offline mode: paper is not cached. Online retrieval must be enabled explicitly.')
         try:
@@ -900,20 +1013,24 @@ class LiteratureTools:
             suffix = '.pdf'
         elif 'html' in content_type or body.lstrip().lower().startswith((b'<!doctype html', b'<html')):
             parser = _HTMLText(self._remaining_timeout)
-            decoded = body.decode('utf-8', errors='replace')
+            decoded = decode_page(body, content_type)
             for offset in range(0, len(decoded), 8192):
                 self._remaining_timeout()
                 parser.feed(decoded[offset:offset + 8192])
             text, title, extractor, suffix = parser.text(), _plain(' '.join(parser.title), 300), 'stdlib HTMLParser with math alttext', '.html'
             self._remaining_timeout()
         elif content_type.startswith('text/plain'):
-            text, extractor, suffix = body.decode('utf-8'), 'UTF-8 text', '.txt'
+            text, extractor, suffix = decode_page(body, content_type), 'decoded public text', '.txt'
         else:
             raise LiteratureError('Unsupported document type. Supply a public HTML/PDF/text paper URL; paywalls are not bypassed.')
         if not text.strip():
             raise LiteratureError('No readable text found (possibly scanned PDF). Provide a text-accessible paper; OCR is not available.')
         if len(text.encode('utf-8')) > MAX_TEXT:
             raise LiteratureError('Extracted document exceeds the 4 MB text limit')
+        if metadata is not None and (metadata.get('sha256') != _digest(body)
+                                     or metadata.get('text_sha256') != _digest(text)):
+            # Preserve saved locators when the source OR its extraction changes.
+            document_id = 'doc-' + _digest(canonical + ':' + _digest(body) + ':' + _digest(text))[:24]
         lines = text.splitlines()
         sections = [{'line': i, 'title': line[:160]} for i, line in enumerate(lines, 1)
                     if re.match(r'^(?:\d+(?:\.\d+)*\s+\S|abstract\b|references\b|bibliography\b|appendix\b|theorem\b|lemma\b|proposition\b)', line, re.I)][:60]
@@ -928,6 +1045,8 @@ class LiteratureTools:
         self._write(('documents', document_id + suffix), body)
         self._write(('documents', document_id + '.txt'), text)
         self._write(('documents', document_id + '.json'), json.dumps(metadata, ensure_ascii=False))
+        if document_id != canonical_id:
+            self._write(('document-index', canonical_id + '.json'), json.dumps({'document_id': document_id}))
         return self._document_summary(metadata)
 
     def import_local(self, path):
@@ -1020,14 +1139,10 @@ class LiteratureTools:
         query = self._query(query, 1)
         metadata, lines = self._document(document_id)
         hits = []
-        for i, line in enumerate(lines, 1):
-            pos = line.casefold().find(query.casefold())
-            if pos >= 0:
-                start = max(0, pos - 160)
-                hits.append({'line': i, 'citation': f'{document_id}:L{i}',
-                             'passage': line[start:start + 500], 'partial_line': start > 0 or len(line) > 500})
-                if len(hits) == 8:
-                    break
+        for match in line_matches(lines, query):
+            hits.append({**match, 'citation': f'{document_id}:L{match["line"]}-L{match["end_line"]}'})
+            if len(hits) == 8:
+                break
         return {'document_id': document_id, 'source_url': metadata['source_url'],
                 'query': query, 'matches': hits, 'match_limit': 8, 'text_sha256': metadata['text_sha256']}
 
@@ -1069,8 +1184,9 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             source, target = Path(directory) / 'paper.pdf', Path(directory) / 'paper.txt'
             source.write_bytes(body)
             try:
-                result = subprocess.run([sys.executable, '-c', script, str(source), str(target)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=self._remaining_timeout(), check=False)
+                result = subprocess.run([sys.executable, '-I', '-c', script, str(source), str(target)],
+                    cwd=directory, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=self._remaining_timeout(), check=False)
             except subprocess.TimeoutExpired:
                 raise LiteratureError('PDF extraction timed out') from None
             if result.returncode or not target.exists() or target.stat().st_size > MAX_TEXT:
@@ -1108,7 +1224,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)},
                                key=lambda address: (ipaddress.ip_address(address).version, address))
         except OSError:
-            raise LiteratureError('Could not resolve the public source hostname') from None
+            raise LiteratureError('Could not resolve the public source hostname', code='source_unavailable') from None
         if not addresses or any(not self._public(ipaddress.ip_address(value)) for value in addresses):
             raise LiteratureError('Source hostname resolves to a nonpublic address; retrieval refused')
         return addresses
@@ -1116,7 +1232,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
     def _request_once(self, url, headers, max_bytes):
         parts = self._url(url)
         addresses = self._addresses(parts.hostname)
-        context = ssl.create_default_context()
+        context = _tls_context()
         timeout = self._remaining_timeout()
         conn = http.client.HTTPSConnection(parts.hostname, timeout=timeout, context=context)
         try:
@@ -1139,38 +1255,50 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                     if index == len(addresses) - 1 or time.monotonic() >= deadline:
                         raise
             path = urlunsplit(('', '', parts.path or '/', parts.query, ''))
-            conn.request('GET', path, headers={'User-Agent': 'SquareHarness/0.4 literature research',
-                                              'Accept-Encoding': 'identity', **headers})
+            from . import __version__
+            conn.request('GET', path, headers={'User-Agent': f'SquareHarness/{__version__} literature research',
+                                              'Accept-Encoding': 'gzip', **headers})
             response = conn.getresponse()
             status = response.status
             response_headers = {k.lower(): v for k, v in response.getheaders()}
             length = response_headers.get('content-length', '')
             if length.isdigit() and int(length) > max_bytes:
                 raise LiteratureError('Remote response exceeds the download byte limit')
-            chunks, size = [], 0
+            encoding = response_headers.get('content-encoding', 'identity').lower()
+            if encoding not in ('', 'identity', 'gzip'):
+                raise LiteratureError('Unsupported response compression')
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == 'gzip' else None
+            chunks, size, downloaded = [], 0, 0
             deadline = time.monotonic() + timeout
             if self.deadline is not None:
                 deadline = min(deadline, self.deadline)
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise LiteratureError('Document download timed out')
+                    raise LiteratureError('Document download timed out', code='source_unavailable')
                 if conn.sock:
                     conn.sock.settimeout(min(self.timeout, remaining))
-                chunk = response.read(min(65536, max_bytes + 1 - size))
+                chunk = response.read(min(65536, max_bytes + 1 - downloaded))
                 if not chunk:
                     break
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    raise LiteratureError('Remote response exceeds the download byte limit')
+                if decoder is not None:
+                    chunk = decoder.decompress(chunk, max_bytes + 1 - size)
                 chunks.append(chunk)
                 size += len(chunk)
                 if size > max_bytes:
                     raise LiteratureError('Remote response exceeds the download byte limit')
+            if decoder is not None and (not decoder.eof or decoder.unused_data):
+                raise LiteratureError('Invalid or concatenated gzip response')
             return status, response_headers, b''.join(chunks)
         except LiteratureError:
             raise
         except ssl.SSLCertVerificationError:
-            raise LiteratureError('HTTPS certificate verification failed; configure SSL_CERT_FILE with a current trusted CA bundle') from None
-        except (OSError, http.client.HTTPException):
-            raise LiteratureError('HTTPS retrieval failed or timed out; check network and source availability') from None
+            raise LiteratureError('HTTPS certificate verification failed; configure SSL_CERT_FILE with a current trusted CA bundle', code='source_unavailable') from None
+        except (OSError, http.client.HTTPException, zlib.error):
+            raise LiteratureError('HTTPS retrieval failed; check network and source availability', code='source_unavailable') from None
         finally:
             conn.close()
 
@@ -1179,12 +1307,12 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             return self.timeout
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise LiteratureError('Literature workflow time budget exhausted')
+            raise LiteratureError('Literature workflow time budget exhausted', code='workflow_budget')
         return min(self.timeout, remaining)
 
     def _pause(self, duration):
         if self.deadline is not None and time.monotonic() + duration >= self.deadline:
-            raise LiteratureError('Literature workflow time budget insufficient for provider rate limit')
+            raise LiteratureError('Literature workflow time budget insufficient for provider rate limit', code='workflow_budget')
         time.sleep(duration)
 
     def _check_robots(self, url):
@@ -1194,17 +1322,28 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         origin = urlunsplit((parts.scheme, parts.netloc, '', '', ''))
         if origin not in self._robots:
             rules = RobotFileParser()
+            parts_cache = ('robots', _digest(origin) + '.json')
             try:
-                body, _, _ = self._fetch(origin + '/robots.txt', max_bytes=512_000, _robots=False)
-            except LiteratureError as exc:
-                if 'HTTP 404' in str(exc) or 'HTTP 410' in str(exc):
-                    rules.allow_all = True
-                elif 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
-                    rules.disallow_all = True
-                else:
-                    raise
+                cached = json.loads(self._read(parts_cache, 600_000) or '{}')
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached['retrieved_at'])).total_seconds()
+            except (ValueError, KeyError, TypeError):
+                cached, age = {}, float('inf')
+            if age < 86400 and isinstance(cached.get('lines'), list):
+                rules.parse(cached['lines'])
             else:
-                rules.parse(body.decode('utf-8', errors='replace').splitlines())
+                try:
+                    body, _, _ = self._fetch(origin + '/robots.txt', max_bytes=512_000, _robots=False)
+                except LiteratureError as exc:
+                    if 'HTTP 404' in str(exc) or 'HTTP 410' in str(exc):
+                        lines = ['User-agent: *', 'Allow: /']
+                    elif 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+                        lines = ['User-agent: *', 'Disallow: /']
+                    else:
+                        raise
+                else:
+                    lines = body.decode('utf-8', errors='replace').splitlines()
+                rules.parse(lines)
+                self._write(parts_cache, json.dumps({'retrieved_at': _stamp(), 'lines': lines}))
             self._robots[origin] = rules
         if not self._robots[origin].can_fetch('SquareHarness', url):
             raise LiteratureError('Source robots.txt disallows automated retrieval of this URL')
@@ -1216,7 +1355,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         original_host = self._url(url).hostname
         provider = QUOTA_HOSTS.get(original_host)
         if provider in self.down:
-            raise LiteratureError(f'{provider} refused earlier in this session (quota used up); not asked again')
+            raise LiteratureError(f'{provider} unavailable earlier in this session; use cached evidence or another provider', code='source_unavailable')
         auth_headers = {'authorization', 'x-api-key', 'x-subscription-token'}
         if any(k.casefold() in auth_headers for k in headers) and original_host not in ('api.semanticscholar.org', 'api.search.brave.com'):
             raise LiteratureError('API credentials may only be sent to their fixed provider host')
@@ -1229,14 +1368,33 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             if self.stats['requests'] >= self.max_requests:
                 raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence')
             interval = 3.0 if host.endswith('arxiv.org') else 0.25
-            delay = interval - (time.monotonic() - self._last_request.get(host, -1e9))
-            if delay > 0:
-                self._pause(delay)
-            self.stats['requests'] += 1
+            origin = 'https://' + host
+            rules = self._robots.get(origin)
+            if rules:
+                interval = max(interval, rules.crawl_delay('SquareHarness') or 0)
+            # Share politeness across jobs in this server, rather than multiplying
+            # the allowed rate by the number of concurrent DS4 workers.
+            rate_host = 'arxiv.org' if host.endswith('arxiv.org') else host
+            with _RATE_LOCK:
+                host_lock = _HOST_LOCKS.setdefault(rate_host, threading.Lock())
+            with host_lock:
+                delay = interval - (time.monotonic() - _LAST_REQUEST.get(rate_host, -1e9))
+                if delay > 0:
+                    self._pause(delay)
+                self._remaining_timeout()
+                if self.stats['requests'] >= self.max_requests:
+                    raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
+                self.stats['requests'] += 1
+                _LAST_REQUEST[rate_host] = time.monotonic()
             if self.on_budget_change:
                 self.on_budget_change()
             self._last_request[host] = time.monotonic()
-            status, response_headers, body = self._request_once(url, headers, max_bytes)
+            try:
+                status, response_headers, body = self._request_once(url, headers, max_bytes)
+            except LiteratureError as exc:
+                if provider and exc.code == 'source_unavailable':
+                    self.down.add(provider)
+                raise
             if status in (301, 302, 303, 307, 308):
                 if redirects >= 3 or not response_headers.get('location'):
                     raise LiteratureError('Too many redirects or missing redirect destination')
@@ -1257,9 +1415,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 retries += 1
                 continue
             if not 200 <= status < 300:
-                if status == 429 and provider:
+                if (status == 429 or status >= 500) and provider:
                     self.down.add(provider)
-                raise LiteratureError(f'Source returned HTTP {status}; check provider access or use another public source')
-            if response_headers.get('content-encoding', 'identity') not in ('', 'identity'):
-                raise LiteratureError('Unsupported compressed response; source ignored identity encoding')
-            return body, response_headers.get('content-type', '').split(';')[0].lower(), url
+                raise LiteratureError(f'Source returned HTTP {status}; check provider access or use another public source',
+                                      code='source_unavailable' if status == 429 or status >= 500 else 'source_error')
+            return body, response_headers.get('content-type', '').lower(), url
