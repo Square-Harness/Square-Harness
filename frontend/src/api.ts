@@ -131,7 +131,7 @@ export type StyleProfile = {
   name: string
   created_at: string
   updated_at: string
-  articles: { path: string; sha256: string; title: string; domain: string }[]
+  articles: { path: string; sha256: string; title: string; domain: string; source_archive?: string }[]
   macros: { name: string; definition: string; uses: number; articles: string[] }[]
   environments: { name: string; definition: string; uses: number }[]
   domains: DomainStyle[]
@@ -384,7 +384,7 @@ export type ResearchDetail = {
   style_checked?: boolean
   parts?: { complete: boolean; characters: number }[]
   style?: { label: string; profile: string; domain: string } | null
-  articles?: { id: string; path: string; title: string; abstract: string; headings: string[]; environments: Record<string, number>; inputs: string[]; lines: number }[]
+  articles?: { id: string; path: string; title: string; abstract: string; headings: string[]; environments: Record<string, number>; inputs: string[]; lines: number; source_archive?: string }[]
   domains?: { name: string; description: string; articles: string[]; complete: boolean }[]
   observations?: Record<string, { aim: string; structure: string[]; habits: string[]; phrases: string[]; complete: boolean }>
   profile?: StyleProfile | null

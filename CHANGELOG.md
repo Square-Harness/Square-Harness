@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Read arXiv TeX source bundles (`.tar.gz`, `.tgz`, `.tar`) and gzipped single
+  TeX files through uploads, file tools and pinned workflows. Validate bounded
+  archive contents in memory without extracting paths or executing source;
+  preserve per-file hashes and warn about unexpanded includes and numbering.
+  Recognize arXiv source URLs separately from rendered papers, retaining site
+  access rules and offering upload when automated source downloads are denied.
 - Keep new effort choices to Low, Medium and High, retaining saved older jobs.
 - Repair Proof crash/pause recovery, queued-inference accounting, continuation
   packing, verdict parsing and uncertain-repair exports. Keep proof-policy bytes

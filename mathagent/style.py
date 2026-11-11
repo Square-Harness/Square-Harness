@@ -26,7 +26,7 @@ import re
 
 from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
-from .tools import unicode_source
+from .tools import unicode_source, source_suffix
 from .worker_errors import WorkerInputError
 from .model_limits import input_limit
 from . import images
@@ -338,7 +338,8 @@ def style_prompt(profile, domain=None, limit=PROMPT_CHARS):
     """Compact style guidance for a write-up: one domain's description, then its macros."""
     chosen = _domain(profile, domain)
     domains = [chosen] if chosen else profile['domains']
-    out = [f'AUTHOR STYLE "{profile["name"]}" (condensed from {len(profile["articles"])} of the author\'s articles).']
+    source_label = 'supplied text sources; archive members may be article fragments' if any(a.get('source_archive') for a in profile['articles']) else "of the author's articles"
+    out = [f'AUTHOR STYLE "{profile["name"]}" (condensed from {len(profile["articles"])} {source_label}).']
     for item in domains:
         out.append(f'\nDomain: {item["name"]}. {item.get("description", "")}'.rstrip())
         if item.get('aim'):
@@ -378,8 +379,8 @@ class StyleRunner(ResearchRunner):
         names = images.capture(self.agent, source_files)
         if not names and not getattr(self.agent, 'image_refs', None):
             raise ValueError('Choose .tex articles or screenshots to learn the writing style from')
-        if any(Path(n).suffix.lower() != '.tex' for n in names):
-            raise ValueError('A style is learnt from .tex articles only')
+        if any(source_suffix(n) != '.tex' for n in names):
+            raise ValueError('A style is learnt from TeX articles or TeX source archives only')
         # An unreadable article is left out and named; the style is learnt from the others.
         readable, self._skipped = [], []
         for article in names:
@@ -417,7 +418,8 @@ class StyleRunner(ResearchRunner):
         heads = '\n'.join(article['headings'][:30]) or '(no \\section headings)'
         envs = ', '.join(f'{k} ×{v}' for k, v in article['environments'].items()) or 'none'
         return (f'[{article["id"]}] {article["path"]}\nTitle: {article["title"] or "(none)"}\n'
-                f'Abstract: {article["abstract"] or "(none)"}\nSections:\n{heads}\nEnvironments: {envs}')
+                f'Abstract: {article["abstract"] or "(none)"}\nSections:\n{heads}\nEnvironments: {envs}' +
+                ('\nArchive member: this may be a source fragment, not a complete independent article.' if article.get('source_archive') else ''))
 
     def _step(self, phase):
         if phase == 'scan':
@@ -436,7 +438,16 @@ class StyleRunner(ResearchRunner):
 
     def _scan(self):
         self.state['warnings'] += [f'Not used for the style: {problem}.' for problem in self.state.get('skipped', [])]
-        self.state['articles'] = [{'id': s['id'], 'path': s['path'], **scan(s['content'])} for s in self.state['sources']]
+        targets = [s for s in self.state['sources'] if not s.get('source_archive')
+                   or Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex')]
+        self.state['articles'] = [{'id': s['id'], 'path': s['path'],
+                                   **({'source_archive': s['source_archive']} if s.get('source_archive') else {}),
+                                   **scan(s['content'])} for s in targets]
+        support = len(self.state['sources']) - len(targets)
+        if support:
+            self.state['warnings'].append(f'{support} archive bibliography/style/class support file(s) are pinned but are not classified or observed as articles.')
+        if any(s.get('source_archive') for s in targets):
+            self.state['warnings'].append('Each archive TeX member is a text source and may be an article fragment; this source count is not a count of independent papers. Includes/macros were not assembled.')
         for article in self.state['articles']:
             if article['inputs']:
                 self.state['warnings'].append(f'{article["path"]} includes other files ({", ".join(article["inputs"][:4])}); '
@@ -559,7 +570,8 @@ class StyleRunner(ResearchRunner):
         return {'format': FORMAT, 'version': 1, 'name': self.state['style_name'],
                 'created_at': now, 'updated_at': now, 'job': self.state['id'], 'model': self.state['settings']['model'],
                 'articles': [{'path': a['path'], 'sha256': self._article(a['id'])['sha256'], 'title': a['title'],
-                              'domain': domain_of.get(a['id'], '')} for a in self.state['articles']],
+                              'domain': domain_of.get(a['id'], ''),
+                              **({'source_archive': a['source_archive']} if a.get('source_archive') else {})} for a in self.state['articles']],
                 'macros': [{k: m[k] for k in ('name', 'definition', 'uses', 'articles')} for m in used[:LIMITS['macros']]],
                 'environments': sorted(environments.values(), key=lambda e: -e['uses'])[:LIMITS['environments']],
                 'domains': [{'name': d['name'], 'description': d['description'], 'articles': [paths[i] for i in d['articles']],
@@ -611,7 +623,7 @@ class StyleRunner(ResearchRunner):
             out += ['', '## Controller checks', ''] + ['- ' + w for w in dict.fromkeys(s['warnings'])]
         if profile:
             out += ['', '## Style (as given to a write-up)', '', '```text', style_prompt(profile, limit=PROMPT_CHARS * 3), '```']
-        out += ['', '## Articles', '']
+        out += ['', '## Articles and source fragments' if any(a.get('source_archive') for a in s.get('articles', [])) else '## Articles', '']
         domain_of = {i: d['name'] for d in s.get('domains', []) for i in d['articles']}
         for article in s.get('articles', []):
             out.append(f'- {article["id"]} `{article["path"]}`: {article["title"] or "untitled"}'

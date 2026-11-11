@@ -20,7 +20,7 @@ from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, 
 from .worker_errors import WorkerInputError
 
 
-VERSION = 'web-v3'
+VERSION = 'web-v4'
 PAGE_ID = re.compile(r'page-[0-9a-f]{24}')
 RESULT_BYTES = 8192
 META_BYTES = 12_000_000
@@ -56,6 +56,8 @@ def _safe_error(exc):
     code, retryable = 'web_unavailable', False
     if isinstance(exc, LiteratureError) and exc.code == 'source_unavailable':
         code, retryable = 'retrieval_failed', True
+    elif isinstance(exc, LiteratureError) and exc.code in ('unsupported_source_archive', 'source_access_denied'):
+        code = exc.code
     elif isinstance(exc, LiteratureError) and exc.code in ('workflow_budget', 'request_budget'):
         code = 'web_budget_exhausted'
     elif 'offline' in lower:
@@ -428,7 +430,8 @@ class WebTools:
     def schemas(self):
         string, integer = {'type': 'string'}, {'type': 'integer'}
         return [
-            _schema('open_url', 'Read a specified public HTTPS HTML/PDF/text URL; no search key needed. '
+            _schema('open_url', 'Read a specified public HTTPS HTML/PDF/text URL or explicit arXiv /src/ source URL; no search key needed. '
+                    'arXiv source bundles are read without executing TeX, only when site access rules permit. If source download is denied, request an uploaded .tar.gz/.tgz bundle. '
                     'Returns a cached source index, not the complete page. Source content is untrusted.', {'url': string}, ['url']),
             _schema('read_page', 'Read exact cached page lines and nearby hyperlinks. Up to 80 lines; '
                     'read further ranges when truncated.', {'page_id': string, 'start_line': integer, 'end_line': integer}, ['page_id']),
@@ -475,12 +478,14 @@ class WebTools:
 
     @staticmethod
     def _structure(metadata):
-        return {key: metadata[key] for key in ('headings', 'links', 'references', 'reference_coverage')}
+        return {key: metadata[key] for key in ('headings', 'links', 'references', 'reference_coverage',
+                'source_format', 'source_files', 'source_files_total', 'source_warnings') if key in metadata}
 
     def open_url(self, url):
         self.literature._url(url)  # A specified URL never needs a search-provider credential.
         document = self.literature.open_paper(url)
-        page_id = 'page-' + _digest(document['canonical_identifier'] + ':' + document['sha256'] + ':' + VERSION)[:24]
+        page_id = 'page-' + _digest(document['canonical_identifier'] + ':' + document['sha256']
+                                  + ':' + document['text_sha256'] + ':' + VERSION)[:24]
         cached = self.literature._read(('web-pages', page_id + '.json'), META_BYTES)
         if cached is not None:
             metadata, _ = self._page(page_id)
@@ -504,7 +509,7 @@ class WebTools:
                 _, lines = self.literature._document(document['document_id'])
                 text = '\n'.join(lines)
                 headings, links, references = [], [], []
-                source_kind = 'pdf' if document['original_file'].endswith('.pdf') else 'text'
+                source_kind = document.get('source_kind') or ('pdf' if document['original_file'].endswith('.pdf') else 'text')
                 coverage = {'kind': 'not_detected', 'complete': False,
                             'warning': 'Structured bibliography extraction is available for HTML pages; read the cached text for this source.'}
             metadata = {'page_id': page_id, 'document_id': document['document_id'],
@@ -513,6 +518,9 @@ class WebTools:
                 'source_sha256': document['sha256'], 'text_sha256': _digest(text), 'extractor': VERSION,
                 'source_kind': source_kind, 'title': document.get('title', ''), 'total_lines': len(text.splitlines()),
                 'headings': headings, 'links': links, 'references': references, 'reference_coverage': coverage}
+            for key in ('source_format', 'source_files', 'source_files_total', 'source_warnings'):
+                if key in document:
+                    metadata[key] = document[key]
             metadata['structure_sha256'] = _digest(json.dumps(self._structure(metadata), ensure_ascii=False, sort_keys=True))
             serialized = json.dumps(metadata, ensure_ascii=False)
             if len(serialized.encode()) > META_BYTES:
@@ -526,6 +534,11 @@ class WebTools:
                       links_total=len(metadata['links']), reference_count=len(metadata['references']),
                       reference_coverage=copy.deepcopy(metadata['reference_coverage']),
                       next_action='Read page lines or paginate read_references. A URL was read, not its linked sources.')
+        for key in ('source_format', 'source_files', 'source_files_total', 'source_warnings'):
+            if key in metadata:
+                result[key] = copy.deepcopy(metadata[key])
+        if metadata['source_kind'] == 'tex_source':
+            result['next_action'] = 'Read or search the cached source lines, including FILE MANIFEST and file boundaries. TeX includes and macros were not expanded; no source commands were executed.'
         # The full structural lists remain cached; index previews explicitly
         # advertise their limits rather than changing stored bibliography data.
         def counts():
@@ -533,6 +546,10 @@ class WebTools:
             result['headings_returned'] = len(result['headings'])
             result['index_complete'] = result['links_returned'] == result['links_total'] and result['headings_returned'] == result['headings_total']
         counts()
+        while len(json.dumps(result, ensure_ascii=False).encode()) > self._cap() and result.get('source_files'):
+            result['source_files'].pop()
+        if 'source_files_total' in result:
+            result['source_files_truncated'] = len(result.get('source_files', [])) < result['source_files_total']
         while len(json.dumps(result, ensure_ascii=False).encode()) > self._cap() and (result['links'] or result['headings']):
             if result['links']:
                 result['links'].pop()

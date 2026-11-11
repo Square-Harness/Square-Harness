@@ -24,7 +24,7 @@ import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..research import _job_directory, _read_state as _read_research
-from ..tools import READ_GROUPS, SKIP, TEXT, Workspace
+from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, source_suffix
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
@@ -518,7 +518,7 @@ def list_files(root, limit=2000):
                          and not (Path(folder) / d).is_symlink())
         for name in sorted(files):
             path = Path(folder) / name
-            suffix = path.suffix.lower()
+            suffix = source_suffix(path)
             if name.startswith('.') or path.is_symlink() or (suffix not in TEXT and suffix != '.pdf' and not images.is_image(path)):
                 continue
             try:
@@ -962,7 +962,7 @@ def _counts(folder):
     for entry in entries[:5000]:
         if entry.name.startswith('.') or not entry.is_file(follow_symlinks=False):
             continue
-        suffix = Path(entry.name).suffix.lower()
+        suffix = source_suffix(entry.name)
         key = 'tex' if suffix in READ_GROUPS['tex'] else 'pdf' if suffix == '.pdf' else 'py' if suffix == '.py' else None
         if key:
             counts[key] += 1
@@ -1014,14 +1014,18 @@ def save_upload(workspace, name, data):
     """Save a dropped file in the workspace; never replaces an existing file."""
     workspace = Path(workspace).resolve(strict=True)
     base = re.sub(r'[^\w.\- ()+]', '_', str(name).replace('\\', '/').split('/')[-1]).strip()
-    suffix = Path(base).suffix.lower()
-    if not base or base.startswith('.') or suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop text/LaTeX, PDF, Python or PNG/JPEG/WebP image files')
+    archive = is_source_archive(base)
+    suffix = next((ext for ext in ('.tar.gz', '.tgz', '.tar', '.gz') if base.lower().endswith(ext)), '') if archive else Path(base).suffix.lower()
+    if not base or base.startswith('.') or not archive and suffix not in UPLOAD_SUFFIXES:
+        raise ValueError('Drop text/LaTeX, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDF, Python or PNG/JPEG/WebP image files')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
-    if suffix not in BINARY_UPLOADS and b'\x00' in data:
+    if archive:
+        from ..arxiv_source import extract_source
+        extract_source(data, deadline=time.monotonic() + 10)  # Validate before publishing any workspace file.
+    if not archive and suffix not in BINARY_UPLOADS and b'\x00' in data:
         raise ValueError('That file is not text')
-    stem, number = Path(base).stem, 2
+    stem, number = base[:-len(suffix)] if archive else Path(base).stem, 2
     target = workspace / base
     fd, temporary = tempfile.mkstemp(prefix='.upload-', dir=workspace)
     try:
@@ -1312,7 +1316,7 @@ def chat_macros(root, chat, base=None):
     for name in files[-20:]:
         try:
             path = workspace.path(name)
-            if path.suffix.lower() in ('.tex', '.sty', '.cls'):
+            if source_suffix(path) in ('.tex', '.sty', '.cls'):
                 texts.append(workspace.text(path))
         except (OSError, ValueError, UnicodeError):
             continue

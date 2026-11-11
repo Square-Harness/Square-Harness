@@ -358,7 +358,7 @@ class ReviewBase(ResearchRunner):
         if mark:
             with self._mutex:
                 self.state['manuscript_ranges'].setdefault(source_id, []).append([a, b])
-        tex = self._source(source_id)['path'].lower().endswith('.tex')
+        tex = self._source(source_id)['path'].lower().endswith(('.tex', '.ltx', '.latex'))
         return '\n'.join(f'L{n}: {(manuscript._strip_comment(lines[n - 1]) if tex else lines[n - 1]).rstrip()}' for n in range(a, b + 1))
 
     def _cap(self, wanted):
@@ -587,8 +587,11 @@ class ReviewBase(ResearchRunner):
         elif len(self.state['sources']) > 1:
             self._select_pinned_source()
         source = self.state['sources'][0]
+        if source.get('source_archive'):
+            self.state['source_incomplete'] = True
+            self._warn('Archive members were not assembled into a TeX document; this review concerns the selected member and cannot confirm cross-file numbering or omitted dependencies.')
         mapping = manuscript.build(source['content'], source['path'])
-        if source['path'].lower().endswith('.tex'):
+        if source['path'].lower().endswith(('.tex', '.ltx', '.latex')):
             inputs = re.findall(r'\\(?:input|include|subfile)\s*\{([^}]+)\}', source['content'])
             if inputs:
                 mapping['warnings'].append('External TeX inputs were not expanded: ' + ', '.join(dict.fromkeys(inputs)) + '. Their proofs are outside this review.')
@@ -596,6 +599,8 @@ class ReviewBase(ResearchRunner):
             bibliography_sources = [s for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() in ('.bib', '.bbl')]
             names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'])
             for name in (n.strip() for group in names for n in group.split(',')):
+                if source.get('source_archive'):
+                    continue  # Bibliography members are already pinned; never resolve an archive path on disk.
                 name = str(Path(source['path']).parent / (name if Path(name).suffix else name + '.bib'))
                 try:
                     path = self.agent.workspace.path(name)
@@ -622,7 +627,7 @@ class ReviewBase(ResearchRunner):
 
     def _select_pinned_source(self):
         sources = self.state['sources']
-        manuscripts = [s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.pdf', '.md', '.txt')]
+        manuscripts = [s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')]
         selectable = manuscripts if self.VARIANT in MANUSCRIPT_VARIANTS and manuscripts else sources
         request = '\n'.join((self.state.get('goal', ''), self.state.get('target', ''),
                               (self.state.get('reference_context') or {}).get('query', '')))
@@ -635,7 +640,7 @@ class ReviewBase(ResearchRunner):
             matches = [source for source in sources if manuscript.resolve(
                 manuscript.build(source['content'], source['path']), self.state.get('target') or request)]
         if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
-            matches = [next((s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.pdf', '.md', '.txt')), sources[0])]
+            matches = [next((s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')), sources[0])]
         if len(matches) != 1:
             raise WorkerInputError('Which source should I use: ' + ', '.join(source['path'] for source in sources) + '?',
                 code='ambiguous_source', scope='input', details={'sources': [source['path'] for source in sources]})
@@ -1598,7 +1603,7 @@ class ExplainRunner(ReviewBase):
             return [f'## {unit["name"]}', '', '*The explanation is not written yet.*'], []
         sid = unit['source']
         lines = self._lines(sid)
-        show_source = self._source(sid)['path'].lower().endswith(('.tex', '.md', '.txt')) or sid == 'P1'
+        show_source = self._source(sid)['path'].lower().endswith(('.tex', '.ltx', '.latex', '.md', '.txt')) or sid == 'P1'
         body = [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '', '### What it says', '', value['says'],
                 '', '### ' + ('Ideas for the proof parts' if len(s.get('explain_plan') or []) > 1 else 'The idea'), '', value['idea'] or '—']
         if value['steps']:

@@ -86,7 +86,7 @@ def _braced(text, start):
 
 def detect_format(path, lines):
     head = '\n'.join(lines[:400])
-    if str(path).lower().endswith('.tex') or re.search(r'\\begin\{(?:document|theorem|lemma|proof)\}|\\section\{', head):
+    if str(path).lower().endswith(('.tex', '.ltx', '.latex')) or re.search(r'\\begin\{(?:document|theorem|lemma|proof)\}|\\section\{', head):
         return 'tex'
     if str(path).lower().endswith('.md'):
         return 'markdown'
@@ -597,6 +597,10 @@ def _text_bibliography(lines, start):
 def build(content, path=''):
     """Map a manuscript; `content` is the pinned text, `path` only helps guess its format."""
     lines = content.splitlines()
+    if str(path).lower().endswith(('.tar.gz', '.tgz', '.tar', '.gz')):
+        mapping = _parse_text(lines, 'source-archive')
+        mapping['warnings'].append('This source archive is a labelled collection of files, not an assembled TeX document. Inclusion order, macros and cross-file numbering were not reconstructed.')
+        return mapping
     fmt = detect_format(path, lines)
     return _parse_tex(lines) if fmt == 'tex' else _parse_text(lines, fmt)
 

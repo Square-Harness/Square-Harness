@@ -117,6 +117,34 @@ directly is respected. The routing decision and its usage are saved with the
 turn; resuming does not create a second completed Proof job. A failed routing
 decision pauses the work instead of authorizing an unchecked direct proof.
 
+## TeX source archives
+
+Attach an arXiv source download with **Attach files**, or pin a `.tar.gz`, `.tgz`,
+`.tar` or `.gz` file already in your workspace. The same sources work in the
+terminal through `--proof-file` or `--research-file`. Both a tar bundle and
+arXiv's gzipped single TeX file are supported. Archives use the **LaTeX** read
+setting and remain read-only.
+
+SH reads the source files with their filenames and a file manifest. TeX,
+bibliography and local style/class files are available as text; figures, code
+and other binary assets are listed as omitted. Nothing inside the archive is
+executed or unpacked into your working folder. The archive must contain readable
+TeX, fit within 10 MB, expand to at most 32 MB and stay within the member and
+source-text bounds. Unsafe or oversized bundles are rejected before an upload
+is saved.
+
+This reads source files; it does not compile the paper or expand `\input`,
+`\include` and macros. Manuscript workflows pin the textual members separately
+and flag unresolved inclusion order and cross-file numbering. Ask about a named
+file or result when a bundle contains several documents.
+
+An explicit arXiv source URL such as `https://arxiv.org/src/2207.09284v1` requests
+source rather than the rendered paper. Downloads keep the existing HTTPS,
+robots and request-budget rules. The current [arXiv robots rules](https://arxiv.org/robots.txt)
+disallow automated access to its source endpoints; when blocked, SH explains how to attach a source download
+instead. Ordinary arXiv paper links still use the HTML/PDF reader. Cached source
+text remains available offline.
+
 ## Images
 
 With the DeepInfra **DS4.1 Flash 1017** profile, attach PNG, JPEG or static WebP

@@ -43,7 +43,7 @@ export function StyleNew() {
   const [queuedNote, setQueuedNote] = useState('')
 
   useEffect(() => {
-    api.files().then((result) => setArticles(result.files.filter((f) => f.path.toLowerCase().endsWith('.tex') || isImagePath(f.path)).map((f) => f.path)),
+    api.files().then((result) => setArticles(result.files.filter((f) => /\.(?:tex|tar\.gz|tgz|tar|gz)$/i.test(f.path) || isImagePath(f.path)).map((f) => f.path)),
       () => setArticles([]))
   }, [filesChanged])
   useEffect(() => { api.styles().then((result) => { setSaved(result.styles); setChoice(result.choice) }, () => undefined) }, [])
@@ -61,8 +61,8 @@ export function StyleNew() {
   }, [d])
   const preset = d ? effortLimits('style', d, level) : null
   const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
-  const uploading = useDropTarget('Pin .tex articles or screenshots as style examples', (paths) => {
-    setSelected((items) => [...new Set([...items, ...paths.filter((path) => path.toLowerCase().endsWith('.tex') || isImagePath(path))])])
+  const uploading = useDropTarget('Pin TeX articles, source archives or screenshots as style examples', (paths) => {
+    setSelected((items) => [...new Set([...items, ...paths.filter((path) => /\.(?:tex|tar\.gz|tgz|tar|gz)$/i.test(path) || isImagePath(path))])])
   })
 
   const running = capacityFull(snapshot, status)
@@ -97,7 +97,7 @@ export function StyleNew() {
           <div>
             <h1 className="page-title">Learn your writing style</h1>
             <p className="lede">
-              Give .tex articles or screenshots of your writing. Screenshots provide visible wording and layout; exact macros can only be learned from .tex sources. The harness sorts the articles
+              Give TeX articles, source archives or screenshots of your writing. Screenshots provide visible wording and layout; exact macros can only be learned from .tex sources. The harness sorts the articles
               by domain (a numerics paper is not written like a geometry paper), and describes for each domain what your
               papers set out to do, how you structure them and how you explain. Quotations are kept only when they occur
               word for word in your articles. The result is a small file a write-up can follow.
@@ -113,14 +113,14 @@ export function StyleNew() {
               <div className="style-ask" role="status">
                 <p><strong>Add your articles or screenshots.</strong> To learn your style, the harness needs examples of your writing,
                   ideally two or more for each kind of paper you write.</p>
-                <p className="field-hint">Drop .tex files or images anywhere on this page, paste an image, or open the folder that holds them from the
+                <p className="field-hint">Drop TeX files, source archives or images anywhere on this page, paste an image, or open the folder that holds them from the
                   folder name at the bottom of the sidebar. Files with \input parts: drop the parts too.</p>
               </div>
             ) : (
               <>
-                <FilePicker selected={selected} onChange={setSelected} allowImages accept={['.tex', ...IMAGE_SUFFIXES]} label="Choose .tex articles or screenshots" />
+                <FilePicker selected={selected} onChange={setSelected} allowImages accept={['.tex', '.tar.gz', '.tgz', '.tar', '.gz', ...IMAGE_SUFFIXES]} label="Choose TeX articles, archives or screenshots" />
                 <span className="field-hint">
-                  {articles.length} article source{articles.length === 1 ? '' : 's'} here. Choose main .tex files or screenshots;
+                  {articles.length} article source{articles.length === 1 ? '' : 's'} here. Choose main .tex files, source archives or screenshots;
                   two or more per domain give a better style. At most 20 files, including up to 8 images.
                 </span>
               </>
@@ -207,7 +207,7 @@ export function StyleNew() {
                 {saved.map((profile) => (
                   <li key={profile.name}>
                     <Collapse summary={<><strong>{profile.name}</strong> <span className="muted small">
-                      {profile.domains.map((item) => item.name).join(', ')} · {profile.articles.length} article{profile.articles.length === 1 ? '' : 's'} · {profile.macros.length} macros · {ago(profile.updated_at)}</span></>}>
+                      {profile.domains.map((item) => item.name).join(', ')} · {profile.articles.length} {profile.articles.some((article) => article.source_archive) ? 'text sources' : `article${profile.articles.length === 1 ? '' : 's'}`} · {profile.macros.length} macros · {ago(profile.updated_at)}</span></>}>
                       <StyleTemplate profile={profile} onSaved={(next) => setSaved((items) => items.map((item) => item.name === next.name ? next : item))} />
                       <Profile profile={profile} />
                     </Collapse>
@@ -467,6 +467,7 @@ function Articles({ data }: { data: ResearchDetail }) {
           <li key={article.id}>
             <strong>{article.title || article.path}</strong>{domainOf.has(article.id) && <span className="muted"> · {domainOf.get(article.id)}</span>}
             <p className="muted small">{article.path}, {article.lines} lines, {article.headings.filter((h) => !h.startsWith(' ')).length} sections.
+              {article.source_archive && ' Archive member; this may be an article fragment, and includes/macros were not assembled.'}
               {article.inputs.length > 0 && ` Includes ${article.inputs.join(', ')}, which was not read.`}</p>
             {seen ? (
               <Collapse summary="What the model noticed">

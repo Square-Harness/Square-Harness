@@ -116,13 +116,13 @@ export function DropZone() {
   const project = projects?.find((item) => item.id === target?.project_id)
   return (
     <>
-      <input ref={input} type="file" multiple hidden accept={'.tex,.sty,.cls,.bib,.md,.txt,.pdf,.py' + (status?.image_support ? ',.png,.jpg,.jpeg,.webp' : '')} aria-label="Attach files or images" />
+      <input ref={input} type="file" multiple hidden accept={'.tex,.sty,.cls,.bib,.tar.gz,.tgz,.tar,.gz,.md,.txt,.pdf,.py' + (status?.image_support ? ',.png,.jpg,.jpeg,.webp' : '')} aria-label="Attach files or images" />
       {over && (
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-card">
             <p className="drop-title">Drop to add to {folder}</p>
             <p className="drop-hint">{target ? target.label : 'Files are saved in the folder; nothing is replaced.'}{project ? ` · ${project.name}` : ''}</p>
-            <p className="drop-types">.tex .sty .cls .bib .md .txt .pdf .py{status?.image_support ? ' · PNG JPEG WebP' : ''}</p>
+            <p className="drop-types">.tex .sty .cls .bib .tar.gz .tgz .tar .gz .md .txt .pdf .py{status?.image_support ? ' · PNG JPEG WebP' : ''}</p>
           </div>
         </div>
       )}

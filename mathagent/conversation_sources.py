@@ -8,7 +8,7 @@ import unicodedata
 from .worker_errors import WorkerInputError
 
 
-_NAMED = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt|sty|cls|bib|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
+_NAMED = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt|sty|cls|bib|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
 
 
 def conversation_sources(query, supplied, transcript, *, mode=None):

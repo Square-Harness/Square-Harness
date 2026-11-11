@@ -206,6 +206,26 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Ordinary webpages consult cached per-origin robots.txt through the standard
   library's prefix-rule parser, within the same HTTPS, request and time bounds.
   This does not implement full wildcard/longest-match robots semantics.
+- **TeX source archives.** `arxiv_source.extract_source` reads tar/gzip payloads
+  into memory only: never use `extract`, `extractall`, a shell unpacker, TeX or
+  Python from the source. Validate physical headers before semantic tar parsing,
+  including PAX/GNU metadata; reject links, sparse/special members, unsafe names,
+  normalized path collisions and incomplete archives. Bounds: 10 MB input,
+  32 MB decompressed, 512 physical members including metadata, 2 MB per source
+  file and 4 MB combined decoded text including the manifest. Reading also has
+  a ten-second ceiling and cancellation/deadline checks. Preserve raw archive
+  and member hashes separately from normalized text hashes and line ranges.
+  Local uploads validate before publication and use the existing TeX read
+  permission. Writes and replacements refuse archive targets. Research pins
+  individual source members with logical `archive::member` names, not disk
+  paths; never resolve those names as local bibliography/include paths.
+  An archive is not an assembled manuscript: unresolved compilation order,
+  macros and cross-file numbering remain explicit.
+  Remote source requests use exact trusted arXiv `/src/` or `/e-print/` URLs,
+  a separate `arxiv-source:` cache identity and version checks. Restrict every
+  content redirect to arXiv origins and retain robots rules. The export host's
+  API exemption applies only to `/api/query`, never its source endpoints. Site
+  denial should suggest a local source upload, not bypasses or mirror retries.
 - **Reference retrieval.** Keep all eligible fetched records within the existing
   request and character budgets; early results must not hide later providers.
   Retries archive rejected records and preserve their R identifiers on rediscovery.

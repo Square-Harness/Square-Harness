@@ -4,6 +4,7 @@
 """Explicit tool registry; workspace-scoped text access and approved mutations."""
 import codecs
 import difflib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,16 @@ SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
 _WRITE_LOCK = Lock()
+SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
+
+
+def is_source_archive(path):
+    return str(path).lower().endswith(SOURCE_ARCHIVE_SUFFIXES)
+
+
+def source_suffix(path):
+    """Source archives belong to the existing TeX read permission."""
+    return '.tex' if is_source_archive(path) else Path(path).suffix.lower()
 
 # Reading user files. UTF-8 first; otherwise the 8-bit encoding the file declares; otherwise UTF-8
 # with Windows-1252 for the bytes that are not UTF-8 (French accents saved by an older editor).
@@ -146,6 +157,7 @@ class Workspace:
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
         self.pinned = set()
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
+        self.source_archives = {}  # path -> last bounded, immutable source extraction
         if self.literature is None:
             self.readable.discard('.pdf')  # PDF extraction uses the literature backend
 
@@ -165,21 +177,50 @@ class Workspace:
             raise ValueError('Path escapes workspace, possibly through a symlink')
         if any(part.startswith('.') for part in p.relative_to(self.root).parts):
             raise ValueError('Hidden paths are excluded, including symlink targets')
-        if p.suffix.lower() not in TEXT and not (pdf and p.suffix.lower() == '.pdf'):
-            raise ValueError('Unsupported extension; use text/LaTeX/Markdown/Python files')
+        if source_suffix(p) not in TEXT and not (pdf and p.suffix.lower() == '.pdf'):
+            raise ValueError('Unsupported extension; use text/LaTeX/Markdown/Python files or a TeX source archive (.tar.gz/.tgz/.tar/.gz)')
         return p
 
     def _readable(self, p):
-        if p.suffix.lower() not in self.readable and p not in self.pinned:
+        if source_suffix(p) not in self.readable and p not in self.pinned:
             raise ValueError(f'The user has not allowed reading {p.suffix} files in this workspace; '
                              'ask them to pin the file or enable that file type')
 
-    def text(self, p):
+    def text(self, p, *, deadline=None):
         name = p.relative_to(self.root).as_posix() if p.is_relative_to(self.root) else p.name
-        st = p.stat()
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:
-            raise ValueError(f'{name}: only regular text files up to 1 MB can be read')
-        value, encoding = decode_text(p.read_bytes(), name)
+        archive = is_source_archive(p)
+        if archive:
+            from .arxiv_source import MAX_ARCHIVE_BYTES
+            limit = MAX_ARCHIVE_BYTES
+        else:
+            limit = MAX_BYTES
+        # A non-regular path must not block in open() before fstat can refuse it.
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            st = os.fstat(stream.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+                raise ValueError(f'{name}: only regular {"source archives up to 10 MB" if archive else "text files up to 1 MB"} can be read')
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError(f'{name}: file exceeds its bounded read limit')
+        if archive:
+            from .arxiv_source import extract_source
+            if self.cancelled():
+                raise KeyboardInterrupt
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ValueError('Source archive reading exceeded its time limit')
+            cached = self.source_archives.get(p)
+            if cached and cached['sha256'] == hashlib.sha256(data).hexdigest():
+                return cached['text']
+            until = min(deadline, time.monotonic() + 10) if deadline is not None else time.monotonic() + 10
+            extraction = extract_source(data, deadline=until, cancelled=self.cancelled)
+            self.source_archives.pop(p, None)
+            self.source_archives[p] = extraction
+            while len(self.source_archives) > 4:
+                self.source_archives.pop(next(iter(self.source_archives)))
+            self.encodings.pop(p, None)
+            return extraction['text']
+        value, encoding = decode_text(data, name)
         if encoding:
             self.encodings[p] = encoding
         else:
@@ -194,7 +235,7 @@ class Workspace:
                              and not (Path(folder) / d).is_symlink())
             for name in sorted(files):
                 p = Path(folder) / name
-                if name.startswith('.') or p.suffix.lower() not in allowed or p.is_symlink():
+                if name.startswith('.') or source_suffix(p) not in allowed or p.is_symlink():
                     continue
                 yield p
                 count += 1
@@ -276,7 +317,7 @@ class Workspace:
                     finally:
                         self.literature.deadline = previous
                 else:
-                    text = self.text(p)
+                    text = self.text(p, deadline=deadline)
                     if needle not in text.casefold():
                         continue
                     lines = text.splitlines()
@@ -296,6 +337,8 @@ class Workspace:
         if not isinstance(content, str) or len(content.encode()) > max_bytes:
             raise ValueError(f'Content must be text, at most {max_bytes} bytes')
         p = self.path(path)
+        if is_source_archive(p):
+            raise ValueError('Source archives are read-only; request a separate text file instead')
         original = p.stat() if p.exists() else None
         old = self.text(p) if original is not None else ''
         if expected is not None and old != expected:
@@ -348,6 +391,8 @@ class Workspace:
         if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
             raise ValueError('Provide a nonempty old_text and a text replacement')
         p = self.path(path)
+        if is_source_archive(p):
+            raise ValueError('Source archives are read-only; request a separate text file instead')
         self._readable(p)
         old = self.text(p)
         if old.count(old_text) != 1:
@@ -398,6 +443,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         string = {'type': 'string'}
         integer = {'type': 'integer'}
         kinds = ', '.join(sorted(self.readable))
+        if '.tex' in self.readable:
+            kinds += ', .tar.gz/.tgz/.tar/.gz TeX sources'
         result = [] if not self.readable and not self.pinned else [
             schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000). Continue with offset when paginated.', {'offset': integer, 'limit': integer}),
             schema('search_text', 'Case-insensitive literal search in allowed files'
@@ -408,6 +455,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         if self.readable or self.pinned:
             result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
                    + (', including extracted PDF text' if self.literature is not None else '')
+                   + '; TeX source archives are read as a labelled, read-only source bundle; members are never executed or written to disk'
                    + '. At most 200 lines / 6000 characters.',
                    {'path': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['path']))
         result += [

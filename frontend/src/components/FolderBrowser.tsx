@@ -104,7 +104,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
 }
 
 const GROUPS: { key: keyof ReadSettings; label: string; hint: string }[] = [
-  { key: 'tex', label: 'LaTeX', hint: '.tex .bib .sty .cls' },
+  { key: 'tex', label: 'LaTeX', hint: '.tex .bib .sty .cls and TeX source archives' },
   { key: 'pdf', label: 'PDF', hint: 'text extracted locally' },
   { key: 'py', label: 'Python', hint: '.py' },
   { key: 'text', label: 'Other text', hint: '.md .txt .json .yaml .csv' },

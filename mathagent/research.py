@@ -24,7 +24,7 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
-from .tools import schema, unicode_source
+from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError
 from .model_limits import input_limit, is_ds4, output_limit
@@ -169,7 +169,15 @@ def _read_state(directory, job_id, *, verify=True):
         if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0 or (number == 0 and key != 'max_requests'):
             raise ValueError('Invalid research budget: ' + key)
     for source in value.get('sources', []):
-        path = Path(source['path'])
+        if source.get('source_archive'):
+            from .arxiv_source import _safe_name
+            archive = source['source_archive']
+            prefix, separator, member = source['path'].rpartition('::')
+            if not isinstance(archive, str) or not is_source_archive(archive) or separator != '::' or prefix != archive or _safe_name(member) != member:
+                raise ValueError('Invalid pinned archive member path')
+            path = Path(archive)
+        else:
+            path = Path(source['path'])
         if path.is_absolute() or any(part == '..' or part.startswith('.') for part in path.parts):
             raise ValueError('Unsafe pinned manuscript path')
         if verify and hashlib.sha256(source['content'].encode()).hexdigest() != source['sha256']:
@@ -247,7 +255,7 @@ class ResearchRunner:
         """A filename mentioned in prose is not an explicit permission to pin it."""
         local_text = re.sub(r'https?://\S+|arxiv:\S+', '', goal, flags=re.I)
         names = []
-        for name in re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', local_text):
+        for name in re.findall(r'(?<![\w/])[\w./-]+\.(?:tar\.gz|tgz|tar|gz|tex|md|txt|pdf)\b', local_text):
             try:
                 path = self.agent.workspace.path(name, pdf=True)
                 self.agent.workspace._readable(path)
@@ -270,7 +278,7 @@ class ResearchRunner:
 
     def _pin(self, names, prefix):
         sources = []
-        for index, name in enumerate(dict.fromkeys(str(n) for n in names), 1):
+        for name in dict.fromkeys(str(n) for n in names):
             rel = Path(name)
             if rel.is_absolute():
                 rel = rel.resolve().relative_to(self.agent.workspace.root)
@@ -282,9 +290,23 @@ class ResearchRunner:
                 content = '\n'.join(lines)
             else:
                 path = self.agent.workspace.path(str(rel))
-                # The pinned copy is Unicode, and declares it.
                 content = unicode_source(self.agent.workspace.text(path), self.agent.workspace.encodings.get(path))
-            sources.append({'id': f'{prefix}{index}', 'path': str(rel), 'content': content,
+                if is_source_archive(path):
+                    extraction = self.agent.workspace.source_archives[path]
+                    lines = content.splitlines()
+                    warnings = list(extraction['warnings']) + [
+                        'Archive members are separate source files. TeX includes, macros and compilation order were not expanded; cross-file numbering is unresolved.']
+                    for member in extraction['files']:
+                        if not member.get('included') or not member.get('lines'):
+                            continue
+                        text = '\n'.join(lines[member['start_line'] - 1:member['end_line']])
+                        logical = str(rel) + '::' + member['path']
+                        sources.append({'id': f'{prefix}{len(sources) + 1}', 'path': logical, 'content': text,
+                                        'sha256': hashlib.sha256(text.encode()).hexdigest(),
+                                        'source_archive': str(rel), 'archive_sha256': extraction['sha256'],
+                                        'member_sha256': member['sha256'], 'archive_warnings': warnings})
+                    continue
+            sources.append({'id': f'{prefix}{len(sources) + 1}', 'path': str(rel), 'content': content,
                             'sha256': hashlib.sha256(content.encode()).hexdigest()})
         return sources
 
@@ -314,6 +336,11 @@ class ResearchRunner:
                       'notes': [], 'plan': '', 'draft': '', 'review': '',
                       'warnings': [], 'manuscript_ranges': {}, 'pending_tools': None,
                       **self._extra_state()}
+        for source in sources:
+            for warning in source.get('archive_warnings', []):
+                note = f'{source["source_archive"]}: {warning}'
+                if note not in self.state['warnings']:
+                    self.state['warnings'].append(note)
         if reference is not None:
             self.state['reference_context'], _, self.state['reference_context_sha256'] = reference
         if getattr(self.agent, 'image_refs', None):

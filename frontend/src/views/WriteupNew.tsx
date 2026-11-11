@@ -114,7 +114,7 @@ export function WriteupNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Notes, drafts or PDFs</span>
-            <FilePicker selected={sources} onChange={setSources} allowPdf allowImages accept={['.tex', '.md', '.txt', '.pdf', ...IMAGE_SUFFIXES]} label="Pin notes from the folder" />
+            <FilePicker selected={sources} onChange={setSources} allowPdf allowImages accept={['.tex', '.tar.gz', '.tgz', '.tar', '.gz', '.md', '.txt', '.pdf', ...IMAGE_SUFFIXES]} label="Pin notes from the folder" />
             <span className="field-hint">Or drop files anywhere on this page. PDF text is extracted locally.</span>
           </div>
         </div>

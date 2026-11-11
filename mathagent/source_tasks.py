@@ -13,7 +13,7 @@ import unicodedata
 from . import manuscript
 
 
-_FILE = re.compile(r'(?<![\w./-])([\w-]+(?:/[\w.-]+)*\.(?:pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
+_FILE = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
 _RESULT = re.compile(r'\b(?:theorem|lemma|proposition|corollary|proof|theoreme|lemme|demonstration|preuve)\b')
 _ARTICLE = re.compile(r'\b(?:article|paper|manuscript|document|preprint|papier|manuscrit)\b')
 _OVERVIEW = re.compile(r'\b(?:main results?|principal results?|key results?|overview|summary|novelty|contribution|'
@@ -160,6 +160,8 @@ def _overview(filename, lines, size):
     mapping = manuscript.build('\n'.join(lines), filename)
     total = len(lines)
     header = f'SOURCE: {filename}; {total} total lines.\n'
+    if mapping['format'] == 'source-archive':
+        header += 'SOURCE NOTE: Source files are separate, labelled members; TeX includes/macros and cross-file numbering were not expanded.\n'
     if not total:
         return header + 'No extractable text.\n'
     # A structural scan creates locators only. It does not establish the truth
