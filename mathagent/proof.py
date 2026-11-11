@@ -22,10 +22,11 @@ from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_
 from .ledger import LedgerError, ProofStore
 from .model_limits import is_ds4
 from .proof_policy import (
-    CONTINUE_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
+    CONTINUE_POLICY, REPAIR_HISTORY_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
 )
 
-POLICY_VERSION = 8
+POLICY_VERSION = 9
+PREVIOUS_POLICY_SHA256 = '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb'
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 
@@ -225,15 +226,21 @@ class ProofRunner:
             self.agent.client.reasoning_effort = saved['reasoning_effort']
         # Source hashes record provenance, not a compatibility contract. Only a
         # deliberate execution-policy change invalidates an unfinished proof.
-        if saved.get('policy_version') not in (7, POLICY_VERSION):
+        if saved.get('policy_version') not in (7, 8, POLICY_VERSION):
             raise ValueError('Cannot resume with changed policy_version; saved artifacts remain readable.')
-        if saved.get('policy_sha256') != current_provenance['policy_sha256']:
+        legacy = saved.get('policy_version') in (7, 8)
+        expected_hash = PREVIOUS_POLICY_SHA256 if legacy else current_provenance['policy_sha256']
+        if saved.get('policy_sha256') != expected_hash:
             raise ValueError('Cannot resume with changed policy_sha256; use the original proof policy.')
-        if saved.get('policy_version') == 7:
-            self.state.setdefault('execution_migration', {
-                'from_policy': 7, 'to_policy': POLICY_VERSION,
+        if legacy:
+            self.state.setdefault('policy_migrations', []).append({
+                'from_policy': saved['policy_version'], 'to_policy': POLICY_VERSION,
+                'original_policy_sha256': saved['policy_sha256'],
+                'policy_sha256': current_provenance['policy_sha256'],
                 'original_controller_sha256': saved.get('controller_sha256'),
-                'original_transport_sha256': copy.deepcopy(saved.get('transport_sha256'))})
+                'controller_sha256': current_provenance['controller_sha256']})
+            saved.update(policy_version=POLICY_VERSION, policy_sha256=current_provenance['policy_sha256'])
+            self.emit('notice', 'Resuming with focused Proof policy 9; original calls and all saved allowances are retained. The policy change is recorded in the report.')
         if saved.get('transport_sha256') != current_provenance['transport_sha256']:
             self.state.setdefault('transport_migration', {
                 'original_controller_sha256': saved.get('controller_sha256'),
@@ -425,8 +432,29 @@ class ProofRunner:
     def _initial_messages(self, goal, sources):
         return self._reference_messages(initial_request(goal, sources))
 
+    def _repair_history(self, review):
+        """Bound earlier allegations without inventing resolution or replaying reasoning."""
+        earlier = self.state['reviews'][:self.state['reviews'].index(review)]
+        records = []
+        seen = {(i['kind'], i['location'], i['evidence']) for i in review['response']['issues']}
+        for old in reversed([r for r in earlier if r.get('response') and r['response']['issues']][-3:]):
+            for issue in old['response']['issues']:
+                identity = (issue['kind'], issue['location'], issue['evidence'])
+                if identity in seen:
+                    continue
+                item = {'candidate': old['candidate'], 'review': old['id'], 'kind': issue['kind']}
+                for field, limit in (('location', 200), ('evidence', 800)):
+                    value = issue[field]
+                    item[field] = value if len(value) <= limit else value[:limit] + ' [excerpt; full review saved]'
+                if len(json.dumps(records + [item], ensure_ascii=False)) > 3000 or len(records) >= 6:
+                    continue
+                records.append(item)
+                seen.add(identity)
+        return json.dumps(records, ensure_ascii=False) if records else ''
+
     def _solve_messages(self, pending):
         goal, sources = self.state['goal'], self.state['sources']
+        pending['repair_history_chars'] = 0
         messages = self._initial_messages(goal, sources)
         if pending['kind'] in {'initial', 'retry'}:
             return messages
@@ -434,7 +462,12 @@ class ProofRunner:
         text = self._candidate_text(prior)
         if pending['kind'] == 'repair':
             review = next(r for r in self.state['reviews'] if r['id'] == pending['review'])
-            messages[0]['content'] += ('\n\n' + REPAIR_POLICY + '\n\nPRIOR CANDIDATE:\n' + text +
+            history = '' if pending.get('repair_history_omitted') else self._repair_history(review)
+            pending['repair_history_chars'] = len(history)
+            messages[0]['content'] += '\n\n' + REPAIR_POLICY
+            if history:
+                messages[0]['content'] += '\n\n' + REPAIR_HISTORY_POLICY + '\n' + history
+            messages[0]['content'] += ('\n\nPRIOR CANDIDATE:\n' + text +
                                        '\n\nFALLIBLE REVIEW:\n' + json.dumps(review['response'], ensure_ascii=False))
             return messages
         return self._continue_messages(pending, prior, text)
@@ -701,7 +734,21 @@ class ProofRunner:
                 payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
                                                  explicit_cap=self.state['settings'].get('specialist_output_cap'))
             except CallContextError as exc:
-                raise ProofContext(str(exc) + ' Candidate retained.') from exc
+                if role != 'solver' or not pending.get('repair_history_chars'):
+                    raise ProofContext(str(exc) + ' Candidate retained.') from exc
+                payload = None
+            # Optional history must never displace exact mathematical input or
+            # reduce the output room available without it. Retry preflight only.
+            if role == 'solver' and pending.get('repair_history_chars') and (
+                    payload is None or payload['options']['num_predict'] < self._call_cap(cap)):
+                pending['repair_history_omitted'] = 'context'
+                payload = self._payload(role, self._solve_messages(pending), cap, format_schema)
+                self.emit('notice', 'Earlier repair history omitted to preserve the original inputs and solver output allowance')
+                try:
+                    payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
+                        explicit_cap=self.state['settings'].get('specialist_output_cap'))
+                except CallContextError as exc:
+                    raise ProofContext(str(exc) + ' Candidate retained.') from exc
             cap = payload['options']['num_predict']
             if role == 'solver':
                 pending['solver_cap'] = cap
@@ -785,8 +832,13 @@ class ProofRunner:
                  self.state.get('stop_reason', ''), '',
                  'Model reviews are fallible assessments, not formal proof certificates.', '',
                  f'Generated tokens charged: {token_usage}.',
-                 f'Elapsed active seconds charged: {self.state["seconds_used"]:.1f}.', '',
-                 '## Original problem', '', self.state['goal'], '', '## Candidates', '']
+                 f'Elapsed active seconds charged: {self.state["seconds_used"]:.1f}.', '']
+        for migration in self.state.get('policy_migrations', []):
+            lines += [f'Proof policy upgraded on resume: {migration["from_policy"]} → {migration["to_policy"]}. '
+                      f'Original policy SHA-256 `{migration["original_policy_sha256"]}`; '
+                      f'new policy SHA-256 `{migration["policy_sha256"]}`. '
+                      'Earlier calls remain unchanged; saved allowances were not increased.', '']
+        lines += ['## Original problem', '', self.state['goal'], '', '## Candidates', '']
         for candidate in self.state['candidates']:
             marker = ' (selected)' if candidate['id'] == selected_id else ''
             lines.append(f'- [{candidate["id"]}](artifacts/{candidate["artifact"]}){marker}: '

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Focus Proof verification on mathematical risks while retaining whole-proof
+  checking, and ask for clearer proof structure and rigorous counterexamples
+  when appropriate. Give later repairs a bounded, fallible history of earlier
+  located objections without extra model calls, raw reasoning replay or a new
+  solver output format. Preserve existing reasoning effort and budgets. Upgrade
+  recognized paused policy 7/8 jobs to policy 9 with recorded hashes and unchanged
+  allowances; keep completed calls and candidates.
 - Read arXiv TeX source bundles (`.tar.gz`, `.tgz`, `.tar`) and gzipped single
   TeX files through uploads, file tools and pinned workflows. Validate bounded
   archive contents in memory without extracting paths or executing source;
@@ -10,8 +17,8 @@
   access rules and offering upload when automated source downloads are denied.
 - Keep new effort choices to Low, Medium and High, retaining saved older jobs.
 - Repair Proof crash/pause recovery, queued-inference accounting, continuation
-  packing, verdict parsing and uncertain-repair exports. Keep proof-policy bytes
-  unchanged; label reviewed responses without asserting the claim is true.
+  packing, verdict parsing and uncertain-repair exports. Label reviewed responses
+  without asserting the claim is true.
 - Buffer stream journals with periodic synchronization, parse fragments linearly,
   avoid duplicate tokenizer requests and improve reusable research prefixes.
 - Preserve literature allowances on resume; support bounded larger saved state

@@ -110,11 +110,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
 
 ### Invariants that protect users' saved work
 
-- **Proof policy.** `mathagent/proof_policy.py` holds the two proof prompts. Its
-  SHA-256 is saved in every proof job. Resume refuses a changed hash (`proof.py`,
-  `_provenance`/`resume`), so editing even one byte of that file strands every
-  paused proof. Change it only deliberately, together with
-  `proof.POLICY_VERSION` and a migration rule, as done for version 7 → 8. Other
+- **Proof policy.** `mathagent/proof_policy.py` holds the solve, review, repair
+  and continuation instructions. Its SHA-256 is saved in every proof job.
+  Resume refuses an unrecognized changed hash (`proof.py`, `_provenance`/`resume`).
+  Change the file only deliberately, together with `proof.POLICY_VERSION` and a
+  migration rule. Policy 9 accepts saved policy 7/8 only with the exact recognized
+  previous hash (`PREVIOUS_POLICY_SHA256`), records old/new versions and hashes
+  in `policy_migrations` and the report, and updates the active policy version
+  and hash. Keep all numeric allowances, sources, candidates and completed calls;
+  resumed unfinished work uses the new instructions. Unknown/custom previous
+  hashes remain refused, and completed jobs need no migration to be read. Other
   source hashes (controller, transports) are provenance only.
 - **Proof recovery and exports.** Transport interruptions do not consume solver
   passes or verifier protocol retries. Redispatch uses a new journal key and
@@ -478,6 +483,28 @@ documented together when releasing these features.
 5. Events (`emit(kind, value)`) stream to the terminal or, through the hub's
    `EventBus`, to the browser over SSE. `gui/watch.py` publishes changes made by
    other processes, so the web app also shows jobs started in the terminal.
+
+Proof remains one sequential solve → review → repair loop. The initial solver
+instruction is shared with raw inference; it asks for a clear main argument,
+economical routine deductions and a rigorous counterexample when appropriate.
+The reviewer allocates effort to mathematical risks without weakening whole-proof
+coverage or the structured verdict contract. Both roles retain their existing
+thinking, sampling and output budgets; GUI effort is separate from provider
+reasoning effort, which defaults to High for DS4.
+
+A repair gets the exact original inputs, latest full candidate and latest full
+review. `_repair_history` also builds a deterministic record from at most three
+earlier reviews: at most six located issues and 3,000 serialized characters,
+with labelled location/evidence excerpts. Exact duplicate issues, including
+ones already in the latest full review, are omitted. Historical objections are explicitly
+fallible and may already have been repaired or rebutted; never infer that an
+auxiliary result is established or an approach failed beyond the recorded
+evidence. This adds no model call or solver-output parser and does not replay
+raw reasoning. Fresh reviewers receive no repair record or earlier reviews.
+If this optional history would prevent context admission or reduce available
+solver output, omit it and retry preflight, preserving the exact mathematical
+inputs and ordinary allocation rule. Keep unfinished-solver continuation and
+interruption recovery on their existing saved-text/reasoning paths.
 
 The Assistant (`orchestrator.py`) is a controller whose model may call a
 `delegate` tool with a mode, an objective, an effort and files. A worker

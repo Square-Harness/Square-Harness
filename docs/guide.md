@@ -90,6 +90,10 @@ reviews do not consume the one format retry. Their unknown token usage remains
 reserved, so repeated interruptions can still exhaust the saved token budget. A successful review ends the run early; an uncertain review preserves
 the uncertainty. Reasoning tokens count toward generated-token usage.
 
+Low, Medium and High select workflow allowances, separately from the provider's
+reasoning effort. DS4 uses thinking for both solving and review, with provider
+reasoning effort High by default; selecting Low here does not lower that setting.
+
 Medium and higher levels use the same per-call time guard; the workflow time
 allowance grows with the permitted number of calls. The default guard is three
 hours per call, configurable with `--proof-call-seconds`. Low retains a short
@@ -484,12 +488,23 @@ it depends on: proof jobs read nothing by themselves.
 
 How it works: **solve → verify → repair**.
 
-1. The solver makes one full attempt, thinking first, with no tools.
+1. The solver makes one full attempt, thinking first, with no tools. It explains
+   the main argument and concentrates detail
+   on the essential steps. If the statement is false, it may give a rigorous
+   counterexample.
 2. A fresh verifier, which has not seen the solver's reasoning, reads the whole
-   written proof. It returns a verdict and objections, each located in the proof.
+   written proof, including mathematical claims in overviews and remarks. It
+   avoids unnecessary repeated derivation of routine steps and
+   concentrates effort on delicate implications, theorem hypotheses, quantifiers,
+   domains, constant dependence and limits. Finding no issue still requires
+   checking the whole logical chain. It returns a verdict and objections, each
+   located in the proof.
 3. If it finds no issue, that proof is returned unchanged. Concrete objections go
    back to the solver, which repairs the proof or argues the objection is
-   mistaken. The new version is reviewed again.
+   mistaken. The solver receives the latest full written candidate and review.
+   Later repairs also receive a short record of earlier located objections;
+   these remain fallible and may already have been repaired or rebutted. The new
+   version is reviewed afresh without this record or the earlier reviews.
 4. An uncertain review stops the job. If the earlier answer had a concrete
    objection, the uncertain repaired answer becomes the export; the original
    and both reviews remain available.
@@ -500,6 +515,18 @@ no issue in the selected response. The response can prove the statement or
 refute it with a counterexample; this status does not assert the statement is
 true and is never a formal certificate. Read the response and its attributed
 review. Conflicting JSON verdicts or retractions are not accepted as a pass.
+
+The repair record is built from saved reviews, with no extra model call or new
+solver output format. It does not retain unwritten failed approaches or replay
+the solver's reasoning. The record is bounded and can be omitted to preserve
+space for the original inputs, current candidate, latest review and solver
+output. An unfinished generation follows a separate continuation path, which
+does reuse saved reasoning notes, or a labelled ending excerpt when necessary.
+
+Paused jobs using the recognized previous Proof policy are upgraded to policy 9
+on resume. The report records the old and new policy hashes; completed calls,
+candidate versions and saved allowances are retained. Completed old jobs remain
+readable without an upgrade.
 
 ### Critique and Explore
 
