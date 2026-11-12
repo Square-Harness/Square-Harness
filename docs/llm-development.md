@@ -114,13 +114,23 @@ Version 1.1.0. The source of truth for the machine-readable version is
   and continuation instructions. Its SHA-256 is saved in every proof job.
   Resume refuses an unrecognized changed hash (`proof.py`, `_provenance`/`resume`).
   Change the file only deliberately, together with `proof.POLICY_VERSION` and a
-  migration rule. Policy 9 accepts saved policy 7/8 only with the exact recognized
-  previous hash (`PREVIOUS_POLICY_SHA256`), records old/new versions and hashes
+  migration rule. Policy 11 accepts saved policies 7/8/9/10 only with their exact recognized
+  hashes (`RECOGNIZED_POLICY_HASHES`), records old/new versions and hashes
   in `policy_migrations` and the report, and updates the active policy version
   and hash. Keep all numeric allowances, sources, candidates and completed calls;
   resumed unfinished work uses the new instructions. Unknown/custom previous
   hashes remain refused, and completed jobs need no migration to be read. Other
   source hashes (controller, transports) are provenance only.
+  Review schema 3 separates nonblocking notes from essential issues and requires
+  one whole-task assessment plus up to five critical dependency checks. The model
+  no longer emits a separate verdict; the controller derives it after validation.
+  Acceptance requires a completed proof/refutation and no unverified dependency.
+  Never use the derived fields as a new model-written assessment. Contradictions
+  remain unavailable. Saved schema 1/2 calls retain their original semantics,
+  including refusal of contradictory old verdicts.
+  These are consistency checks on a model judgment, not mathematical certification.
+  A completed pre-upgrade verifier call is validated against the legacy schema
+  in its immutable request; new calls cannot fall back to the old contract.
 - **Proof recovery and exports.** Transport interruptions do not consume solver
   passes or verifier protocol retries. Redispatch uses a new journal key and
   retains the interrupted call's reservation; never increase a saved allowance.
@@ -488,7 +498,16 @@ Proof remains one sequential solve → review → repair loop. The initial solve
 instruction is shared with raw inference; it asks for a clear main argument,
 economical routine deductions and a rigorous counterexample when appropriate.
 The reviewer allocates effort to mathematical risks without weakening whole-proof
-coverage or the structured verdict contract. Both roles retain their existing
+coverage. It distinguishes given facts, proved deductions, standard results and
+unverified essential dependencies, and checks that the answer completes the whole
+task. It challenges the weakest nonroutine, non-given dependency with one short
+independent test or availability check in the existing check field; it does not
+repeat this for ordinary standard results or add a model role. Counterexamples
+must first satisfy all supplied relations, including endpoint/singular-measure
+and uniform-constant conditions. Ambiguity stays explicit. Only essential issues
+trigger repair; harmless local corrections and
+deletable unused remarks remain nonblocking notes. Notes and dependency checks
+are retained in the native report and shown in the interface. Both roles retain their existing
 thinking, sampling and output budgets; GUI effort is separate from provider
 reasoning effort, which defaults to High for DS4.
 
@@ -497,7 +516,10 @@ review. `_repair_history` also builds a deterministic record from at most three
 earlier reviews: at most six located issues and 3,000 serialized characters,
 with labelled location/evidence excerpts. Exact duplicate issues, including
 ones already in the latest full review, are omitted. Historical objections are explicitly
-fallible and may already have been repaired or rebutted; never infer that an
+fallible and may already have been repaired or rebutted. The record marks old
+allegations not reassessed, with a reason; absence from a later review does not
+establish resolution. The solver briefly gives repaired/rebutted/unresolved
+dispositions with mathematical reasons, without a new output parser. Never infer that an
 auxiliary result is established or an approach failed beyond the recorded
 evidence. This adds no model call or solver-output parser and does not replay
 raw reasoning. Fresh reviewers receive no repair record or earlier reviews.

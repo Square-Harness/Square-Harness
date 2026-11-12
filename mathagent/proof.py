@@ -22,11 +22,18 @@ from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_
 from .ledger import LedgerError, ProofStore
 from .model_limits import is_ds4
 from .proof_policy import (
-    CONTINUE_POLICY, REPAIR_HISTORY_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
+    CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
+    VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request, review_request,
 )
 
-POLICY_VERSION = 9
-PREVIOUS_POLICY_SHA256 = '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb'
+POLICY_VERSION = 11
+PREVIOUS_POLICY_SHA256 = '750e8ec2e4de9092d8faeb0d9f1d377276259a9657d87dbf2981759377f039a6'
+RECOGNIZED_POLICY_HASHES = {
+    7: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
+    8: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
+    9: 'aabe8adeba577d4de0bf4788f22e3cb3c8401092443d8190588be57ae095727d',
+    10: PREVIOUS_POLICY_SHA256,
+}
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 
@@ -52,7 +59,7 @@ def _validate(value, spec, path='response'):
         for key, child in spec['properties'].items():
             _validate(value[key], child, path + '.' + key)
     elif kind == 'array':
-        if not isinstance(value, list) or len(value) > spec['maxItems']:
+        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec['maxItems']:
             raise ValueError(f'{path}: invalid list')
         for item in value:
             _validate(item, spec['items'], path)
@@ -61,18 +68,25 @@ def _validate(value, spec, path='response'):
             raise ValueError(f'{path}: expected nonempty bounded text')
         if 'enum' in spec and value not in spec['enum']:
             raise ValueError(f'{path}: invalid value')
+    elif kind == 'integer':
+        if type(value) is not int or value not in spec['enum']:
+            raise ValueError(f'{path}: invalid integer')
 
 
-def validate_review(text):
-    """Positive explanation is allowed; contradictory verdicts are unavailable."""
+def validate_review(text, *, schema_version=3):
+    """Validate the requested contract; legacy calls retain their original semantics."""
+    if type(schema_version) is not int or schema_version not in (1, 2, 3):
+        raise ValueError('Unknown review schema version')
+    schema = {1: LEGACY_VERIFIER_SCHEMA, 2: VERIFIER_SCHEMA_V2, 3: VERIFIER_SCHEMA}[schema_version]
     value = loads_single(text)
     def bounded(value, limit):
         marker = ' [truncated; full review in journal]'
         return value if len(value) <= limit else value[:limit - len(marker)] + marker
-    # Extra fields and display lengths are formatting, never new permissions.
-    # Preserve all raw output in the journal and keep substantive checks strict.
-    if isinstance(value, dict) and all(k in value for k in VERIFIER_SCHEMA['properties']):
-        value = {k: value[k] for k in VERIFIER_SCHEMA['properties']}
+    # Old contracts normalize cosmetic extra fields; v3 has one assessment and
+    # forbids an additional model verdict. All raw output remains in the journal.
+    if isinstance(value, dict) and all(k in value for k in schema['properties']):
+        if schema_version < 3:
+            value = {k: value[k] for k in schema['properties']}
         if isinstance(value['explanation'], str):
             value['explanation'] = bounded(value['explanation'], 4000)
         if isinstance(value['issues'], list):
@@ -86,17 +100,52 @@ def validate_review(text):
                         item[key] = bounded(item[key], limit)
                 cleaned.append(item)
             # Do not discard a concrete issue hidden beyond five uncertainties.
-            if len(cleaned) > 5:
+            if len(cleaned) > 5 and schema_version < 3:
                 cleaned.sort(key=lambda i: i['kind'] == 'uncertainty')
-            value['issues'] = cleaned[:5]
-            if value['verdict'] == 'issues_found' and cleaned and all(i['kind'] == 'uncertainty' for i in cleaned):
+            value['issues'] = cleaned if schema_version == 3 else cleaned[:5]
+            if (schema_version < 3 and value['verdict'] == 'issues_found' and cleaned and
+                    all(i['kind'] == 'uncertainty' for i in cleaned)):
                 value['verdict'] = 'uncertain'
-    _validate(value, VERIFIER_SCHEMA)
+        if schema_version >= 2:
+            if isinstance(value['notes'], list):
+                value['notes'] = [bounded(note, 600) if isinstance(note, str) else note for note in value['notes']]
+            if isinstance(value['critical_dependencies'], list):
+                dependencies = []
+                for dependency in value['critical_dependencies']:
+                    fields = ('claim', 'provenance', 'check')
+                    if not isinstance(dependency, dict) or not all(k in dependency for k in fields):
+                        raise ValueError('Invalid critical dependency')
+                    item = {k: dependency[k] for k in fields}
+                    for key, limit in (('claim', 400), ('check', 700)):
+                        if isinstance(item[key], str):
+                            item[key] = bounded(item[key], limit)
+                    dependencies.append(item)
+                value['critical_dependencies'] = dependencies
+    _validate(value, schema)
+    if schema_version == 3:
+        status, issues = value['task_status'], value['issues']
+        if status in {'proved', 'refuted'}:
+            if issues or any(d['provenance'] == 'unverified' for d in value['critical_dependencies']):
+                raise ValueError('Validated task completion requires no essential issues or unverified dependencies')
+            verdict = 'no_issue_found'
+        elif status == 'incomplete':
+            if not any(i['kind'] != 'uncertainty' for i in issues):
+                raise ValueError('incomplete requires a concrete essential issue; use uncertain for undecided points')
+            verdict = 'issues_found'
+        else:
+            verdict = 'uncertain'
+        return {**value, 'verdict': verdict, 'verdict_source': 'controller_task_status_v3'}
     verdict, issues = value['verdict'], value['issues']
     if verdict == 'no_issue_found' and issues:
         raise ValueError('no_issue_found contradicts the nonempty issues list')
     if verdict == 'issues_found' and not any(i['kind'] != 'uncertainty' for i in issues):
         raise ValueError('issues_found requires a concrete mathematical issue')
+    if schema_version == 2:
+        if value['task_status'] in {'proved', 'refuted'} and verdict != 'no_issue_found':
+            raise ValueError('Validated task completion contradicts the nonpassing verdict')
+        if verdict == 'no_issue_found' and (value['task_status'] not in {'proved', 'refuted'} or
+                any(d['provenance'] == 'unverified' for d in value['critical_dependencies'])):
+            raise ValueError('no_issue_found requires a completed task with verified essential dependencies')
     return value
 
 
@@ -226,10 +275,10 @@ class ProofRunner:
             self.agent.client.reasoning_effort = saved['reasoning_effort']
         # Source hashes record provenance, not a compatibility contract. Only a
         # deliberate execution-policy change invalidates an unfinished proof.
-        if saved.get('policy_version') not in (7, 8, POLICY_VERSION):
+        if saved.get('policy_version') not in (*RECOGNIZED_POLICY_HASHES, POLICY_VERSION):
             raise ValueError('Cannot resume with changed policy_version; saved artifacts remain readable.')
-        legacy = saved.get('policy_version') in (7, 8)
-        expected_hash = PREVIOUS_POLICY_SHA256 if legacy else current_provenance['policy_sha256']
+        legacy = saved.get('policy_version') in RECOGNIZED_POLICY_HASHES
+        expected_hash = RECOGNIZED_POLICY_HASHES[saved['policy_version']] if legacy else current_provenance['policy_sha256']
         if saved.get('policy_sha256') != expected_hash:
             raise ValueError('Cannot resume with changed policy_sha256; use the original proof policy.')
         if legacy:
@@ -240,7 +289,7 @@ class ProofRunner:
                 'original_controller_sha256': saved.get('controller_sha256'),
                 'controller_sha256': current_provenance['controller_sha256']})
             saved.update(policy_version=POLICY_VERSION, policy_sha256=current_provenance['policy_sha256'])
-            self.emit('notice', 'Resuming with focused Proof policy 9; original calls and all saved allowances are retained. The policy change is recorded in the report.')
+            self.emit('notice', 'Resuming with calibrated Proof policy 11; original calls and all saved allowances are retained. The policy change is recorded in the report.')
         if saved.get('transport_sha256') != current_provenance['transport_sha256']:
             self.state.setdefault('transport_migration', {
                 'original_controller_sha256': saved.get('controller_sha256'),
@@ -442,7 +491,9 @@ class ProofRunner:
                 identity = (issue['kind'], issue['location'], issue['evidence'])
                 if identity in seen:
                     continue
-                item = {'candidate': old['candidate'], 'review': old['id'], 'kind': issue['kind']}
+                item = {'candidate': old['candidate'], 'review': old['id'], 'kind': issue['kind'],
+                        'disposition': 'not_reassessed',
+                        'reason': 'No resolution established by this record; check the written candidate.'}
                 for field, limit in (('location', 200), ('evidence', 800)):
                     value = issue[field]
                     item[field] = value if len(value) <= limit else value[:limit] + ' [excerpt; full review saved]'
@@ -570,15 +621,26 @@ class ProofRunner:
             messages[0]['content'] += ('\n\nYour previous review could not be interpreted: ' + pending['protocol_error'] +
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
         cap = self.state['settings']['verify_tokens']
-        cached = any(c['key'] == self._call_key('verifier') for c in self.state['calls'])
+        cached = self._find_call(self._call_key('verifier'))
         if not cached and self._remaining() < self._call_cap(cap):
             self._stop('review_unavailable', 'Insufficient budget for a full verifier call; the candidate was retained without rewriting it.')
             return
         result = self._call('verifier', messages, cap, format_schema=VERIFIER_SCHEMA)
+        # A pre-upgrade call may have finished before its review was committed.
+        # Its immutable request, not the migrated job policy, owns that contract.
+        schema_version = 3
+        if cached:
+            saved_request = json.loads(self.store.read_artifact(cached['request']))
+            if saved_request.get('format') == LEGACY_VERIFIER_SCHEMA:
+                schema_version = 1
+            elif saved_request.get('format') == VERIFIER_SCHEMA_V2:
+                schema_version = 2
+            elif saved_request.get('format') != VERIFIER_SCHEMA:
+                raise ValueError('Unrecognized saved verifier schema; original artifacts retained')
         try:
             if not result['done'] or result['calls']:
                 raise ValueError('Review generation did not finish a standalone response')
-            response = validate_review(result['text'])
+            response = validate_review(result['text'], schema_version=schema_version)
         except (ValueError, TypeError, RecursionError) as exc:
             response = None
             error = str(exc)
@@ -587,6 +649,7 @@ class ProofRunner:
         review = {'id': f'V{len(self.state["reviews"]) + 1}', 'candidate': candidate['id'],
                   'candidate_sha256': candidate['sha256'], 'call': self._call_key('verifier'),
                   'response': response, 'protocol_error': error,
+                  'schema_version': schema_version,
                   'complete_json_at_output_limit': bool(response and not result['complete'])}
         self.state['reviews'].append(review)
         pending['review'] = review['id']
@@ -855,8 +918,17 @@ class ProofRunner:
                 continue
             response = review['response']
             lines += [response['verdict'] + ': ' + response['explanation'], '']
+            if response.get('verdict_source') == 'controller_task_status_v3':
+                lines += ['Internal verdict derived by the controller from the validated task assessment.', '']
+            if 'task_status' in response:
+                lines += ['Whole-task assessment: ' + response['task_status'] + '.', '']
+                for dependency in response['critical_dependencies']:
+                    lines.append(f'- Dependency ({dependency["provenance"]}): {dependency["claim"]} — {dependency["check"]}')
+                lines += ['']
             for issue in response['issues']:
                 lines += [f'- **{issue["kind"]}**, {issue["location"]}: {issue["evidence"]}']
+            for note in response.get('notes', []):
+                lines.append('- Nonblocking note: ' + note)
             lines += ['']
         report = '\n'.join(lines)
         self.store.write_report(report)

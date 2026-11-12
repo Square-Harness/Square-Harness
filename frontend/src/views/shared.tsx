@@ -202,12 +202,32 @@ function prettyJson(text: string): string | null {
 const VERDICTS: Record<string, string> = {
   no_issue_found: 'No issue found', issues_found: 'Issues found', uncertain: 'Uncertain',
 }
+const TASK_STATUSES: Record<string, string> = {
+  proved: 'Proof complete', refuted: 'Refutation complete', incomplete: 'Incomplete', uncertain: 'Uncertain',
+}
+const DEPENDENCY_PROVENANCE: Record<string, string> = {
+  given: 'Supplied fact', proved: 'Proved in the answer', standard: 'Standard result', unverified: 'Unverified',
+}
+type ReviewDisplayResponse = Omit<NonNullable<Review['response']>, 'verdict'> & {
+  verdict?: NonNullable<Review['response']>['verdict']
+}
 
-/** A verifier's answer: its verdict, explanation and located issues. */
-export function ReviewBody({ response }: { response: NonNullable<Review['response']> }) {
+/** A verifier's answer, retaining the shorter display for saved legacy reviews. */
+export function ReviewBody({ response }: { response: ReviewDisplayResponse }) {
+  const dependencies = Array.isArray(response.critical_dependencies) ? response.critical_dependencies.filter(
+    (item) => item && typeof item.claim === 'string' && typeof item.provenance === 'string' && typeof item.check === 'string',
+  ) : []
+  const notes = Array.isArray(response.notes) ? response.notes.filter((note) => typeof note === 'string') : []
   return (
     <div className="review-body">
-      <p className="audit-verdict">Verdict: {VERDICTS[response.verdict] || response.verdict}</p>
+      {response.verdict ? (
+        <p className="audit-verdict">Verdict: {VERDICTS[response.verdict] || response.verdict}</p>
+      ) : (
+        <p className="muted small">Raw model assessment; this is not a validated review.</p>
+      )}
+      {response.task_status && TASK_STATUSES[response.task_status] && (
+        <p className="muted small">Reviewer’s task assessment: {TASK_STATUSES[response.task_status]}</p>
+      )}
       {response.explanation && <Markdown>{response.explanation}</Markdown>}
       {response.issues.map((issue, index) => {
         const look = issueLook(issue.kind)
@@ -220,14 +240,38 @@ export function ReviewBody({ response }: { response: NonNullable<Review['respons
           </div>
         )
       })}
+      {notes.length > 0 && (
+        <Collapse summary={`Nonblocking notes (${notes.length})`}>
+          <ul>{notes.map((note, index) => <li key={index}><Markdown>{note}</Markdown></li>)}</ul>
+        </Collapse>
+      )}
+      {dependencies.length > 0 && (
+        <Collapse summary={`Critical checks (${dependencies.length})`}>
+          {dependencies.map((dependency, index) => (
+            <div key={index}>
+              <p className="detail-label">{DEPENDENCY_PROVENANCE[dependency.provenance] || dependency.provenance}</p>
+              <Markdown>{dependency.claim}</Markdown>
+              <Markdown>{dependency.check}</Markdown>
+            </div>
+          ))}
+        </Collapse>
+      )}
     </div>
   )
 }
 
-function reviewResponse(value: unknown): NonNullable<Review['response']> | null {
-  const item = value as Review['response']
-  return item && typeof item === 'object' && typeof item.verdict === 'string' && typeof item.explanation === 'string'
-    && Array.isArray(item.issues) ? item : null
+function reviewResponse(value: unknown): ReviewDisplayResponse | null {
+  const item = value as ReviewDisplayResponse | null
+  if (!item || typeof item !== 'object' || typeof item.explanation !== 'string' || !Array.isArray(item.issues)) return null
+  if (item.schema_version === 3) {
+    // The model's v3 wire contract has no verdict. Do not infer one in the browser
+    // or hide forbidden verdict fields inside an otherwise plausible assessment.
+    const fields = ['schema_version', 'explanation', 'issues', 'task_status', 'critical_dependencies', 'notes']
+    if (Object.keys(item).length !== fields.length || fields.some((field) => !(field in item))) return null
+    return item.task_status
+      && Object.prototype.hasOwnProperty.call(TASK_STATUSES, item.task_status) ? item : null
+  }
+  return typeof item.verdict === 'string' ? item : null
 }
 
 /** Model output as text: prose is typeset; structured roles show their JSON. */

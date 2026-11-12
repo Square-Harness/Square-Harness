@@ -493,17 +493,31 @@ How it works: **solve → verify → repair**.
    on the essential steps. If the statement is false, it may give a rigorous
    counterexample.
 2. A fresh verifier, which has not seen the solver's reasoning, reads the whole
-   written proof, including mathematical claims in overviews and remarks. It
+   written proof. It
    avoids unnecessary repeated derivation of routine steps and
    concentrates effort on delicate implications, theorem hypotheses, quantifiers,
-   domains, constant dependence and limits. Finding no issue still requires
-   checking the whole logical chain. It returns a verdict and objections, each
-   located in the proof.
-3. If it finds no issue, that proof is returned unchanged. Concrete objections go
+   domains, constant dependence and limits. It records up to five essential
+   dependencies, distinguishing supplied facts, checked deductions, standard
+   results and unresolved claims. A theorem name alone does not establish an
+   essential input. For the weakest nonroutine dependency, it attempts one short
+   independent check of the claim itself, such as a small example, limiting
+   regime or precise known result. Routine standard deductions are not re-proved.
+   For a counterexample it first checks admissibility under all supplied
+   relations, endpoints and constant quantifiers; an ambiguous hypothesis is
+   flagged rather than silently reinterpreted. Acceptance requires checking the
+   whole logical chain and
+   completing the original task, either by a proof or by a counterexample
+   satisfying all the hypotheses.
+3. If it finds no essential issue, that proof is returned unchanged. Routine
+   omitted computations, harmless local typos and removable unused remarks can
+   receive nonblocking notes without triggering a new attempt. A false claim
+   needed by the argument still blocks acceptance. Essential objections go
    back to the solver, which repairs the proof or argues the objection is
    mistaken. The solver receives the latest full written candidate and review.
    Later repairs also receive a short record of earlier located objections;
-   these remain fallible and may already have been repaired or rebutted. The new
+   these remain fallible and are marked not reassessed, rather than assumed
+   resolved because a later review omits them. The solver gives a short
+   mathematical reason for repairing, rebutting or retaining an objection. The new
    version is reviewed afresh without this record or the earlier reviews.
 4. An uncertain review stops the job. If the earlier answer had a concrete
    objection, the uncertain repaired answer becomes the export; the original
@@ -511,10 +525,15 @@ How it works: **solve → verify → repair**.
 
 Every version is kept, and the first answer is never lost. Effort sets the number
 of attempts and the working time. “Response reviewed” means the verifier found
-no issue in the selected response. The response can prove the statement or
+no blocking mathematical issue in the selected response; any nonblocking notes
+remain visible in its review and report. The response can prove the statement or
 refute it with a counterexample; this status does not assert the statement is
 true and is never a formal certificate. Read the response and its attributed
 review. Conflicting JSON verdicts or retractions are not accepted as a pass.
+New reviews return one task assessment; the controller derives the operational
+verdict after checking its consistency with essential issues and dependencies.
+This avoids asking the model for two overlapping status labels. An inconsistent
+assessment remains unavailable rather than being promoted to acceptance.
 
 The repair record is built from saved reviews, with no extra model call or new
 solver output format. It does not retain unwritten failed approaches or replay
@@ -523,7 +542,7 @@ space for the original inputs, current candidate, latest review and solver
 output. An unfinished generation follows a separate continuation path, which
 does reuse saved reasoning notes, or a labelled ending excerpt when necessary.
 
-Paused jobs using the recognized previous Proof policy are upgraded to policy 9
+Paused jobs using recognized Proof policies 7, 8, 9 or 10 are upgraded to policy 11
 on resume. The report records the old and new policy hashes; completed calls,
 candidate versions and saved allowances are retained. Completed old jobs remain
 readable without an upgrade.

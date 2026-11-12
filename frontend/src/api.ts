@@ -205,12 +205,23 @@ export type Candidate = {
 
 export type ReviewIssue = { kind: 'invalid_inference' | 'missing_justification' | 'uncertainty'; location: string; evidence: string }
 
+export type ReviewResponse = {
+  verdict: 'no_issue_found' | 'issues_found' | 'uncertain'
+  explanation: string
+  issues: ReviewIssue[]
+  schema_version?: 2 | 3
+  verdict_source?: 'controller_task_status_v3'
+  task_status?: 'proved' | 'refuted' | 'incomplete' | 'uncertain'
+  critical_dependencies?: { claim: string; provenance: 'given' | 'proved' | 'standard' | 'unverified'; check: string }[]
+  notes?: string[]
+}
+
 export type Review = {
   id: string
   candidate: string
   candidate_sha256: string
   call: string
-  response: { verdict: 'no_issue_found' | 'issues_found' | 'uncertain'; explanation: string; issues: ReviewIssue[] } | null
+  response: ReviewResponse | null
   protocol_error: string | null
 }
 

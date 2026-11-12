@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Ask Proof's reviewer to challenge its weakest nonroutine premise and verify
+  counterexample admissibility before checking the failed conclusion. Replace
+  two model-written status labels with one assessment and derive the operational
+  verdict after consistency checks. Preserve legacy review schemas and exact-hash
+  migration from recognized policies 7/8/9/10 to policy 11 without changing saved
+  calls, candidates, allowances or generation settings.
+- Calibrate Proof reviews to essential mathematical validity: retain harmless
+  corrections as nonblocking notes, check critical theorem dependencies and
+  require a complete proof or admissible counterexample before acceptance.
+  Show these checks and notes in the review and report. Keep repair obligations
+  explicitly fallible, with reasoned dispositions, without extra model calls.
 - Prepare external LemmaBench JSONL data as statement-only benchmark inputs,
   preserving reference and judging material separately. Export exact written
   answers in solution JSONL format, with optional initial Proof candidates,

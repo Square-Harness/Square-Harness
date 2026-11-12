@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Visual interface server: security boundaries and workflows against a simulated Ollama."""
+import copy
 import http.client
 import json
 import os
@@ -13,13 +14,17 @@ import unittest
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from mathagent import cli
+from mathagent import cli, proof
+from mathagent.agent import Agent
 from mathagent.deepinfra import LEGACY_MODEL as DEEPINFRA_LEGACY_MODEL, MODEL as DEEPINFRA_MODEL
 from mathagent.gui import server, store
 from mathagent.gui.hub import Hub
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
 from mathagent.model_limits import PROFILE as DS4_PROFILE
+from mathagent.proof_policy import LEGACY_VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request
+from mathagent.tools import Workspace
+from test_research import FakeClient, response
 
 MODEL = 'test-model:latest'
 
@@ -190,7 +195,11 @@ class SecurityTests(GuiCase):
 
 PROOF = ('Let x be an arbitrary real number. Equality is reflexive, so $x=x$. '
          'Since x was arbitrary, the statement holds for every real number.')
-APPROVAL = {'explanation': 'Reflexivity covers every real x.', 'issues': [], 'verdict': 'no_issue_found'}
+APPROVAL = {'schema_version': 3, 'explanation': 'Reflexivity covers every real x.',
+            'issues': [], 'task_status': 'proved',
+            'critical_dependencies': [{'claim': 'Every real x equals itself.', 'provenance': 'standard',
+                                       'check': 'Reflexivity of equality applies to each real x.'}],
+            'notes': []}
 
 
 class FakeDeepInfra:
@@ -448,8 +457,10 @@ class DeepInfraWorkflowTests(GuiCase):
 
 
     def test_api_key_gui_proof_preserves_reasoning_usage_and_private_credentials(self):
+        approval = copy.deepcopy(APPROVAL)
+        approval['notes'] = ['A harmless notation typo does not affect reflexivity.']
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
-                             (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
+                             (json.dumps(approval), 'Reviewer reasoning.', 23)]
         status = self.ok('GET', '/api/status')
         self.assertTrue(status['ollama']['reachable'])
         self.assertFalse(status['online'])
@@ -483,6 +494,15 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertTrue(all(auth is None if path == '/v1/openai/models' else auth == 'Bearer ' + self.fake.key
                             for path, auth in self.fake.requests))
         stored = ProofStore.load(self.root, started['id'])
+        normalized = proof.validate_review(json.dumps(approval))
+        self.assertEqual(stored.state['reviews'][0]['response'], normalized)
+        self.assertEqual(normalized['verdict_source'], 'controller_task_status_v3')
+        self.assertNotIn('verdict', self.fake.completions[1]['response_format']['json_schema']['schema']['properties'])
+        report = (stored.directory / 'report.md').read_text()
+        self.assertIn('Whole-task assessment: proved', report)
+        self.assertIn('Dependency (standard)', report)
+        self.assertIn('Nonblocking note:', report)
+        self.assertEqual(self.fake.completions[0]['messages'], initial_request(stored.state['goal']))
         self.assertTrue(all('estimate' in call['context']['method'] for call in stored.state['calls']))
         streams = [self.ok('GET', f'/api/proofs/{started["id"]}/stream/{call["stream"]}?from=0')
                    for call in stored.state['calls']]
@@ -490,6 +510,131 @@ class DeepInfraWorkflowTests(GuiCase):
                          ['Solver reasoning.', 'Reviewer reasoning.'])
         self.assertEqual([stream['stats']['eval_count'] for stream in streams], [37, 23])
         self.assertNotIn(self.fake.key, json.dumps([status, detail, streams]))
+
+        # Completion/dependency metadata is a substantive gate, while notes are
+        # nonblocking. Legacy JSON is accepted only under its explicit contract.
+        legacy = {k: APPROVAL[k] for k in ('explanation', 'issues')}
+        legacy['verdict'] = 'no_issue_found'
+        legacy_v2 = {**copy.deepcopy(APPROVAL), 'schema_version': 2, 'verdict': 'no_issue_found'}
+        self.assertEqual(proof.validate_review(json.dumps(legacy), schema_version=1), legacy)
+        self.assertEqual(proof.validate_review(json.dumps(legacy_v2), schema_version=2), legacy_v2)
+        with self.assertRaises(ValueError):
+            proof.validate_review(json.dumps(legacy))
+        for change in ({'task_status': 'incomplete'}, {'schema_version': 1},
+                       {'verdict': 'no_issue_found'}, {'assessment': 'proved'},
+                       {'verdict_source': 'controller_task_status_v3'},
+                       {'critical_dependencies': []},
+                       {'critical_dependencies': [{'claim': 'The hard step.', 'provenance': 'unverified',
+                                                    'check': 'No argument supplied.'}]},
+                       {'issues': [{'location': 'Conclusion', 'kind': 'missing_justification',
+                                    'evidence': 'The required universal conclusion was not proved.'}]}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                proof.validate_review(json.dumps({**approval, **change}))
+        with self.assertRaisesRegex(ValueError, 'Duplicate JSON field: task_status'):
+            proof.validate_review(json.dumps(approval).replace('"task_status": "proved"',
+                                  '"task_status": "proved", "task_status": "uncertain"'))
+        undecided = {**approval, 'task_status': 'uncertain',
+                     'issues': [{'location': 'Auxiliary lemma', 'kind': 'uncertainty',
+                                 'evidence': 'The essential theorem applicability is undecided.'}]}
+        self.assertEqual(proof.validate_review(json.dumps(undecided))['verdict'], 'uncertain')
+        self.assertEqual(proof.validate_review(json.dumps({**approval, 'task_status': 'refuted'}))['verdict'],
+                         'no_issue_found')
+        with self.assertRaisesRegex(ValueError, 'concrete essential issue'):
+            proof.validate_review(json.dumps({**undecided, 'task_status': 'incomplete'}))
+        # Historical contradictory v2 assessments remain protocol failures;
+        # deriving the new verdict must not reinterpret a saved old response.
+        contradictory_v2 = {**legacy_v2, 'verdict': 'issues_found',
+                            'issues': [{'location': 'Overview', 'kind': 'invalid_inference',
+                                        'evidence': 'A claimed consequence contradicts the calculation.'}]}
+        with self.assertRaisesRegex(ValueError, 'Validated task completion'):
+            proof.validate_review(json.dumps(contradictory_v2), schema_version=2)
+        contradictory_v2 = {**legacy_v2, 'verdict': 'issues_found'}
+        with self.assertRaisesRegex(ValueError, 'concrete mathematical issue'):
+            proof.validate_review(json.dumps(contradictory_v2), schema_version=2)
+
+        # An essential gap triggers the same sequential repair, with no extra
+        # role or call; a fresh reviewer receives neither old review nor record.
+        objection = {**copy.deepcopy(APPROVAL), 'task_status': 'incomplete',
+                     'issues': [{'location': 'Conclusion', 'kind': 'missing_justification',
+                                 'evidence': 'SYNTHETIC_UNMET_OBLIGATION: no argument for all x.'}]}
+        scripted = FakeClient([response('A proof sketch.'), response(json.dumps(objection)),
+                               response(PROOF), response(json.dumps(approval))])
+        runner = proof.ProofRunner(Agent(scripted, Workspace(self.root), MODEL, ctx=16384))
+        repaired = runner.start('Prove x=x for every real x.', max_rounds=2,
+                                max_predict=1024, verify_tokens=1024, max_tokens=8192)
+        self.assertEqual(repaired['status'], 'candidate_complete')
+        self.assertEqual(repaired['selected_candidate']['id'], 'P2')
+        self.assertEqual(len(scripted.requests), 4)
+        self.assertIn('repaired, rebutted or unresolved', scripted.requests[2]['messages'][0]['content'])
+        self.assertNotIn('SYNTHETIC_UNMET_OBLIGATION', scripted.requests[3]['messages'][0]['content'])
+        earlier = runner.state['reviews'][0]
+        later = runner.state['reviews'][1]
+        record = json.loads(runner._repair_history(later))
+        self.assertEqual(record[0]['disposition'], 'not_reassessed')
+        self.assertIn('No resolution established', record[0]['reason'])
+        self.assertEqual(earlier['response'], proof.validate_review(json.dumps(objection)))
+        self.assertEqual(earlier['response']['verdict'], 'issues_found')
+        abstaining = FakeClient([response(PROOF), response(json.dumps(undecided))])
+        abstention = proof.ProofRunner(Agent(abstaining, Workspace(self.root), MODEL, ctx=16384)).start(
+            'Prove x=x for every real x.', max_rounds=2, max_predict=1024, verify_tokens=1024, max_tokens=8192)
+        self.assertEqual(abstention['status'], 'uncertain')
+        self.assertEqual(len(abstaining.requests), 2)  # No automatic repair after abstention.
+
+        # Recover an old verifier stream that finished before the ledger review
+        # was committed. Migration preserves immutable input/output and budgets;
+        # parsing uses that old request schema, not the new job policy version.
+        for contract, old_version, schema, saved_response in (
+                (1, 9, LEGACY_VERIFIER_SCHEMA, legacy), (2, 10, VERIFIER_SCHEMA_V2, legacy_v2),
+                (2, 10, VERIFIER_SCHEMA_V2, contradictory_v2)):
+            legacy_protocol_failure = saved_response is contradictory_v2
+            interrupted = FakeClient([response(PROOF), response(json.dumps(saved_response)) + [KeyboardInterrupt()]])
+            old_runner = proof.ProofRunner(Agent(interrupted, Workspace(self.root), MODEL, ctx=16384))
+            with patch.object(proof, 'VERIFIER_SCHEMA', schema):
+                paused = old_runner.start('Prove x=x for every real x.', max_rounds=2,
+                                          max_predict=1024, verify_tokens=1024, max_tokens=8192)
+            self.assertEqual(paused['status'], 'paused')
+            old = ProofStore.load(self.root, paused['id'])
+            old.state['settings'].update(policy_version=old_version, policy_sha256='0' * 64)
+            old.save()
+            resumed_client = FakeClient([response(json.dumps(approval))] if legacy_protocol_failure else [])
+            resumed = proof.ProofRunner(Agent(resumed_client, Workspace(self.root), MODEL, ctx=16384))
+            with self.assertRaisesRegex(ValueError, 'policy_sha256'):
+                resumed.resume(paused['id'])
+            old = ProofStore.load(self.root, paused['id'])
+            old.state['settings']['policy_sha256'] = proof.RECOGNIZED_POLICY_HASHES[old_version]
+            old.save()
+            allowances = {k: old.state['settings'][k] for k in
+                          ('max_rounds', 'max_tokens', 'max_seconds', 'max_predict', 'verify_tokens', 'repair_tokens')}
+            immutable = {p.name: p.read_bytes() for p in (old.directory / 'artifacts').iterdir()}
+            recovered = resumed.resume(paused['id'])
+            self.assertEqual(recovered['status'], 'candidate_complete')
+            self.assertEqual(len(resumed_client.requests), int(legacy_protocol_failure))
+            self.assertEqual(resumed.state['settings']['policy_version'], 11)
+            self.assertEqual(resumed.state['reviews'][0]['schema_version'], contract)
+            if legacy_protocol_failure:
+                self.assertIsNone(resumed.state['reviews'][0]['response'])
+                self.assertIn('concrete mathematical issue', resumed.state['reviews'][0]['protocol_error'])
+                self.assertEqual(resumed.state['reviews'][1]['response'], normalized)
+                self.assertEqual(resumed.state['reviews'][1]['schema_version'], 3)
+                self.assertEqual(resumed_client.requests[0]['format'], proof.VERIFIER_SCHEMA)
+                self.assertEqual([call['role'] for call in resumed.state['calls']],
+                                 ['solver', 'verifier', 'verifier'])
+                self.assertEqual([c['id'] for c in resumed.state['candidates']], ['P1'])
+            else:
+                self.assertEqual(resumed.state['reviews'][0]['response'], saved_response)
+            self.assertEqual(resumed.state['policy_migrations'][0]['from_policy'], old_version)
+            self.assertEqual(allowances, {k: resumed.state['settings'][k] for k in allowances})
+            self.assertEqual(immutable, {name: (old.directory / 'artifacts' / name).read_bytes() for name in immutable})
+        for old_version in (7, 8, 9):
+            old = ProofStore.load(self.root, paused['id'])
+            old.state['status'] = 'paused'
+            old.state['settings'].update(policy_version=old_version,
+                                         policy_sha256=proof.RECOGNIZED_POLICY_HASHES[old_version])
+            old.save()
+            with patch.object(resumed, '_run', return_value={}):
+                resumed.resume(paused['id'])
+            self.assertEqual(resumed.state['policy_migrations'][-1]['from_policy'], old_version)
+            self.assertEqual(resumed.state['settings']['policy_version'], 11)
 
         # Actual provider streams use type:null in tool-call continuation
         # chunks. The full GUI turn must execute the tool and send its result

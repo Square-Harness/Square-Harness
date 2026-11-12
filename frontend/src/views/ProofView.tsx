@@ -20,7 +20,7 @@ const PHASES: Record<string, string> = { solve: 'Solve', review: 'Review', repai
 const SELECTIONS: Record<string, string> = {
   first_written_candidate: 'first written answer',
   finished_response_replaces_fragment: 'a finished answer replaces an unfinished one',
-  whole_proof_review_found_no_issue: 'the whole-proof review found no issue',
+  whole_proof_review_found_no_issue: 'the whole-proof review found no blocking issue',
   uncertain_repair_replaces_candidate_with_known_issue: 'an uncertain repair replaces an answer with a concrete objection',
 }
 
@@ -191,7 +191,7 @@ function SelectedAnswer({ data, candidate }: { data: ProofDetail; candidate: Can
         <h2 className="candidate-title">{title}</h2>
         <p className="caveat">
           {clean
-            ? 'A fresh review by the same model found no issue in the whole proof. That is a model judgement, not verification: check every step yourself.'
+            ? 'A fresh review by the same model found no blocking mathematical issue. Nonblocking notes may remain in the review. This is a model judgement, not a proof certificate.'
             : candidate.review_status === 'unreviewed'
               ? 'This is the answer the harness exports as proof.md. It has not been reviewed yet.'
               : 'This is the answer the harness exports as proof.md. It has not passed a review; the attempts below show what the reviewer said.'}
