@@ -206,8 +206,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `texcheck` findings; no model verdict is used, and the field is not called
   `verdict` (the hub reads that name for reviews). Keep the PDF downloadable when
   the gate leaves the draft partial. A ready document prints no "Points to
-  check" block; the block's `% TODO` points are typeset as LaTeX and fall back to
-  escaped text when an error lies in the block.
+  check" block; a draft's block only counts, in the document's language
+  (`LANGUAGES`), the TODO comments and the other points, which the report lists
+  (`_points_to_check`): no model-written or English text goes into the PDF.
 - **Workflow status.** Operational failures (timeout, budget, context, malformed
   output) retain their own stop reasons. Partial work stays labelled partial.
   Retryable child failures keep their pending native transaction and saved job;

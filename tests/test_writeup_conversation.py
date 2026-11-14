@@ -22,6 +22,12 @@ PLAN = json.dumps({'kind': 'notes', 'scope': 'document', 'language': 'English', 
                    'sections': [], 'needs': []})
 
 
+def report_points(job):
+    """The report's list of points to check."""
+    report = (job / 'report.md').read_text()
+    return report[report.index('## Points to check'):].split('\n## ', 1)[0]
+
+
 def writing_prompt(fake):
     """The writing call's prompt: the outline call comes before it, the review calls after it."""
     return next(r['messages'][1]['content'] for r in reversed(fake.requests)
@@ -78,15 +84,19 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
         self.assertIn('\\renewcommand{\\E}{{\\mathbb{E}}}', document)  # the request's notation wins
         self.assertIn('\\usepackage[shortlabels]{enumitem}', document)
         self.assertEqual(state['missing_figures'], ['missing-plot'])  # a placeholder; fig.png was copied
+        # The PDF's block only counts, in the document's language; the points are listed in the report.
         block = document[document.index('Points to check'):document.index('\\section{Result}')]
-        self.assertIn('check the constant 4\\_x against the reference.', block)
-        self.assertIn('Invented13', block)
-        self.assertNotIn('HS04', block)
-        self.assertIn('missing-plot', block)
+        self.assertIn('1 TODO comment in the source marks a point to settle.', block)
+        self.assertNotIn('textbackslash', block)
+        points = report_points(job)
+        self.assertIn('check the constant 4_x against the reference.', points)
+        self.assertIn('Invented13', points)
+        self.assertNotIn('HS04', points)
+        self.assertIn('missing-plot', points)
         self.assertIn('By \\eqref{eq:exit} and', document)  # (\\ref{...}) normalised
-        self.assertIn('eq:missing', block)
-        self.assertNotIn('eq:exit', block)
-        self.assertIn('the equation above', block)
+        self.assertIn('eq:missing', points)
+        self.assertNotIn('eq:exit', points)
+        self.assertIn('the equation above', points)
         self.assertIn('\\begin{equation*} a = b \\end{equation*}', document)  # numbered only when referred to
         self.assertIn('\\begin{equation}\\label{eq:exit}', document)
         self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
@@ -123,7 +133,7 @@ By \cite{HS04}, see also \cite{Fake99}.
         self.assertIn('doi = {10.1007/s10955-004-5712-8}', document)
         self.assertIn('\\bibliography{', document)
         self.assertNotIn('Invented', document)
-        self.assertIn('Fake99', document[document.index('Points to check'):document.index('\\section{Result}')])
+        self.assertIn('Fake99', report_points(made.parent))
 
         # A conversation's retrieved record supplies the bibliography even when
         # the writer emits only a citation, without retyping the metadata.

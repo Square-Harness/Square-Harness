@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Write-up: a draft's "Points to check" block only counts, in the document's
+  language, the TODO comments and the other points to settle; the points
+  themselves are listed in the report on the write-up's page. No raw LaTeX and
+  no English sentence appear any more in the PDF of a French exam.
 - Write-up: the style check reads the text without comments, so `% TODO`
   comments are no longer reported as text that talks about its source.
 - Write-up: a generated section is kept only when a requirement it cites names

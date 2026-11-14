@@ -774,9 +774,10 @@ How it works:
    name of a person or work that only the plan mentions, with no source, keeps
    the document a draft.
    Otherwise it is a **Draft**: the reply starts with `Draft:` and says why, and
-   the document opens with **Points to check** (its `% TODO` comments, typeset,
-   and the problems found), to delete once they are settled. A ready document
-   has no such block. "Ready" means these checks passed: read it before using it.
+   the document opens with a short **Points to check** notice, in its language,
+   counting the `% TODO` comments and the other points to settle; the report on
+   the write-up's page lists them. Delete the notice once they are settled. A
+   ready document has no such block. "Ready" means these checks passed: read it before using it.
    When you attach a complete `.tex` of your paper, three more checks apply,
    because the text is meant to be pasted into it: a label your paper already
    uses, a citation outside your bibliography, and a command or environment your
