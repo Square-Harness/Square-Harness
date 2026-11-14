@@ -40,8 +40,8 @@ from .ledger import _atomic_write, _bytes, _directory, _now, _regular
 from . import texcheck
 from .texcheck import POSITIONAL as _POSITIONAL
 from .research import ResearchBudget, ResearchRunner, _job_directory, _read_state, remaining_limit
-from .style import (_group, definition_body, environment_definitions, grouped, list_profiles, macro_definitions,
-                    style_digest, uses)
+from .style import (_group, annotated, definition_body, environment_definitions, grouped, list_profiles,
+                    macro_definitions, needed_macros, style_digest, uses)
 from .worker_errors import WorkerInputError
 from .model_limits import output_limit, input_limit, sampling, is_ds4
 
@@ -864,6 +864,17 @@ def reference_diagnostics(log):
                         r'undefined citations|unresolved citations', log, re.I)
     result['unresolved'] = bool(summary or any(result.values()))
     return result
+
+
+def _installed(package):
+    """Whether TeX finds the package; assumed when there is no kpsewhich to ask."""
+    exe = shutil.which('kpsewhich')
+    if exe is None:
+        return True
+    try:
+        return subprocess.run([exe, package + '.sty'], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
 
 
 def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
@@ -2813,7 +2824,8 @@ class WriteupRunner(ResearchRunner):
         macros = [m for m in profile['macros'] if articles & set(m['articles'])
                   and m['name'] not in protected and definition_body(m['definition']) not in bodies]
         return {'label': label, 'profile': profile['name'], 'domain': domain['name'],
-                'digest': style_digest(profile, domain['name']), 'macros': macros,
+                'digest': style_digest(profile, domain['name'], limit=input_limit(self.agent, 'style_guidelines', 1500)),
+                'macros': macros, 'packages': {p['name']: p['options'] for p in profile.get('packages') or []},
                 'template': [f['name'] for f in profile.get('template') or []]}
 
     def _notation(self):
@@ -2827,8 +2839,8 @@ class WriteupRunner(ResearchRunner):
             out.append('TEMPLATE MACROS: use them instead of their expansions:\n' + '\n'.join(self.state['definitions'])[:2500])
         style = self.state.get('style')
         if style and style['macros']:
-            out.append("THE AUTHOR'S USUAL MACROS: use them where they fit:\n"
-                       + '\n'.join(m['definition'] for m in style['macros'])[:1500])
+            out.append("THE AUTHOR'S USUAL MACROS: use them where they fit, each for what its comment says only:\n"
+                       + '\n'.join(annotated(m) for m in style['macros'])[:input_limit(self.agent, 'style_guidelines', 1500)])
         standard = self._standard()
         if standard:
             meaning = {n: what for n, _, what in STANDARD_NOTATION}
@@ -4777,13 +4789,25 @@ class WriteupRunner(ResearchRunner):
         return ('\n% Notation from the request\n' + '\n'.join(lines)) if lines else ''
 
     def _style_preamble(self, preamble, body):
-        """The saved style's macros that the document uses and the preamble lacks."""
+        """The saved style's macros that the document uses (or that their definitions use) and the preamble
+        lacks, after the packages they need."""
         style = self.state.get('style')
         if not style:
             return ''
         defined = self._defined(preamble)
-        lines = [grouped(m['definition']) for m in style['macros'] if m['name'] not in defined and uses(body, m['name'])]
-        if any('PairedDelimiter' in line for line in lines) and 'mathtools' not in preamble:
+        macros = [m for m in needed_macros(style['macros'], body) if m['name'] not in defined]
+        lines = [grouped(m['definition']) for m in macros]
+        for name in dict.fromkeys(p for m in macros for p in m.get('packages') or []):
+            if re.search(_LOADED % re.escape(name), preamble):
+                continue
+            if not _installed(name):
+                note = f'The style\'s macros need the package {name}, which this TeX installation lacks; it was not loaded.'
+                if note not in self.state['warnings']:
+                    self.state['warnings'].append(note)
+                continue
+            options = (style.get('packages') or {}).get(name)
+            lines.insert(0, f'\\usepackage[{options}]{{{name}}}' if options else f'\\usepackage{{{name}}}')
+        if any('PairedDelimiter' in line for line in lines) and not re.search(_LOADED % 'mathtools', '\n'.join([preamble] + lines)):
             lines.insert(0, '\\usepackage{mathtools}')
         return ('\n% From the saved style "' + style['label'] + '"\n' + '\n'.join(lines)) if lines else ''
 
@@ -6670,9 +6694,15 @@ class WriteupRunner(ResearchRunner):
             body = '\\begin{abstract}\n' + self.state['abstract'] + '\n\\end{abstract}\n\n' + body.lstrip('\n')
         own = set(self.state['macros']) | set(self.state.get('request_macros') or {})
         style = self.state.get('style') or {}
-        macros = {**self._standard(), **{m['name']: m['definition'] for m in style.get('macros') or []},
+        # A style macro brings the macros its definition uses (\E inside \Ex) and the packages it needs.
+        needed = [m for m in needed_macros(style.get('macros') or [], body) if m['name'] not in own]
+        macros = {**self._standard(), **{m['name']: m['definition'] for m in needed},
                   **self._model_macros(), **(self.state.get('supplied_macros') or {})}
-        lines = [grouped(d) for n, d in macros.items() if n not in own and uses(body, n)]
+        brought = {m['name'] for m in needed}
+        lines = [grouped(d) for n, d in macros.items() if n not in own and (n in brought or uses(body, n))]
+        options = style.get('packages') or {}
+        lines = [f'\\usepackage[{options[p]}]{{{p}}}' if options.get(p) else f'\\usepackage{{{p}}}'
+                 for p in dict.fromkeys(p for m in needed for p in m.get('packages') or [])] + lines
         environments = {**environment_definitions(model), **(self.state.get('supplied_environments') or {})}
         lines += [d for n, d in environments.items() if n not in self.state['theorems'] and f'\\begin{{{n}}}' in body]
         head = '% ' + (self.state.get('title') or 'Body') + ': the text alone, to paste into a paper or to \\input.\n'

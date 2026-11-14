@@ -183,7 +183,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   deletion, so cleanup includes old copies without deleting work during retry.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
-  (`writeup._request_preamble`). A written document is always assembled,
+  (`writeup._request_preamble`). A saved style's macro brings the macros its
+  definition uses and the packages it needs, unless the preamble already loads
+  them or TeX lacks them (`writeup._style_preamble`). A written document is always assembled,
   compiled and offered, even when time ran out while writing
   (`WriteupRunner._check_time`). `tidy_numbering` never touches labels or
   displays that come from the material: the rest of the author's paper may refer
@@ -556,7 +558,7 @@ documented together when releasing these features.
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
-| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
+| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
 | | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; retries and the provider breaker (`down`); a wider CA-bundle fallback for TLS |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
@@ -684,6 +686,16 @@ ranges, then reassess the quoted previous comments against those passages.
 Unsupported quotes remain unresolved. Keep the original report, the existing
 budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
+
+Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
+`classify` (domains by field and readership) → `observe` (one call per article,
+answering `QUESTIONS` about how the author explains; the whole body when it fits
+`style_packet`) → `condense` (one call per domain of several articles) →
+`macros` (one call: what each macro is used for, and its packages) → `save`.
+Names and phrasings must occur in the articles, typesetting examples in their
+LaTeX, and a macro's packages among those its files load (or `KNOWN_PACKAGES`);
+the rest is dropped and counted in the warnings. Profiles are version 2; version
+1 files, with `habits` and no packages, stay readable and usable.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of

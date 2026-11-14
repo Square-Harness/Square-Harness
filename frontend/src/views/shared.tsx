@@ -100,6 +100,7 @@ export const ROLES: Record<string, RoleInfo> = {
   classify: { active: 'Sorting your articles by domain', name: 'Domains', structured: true },
   observe: { active: 'Reading an article for how it is written', name: 'Article style', structured: true },
   condense: { active: 'Merging the articles of one domain into a style', name: 'Domain style', structured: true },
+  macros: { active: 'Reading how you use your macros', name: 'Macros', structured: true },
   screen: { active: 'Screening records for the reading list', name: 'Screen', structured: true },
   organise: { active: 'Grouping the reading list by theme', name: 'Organise', structured: true },
   annotate: { active: 'Annotating the reading list', name: 'Annotate', structured: true },

@@ -49,7 +49,9 @@ Number and refer as a careful author does; turning a display of the material int
 
 ## Style
 
-- When the author's style is given, follow it: how they announce and explain results, their tone and phrasings where they fit. Otherwise write as a careful author in the material's field would.
+- When the author's style is given, follow it wherever the request and the material leave the choice open: write for the audience it names; introduce definitions, motivate the work and the proof strategies, organise proofs and point to the contribution as the author does; use their tone and voice, their names for results and objects, their typesetting habits, and their phrasings where they fit. Otherwise write as a careful author in the material's field would.
+- What the author leaves out sets how much detail routine steps get. It never removes a hypothesis, a case or a step the material relies on, and never adds a reference the material does not give.
+- Use each of the author's macros only for what its comment says it is for.
 
 ## Output
 

@@ -903,10 +903,30 @@ name and reused in any folder.
 ### Writing styles
 
 **Learn my writing style** condenses the `.tex` sources of your earlier articles
-into a named style: the macros you actually use, your theorem environments and,
-for each kind of paper you write, how you announce, explain and phrase things.
-Choose main article files, ideally two or more per kind of paper; `\input` parts
-are not followed, so pin them as well. A style can also keep a LaTeX template (an
+into a named style. The articles are sorted into kinds of paper (by field and
+readership), and for each kind the style answers, from what your papers actually
+do:
+
+- who the papers are written for, and what that changes;
+- how and when you introduce definitions;
+- how you motivate the work and which results the introduction puts forward;
+- how and when you motivate a proof strategy;
+- how you organise proofs (for example the strategy first, the key results from
+  propositions and lemmas, the lemma proofs at the end);
+- what you leave out or take as given, and when you give references;
+- how you point the reader to the core of the contribution;
+- your tone and voice.
+
+It also keeps your names for things that have several names (Cauchy–Lipschitz or
+Picard–Lindelöf), your typesetting habits (such as `\left(\!`), your phrasings,
+the packages your articles load and the macros you use, with what each is used
+for when the definition does not say it and the packages it needs. Names,
+typesetting examples and phrasings are kept only when they occur in your
+articles. With the DS4 profile each article is read whole (any `.tex` the
+harness can read, up to 1 MB); smaller models read representative passages, and
+the job's warnings name every article that was not read whole. Choose main
+article files, ideally two or more per kind of paper; `\input` parts are not
+followed, so pin them as well (a pinned macro file counts). A style can also keep a LaTeX template (an
 article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
 style build on unless you attach one. An article that cannot be read as text
 (binary, over 1 MB) is left out and named in the job's warnings; the style is
@@ -919,8 +939,12 @@ still require their `.tex` sources; they are not reconstructed from images.
 
 On the same page, **Style used by write-ups** chooses: automatically (a short
 call picks the style that fits the material, or none), none, one style, or one
-of its domains. A style gives phrasing and macros, never the structure of your
-papers: the request sets the structure. Styles and this choice are kept in the
+of its domains. A write-up follows the chosen style wherever the request and the
+material leave the choice open, uses your macros for what you use them for and
+loads the packages they need; the request still sets the structure of the
+document, and the style never changes its mathematics. Styles learnt with
+earlier versions keep their shorter description and still work; learn them
+again to get the full guide. Styles and this choice are kept in the
 `.mathagent/` folder of `--gui-root` and shared by every folder.
 
 ### Python Lab and Sanity check

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Learn writing styles as explanation guides: per kind of paper, who it is
+  written for and how the author introduces definitions, motivates the work and
+  proof strategies, organises proofs, leaves things out and points to the
+  contribution, with tone, field-dependent names and typesetting habits. Names,
+  typesetting examples and phrasings must occur in the articles. Read whole
+  articles with DS4. Keep the packages articles load and, per macro, what it is
+  used for and the packages it needs; write-ups load those packages, bring the
+  macros a definition uses and follow the full guide. Ignore layout settings
+  redefined by classes; count macro uses across pinned files. Saved version 1
+  styles remain readable.
 - Upgrade Literature review for research mathematicians. Resolve citation leads
   in primary bibliographies, reconsider records linked by later papers, and use
   the original mathematical question throughout. A compact plan selects the

@@ -1,25 +1,40 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Style profiles: condense an author's earlier .tex articles into a small reusable file.
+"""Style profiles: condense an author's earlier .tex articles into a reusable style guide.
 
-The controller extracts what can be read exactly (macro definitions and how often the
-body uses them, theorem environments, section skeletons); the model only describes
-what needs judgement: which articles belong to the same domain, what each kind of
-article sets out to do, how it is organised and how it explains. Quoted phrasings are
-kept only when they occur verbatim in the articles.
+The controller extracts what can be read exactly: macro definitions and how often the
+bodies use them, the packages the articles load, theorem environments and section
+skeletons. The model answers what needs judgement, per domain of articles: who the
+papers are written for and how the author explains (`QUESTIONS`: definitions,
+motivation, proof strategy, proof organisation, what is left out, the contribution,
+tone), which names the author uses for objects with several names, their typesetting
+habits, and what a macro is used for when its definition does not say it.
 
-A profile is one JSON file (format below) with bounded fields, so a later write-up can
-include the part for one domain in roughly a thousand tokens (see `style_prompt`).
+Model output is checked against the articles: phrasings and names are kept only when
+they occur in the text, typesetting habits only when their example occurs in the LaTeX
+source, and a macro's packages only when its files load them (or a known package
+provides a command of its definition).
 
-    {"format": "square-style", "version": 1, "name": ..., "created_at": ..., "updated_at": ...,
+A profile is one JSON file:
+
+    {"format": "square-style", "version": 2, "name", "created_at", "updated_at",
      "articles": [{"path", "sha256", "title", "domain"}],
-     "macros": [{"name", "definition", "uses", "articles": [path]}],
+     "packages": [{"name", "options", "articles": [path]}],
+     "macros": [{"name", "definition", "uses", "articles": [path], "usage", "packages": [name]}],
      "environments": [{"name", "definition", "uses"}],
-     "domains": [{"name", "description", "articles": [path],
-                  "aim", "structure": [str], "habits": [str], "phrases": [str]}],
+     "domains": [{"name", "description", "articles": [path], "audience", "aim", "structure": [str],
+                  "definitions", "motivation", "proof_motivation", "proof_organisation",
+                  "omissions", "contribution", "tone": [str],
+                  "names": [{"term", "note"}], "typesetting": [{"habit", "example"}], "phrases": [str]}],
      "template": [{"name", "content"}]}   (optional: the LaTeX template write-ups in this style build on)
+
+Version 1 files, learnt before these questions, have `habits` instead of the explanation
+fields, and no packages or macro notes; they are read as they are.
+
+A write-up reads one domain through `style_digest` and the macros through `annotated`.
 """
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -32,16 +47,56 @@ from .model_limits import input_limit
 from . import images
 
 FORMAT = 'square-style'
+VERSION = 2
 NAME = re.compile(r'[\w][\w .-]{0,59}')
-LIMITS = {'aim': 400, 'item': 200, 'structure': 10, 'habits': 10, 'phrases': 8, 'macros': 80, 'environments': 30}
-PROMPT_CHARS = 6000  # a domain's style text for a later write-up, about 1500 tokens
+LIMITS = {'aim': 400, 'audience': 400, 'item': 300, 'structure': 12, 'question': 5, 'names': 12, 'typesetting': 12,
+          'phrases': 10, 'usage': 200, 'macros': 100, 'environments': 30, 'packages': 60}
+REPORT_CHARS = 40_000  # the whole style, in the job's report
 TEMPLATE_FILES = ('.tex', '.sty', '.cls', '.bib')
+
+# What a style answers about how the author explains: key, heading, question.
+QUESTIONS = (
+    ('definitions', 'Definitions',
+     'how and when definitions and notation are introduced: all up front in a preliminaries section, or just before '
+     'their first use; in Definition environments or inline; with or without examples'),
+    ('motivation', 'Motivation and the results put forward',
+     'how the work is motivated and which results the introduction puts forward for this audience: applications, '
+     'open problems, the place in a theory; main results stated informally or in full, and how early'),
+    ('proof_motivation', 'Motivating the proof strategy',
+     'how and when the strategy of a proof is motivated: an outline before the details, the key idea named, the '
+     'difficulty and why a naive approach fails, a comparison with earlier methods'),
+    ('proof_organisation', 'Organising proofs',
+     'how proofs are organised: for example the broad strategy first, then the proofs of the key results from '
+     'propositions and lemmas, with the lemma proofs gathered at the end; or every proof in its own section; steps '
+     'and claims inside long proofs'),
+    ('omissions', 'What is left out',
+     'what is left out or taken as given: which steps are called obvious or standard, whether every claim not proved '
+     'gets a reference, which results are used without one, whether a technique is pointed to its general framework'),
+    ('contribution', 'Pointing to the contribution',
+     'how the reader is pointed to the core of the contribution: contributions listed, novelty stated against '
+     'earlier work, the key idea or estimate flagged, where the main theorem appears'),
+    ('tone', 'Tone and voice',
+     'tone and voice: person (we, I, impersonal), tense, register, how formal the explanations are, how the reader '
+     'is addressed'),
+)
 
 _DEFINE = re.compile(r'\\(?:(?:re|provide)?newcommand\*?|DeclareMathOperator\*?|DeclarePairedDelimiter|def)(?![A-Za-z@])')
 _THEOREM = re.compile(r'\\(?:newtheorem|declaretheorem)\*?(?![A-Za-z@])')
 _HEADING = re.compile(r'\\(section|subsection)\*?\s*(?:\[[^\]]*\]\s*)?\{')
 _ENVIRONMENT = re.compile(r'\\begin\{([A-Za-z*]+)\}')
 _INPUT = re.compile(r'\\(?:input|include)\{([^}]+)\}')
+_PACKAGE = re.compile(r'\\(?:usepackage|RequirePackage)\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}')
+# Layout settings a class or a journal template redefines: they are not the author's notation.
+_LAYOUT = re.compile(r'(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge'
+                     r'|[a-z]+name|[a-z]+default|[a-z]*rule(?:width)?|baselinestretch|arraystretch|maketitle'
+                     r'|the(?:footnote|page|part|chapter|section|subsection|subsubsection|paragraph|equation|figure|table|enum[iv]+)'
+                     r'|label(?:enum|item)[iv]+)')
+# Packages that provide a command a macro definition may use (beyond LaTeX and amsmath).
+KNOWN_PACKAGES = {
+    'mathds': 'dsfont', 'mathbbm': 'bbm', 'mathscr': 'mathrsfs', 'bm': 'bm', 'mathbb': 'amssymb',
+    'mathfrak': 'amssymb', 'coloneqq': 'mathtools', 'eqqcolon': 'mathtools', 'DeclarePairedDelimiter': 'mathtools',
+    'llbracket': 'stmaryrd', 'rrbracket': 'stmaryrd', 'textcolor': 'xcolor', 'SI': 'siunitx', 'upmu': 'upgreek',
+}
 
 SCAN_KEYS = ('title', 'abstract', 'headings', 'environments', 'inputs', 'lines')
 
@@ -54,14 +109,42 @@ DOMAINS_SCHEMA = {
                        'articles': {'type': 'array', 'items': {'type': 'string', 'maxLength': 10}}}}}},
 }
 
+
+def _strings(count, length=LIMITS['item']):
+    return {'type': 'array', 'maxItems': count, 'items': {'type': 'string', 'maxLength': length}}
+
+
+def _records(count, fields):
+    """An array of objects with these text fields, given as (name, maximum length, characters trimmed)."""
+    return {'type': 'array', 'maxItems': count, 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': [name for name, _, _ in fields],
+        'properties': {name: {'type': 'string', 'maxLength': length} for name, length, _ in fields}}}
+
+
+# A quoted term loses its quotes; a LaTeX example only spaces and backticks (a final ' can be a prime).
+NAME_FIELDS = (('term', 120, ' "\'“”`'), ('note', LIMITS['item'], ' '))
+TYPESETTING_FIELDS = (('habit', LIMITS['item'], ' '), ('example', 200, ' `'))
+
 STYLE_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['aim', 'structure', 'habits', 'phrases'],
+    'type': 'object', 'additionalProperties': False,
+    'required': ['audience', 'aim', 'structure', *(key for key, _, _ in QUESTIONS), 'names', 'typesetting', 'phrases'],
     'properties': {
+        'audience': {'type': 'string', 'maxLength': LIMITS['audience']},
         'aim': {'type': 'string', 'maxLength': LIMITS['aim']},
-        'structure': {'type': 'array', 'maxItems': LIMITS['structure'], 'items': {'type': 'string', 'maxLength': LIMITS['item']}},
-        'habits': {'type': 'array', 'maxItems': LIMITS['habits'], 'items': {'type': 'string', 'maxLength': LIMITS['item']}},
-        'phrases': {'type': 'array', 'maxItems': LIMITS['phrases'], 'items': {'type': 'string', 'maxLength': LIMITS['item']}},
+        'structure': _strings(LIMITS['structure']),
+        **{key: _strings(LIMITS['question']) for key, _, _ in QUESTIONS},
+        'names': _records(LIMITS['names'], NAME_FIELDS),
+        'typesetting': _records(LIMITS['typesetting'], TYPESETTING_FIELDS),
+        'phrases': _strings(LIMITS['phrases']),
     },
+}
+
+MACROS_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['macros'],
+    'properties': {'macros': {'type': 'array', 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': ['name', 'usage', 'packages'],
+        'properties': {'name': {'type': 'string', 'maxLength': 60}, 'usage': {'type': 'string', 'maxLength': LIMITS['usage']},
+                       'packages': _strings(4, 40)}}}},
 }
 
 
@@ -144,13 +227,62 @@ def environment_definitions(tex):
     return found
 
 
+def packages(tex):
+    """The packages a file loads in its preamble, with their options: name -> options."""
+    preamble, found = strip_comments(tex).split('\\begin{document}', 1)[0], {}
+    for match in _PACKAGE.finditer(preamble):
+        for name in match.group(2).split(','):
+            name = name.strip()
+            if re.fullmatch(r'[A-Za-z0-9-]+', name):
+                found.setdefault(name, ' '.join((match.group(1) or '').split()))
+    return found
+
+
+def macro_packages(definition):
+    """Packages known to provide a command the definition uses."""
+    return {KNOWN_PACKAGES[name] for name in re.findall(r'\\([A-Za-z]+)', definition) if name in KNOWN_PACKAGES}
+
+
 def document_body(tex):
     text = strip_comments(tex)
     return text.split('\\begin{document}', 1)[1] if '\\begin{document}' in text else text
 
 
+def written_text(tex):
+    """The text where commands are used rather than defined: the document body, or for a file without
+    one (a fragment, a .sty) the file without its definition and package lines."""
+    if '\\begin{document}' in strip_comments(tex):
+        return document_body(tex)
+    return '\n'.join(line for line in strip_comments(tex).splitlines()
+                     if not (_DEFINE.search(line) or _THEOREM.search(line) or _PACKAGE.search(line)))
+
+
 def uses(body, name):
     return len(re.findall(r'\\' + re.escape(name) + r'(?![A-Za-z@])', body))
+
+
+def _referenced(definition):
+    """The command names a definition contains, its own included."""
+    return set(re.findall(r'\\([A-Za-z]+)', definition))
+
+
+def needed_macros(macros, text):
+    """The macros `text` uses, with the macros their definitions use in turn, in the order given."""
+    by_name = {m['name']: m for m in macros}
+    pending = [name for name in by_name if uses(text, name)]
+    needed = set(pending)
+    while pending:
+        for name in _referenced(by_name[pending.pop()]['definition']) & by_name.keys() - needed:
+            needed.add(name)
+            pending.append(name)
+    return [m for m in macros if m['name'] in needed]
+
+
+def contexts(body, name, count=3, width=70):
+    """Up to `count` passages of the body around uses of \\name, spread over the text, spaces normalised."""
+    starts = [m.start() for m in re.finditer(r'\\' + re.escape(name) + r'(?![A-Za-z@])', body)]
+    picked = sorted({starts[i * (len(starts) - 1) // max(1, count - 1)] for i in range(count)}) if starts else []
+    return [' '.join(body[max(0, s - width):s + len(name) + 1 + width].split()) for s in picked]
 
 
 def scan(tex):
@@ -178,16 +310,20 @@ def scan(tex):
 
 
 def excerpts(tex, room):
-    """Representative passages within `room` characters: the introduction's opening, the
-    opening of every section, one substantial proof and the start of the last section."""
-    body = document_body(tex).split('\\end{document}', 1)[0]
+    """The article's body when it fits in `room` characters, as (text, True). Otherwise representative
+    passages, as (text, False): the introduction's opening, the opening of every section, one substantial
+    proof and the start of the last section."""
+    body = re.sub(r'\n{3,}', '\n\n', document_body(tex).split('\\end{document}', 1)[0].strip())
+    if len(body) <= room:
+        return '--- Full text ---\n' + body, True
     starts = [m.start() for m in re.finditer(r'\\section\*?\s*(?:\[[^\]]*\]\s*)?\{', body)]
     parts = []
     if starts:
+        opening = max(600, room // (3 * len(starts)))
         intro_end = starts[1] if len(starts) > 1 else len(body)
         parts.append(('Introduction (opening)', body[starts[0]:min(intro_end, starts[0] + room // 3)]))
         for start in starts[1:]:
-            parts.append(('Section opening', body[start:start + 600]))
+            parts.append(('Section opening', body[start:start + opening]))
         if len(starts) > 1:
             parts.append(('Last section (opening)', body[starts[-1]:starts[-1] + room // 8]))
     else:
@@ -202,28 +338,76 @@ def excerpts(tex, room):
             continue
         shown.append(f'--- {label} ---\n{text}')
         used += len(text)
-    return '\n\n'.join(shown)
+    return '\n\n'.join(shown), False
 
 
-def verbatim(phrase, sources):
-    """Whether a quoted phrasing occurs in one of the articles, up to spacing."""
-    needle = ' '.join(phrase.strip(' "\'“”').split())
-    return len(needle) >= 8 and any(needle in ' '.join(strip_comments(text).split()) for text in sources)
+# -- checking the model's description against the articles -------------------------------
+
+def _flat(text):
+    return ' '.join(text.split())
+
+
+def _term(text):
+    """A name as compared with the articles: case, braces, ties and dash styles ignored."""
+    text = re.sub(r'---?|[–—]', '-', text.replace('~', ' ')).replace('{', '').replace('}', '')
+    return _flat(text.lower())
+
+
+def verbatim(phrase, texts):
+    """Whether a quoted phrasing occurs in one of the texts (comments removed, spaces normalised)."""
+    needle = _flat(phrase.strip(' "\'“”'))
+    return len(needle) >= 8 and any(needle in text for text in texts)
+
+
+def _text(value, length):
+    return _flat(str(value or ''))[:length]
 
 
 def _items(values, count):
-    return [' '.join(str(v).split())[:LIMITS['item']] for v in values or [] if isinstance(v, str) and v.strip()][:count]
+    return [_flat(str(v))[:LIMITS['item']] for v in values or [] if isinstance(v, str) and v.strip()][:count]
 
 
-def clean_style(value, sources):
-    """Bound a model's style description; keep only phrasings found verbatim."""
+def _records_of(values, fields, count):
+    """The model's objects whose text fields are all given, trimmed and bounded as `fields` says."""
+    out = []
+    for value in values or []:
+        if isinstance(value, dict) and all(isinstance(value.get(name), str) for name, _, _ in fields):
+            item = {name: _flat(value[name].strip(trim))[:length] for name, length, trim in fields}
+            if all(item.values()):
+                out.append(item)
+    return out[:count]
+
+
+def blank_style():
+    return {'audience': '', 'aim': '', 'structure': [], **{key: [] for key, _, _ in QUESTIONS},
+            'names': [], 'typesetting': [], 'phrases': []}
+
+
+def clean_style(value, sources, typeset=None):
+    """Bound a model's style description and check its quotations against the articles.
+
+    Phrasings and names are kept only when they occur in `sources`; a typesetting habit only when its
+    example occurs in `typeset`, the LaTeX the author wrote (by default the sources; none for
+    screenshots). Returns the style and the number of quotations dropped.
+    """
     value = value if isinstance(value, dict) else {}
-    phrases = _items(value.get('phrases'), LIMITS['phrases'] * 2)
-    kept = [p for p in phrases if verbatim(p, sources)][:LIMITS['phrases']]
-    return {'aim': ' '.join(str(value.get('aim') or '').split())[:LIMITS['aim']],
-            'structure': _items(value.get('structure'), LIMITS['structure']),
-            'habits': _items(value.get('habits'), LIMITS['habits']),
-            'phrases': [p.strip(' "\'“”') for p in kept]}, len(phrases) - len(kept)
+    texts = [_flat(strip_comments(t)) for t in sources]
+    terms = [_term(t) for t in texts]
+    source = texts if typeset is None else [_flat(strip_comments(t)) for t in typeset]
+    style = {'audience': _text(value.get('audience'), LIMITS['audience']), 'aim': _text(value.get('aim'), LIMITS['aim']),
+             'structure': _items(value.get('structure'), LIMITS['structure']),
+             **{key: _items(value.get(key), LIMITS['question']) for key, _, _ in QUESTIONS}}
+    names = _records_of(value.get('names'), NAME_FIELDS, LIMITS['names'] * 2)
+    found_names = [n for n in names if len(_term(n['term'])) >= 3 and any(_term(n['term']) in t for t in terms)]
+    examples = _records_of(value.get('typesetting'), TYPESETTING_FIELDS, LIMITS['typesetting'] * 2) if source else []
+    found_examples = [t for t in examples if len(t['example']) >= 3 and any(t['example'] in s for s in source)]
+    phrases = [p.strip(' "\'“”') for p in _items(value.get('phrases'), LIMITS['phrases'] * 2)]
+    found_phrases = [p for p in phrases if verbatim(p, texts)]
+    style['names'] = found_names[:LIMITS['names']]
+    style['typesetting'] = found_examples[:LIMITS['typesetting']]
+    style['phrases'] = found_phrases[:LIMITS['phrases']]
+    dropped = len(names) + len(examples) + len(phrases) - len(found_names) - len(found_examples) - len(found_phrases)
+    return style, dropped
 
 
 # -- the saved file ------------------------------------------------------------------------
@@ -290,7 +474,7 @@ def public_profile(profile):
 
 
 def valid_profile(value):
-    return (isinstance(value, dict) and value.get('format') == FORMAT and value.get('version') == 1
+    return (isinstance(value, dict) and value.get('format') == FORMAT and value.get('version') in (1, VERSION)
             and isinstance(value.get('name'), str) and isinstance(value.get('domains'), list)
             and isinstance(value.get('macros'), list) and isinstance(value.get('articles'), list))
 
@@ -334,32 +518,76 @@ def _domain(profile, domain):
     return next((d for d in profile['domains'] if d['name'].lower() == str(domain or '').lower()), None)
 
 
-def style_prompt(profile, domain=None, limit=PROMPT_CHARS):
-    """Compact style guidance for a write-up: one domain's description, then its macros."""
+# -- the style as text ---------------------------------------------------------------------
+
+def annotated(macro):
+    """A macro's definition with what the author uses it for, as a LaTeX comment."""
+    return macro['definition'] + (f'  % {macro["usage"]}' if macro.get('usage') else '')
+
+
+def _guide(style):
+    """How the author explains, as (heading, lines) blocks in the order a writer needs them."""
+    blocks = [('', ['Written for: ' + style['audience']] if style.get('audience') else [])]
+    blocks += [(label + ':', ['- ' + item for item in style.get(key) or []]) for key, label, _ in QUESTIONS]
+    blocks.append(('How the author explains:', ['- ' + item for item in style.get('habits') or []]))  # version 1 styles
+    blocks.append(('Names the author uses for things that have several names:',
+                   [f'- {n["term"]}: {n["note"]}' for n in style.get('names') or []]))
+    blocks.append(('Typesetting habits to reproduce:',
+                   [f'- {t["habit"]} Example: {t["example"]}' for t in style.get('typesetting') or []]))
+    blocks.append(('Phrasings the author uses, where they fit:', ['- "' + p + '"' for p in style.get('phrases') or []]))
+    return blocks
+
+
+def _fitted(blocks, limit):
+    """The blocks within `limit` characters: whole lines only, a heading only above a line it heads."""
+    out, size = [], 0
+    for heading, lines in blocks:
+        taken = []
+        for line in lines:
+            extra = len(line) + 1 + (len(heading) + 1 if heading and not taken else 0)
+            if size + extra > limit:
+                break
+            taken.append(line)
+            size += extra
+        if taken:
+            out += ([heading] if heading else []) + taken
+    return '\n'.join(out)
+
+
+def style_digest(profile, domain, limit=1500):
+    """One domain style as guidelines for writing a document: who it is for and how the author explains,
+    names, typesetting and phrasings, the most useful first.
+
+    The request sets a document's structure, so the papers' usual order of sections is left out (how
+    proofs are organised stays); macros are given separately, after the user's own notation has been
+    removed from them.
+    """
+    chosen = _domain(profile, domain)
+    if chosen is None:
+        return ''
+    head = (f'AUTHOR STYLE "{profile["name"]}", domain "{chosen["name"]}"'
+            + (f': {chosen["description"]}' if chosen.get('description') else '') +
+            '. Follow these habits of the author wherever the request and the material leave the choice open.')
+    return _fitted([('', [head])] + _guide(chosen), limit)
+
+
+def style_prompt(profile, domain=None, limit=REPORT_CHARS):
+    """The whole style as text, for the job's report: each domain, then the macros with their notes."""
     chosen = _domain(profile, domain)
     domains = [chosen] if chosen else profile['domains']
-    source_label = 'supplied text sources; archive members may be article fragments' if any(a.get('source_archive') for a in profile['articles']) else "of the author's articles"
-    out = [f'AUTHOR STYLE "{profile["name"]}" (condensed from {len(profile["articles"])} {source_label}).']
+    source_label = ('supplied text sources; archive members may be article fragments'
+                    if any(a.get('source_archive') for a in profile['articles']) else "of the author's articles")
+    blocks = [('', [f'AUTHOR STYLE "{profile["name"]}" (condensed from {len(profile["articles"])} {source_label}).'])]
     for item in domains:
-        out.append(f'\nDomain: {item["name"]}. {item.get("description", "")}'.rstrip())
-        if item.get('aim'):
-            out.append('Aim of these papers: ' + item['aim'])
-        if item.get('structure'):
-            out.append('Typical structure:\n' + '\n'.join(f'{i}. {s}' for i, s in enumerate(item['structure'], 1)))
-        if item.get('habits'):
-            out.append('Explanation habits:\n' + '\n'.join('- ' + h for h in item['habits']))
-        if item.get('phrases'):
-            out.append('Characteristic phrasings (verbatim): ' + '; '.join(f'"{p}"' for p in item['phrases']))
+        blocks.append(('', ['', f'Domain: {item["name"]}. {item.get("description", "")}'.rstrip()]))
+        blocks.append(('', ['Aim of these papers: ' + item['aim']] if item.get('aim') else []))
+        blocks.append(('Usual order of a paper:', [f'{i}. {s}' for i, s in enumerate(item.get('structure') or [], 1)]))
+        blocks += _guide(item)
     articles = set(chosen['articles']) if chosen else None
-    macros = [m['definition'] for m in profile['macros'] if articles is None or articles & set(m['articles'])]
-    text = '\n'.join(out)
-    if macros:
-        text += '\nUse these macros instead of their expansions:\n'
-        for definition in macros:
-            if len(text) + len(definition) + 1 > limit:
-                break
-            text += definition + '\n'
-    return text[:limit]
+    macros = [m for m in profile['macros'] if articles is None or articles & set(m['articles'])]
+    blocks.append(('\nMacros (use them instead of their expansions):',
+                   [annotated(m) + (f'  [needs {", ".join(m["packages"])}]' if m.get('packages') else '') for m in macros]))
+    return _fitted(blocks, limit)
 
 
 # -- the job -------------------------------------------------------------------------------
@@ -398,7 +626,7 @@ class StyleRunner(ResearchRunner):
 
     def _extra_state(self):
         return {'phase': 'scan', 'style_name': self._name, 'articles': [], 'domains': [],
-                'observations': {}, 'profile': None, 'saved_to': None, 'template': self._template,
+                'observations': {}, 'macro_notes': None, 'profile': None, 'saved_to': None, 'template': self._template,
                 'skipped': self._skipped}
 
     def _material(self, role):
@@ -413,6 +641,10 @@ class StyleRunner(ResearchRunner):
 
     def _article(self, source_id):
         return next(s for s in self.state['sources'] if s['id'] == source_id)
+
+    def _typeset_sources(self):
+        """The sources the author typeset: screenshots show wording and layout, not their LaTeX."""
+        return [s for s in self.state['sources'] if not s.get('derived_from_images')]
 
     def _digest(self, article):
         heads = '\n'.join(article['headings'][:30]) or '(no \\section headings)'
@@ -430,6 +662,8 @@ class StyleRunner(ResearchRunner):
             self._observe()
         elif phase == 'condense':
             self._condense()
+        elif phase == 'macros':
+            self._annotate_macros()
         elif phase == 'save':
             self._save_profile()
             self.state['phase'] = 'done'
@@ -457,10 +691,12 @@ class StyleRunner(ResearchRunner):
     def _classify(self):
         articles = self.state['articles']
         instruction = ('Sort these articles by the kind of mathematical writing they are, so the author gets one style per '
-                       'domain (for example numerical analysis, theoretical PDE, geometry). Group articles whose aim and '
-                       'readership are alike; use a single domain when they all are. Give each domain a short name and a '
-                       'one-sentence description of its aim, and list its article identifiers such as "M1". Every article '
-                       'belongs to exactly one domain.\n\nAUTHOR\'S NOTE (may be empty): ' + self.state['goal'] +
+                       'domain (for example numerical analysis, theoretical PDE, geometry, or mathematics written for '
+                       'physicists). Group articles whose aim and readership are alike: the same field, and the same '
+                       'audience (specialists, the wider mathematical community, or readers from another science). Use a '
+                       'single domain when they all are alike. Give each domain a short name and a one-sentence '
+                       'description of its aim and readership, and list its article identifiers such as "M1". Every '
+                       'article belongs to exactly one domain.\n\nAUTHOR\'S NOTE (may be empty): ' + self.state['goal'] +
                        '\n\nARTICLES:\n' + '\n\n'.join(self._digest(a) for a in articles))
         result = self._call('classify', instruction, cap=1500, format_schema=DOMAINS_SCHEMA)
         try:
@@ -491,91 +727,194 @@ class StyleRunner(ResearchRunner):
             self.state['phase'] = 'condense'
             return
         article = pending[0]
-        cap = 2500
+        source = self._article(article['id'])
+        cap = 6000
+        room = self._room(cap)
+        text, whole = excerpts(source['content'], room)
+        if not whole:
+            self.state['warnings'].append(f'{article["path"]} is longer than one call can read here ({room:,} characters); '
+                                          'its style was learnt from representative passages, not the whole text.')
         domain = next(d for d in self.state['domains'] if article['id'] in d['articles'])
-        instruction = (f'Describe the writing style of article {article["id"]}, from the domain "{domain["name"]}". '
-                       'Describe how it is written, not what it proves: what the paper sets out to do for its reader '
-                       '(aim); its typical structure as an ordered list of parts, each with what that part does; '
-                       'the author\'s explanation habits (how results are motivated and announced, how proofs are '
-                       'organised and signposted, use of remarks, examples, figures or numerical tables, notation '
-                       'conventions, tone, person and tense); and up to eight short characteristic phrasings copied '
-                       'exactly from the text (connectives and signposts, not mathematical statements). Be concrete and '
-                       'brief: one sentence per item.\n\n' + self._digest(article) +
-                       '\n\nEXCERPTS (LaTeX source, comments removed):\n' + excerpts(self._article(article['id'])['content'], self._room(cap)))
+        instruction = (f'Describe how article {article["id"]} (domain "{domain["name"]}") is written, not what it proves, '
+                       'as the style method says. Answer from what this article actually does: concrete items that another '
+                       'writer could follow, never advice that would fit any author. Leave a list empty rather than '
+                       'filling it with something generic.\n'
+                       '- audience: who the paper is written for (specialists of its field, the wider mathematical '
+                       'community, physicists or other applied readers) and what that changes in the exposition.\n'
+                       '- aim: what the paper sets out to do for its reader.\n'
+                       '- structure: its parts in order, each with what that part does.\n'
+                       + ''.join(f'- {key}: {question}.\n' for key, _, question in QUESTIONS) +
+                       '- names: objects, results or methods that have several names (by field or country, for example '
+                       'Cauchy--Lipschitz or Picard--Lindelöf theorem, overdamped Langevin dynamics or a reversible '
+                       'diffusion) with the term copied exactly as the article writes it, and in the note what it names '
+                       'and which other names it is preferred to.\n'
+                       '- typesetting: habits of the LaTeX source that a write-up should reproduce (spacing or sizing of '
+                       'delimiters, \\displaystyle in fractions, how differentials, sets, norms, expectations or '
+                       'conditional expectations are written, choice of equation environments, labels), each with an '
+                       'example copied exactly from the source.\n'
+                       '- phrases: short characteristic connectives and signposts copied exactly from the text, not '
+                       'mathematical statements.\n\n' + self._digest(article) +
+                       '\n\nARTICLE (LaTeX source, comments removed):\n' + text)
         result = self._call('observe', instruction, cap=cap, format_schema=STYLE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
             value = {}
-        style, dropped = clean_style(value, [self._article(article['id'])['content']])
+        style, dropped = clean_style(value, [source['content']], [] if source.get('derived_from_images') else None)
         if dropped:
-            self.state['warnings'].append(f'{dropped} phrasing(s) quoted for {article["path"]} were not found verbatim and were dropped.')
-        if not result['complete'] or not (style['aim'] or style['structure'] or style['habits']):
+            self.state['warnings'].append(f'{dropped} name(s), typesetting example(s) or phrasing(s) quoted for '
+                                          f'{article["path"]} were not found in it and were dropped.')
+        if not result['complete'] or not (style['aim'] or style['structure'] or any(style[k] for k, _, _ in QUESTIONS)):
             self.state['warnings'].append(f'The style description of {article["path"]} is incomplete.')
         self.state['observations'][article['id']] = {**style, 'complete': result['complete']}
 
     def _condense(self):
         domain = next((d for d in self.state['domains'] if not d['complete']), None)
         if domain is None:
-            self.state['phase'] = 'save'
+            self.state['phase'] = 'macros'
             return
-        notes = [self.state['observations'][i] for i in domain['articles'] if i in self.state['observations']]
-        sources = [self._article(i)['content'] for i in domain['articles']]
+        notes = [{k: v for k, v in self.state['observations'][i].items() if k != 'complete'}
+                 for i in domain['articles'] if i in self.state['observations']]
         if len(notes) == 1:  # one article: its description is already the domain's
-            domain['style'] = {k: notes[0][k] for k in ('aim', 'structure', 'habits', 'phrases')}
+            domain['style'] = {**blank_style(), **notes[0]}
             domain['complete'] = True
             return
+        articles = [self._article(i) for i in domain['articles']]
         instruction = (f'Merge these style descriptions of {len(notes)} articles from the domain "{domain["name"]}" '
-                       f'({domain["description"]}) into one style for writing new papers of this kind. Keep what recurs '
-                       'across articles and what is distinctive of this author; drop what is specific to one paper\'s '
-                       'mathematics. The structure is the author\'s usual order of parts. Keep phrasings exactly as '
-                       'quoted.\n\nDESCRIPTIONS:\n' + json.dumps(
-                           [{k: n[k] for k in ('aim', 'structure', 'habits', 'phrases')} for n in notes], ensure_ascii=False, indent=1))
-        result = self._call('condense', instruction, cap=2500, format_schema=STYLE_SCHEMA)
+                       f'({domain["description"]}) into one style guide for writing new papers of this kind, with the '
+                       'same fields. Keep what recurs across articles and what is distinctive of this author; where the '
+                       'articles differ, say on what it depends (for example the length of the paper or its readers). '
+                       'Drop what is specific to one paper\'s mathematics and anything generic. The structure is the '
+                       'author\'s usual order of parts. Keep names, typesetting examples and phrasings exactly as '
+                       'quoted.\n\nDESCRIPTIONS:\n' + json.dumps(notes, ensure_ascii=False, indent=1))
+        result = self._call('condense', instruction, cap=6000, format_schema=STYLE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
             value = {}
-        style, _ = clean_style(value, sources)
+        style, _ = clean_style(value, [a['content'] for a in articles],
+                               [a['content'] for a in articles if not a.get('derived_from_images')])
         domain['merged'] = result['complete'] and bool(style['aim'] or style['structure'])
         if not domain['merged']:
             self.state['warnings'].append(f'Merging the "{domain["name"]}" articles failed; the first article\'s description is used.')
-            style = {k: notes[0][k] for k in ('aim', 'structure', 'habits', 'phrases')}
+            style = {**blank_style(), **notes[0]}
         domain['style'], domain['complete'] = style, True
 
-    def _profile(self):
-        sources = self.state['sources']
-        bodies = {s['path']: document_body(s['content']) for s in sources}
-        macros, environments = {}, {}
+    def _macros(self):
+        """The macros the files define and the texts use, most widely used first (exact, no model).
+
+        Uses are counted in every file, so a macro file pinned with the articles counts. The definition
+        kept is the one of the file whose text uses the macro most (the first one, on a tie)."""
+        sources = self._typeset_sources()
+        commands = {s['path']: Counter(re.findall(r'\\([A-Za-z]+)(?![A-Za-z@])', written_text(s['content']))) for s in sources}
+        definitions = {}
         for source in sources:
-            if source.get('derived_from_images'):
-                continue  # Screenshots show wording/layout, not exact TeX macro definitions.
             for name, definition in macro_definitions(source['content']).items():
-                if '@' in name:
-                    continue
-                count = uses(bodies[source['path']], name)
-                entry = macros.setdefault(name, {'name': name, 'definition': definition, 'uses': 0, 'articles': [], 'best': -1})
-                if count > entry['best']:  # the definition from the article that uses the macro most
-                    entry['definition'], entry['best'] = definition, count
-                if count:
-                    entry['uses'] += count
-                    entry['articles'].append(source['path'])
+                if '@' not in name and not _LAYOUT.fullmatch(name):
+                    definitions.setdefault(name, []).append((source['path'], definition))
+        found = {}
+        for name, defined in definitions.items():
+            counts = {path: count[name] for path, count in commands.items() if count[name]}
+            path, definition = max(defined, key=lambda item: counts.get(item[0], 0))
+            found[name] = {'name': name, 'definition': definition, 'uses': sum(counts.values()),
+                           'articles': list(counts), 'source': path}
+        kept = sorted((m for m in found.values() if m['uses']), key=lambda m: (-len(m['articles']), -m['uses'], m['name']))
+        kept = kept[:LIMITS['macros']]
+        # A kept definition may use a macro the texts never use directly (\E inside \Ex): keep it too, for
+        # the articles that need it. The list grows while it is read, so dependencies of dependencies come.
+        names = {m['name']: m for m in kept}
+        for macro in kept:
+            for name in sorted(_referenced(macro['definition']) - {macro['name']}):
+                if name in found:
+                    if name not in names:
+                        names[name] = found[name]
+                        kept.append(found[name])
+                    names[name]['articles'] = list(dict.fromkeys(names[name]['articles'] + macro['articles']))
+        return kept
+
+    def _annotate_macros(self):
+        """One call: what each macro is used for when its definition does not say it, and the packages it needs."""
+        macros = self._macros()
+        if not macros:
+            self.state['macro_notes'], self.state['phase'] = {}, 'save'
+            return
+        sources = {s['path']: s['content'] for s in self._typeset_sources()}
+        loaded = {path: packages(content) for path, content in sources.items()}
+        texts = {path: written_text(content) for path, content in sources.items()}
+        cap = 6000
+        room = self._room(cap)
+        listing = 'PACKAGES EACH FILE LOADS:\n' + '\n'.join(f'{path}: {", ".join(names) or "none"}' for path, names in loaded.items())
+        shown = []
+        for macro in macros:
+            seen = [snippet for path in macro['articles'][:2] for snippet in contexts(texts[path], macro['name'], 3)]
+            entry = (f'\n\n\\{macro["name"]} (defined in {macro["source"]}; {macro["uses"]} direct uses)\n'
+                     f'Definition: {macro["definition"]}\nIn use: ' + (' | '.join(seen) or 'only inside other macros'))
+            if len(listing) + len(entry) > room:
+                break
+            listing += entry
+            shown.append(macro['name'])
+        instruction = ('For each macro below, from its definition and the passages where the author uses it, give:\n'
+                       '- usage: what the author uses it for, in a few words, when the definition alone does not say it or '
+                       'when the author keeps it for one purpose (for example \\rmo defined as \\mathrm{o} and used only for '
+                       'the little-o of asymptotic expansions: "little-o in asymptotic expansions only"); empty when the '
+                       'definition says it all;\n'
+                       '- packages: the packages its definition needs to compile, among those its files load; none when '
+                       'LaTeX and amsmath suffice.\nAnswer for every macro listed, by its name without the backslash.\n\n'
+                       + listing)
+        result = self._call('macros', instruction, cap=cap, format_schema=MACROS_SCHEMA)
+        try:
+            value = json.loads(result['text'])
+        except ValueError:
+            value = {}
+        by_name = {m['name']: m for m in macros}
+        notes = {}
+        for item in (value.get('macros') if isinstance(value, dict) else None) or []:
+            name = str(item.get('name') or '').lstrip('\\') if isinstance(item, dict) else ''
+            if name not in by_name or name in notes:
+                continue
+            macro = by_name[name]
+            available = {p for path in [macro['source'], *macro['articles']] for p in loaded.get(path, {})}
+            notes[name] = {'usage': _text(item.get('usage'), LIMITS['usage']),
+                           'packages': sorted({str(p).strip() for p in item.get('packages') or []} & available)}
+        self.state['macro_notes'] = notes
+        self.state['macros_complete'] = result['complete'] and len(shown) == len(macros)
+        if not result['complete']:
+            self.state['warnings'].append('The call describing how the macros are used did not finish; some macros have no note.')
+        elif len(shown) < len(macros):
+            self.state['warnings'].append(f'{len(macros) - len(shown)} less used macro(s) did not fit in the call that '
+                                          'describes the macros; they are kept without a note.')
+        self.state['phase'] = 'save'
+
+    def _profile(self):
+        sources = self._typeset_sources()
+        bodies = {s['path']: document_body(s['content']) for s in sources}
+        notes = self.state.get('macro_notes') or {}
+        macros = []
+        for macro in self._macros():
+            note = notes.get(macro['name'], {})
+            macros.append({**{k: macro[k] for k in ('name', 'definition', 'uses', 'articles')}, 'usage': note.get('usage', ''),
+                           'packages': sorted(macro_packages(macro['definition']) | set(note.get('packages', [])))})
+        loaded, environments = {}, {}
+        for source in sources:
+            for name, options in packages(source['content']).items():
+                entry = loaded.setdefault(name, {'name': name, 'options': options, 'articles': []})
+                entry['articles'].append(source['path'])
             for name, definition in environment_definitions(source['content']).items():
                 entry = environments.setdefault(name, {'name': name, 'definition': definition, 'uses': 0})
                 entry['uses'] += len(re.findall(r'\\begin\{' + re.escape(name) + r'\}', bodies[source['path']]))
-        used = sorted((m for m in macros.values() if m['uses']), key=lambda m: (-len(m['articles']), -m['uses'], m['name']))
-        paths = {s['id']: s['path'] for s in sources}
+        paths = {s['id']: s['path'] for s in self.state['sources']}
         domain_of = {i: d['name'] for d in self.state['domains'] for i in d['articles']}
         now = _now()
-        return {'format': FORMAT, 'version': 1, 'name': self.state['style_name'],
+        return {'format': FORMAT, 'version': VERSION, 'name': self.state['style_name'],
                 'created_at': now, 'updated_at': now, 'job': self.state['id'], 'model': self.state['settings']['model'],
                 'articles': [{'path': a['path'], 'sha256': self._article(a['id'])['sha256'], 'title': a['title'],
                               'domain': domain_of.get(a['id'], ''),
                               **({'source_archive': a['source_archive']} if a.get('source_archive') else {})} for a in self.state['articles']],
-                'macros': [{k: m[k] for k in ('name', 'definition', 'uses', 'articles')} for m in used[:LIMITS['macros']]],
+                'packages': sorted(loaded.values(), key=lambda p: (-len(p['articles']), p['name']))[:LIMITS['packages']],
+                'macros': macros,
                 'environments': sorted(environments.values(), key=lambda e: -e['uses'])[:LIMITS['environments']],
                 'domains': [{'name': d['name'], 'description': d['description'], 'articles': [paths[i] for i in d['articles']],
-                             **(d['style'] or {'aim': '', 'structure': [], 'habits': [], 'phrases': []})}
+                             **blank_style(), **(d['style'] or {})}
                             for d in self.state['domains']]}
 
     def _save_profile(self):
@@ -600,15 +939,17 @@ class StyleRunner(ResearchRunner):
     def _finish(self):
         complete = (self.state.get('saved_to') and all(o.get('complete') for o in self.state['observations'].values())
                     and len(self.state['observations']) == len(self.state['articles'])
-                    and all(d.get('merged', True) for d in self.state['domains']))
+                    and all(d.get('merged', True) for d in self.state['domains'])
+                    and self.state.get('macros_complete', True))
         self.state['status'] = 'saved' if complete else 'partial'
         self.state['stop_reason'] = ('Style saved; read it and correct anything that does not sound like you.' if self.state.get('saved_to')
                                      else 'The style was not saved.')
 
     def _progress(self):
-        total = len(self.state.get('articles', [])) + len(self.state.get('domains', []))
-        done = len(self.state.get('observations', {})) + sum(bool(d.get('complete')) for d in self.state.get('domains', []))
-        return {'phase': self.state['phase'], 'completed': done, 'total': total, 'unit': 'articles and domains',
+        total = len(self.state.get('articles', [])) + len(self.state.get('domains', [])) + 1
+        done = (len(self.state.get('observations', {})) + sum(bool(d.get('complete')) for d in self.state.get('domains', []))
+                + (self.state.get('macro_notes') is not None))
+        return {'phase': self.state['phase'], 'completed': done, 'total': total, 'unit': 'articles, domains and macros',
                 'scope': self.state['goal'], 'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
                 'resumable': self.state['status'] in ('running', 'paused')}
 
@@ -622,7 +963,7 @@ class StyleRunner(ResearchRunner):
         if s.get('warnings'):
             out += ['', '## Controller checks', ''] + ['- ' + w for w in dict.fromkeys(s['warnings'])]
         if profile:
-            out += ['', '## Style (as given to a write-up)', '', '```text', style_prompt(profile, limit=PROMPT_CHARS * 3), '```']
+            out += ['', '## Style', '', '```text', style_prompt(profile), '```']
         out += ['', '## Articles and source fragments' if any(a.get('source_archive') for a in s.get('articles', [])) else '## Articles', '']
         domain_of = {i: d['name'] for d in s.get('domains', []) for i in d['articles']}
         for article in s.get('articles', []):
@@ -672,23 +1013,6 @@ def grouped(definition):
             or re.search(r'\\(?:begin|end|par)\b|\\\\|&|#', body)):
         return definition
     return match.group(1) + '{{' + body + '}}'
-
-
-def style_digest(profile, domain, limit=1500):
-    """The part of a domain style that helps write one document: how the author explains and phrases.
-
-    The request sets a document's structure, so the papers' structure is left out; macros are
-    given separately, after the user's own notation has been removed from them.
-    """
-    chosen = _domain(profile, domain)
-    if chosen is None:
-        return ''
-    out = [f'Author style "{profile["name"]}", {chosen["name"]}: {chosen.get("description", "")}'.rstrip()]
-    if chosen.get('habits'):
-        out.append('How the author explains:\n' + '\n'.join('- ' + h for h in chosen['habits'][:6]))
-    if chosen.get('phrases'):
-        out.append('Phrasings the author uses, where they fit: ' + '; '.join(f'"{p}"' for p in chosen['phrases'][:6]))
-    return '\n'.join(out)[:limit]
 
 
 CHOICE_MODES = ('auto', 'none', 'style', 'domain')
