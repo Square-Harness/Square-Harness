@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Write-up: documents built without a template, class or style file are set on
+  A4 with 2.5 cm margins (`geometry`), instead of the classes' wide margins.
 - Write-up fixes from live trials: an exam or exercise sheet keeps the
   preamble's `exercise`, `solution` and `\points` when the writer also defines
   them; `\\[2pt]` is no longer read as a display by the checker and the review;

@@ -1798,8 +1798,9 @@ class WriteupRunner(ResearchRunner):
 
     def _own_preamble(self, title):
         """The preamble when the user gives no complete template: amsart (article for an exam or an exercise sheet);
-        babel and theorem names in the document's language; exercise, solution and \\points for those two kinds; a
-        short title for amsart's running head when the title is long."""
+        A4 with 2.5 cm margins when no template, class or style file sets the layout; babel and theorem names in the
+        document's language; exercise, solution and \\points for those two kinds; a short title for amsart's
+        running head when the title is long."""
         outline = self.state.get('outline') or {}
         language = outline.get('language', 'english')
         babel, names, _ = LANGUAGES.get(language, LANGUAGES['english'])
@@ -1808,6 +1809,9 @@ class WriteupRunner(ResearchRunner):
         sheet = outline.get('kind') in ('exam', 'exercise_sheet')
         document_class = Path(classes[0]['path']).stem if classes else 'article' if sheet else 'amsart'
         lines = [f'\\documentclass{{{document_class}}}']
+        if not self._templates_in(('.tex', '.cls', '.sty')):
+            # The classes' own margins are wide for a working document; a template keeps its layout.
+            lines.append('\\usepackage[a4paper,margin=2.5cm]{geometry}')
         if language in LANGUAGES and language != 'english':
             lines += ['\\usepackage[T1]{fontenc}', f'\\usepackage[{babel}]{{babel}}']
         elif language not in LANGUAGES:

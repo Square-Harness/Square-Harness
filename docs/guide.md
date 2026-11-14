@@ -721,8 +721,9 @@ How it works:
    prelude. If time runs out, the text already written is compiled and offered
    as a partial draft. A conversation's sandbox results supply the executed
    Python code and their recorded figures, even if the answer did not repeat them.
-   Without a template, an exam or an exercise sheet uses the `article` class
-   with `exercise`, `solution` and `\points{n}` defined; another language than
+   Without a template, the page is A4 with 2.5 cm margins; an exam or an
+   exercise sheet uses the `article` class with `exercise`, `solution` and
+   `\points{n}` defined; another language than
    English gets babel and theorem names in that language (French, German,
    Spanish, Italian); a long title gets a short running title.
 3. Equations the text uses again are numbered and cited with `\eqref`; displays
