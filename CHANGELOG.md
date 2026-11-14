@@ -7,6 +7,10 @@
   them; `\\[2pt]` is no longer read as a display by the checker and the review;
   after a write-up stopped for missing material, a forced final answer reports
   what is missing instead of letting the Assistant write the document itself.
+  A review answer cut short by its output limit keeps its complete issues (and
+  that check counts as not fully run); the fidelity check asks for one-sentence
+  problems and fixes. An issue whose revision was refused because it changed a
+  formula is put to you with both versions.
 - Write-up: material too long for one writing call is written in parts that
   follow the plan's sections, each later part told its sections, the labels and
   the commands already defined; two different definitions of one command are a
