@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Write-up: generated mathematics counts as checked once the fidelity check has
+  run on the version; what is wrong in it is a fidelity issue. Exams and
+  exercise sheets can now be ready.
 - Write-up: an issue the review finds inside generated mathematics (an exercise,
   a solution, exam questions) is revised, even when the fix changes a formula
   or a statement there; the next check looks at it again. Formulas of your own

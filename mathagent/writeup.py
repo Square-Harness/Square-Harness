@@ -2263,6 +2263,10 @@ class WriteupRunner(ResearchRunner):
         digest = _digest(body)
         if self._review_due(digest) and self._review_step(digest):
             return  # one model call made; the next step goes on with the review
+        review = self._review_of(digest)
+        if review and review['layers'].get('fidelity') == 'done':
+            # Generated passages are checked: whatever is wrong in them is an open fidelity issue (G5).
+            self.state['checks'] = [f for f in self.state['checks'] if f['rule'] != 'composed']
         self.state['gates'] = self._gates()
         self.state['readiness'] = 'draft' if self.state['gates'] else 'ready'
         wanted = '' if self.state['readiness'] == 'ready' else self._checks_block(body)
