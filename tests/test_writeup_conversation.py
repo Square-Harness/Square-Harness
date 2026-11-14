@@ -22,6 +22,12 @@ PLAN = json.dumps({'kind': 'notes', 'scope': 'document', 'language': 'English', 
                    'sections': [], 'needs': []})
 
 
+def writing_prompt(fake):
+    """The writing call's prompt: the outline call comes before it, the review calls after it."""
+    return next(r['messages'][1]['content'] for r in reversed(fake.requests)
+                if 'Output the LaTeX body only' in r['messages'][1]['content'])
+
+
 class ConversationWriteupTests(GuiCase):
     extra_args = ('--ctx', '40960')
 
@@ -57,7 +63,7 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
                                                    'source_files': ['paper/notes.md'],
                                                    'template_files': ['paper/macros.sty', 'paper/refs.bib']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        prompt = self.fake.requests[-1]['messages'][1]['content']
+        prompt = writing_prompt(self.fake)
         self.assertIn('HS04: Holcman, D., Escape through a small opening (2004)', prompt)  # the author's .bib
         self.assertIn('never invent a bibliographic entry', prompt)
         self.assertIn('\\eqref{eq:short-name}', prompt)  # numbering and references are asked for
@@ -107,7 +113,7 @@ By \cite{HS04}, see also \cite{Fake99}.
         started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'source_files': ['paper/notes2.md']})
         made = self.root / '.mathagent' / 'research' / started['id'] / 'state.json'
         self.wait_for(lambda: made.exists() and json.loads(made.read_text())['status'] in ('complete', 'partial'), timeout=240)
-        self.assertIn('There is no bibliography file', self.fake.requests[-1]['messages'][1]['content'])
+        self.assertIn('There is no bibliography file', writing_prompt(self.fake))
         state = json.loads(made.read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
         self.assertEqual(state['status'], 'partial')
@@ -146,7 +152,7 @@ By \cite{HS04}, see also \cite{Fake99}.
         self.assertEqual(completed['status'], 'complete', completed['warnings'])
         self.assertFalse(completed['compile']['references']['unresolved'])
         self.assertTrue(completed['outputs']['pdf'])
-        self.assertIn('Holcman2004: D. Holcman', self.fake.requests[-1]['messages'][1]['content'])
+        self.assertIn('Holcman2004: D. Holcman', writing_prompt(self.fake))
 
 if __name__ == '__main__':
     unittest.main()

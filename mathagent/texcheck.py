@@ -26,7 +26,7 @@ import re
 CATEGORIES = ('BLOCKER', 'MATH', 'PROSE', 'LAYOUT', 'FIDELITY')
 # The gate each blocking rule belongs to (writeup.WriteupRunner._gates); PROSE and FIDELITY never block.
 GATE = {'latex-error': 'G1', 'undefined-reference': 'G2', 'undefined-citation': 'G2', 'duplicate-label': 'G2',
-        'todo': 'G4', 'draft-notice': 'G4', 'composed': 'G4', 'overfull': 'G7'}
+        'todo': 'G4', 'draft-notice': 'G4', 'composed': 'G4', 'part-missing': 'G6', 'overfull': 'G7'}
 LAYOUT_POINTS = 5.0
 
 # Formulas referred to by position or by a number typed by hand (writeup.reference_problems uses it too).

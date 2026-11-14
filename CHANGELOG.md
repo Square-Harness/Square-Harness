@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Write-up: review and revise before delivering, as Proof does. After a
+  successful compile each candidate is checked in three layers: the source
+  checker; a fidelity check against the material and the request (changed or
+  missing results, added mathematics, wrong generated exercises or solutions,
+  unmet requirements); and a style check, section by section, against the
+  guideline sheets, with one focused question per required part. Issues whose
+  quote is not in the text are dropped; the controller recomputes what can be
+  fixed by rewording and derives readiness from severities (G5 fidelity, G6
+  style and required parts), never from a model verdict. Rewordable issues are
+  revised one section per call under deterministic guards (same formulas, no
+  label lost, no new citation, theorem statements unchanged, length bounded);
+  a fix that changes a formula is put to the author with both versions. Up to
+  three rounds (one fewer than the job's rounds), stopping on stagnation or
+  when time or budget runs short; the best candidate is exported. Each step
+  is saved, so a paused job resumes inside the review. Ready documents are
+  exported without the review's `% PART:` and `% BEGIN/END COMPOSED` comments.
 - Write-up: plan before writing. One structured call works out the kind of
   document (article, notes, lecture notes, exercise sheet, exam, part of a
   paper, summary), its language, what the request asks for, the material's

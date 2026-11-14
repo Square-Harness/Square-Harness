@@ -264,6 +264,15 @@ Version 1.1.0. The source of truth for the machine-readable version is
   and share one compile deadline. Cancellation stops the compiler process group.
   latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
   which the repair call and the reference checks read.
+- **Write-up review.** Modelled on Proof: candidates and reviews are kept
+  (`state['candidates']`, `state['reviews']`, keyed by the body's digest), the
+  controller derives readiness from issue severities and never uses a model
+  verdict or category, drops issues whose quote is not in the body, and treats
+  a fix that changes a formula as the author's. Revisions pass
+  `_revision_guard` or are discarded. Calls use the roles `fidelity`,
+  `style_check`, `part_check` and `revise_section`; `review` would trigger the
+  research runner's citation checks. Review and revision stop with less than a
+  minute or 2,048 output tokens left; the best candidate is still exported.
 - **Write-up outline.** The controller, not the model, decides what blocks: a
   need blocks only when the model says so and a section depends on it (a
   decision: when it settles a problem of the material), with at most three
@@ -615,8 +624,13 @@ where they are referred to) → `assemble` (the preamble, the made bibliography
 and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
 files and the figures the text includes; commands and environments the text
 uses without defining are supplied) → `repair` (one call on the whole body) →
-`check` (`texcheck.check` and the gate; when the block must change, assemble and
-compile once more) → `export` (the folder, or kept for download when started
+`check` (`texcheck.check`, then the review of the candidate: fidelity, style
+per section batch, required parts, one call per step saved in
+`review_progress`; then the gate; when the block must change, assemble and
+compile once more) → `revise` (one guarded call per section with rewordable
+issues, then a new candidate: assemble, compile, check) → `select` (the best
+candidate by `(not compile_ok, blockers, majors, minors)`, latest on a tie) →
+`export` (the folder, or kept for download when started
 from a conversation; the body alone is exported too, as `-body.tex` and
 `document-body.tex` in the ZIP).
 `@writeup` and `@summarize` reach it through the Assistant's worker adapter

@@ -16,9 +16,9 @@ import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, Thinking, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['style', 'outline', 'draft', 'compile', 'export'] as const
+const STEPS = ['style', 'outline', 'draft', 'compile', 'review', 'export'] as const
 const STEP_NAMES: Record<string, string> = {
-  style: 'Style', outline: 'Outline', draft: 'Writing', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
+  style: 'Style', outline: 'Outline', draft: 'Writing', review: 'Review', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
 }
 
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
@@ -81,7 +81,8 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const phase = data.phase === 'repair' || data.phase === 'assemble' || data.phase === 'check' ? 'compile' : data.phase
+  const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile'
+    : data.phase === 'check' || data.phase === 'revise' || data.phase === 'select' ? 'review' : data.phase
   const current = STEPS.indexOf(phase as typeof STEPS[number])
   return (
     <header className="job-head">

@@ -737,11 +737,25 @@ How it works:
    more than 5pt into the margin. Numbers in the mathematics that your material
    does not contain are listed in the report as points to look at; they never
    block. These are heuristics, not a proofreading.
-6. The result is **Ready** only when it compiles, every reference and citation
+6. Then the document is reviewed, as Proof reviews a proof, unless the effort
+   is Low. A fresh check compares it with your material and request: a result,
+   hypothesis or constant that changed, something left out, mathematics added
+   where the text restates your notes, a generated exercise or solution that is
+   wrong, a requirement not met. A style check reads it section by section
+   against the guidelines, and each required part (an exam's header, an
+   introduction's motivation…) is asked about on its own. Issues that can be
+   fixed by rewording are revised one section at a time; a revision that
+   changes a formula, loses a label, adds a citation or alters a statement is
+   refused. A correction that would change a formula is never made for you: it
+   is put to you with both versions. Up to three rounds; the best version is
+   kept.
+7. The result is **Ready** only when it compiles, every reference and citation
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing
    figure, no text cut short by time, no generated mathematics left unchecked,
    nothing missing that a section depends on) and no line runs into the margin.
+   The review must have found nothing serious against your material or the
+   guidelines, and every required part must be there.
    For an exam, the points must add up to the total the request asks for. A
    name of a person or work that only the plan mentions, with no source, keeps
    the document a draft.
