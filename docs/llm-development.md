@@ -256,6 +256,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   its metadata and limits instead of inviting unverified bibliographic additions.
 - **Compile retries.** Missing-command retries require a new inferred definition
   and share one compile deadline. Cancellation stops the compiler process group.
+  latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
+  which the repair call and the reference checks read.
 
 ### Security posture
 
@@ -592,7 +594,9 @@ files and the figures the text includes; commands and environments the text
 uses without defining are supplied) → `repair` (one call on the whole body) →
 `export` (the folder, or kept for download when started from a conversation).
 `@writeup` and `@summarize` reach it through the Assistant's worker adapter
-with the conversation as material (`store.conversation_record`).
+with the conversation as material (`store.conversation_record`). With no other
+material, notes pasted under the request are pinned as `request-notes.md`
+(`state['inline_material']`) and printed once in the writing call.
 
 ### Saved state
 

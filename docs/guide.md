@@ -665,7 +665,10 @@ What it uses:
 
 - **Material**: the conversation so far (messages, answers and the full results
   of finished jobs, including those of the current turn) and the files you
-  attach. A complete `.tex` file (with `\begin{document}`) is used as a
+  attach. With nothing else to work from, notes pasted in the message under the
+  request (after a blank line, or a message longer than 400 characters) are the
+  material: `@writeup a short note from these notes:`, a blank line, then the
+  notes. A complete `.tex` file (with `\begin{document}`) is used as a
   **template**: its preamble and layout, not its text, and the reply says so. To
   write from a draft, attach it without `\begin{document}`, or as `.md` or `.pdf`.
   `.sty`, `.cls` and `.bib` files are templates too.
@@ -692,14 +695,19 @@ How it works:
    Python code and their recorded figures, even if the answer did not repeat them.
 2. Equations the text uses again are numbered and cited with `\eqref`; displays
    nothing refers to stay unnumbered. Labels from your own material are kept.
+   Typographic punctuation is written as LaTeX input (`---`, `--`, ``` ``…'' ```,
+   `\dots`, `~`), outside code listings.
 3. The document is compiled with `latexmk` when it is installed, in a temporary
-   folder, without shell escape and with restricted file access. If it does not
+   folder, without shell escape and with restricted file access; your own
+   `latexmkrc` is not read. If it does not
    compile, one repair call fixes the reported errors.
    A PDF with undefined citations, unresolved references or duplicate labels is
    offered as a partial draft, with the remaining keys listed. Producing a PDF
    alone does not make the document complete.
    Missing supported commands are supplied within one bounded compile allowance;
-   pausing also stops compilation promptly.
+   pausing also stops compilation promptly. So are undefined theorem-like
+   environments, including `exercise`, `problem` and `question` (numbered on
+   their own) and `solution` (set like a proof).
 4. The document opens with **Points to check**: its `% TODO` comments, citations
    and figures it could not resolve, and references to undefined labels. Delete
    that block once they are settled.

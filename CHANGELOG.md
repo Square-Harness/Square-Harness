@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Write-up: accept rough notes pasted under the request in an `@writeup`
+  message of a new conversation; the message is pinned as the material and the
+  writer sees it once. Run latexmk with `-norc`, so a personal latexmkrc that
+  moves the log no longer hides compile errors from the repair call. Write
+  typographic punctuation (dashes, curly quotes, ellipsis, non-breaking space)
+  as LaTeX input in the body and the title, where amsart's upper-casing broke
+  compilation. Supply undefined `exercise`, `problem` and `question`
+  environments (numbered, definition style) and `solution` (proof-like, with an
+  optional title).
 - Ask Proof's reviewer to challenge its weakest nonroutine premise and verify
   counterexample admissibility before checking the failed conclusion. Replace
   two model-written status labels with one assessment and derive the operational

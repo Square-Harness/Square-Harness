@@ -93,6 +93,18 @@ def latex_text(text):
     return out.replace('^', '\\^{}').replace('~', '\\~{}').replace('\0', '\\textbackslash{}')
 
 
+_PUNCTUATION = str.maketrans({'\u2014': '---', '\u2013': '--', '\u201c': '``', '\u201d': "''", '\u2018': '`',
+                               '\u2019': "'", '\u00a0': '~'})
+
+
+def ascii_punctuation(text):
+    """Typographic Unicode punctuation written as LaTeX input (an em dash as ---), outside code and verbatim.
+    The characters themselves can break compilation: amsart upper-cases the title, which breaks a UTF-8 dash."""
+    masked, restore = _protect_code(text)
+    masked = re.sub('\u2026([A-Za-z]?)', lambda m: '\\dots' + ('{}' + m[1] if m[1] else ''), masked)
+    return restore(masked.translate(_PUNCTUATION))
+
+
 def todo_comments(body):
     """The text of each % TODO comment of a body, with the comment lines that continue it."""
     items, current = [], None
@@ -326,7 +338,7 @@ _STATE_DEFAULTS = {'macros': [], 'theorems': [], 'definitions': [], 'style': Non
                    'title': '', 'body': '', 'model_definitions': '', 'document': '', 'compile': None, 'repaired': False,
                    'outputs': {}, 'supplied_macros': {}, 'supplied_environments': {}, 'request_macros': {},
                    'request_environments': {}, 'style_choice': {'mode': 'auto'}, 'variant': None, 'scoped': False,
-                   'deliver': 'folder', 'output_name': ''}
+                   'deliver': 'folder', 'output_name': '', 'inline_material': False}
 
 _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| should)|Let me|First,? I|Before (?:writing|fixing)|"
                        r"To (?:fix|write|verify)|I'm going to)\b", re.I)
@@ -404,6 +416,27 @@ _DEFINITION_LINE = re.compile(r'^[ \t]*\\(?:(?:re|provide)?newcommand|DeclareMat
 # one section, and it is allowed in the body), and so does anything inside an environment.
 _HOISTED_LINE = re.compile(r'^[ \t]*\\(?:(?:provide)?newcommand|DeclareMathOperator|DeclarePairedDelimiter|def|newtheorem)\b')
 _WRAPPER_LINE = re.compile(r'^[ \t]*\\(?:documentclass|usepackage|maketitle|author|date|begin\{document\}|end\{document\})\b.*$', re.M)
+
+
+_THEOREM_LIKE = set(DEFAULT_THEOREMS) | {'thm', 'lem', 'prop', 'cor', 'defn', 'claim', 'assumption', 'example', 'hypothesis'}
+_EXERCISES = ('exercise', 'problem', 'question')
+
+
+def supplied_environment(name, counter):
+    """A definition for a theorem-like environment the text uses and nothing defines (None for any other).
+    Exercises are numbered on their own (Exercise 1, 2, ...) in the definition style; a solution is a proof,
+    with an optional title (\\begin{solution}[Solution to Exercise 1])."""
+    base = name.rstrip('*')
+    if name == 'solution':
+        return '\\newenvironment{solution}[1][Solution]{\\begin{proof}[#1]}{\\end{proof}}'
+    if base in _EXERCISES:
+        return ('\\theoremstyle{definition}\\newtheorem' + ('*' if name.endswith('*') else '')
+                + f'{{{name}}}{{{base.capitalize()}}}\\theoremstyle{{plain}}')
+    if base not in _THEOREM_LIKE:
+        return None
+    if name.endswith('*'):
+        return f'\\newtheorem*{{{name}}}{{{base.capitalize()}}}'
+    return f'\\newtheorem{{{name}}}{"" if name == "theorem" else counter}{{{name.capitalize()}}}'
 
 
 def undefined_environments(log):
@@ -576,7 +609,8 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         env = dict(os.environ, openin_any='p', openout_any='p', shell_escape='f', max_print_line='1000')
-        command = [exe, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error',
+        # -norc: a user's latexmkrc may move document.log (for example $aux_dir), and the log is read below.
+        command = [exe, '-norc', '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error',
                    '-no-shell-escape', 'document.tex']
         timed_out = False
         with tempfile.TemporaryFile() as output:
@@ -682,9 +716,16 @@ class WriteupRunner(ResearchRunner):
             if path.suffix.lower() != '.tex':
                 raise ValueError('The output must be a workspace-relative .tex file')
         found = re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', goal)
-        if not source_files and not notes.strip() and not found and not conversation.strip() and not getattr(self.agent, 'image_refs', None):
-            raise ValueError('Nothing to summarize yet: the conversation has no results.' if variant == 'summary' else
-                             'Give the write-up something to work from: pin notes, a draft or a PDF, or paste rough notes')
+        # Notes pasted under the request (a second paragraph, or a long message) are the material themselves,
+        # unless the request names a file that is pinned instead (a name inside the notes need not exist).
+        self._inline_material = ''
+        if not source_files and not notes.strip() and not conversation.strip() and not getattr(self.agent, 'image_refs', None):
+            pasted = re.search(r'\n[ \t]*\n', goal.strip()) or len(goal.strip()) > 400
+            if pasted and not (found and self._inferred_sources(goal)):
+                self._inline_material = goal.strip()
+            elif not found:
+                raise ValueError('Nothing to summarize yet: the conversation has no results.' if variant == 'summary' else
+                                 'Give the write-up something to work from: pin notes, a draft or a PDF, or paste rough notes')
         self._templates, self._template_texts = list(template_files), texts
         self._notes, self._output, self._conversation = notes, output, conversation
         self._variant, self._scoped, self._deliver = variant, bool(scoped or variant), deliver
@@ -700,7 +741,8 @@ class WriteupRunner(ResearchRunner):
 
     def _extra_sources(self):
         sources = []
-        for path, text in (('typed-notes.md', self._notes), ('conversation.md', self._conversation)):
+        for path, text in (('typed-notes.md', self._notes), ('conversation.md', self._conversation),
+                           ('request-notes.md', self._inline_material)):
             if text.strip():
                 sources.append({'id': 'M0', 'path': path, 'content': text,
                                 'sha256': hashlib.sha256(text.encode()).hexdigest()})
@@ -714,6 +756,7 @@ class WriteupRunner(ResearchRunner):
 
     def _extra_state(self):
         return {'phase': 'style', 'output_name': self._output, 'variant': self._variant, 'scoped': self._scoped,
+                'inline_material': bool(self._inline_material),
                 'deliver': self._deliver, 'request_macros': self._request_macros,
                 'request_environments': self._request_environments, 'style_choice': self._style_choice,
                 'explain_templates': self._explain_templates,
@@ -976,7 +1019,8 @@ class WriteupRunner(ResearchRunner):
         self._pin_experiment_code()
         labels = {'conversation.md': 'CONVERSATION (as the user saw it: messages, answers and job results)',
                   'typed-notes.md': 'NOTES TYPED BY THE USER'}
-        blocks = [f'=== {labels.get(s["path"], "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
+        blocks = [s['content'].strip() if self.state.get('inline_material') else  # the request itself: _draft labels it
+                  f'=== {labels.get(s["path"], "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
         self.state['parts'] = [{'text': text, 'body': '', 'complete': False} for text in split_material(blocks, self._room())]
         if len(self.state['parts']) > 1:
             self.state['warnings'].append(f'The material is longer than one writing call can read; it was written in '
@@ -1019,8 +1063,10 @@ class WriteupRunner(ResearchRunner):
                     if forced else
                     'Which saved author style fits the material below? A style fits only when the material is the same kind '
                     'of mathematics as that domain. Answer with one label exactly as listed, or with: none.')
-        instruction = (question + '\n\nSTYLES:\n' + listing + '\n\nUSER REQUEST:\n' + self.state['goal'] +
-                       '\n\nMATERIAL (beginning):\n' + self.state['parts'][0]['text'][:6000])
+        beginning = self.state['parts'][0]['text'][:6000]
+        instruction = question + '\n\nSTYLES:\n' + listing + '\n\n' + (
+            'USER REQUEST AND NOTES (beginning):\n' + beginning if self.state.get('inline_material') else
+            'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL (beginning):\n' + beginning)
         result = self._call('style', instruction, cap=300,
                             trailer='Answer with the label' + ('' if forced else ' or none') + ', and nothing else.')
         answer = result['text'].strip().strip('.`"\'*').lower()
@@ -1060,6 +1106,18 @@ class WriteupRunner(ResearchRunner):
                    ', continuing the document without a \\title. Sections already written: ' + '; '.join(titles) +
                    '. The text so far ends with:\n' + previous))
 
+    def _request(self, index, count):
+        """The user's request and this part's material. Notes pasted under the request are printed once."""
+        text = self.state['parts'][index]['text']
+        if not self.state.get('inline_material'):
+            return 'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + text
+        if index:
+            # A message too long for one call: later parts keep its first paragraph, the instruction.
+            instruction = re.split(r'\n[ \t]*\n', self.state['goal'], maxsplit=1)[0][:1500]
+            return ('USER REQUEST (first paragraph of the message):\n' + instruction +
+                    f'\n\nNOTES (part {index + 1} of {count} of the same message):\n' + text)
+        return 'USER REQUEST AND NOTES (one message: the instruction, then the notes it applies to):\n' + text
+
     def _draft(self):
         parts = self.state['parts']
         index = next(i for i, part in enumerate(parts) if not part['complete'])
@@ -1074,8 +1132,7 @@ class WriteupRunner(ResearchRunner):
                        'Keep the mathematics exactly as in the material: the same statements, hypotheses, constants and '
                        'quantifiers, and no new results. Where the material is unclear or incomplete, keep what it says '
                        'and add a comment % TODO: ... describing the gap.\n' + self._citation_rules() + '\n' + self._equation_rules() + '\n' + MATH_RULES +
-                       '\n\n' + self._notation() + '\n\n' + self._style_note() +
-                       '\n\nUSER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + part['text'])
+                       '\n\n' + self._notation() + '\n\n' + self._style_note() + '\n\n' + self._request(index, len(parts)))
         trailer = 'Write the document now: everything needed is above, and no tools are available.'
         if self.state.get('code_files'):
             instruction += ('\n\nRECORDED PYTHON SOURCES: the controller includes the exact executed code. '
@@ -1143,7 +1200,9 @@ class WriteupRunner(ResearchRunner):
 
     def _join_parts(self):
         body = self._take_bibtex('\n\n'.join(p['body'] for p in self.state['parts']))
-        self.state['body'] = tidy_numbering(body, self._material_labels(), self._material_text())
+        # Punctuation after tidy_numbering, which recognises the material's displays by their exact text.
+        self.state['body'] = ascii_punctuation(tidy_numbering(body, self._material_labels(), self._material_text()))
+        self.state['title'] = ascii_punctuation(self.state.get('title') or '')
         self.state['phase'] = 'assemble'
 
     def _assemble(self):
@@ -1504,10 +1563,8 @@ class WriteupRunner(ResearchRunner):
             found = {n: d for n in undefined_names(result['log']) if n not in macros and (d := self._definition_for(n))}
             # Share the theorem counter only when it exists (a template may define no theorem at all).
             counter = '[theorem]' if 'theorem' in set(THEOREM.findall(self.state['document'])) | set(environments) else ''
-            new_environments = {n: (f'\\newtheorem*{{{n}}}{{{n[:-1].capitalize()}}}' if n.endswith('*') else
-                                    f'\\newtheorem{{{n}}}{"" if n == "theorem" else counter}{{{n.capitalize()}}}')
-                                for n in undefined_environments(result['log']) if n not in environments
-                                and n.rstrip('*') in set(DEFAULT_THEOREMS) | {'thm', 'lem', 'prop', 'cor', 'defn', 'claim', 'assumption', 'example', 'hypothesis'} }
+            new_environments = {n: d for n in undefined_environments(result['log'])
+                                if n not in environments and (d := supplied_environment(n, counter))}
             if not found and not new_environments:
                 break
             macros.update(found)
