@@ -39,8 +39,8 @@ _LITERAL = re.compile(r'\\begin\{(verbatim\*?|Verbatim\*?|lstlisting\*?|minted\*
 _INLINE_CODE = re.compile(r'\\(?:verb|lstinline)(?![A-Za-z])\*?([^\s\w{])(?:(?!\1)[^\r\n])*\1')
 _COMMENT = re.compile(r'(?<!\\)%[^\n]*')
 _BIBLIOGRAPHY = re.compile(r'\\begin\{thebibliography\}.*?\\end\{thebibliography\}', re.S)
-_MATH = re.compile(r'\\\[(.*?)\\\]|\\begin\{(equation|align|gather|multline|flalign|alignat|displaymath|math)\*?\}(.*?)\\end\{\2\*?\}'
-                   r'|(?<![\\$])\$(?!\$)((?:\\.|[^$\\])+?)\$|\\\((.*?)\\\)', re.S)
+_MATH = re.compile(r'(?<!\\)\\\[(.*?)\\\]|\\begin\{(equation|align|gather|multline|flalign|alignat|displaymath|math)\*?\}(.*?)\\end\{\2\*?\}'
+                   r'|(?<![\\$])\$(?!\$)((?:\\.|[^$\\])+?)\$|(?<!\\)\\\((.*?)\\\)', re.S)  # \\[2pt] is a line break
 _ARGUMENT = re.compile(r'\\(?:eqref|ref|cref|Cref|autoref|pageref|(?:no|paren|text|auto|foot|super)?cite[pt]?|label|input|include'
                        r'|includegraphics|url|href|begin|end|usepackage|bibliography|bibliographystyle)\*?'
                        r'(?:\s*\[[^\]]*\])*\s*\{[^{}]*\}')

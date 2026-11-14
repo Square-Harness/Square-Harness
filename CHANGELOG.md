@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Write-up fixes from live trials: an exam or exercise sheet keeps the
+  preamble's `exercise`, `solution` and `\points` when the writer also defines
+  them; `\\[2pt]` is no longer read as a display by the checker and the review;
+  after a write-up stopped for missing material, a forced final answer reports
+  what is missing instead of letting the Assistant write the document itself.
 - Write-up: material too long for one writing call is written in parts that
   follow the plan's sections, each later part told its sections, the labels and
   the commands already defined; two different definitions of one command are a

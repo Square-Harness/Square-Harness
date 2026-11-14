@@ -65,8 +65,8 @@ write-up only when the user asks for one, with the user's own words as its reque
 (do not restate or correct the mathematics). A write-up that returns status
 needs_input has written nothing: obtain what its needs list (literature, check or
 prove a result, or ask the user a question), then delegate the write-up once more
-with the same request. A delivered document ends the turn: never critique, review or
-redo it. Notes pasted without a question are not a request to prove them: ask what
+with the same request; never write the document yourself in the reply. A delivered
+document ends the turn: never critique, review or redo it. Notes pasted without a question are not a request to prove them: ask what
 the user wants, or offer a write-up.
 Recorded sandbox code and figures are supplied automatically to write-up workers;
 do not read hidden storage paths or put generated figures in the files argument.
@@ -1179,6 +1179,12 @@ class Orchestrator:
         mode = self.state.get('required_mode')
         if mode is None and self.state['children'] and self.state['children'][-1]['action']['mode'] in ('writeup', 'summarize'):
             mode = self.state['children'][-1]['action']['mode']  # the Assistant chose to write one up itself
+        if mode is None and self.state.get('force_final'):
+            # A forced final answer after a write-up stopped for material reports its needs: the main agent
+            # must not write the document itself.
+            latest = next((c for c in reversed(self.state['children']) if c['action']['mode'] in ('writeup', 'summarize')), None)
+            if latest is not None and _needs_input(latest.get('result')):
+                mode = latest['action']['mode']
         if mode not in ('writeup', 'summarize'):
             return None
         child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
@@ -1186,7 +1192,7 @@ class Orchestrator:
                                                                and not (child.get('result') or {}).get('answer')):
             return None
         value = child.get('result') or {}
-        if _needs_input(value) and self._hand_backs() < 2:
+        if _needs_input(value) and self._hand_backs() < 2 and not self.state.get('force_final'):
             return None  # the main agent obtains what is missing, then asks again
         answer = value.get('answer') if isinstance(value.get('answer'), str) else ''
         if not answer.strip():

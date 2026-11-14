@@ -836,8 +836,8 @@ mathematical fact, attribution or citation, and keep every comment line (% TODO,
 % END COMPOSED) as it is. Output the whole revised section only, from its first line to its last, with no commentary
 and no Markdown fence.'''
 
-_FORMULA = re.compile(r'\\\[(.*?)\\\]|\\begin\{(equation|align|gather|multline|flalign|alignat)\*?\}(.*?)\\end\{\2\*?\}'
-                      r'|\\\((.*?)\\\)|(?<![\\$])\$((?:\\.|[^$\\])+?)\$', re.S)
+_FORMULA = re.compile(r'(?<!\\)\\\[(.*?)\\\]|\\begin\{(equation|align|gather|multline|flalign|alignat)\*?\}(.*?)\\end\{\2\*?\}'
+                      r'|(?<!\\)\\\((.*?)\\\)|(?<![\\$])\$((?:\\.|[^$\\])+?)\$', re.S)
 _COMPOSED_SPAN = re.compile(r'(?<!\\)%[ \t]*BEGIN COMPOSED.*?(?<!\\)%[ \t]*END COMPOSED[^\n]*', re.S)
 # How a source-checker finding can be fixed: rewording, or not by the review (a formula, or the author).
 _SOURCE_FIXABLE = {'source-talk': 'rewrite', 'draft-notice': 'rewrite', 'hand-number': 'rewrite', 'markdown': 'rewrite',
@@ -848,6 +848,35 @@ _SOURCE_SEVERITY = {'BLOCKER': 'blocker', 'MATH': 'major', 'LAYOUT': 'major', 'P
 
 
 _MARKER_LINE = re.compile(r'(?m)^[ \t]*(?<!\\)%[ \t]*(?:PART:|BEGIN COMPOSED|END COMPOSED)[^\n]*\n?')
+
+
+def drop_definitions(body, names):
+    """The body without its own definitions (\\newenvironment, \\newcounter, \\newcommand, \\newtheorem and their
+    re- and provide- forms) of these names, arguments included."""
+    head = re.compile(r'\\(?:(?:new|renew|provide)(?:environment|counter|command)|newtheorem)\*?\s*\{\s*\\?(?:'
+                      + '|'.join(map(re.escape, names)) + r')\s*\}')
+    out, at = [], 0
+    for m in head.finditer(body):
+        if m.start() < at:
+            continue
+        end = m.end()
+        while True:  # the optional and required arguments that follow
+            gap = re.match(r'[ \t]*\n?[ \t]*', body[end:]).end()
+            if body.startswith('[', end + gap):
+                close = body.find(']', end + gap)
+                if close == -1:
+                    break
+                end = close + 1
+            elif body.startswith('{', end + gap):
+                _, after = _group(body, end + gap)
+                if after is None:
+                    break
+                end = after
+            else:
+                break
+        out.append(body[at:m.start()])
+        at = end
+    return ''.join(out) + body[at:]
 
 
 def without_markers(text):
@@ -1700,6 +1729,9 @@ class WriteupRunner(ResearchRunner):
             head = '\\begin{document}\n' + ('\\maketitle\n' if '\\maketitle' in template['content'] else '')
         else:
             preamble, head = self._own_preamble(title), '\\begin{document}\n\\maketitle\n'
+        if self._kind_commands():
+            # The preamble defines exercise, solution and \\points; a definition of them in the text would clash.
+            self.state['body'] = drop_definitions(self.state['body'], ('exercise', 'solution', 'points'))
         body = self.state['body']
         loaded = '\n'.join(_uncommented(s['content']) for s in self._templates_in(('.tex', '.sty', '.cls')))
         # A file the template already \input's (or loads as a package) is copied next to the document, not pasted.
@@ -2528,7 +2560,9 @@ class WriteupRunner(ResearchRunner):
             return
         review = self._review_of(digest)
         model = review['issues'] if review else []
-        blockers = sum(texcheck.gate(f) is not None for f in self.state['checks']) + sum(i['severity'] == 'blocker' for i in model)
+        # Generated passages are as many in every candidate (the revision guard keeps them): not a difference.
+        blockers = (sum(texcheck.gate(f) is not None and f['rule'] != 'composed' for f in self.state['checks'])
+                    + sum(i['severity'] == 'blocker' for i in model))
         majors = sum(i['severity'] == 'major' for i in model)
         minors = sum(i['severity'] == 'minor' for i in model) + sum(f['category'] == 'PROSE' for f in self.state['checks'])
         self.state['candidates'].append({
