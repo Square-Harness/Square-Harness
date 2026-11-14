@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Write-up: when your notes contradict themselves (the `1+k` constant whose
+  derivation gives `1-k`), the reply asks you which version to keep, with both
+  versions; the document keeps yours, marked TODO, until you answer, and the
+  report lists every problem the plan found.
 - Write-up: exam and exercise-sheet questions are numbered by a list, not typed
   by hand; the source checker reports a hand-typed `\textbf{Question 1.}` (and
   Part, Partie, Aufgabe, Frage...) so the review can fix it.

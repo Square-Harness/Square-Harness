@@ -691,7 +691,8 @@ OUTLINE_SCHEMA = _OBJECT({
     'inventory': {'type': 'array', 'items': _OBJECT({
         'id': _TEXT, 'type': {'type': 'string', 'enum': ['definition', 'statement', 'proof', 'example', 'remark', 'computation']},
         'text': _TEXT, 'status': {'type': 'string', 'enum': ['proved', 'sketched', 'stated', 'uncertain', 'withdrawn']}})},
-    'problems': {'type': 'array', 'items': _OBJECT({'inventory_id': _TEXT, 'what': _TEXT})},
+    'problems': {'type': 'array', 'items': _OBJECT({'inventory_id': _TEXT, 'what': _TEXT, 'as_written': _TEXT,
+                                                    'alternative': _TEXT})},
     'notation': {'type': 'array', 'items': _OBJECT({'object': _TEXT, 'symbol': _TEXT, 'also_written': _TEXT})},
     'sections': {'type': 'array', 'items': _OBJECT({
         'heading': _TEXT, 'role': {'type': 'string', 'enum': list(ROLES)},
@@ -716,7 +717,8 @@ inventory: every definition, statement, proof, example, remark and computation o
 (D1, S1, P1...), its text copied from the material (at most two lines), and its status: proved (a complete argument is
 given), sketched, stated (no argument), uncertain (the author says they are not sure), withdrawn (given up or replaced).
 problems: places where the material is wrong, inconsistent with itself or ambiguous, with the inventory id. Check the
-formulas against the derivations next to them.
+formulas against the derivations next to them. as_written copies the material's version (a formula or a phrase);
+alternative gives the version its own derivation or context supports, or an empty string when there is none.
 notation: objects written with more than one symbol, and the one symbol to use.
 sections: the outline, in order. role: introduction, abstract, body, proof, exercises, solutions, header or other.
 source: material when the section only restates the material, composed when it needs text or mathematics the material
@@ -1567,7 +1569,8 @@ class WriteupRunner(ResearchRunner):
         inventory = [{'id': text(i.get('id'), 20), 'type': text(i.get('type'), 20), 'text': text(i.get('text'), 400),
                       'status': pick(i.get('status'), ('proved', 'sketched', 'stated', 'uncertain', 'withdrawn'), 'stated')}
                      for i in items(raw.get('inventory'))][:200]
-        problems = [{'inventory_id': text(p.get('inventory_id'), 20), 'what': text(p.get('what'), 600)}
+        problems = [{'inventory_id': text(p.get('inventory_id'), 20), 'what': text(p.get('what'), 600),
+                     'as_written': text(p.get('as_written'), 300), 'alternative': text(p.get('alternative'), 300)}
                     for p in items(raw.get('problems'))][:30]
         notation = [{'object': text(n.get('object'), 200), 'symbol': text(n.get('symbol'), 200),
                      'also_written': text(n.get('also_written'), 200)} for n in items(raw.get('notation'))][:50]
@@ -1626,7 +1629,9 @@ class WriteupRunner(ResearchRunner):
                                 + (f'; required parts {", ".join(s["parts"])}' if s['parts'] else '') + f'] {s["purpose"]}'
                                 for n, s in enumerate(o['sections'], 1)]
         if o['problems']:
-            out += ['Problems of the material:'] + [f'- {p["inventory_id"]}: {p["what"]}' for p in o['problems']]
+            out += ['Problems of the material:'] + [f'- {p["inventory_id"]}: {p["what"]}'
+                                                    + (f' (as written: {p["as_written"]}; the alternative: {p["alternative"]})'
+                                                       if p.get('alternative') else '') for p in o['problems']]
         if o['notation']:
             out += ['Notation (one symbol per object):'] + [f'- {n["object"]}: {n["symbol"]}' + (f' (the material also writes {n["also_written"]})' if n['also_written'] else '')
                                                             for n in o['notation']]
@@ -1939,6 +1944,7 @@ class WriteupRunner(ResearchRunner):
         points (citations, labels, figures, what the material lacks), the source checker's findings and the review's
         open issues."""
         points = self._template_notes() + ['Missing from the material: ' + piece + '.' for piece in self._missing_pieces()]
+        points += ['Question about your notes: ' + question for question in self._problem_questions()]
         points += self._review_points()
         if self.state.get('truncated'):
             points.append('Time ran out while the document was being written: it stops early.')
@@ -2408,6 +2414,19 @@ class WriteupRunner(ResearchRunner):
                  f'{texcheck.LAYOUT_POINTS:g}pt into the margin'
                  + (' (one is the page head: shorten the title)' if any(f['line'] is None for f in overfull) else ''))
         return failed
+
+    def _problem_questions(self, choices_only=False):
+        """The material's problems the author must settle, each with both versions when the outline has them: the
+        document keeps the material's version (with a TODO) until the author answers. `choices_only`: only the
+        problems with two versions to choose between (for the reply; the report lists them all)."""
+        out = []
+        for p in (self.state.get('outline') or {}).get('problems') or []:
+            choice = bool(p.get('alternative') and p.get('as_written'))
+            if choices_only and not choice:
+                continue
+            what = p['what'] if not choices_only or len(p['what']) <= 200 else p['what'][:197].rstrip() + '...'
+            out.append(f'{p["inventory_id"]}: {what}' + (f' As written: {p["as_written"]}; or: {p["alternative"]}?' if choice else ''))
+        return out[:3] if choices_only else out
 
     def _missing_pieces(self):
         """The blocking needs of the outline, by type and section, without their text (which may name works)."""
@@ -3164,6 +3183,10 @@ class WriteupRunner(ResearchRunner):
                 parts.append(summary)
             if s.get('block'):
                 parts.append('The top of the document counts the points to check; the report on its page lists them.')
+        questions = self._problem_questions(choices_only=True)
+        if questions:
+            parts.append('Questions about your notes (the document keeps their version, marked TODO, until you answer): '
+                         + ' '.join(questions))
         parts += self._template_notes()
         return ' '.join(parts)
 
