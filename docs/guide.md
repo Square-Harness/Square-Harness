@@ -646,9 +646,14 @@ is ambiguous, the interface asks which manuscript to use.
 ### Write-up
 
 Turns rough notes, a draft, a PDF or the results of a conversation into a LaTeX
-document in your own style. It is exposition, not research: every statement,
-hypothesis and constant comes from your material, and nothing reviews the
-mathematics, so write up results you have checked.
+document in your own style: an article, cleaned-up notes, lecture notes, an
+exercise sheet, an exam, or one part of a paper (an introduction, a section). It
+is exposition, not research: every statement, hypothesis and constant of the
+material is kept as it is, and nothing reviews the mathematics, so write up
+results you have checked. What the request asks for beyond the material (an
+introduction, exercises, solutions, exam questions) is written in sections of
+its own, and any new mathematics in them is marked as generated: a document
+that contains some is a draft until it has been checked.
 
 Use it for:
 
@@ -687,17 +692,34 @@ What it uses:
 
 How it works:
 
-1. One writing call reads all the material, your request, your notation and your
-   style, and writes the document. Long material is written in consecutive parts.
+1. A first, short call plans the document: what kind it is and its language,
+   what the request asks for, what the material contains (each result with its
+   status: proved, sketched, only stated, uncertain, withdrawn), where it is
+   wrong or inconsistent, the sections, and what is missing (earlier work, a
+   proof, a definition, data, a decision only you can make). The controller
+   keeps a generated section only when the request, or a required part of that
+   kind of document, asks for it. The plan is shown in the **Outline** tab.
+   Each kind follows written guidelines (`mathagent/skills/writeup/guidelines`):
+   a paper's style rules for articles, notes and parts of papers; an
+   introduction's required parts (motivation, literature, positioning, main
+   result, method, organisation); an exam's header, points and recalled
+   notation; rules for exercise sheets and lecture notes.
+2. One writing call reads all the material, the plan, the guidelines, your
+   request, your notation and your style, and writes the document in the
+   requested language. Long material is written in consecutive parts.
    With at most a minute left, it writes directly without a hidden reasoning
    prelude. If time runs out, the text already written is compiled and offered
    as a partial draft. A conversation's sandbox results supply the executed
    Python code and their recorded figures, even if the answer did not repeat them.
-2. Equations the text uses again are numbered and cited with `\eqref`; displays
+   Without a template, an exam or an exercise sheet uses the `article` class
+   with `exercise`, `solution` and `\points{n}` defined; another language than
+   English gets babel and theorem names in that language (French, German,
+   Spanish, Italian); a long title gets a short running title.
+3. Equations the text uses again are numbered and cited with `\eqref`; displays
    nothing refers to stay unnumbered. Labels from your own material are kept.
    Typographic punctuation is written as LaTeX input (`---`, `--`, ``` ``…'' ```,
    `\dots`, `~`), outside code listings.
-3. The document is compiled with `latexmk` when it is installed, in a temporary
+4. The document is compiled with `latexmk` when it is installed, in a temporary
    folder, without shell escape and with restricted file access; your own
    `latexmkrc` is not read. If it does not
    compile, one repair call fixes the reported errors.
@@ -705,7 +727,7 @@ How it works:
    pausing also stops compilation promptly. So are undefined theorem-like
    environments, including `exercise`, `problem` and `question` (numbered on
    their own) and `solution` (set like a proof).
-4. A source checker reads the LaTeX and the compile log, with no model call. It
+5. A source checker reads the LaTeX and the compile log, with no model call. It
    reports what keeps the text from going into a paper as it is: `% TODO`
    comments, a draft notice, equation numbers typed by hand ("by (3)"), text that
    talks about its notes ("the notes record…"), mathematics typeset wrongly
@@ -715,10 +737,14 @@ How it works:
    more than 5pt into the margin. Numbers in the mathematics that your material
    does not contain are listed in the report as points to look at; they never
    block. These are heuristics, not a proofreading.
-5. The result is **Ready** only when it compiles, every reference and citation
+6. The result is **Ready** only when it compiles, every reference and citation
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing
-   figure, no text cut short by time) and no line runs into the margin.
+   figure, no text cut short by time, no generated mathematics left unchecked,
+   nothing missing that a section depends on) and no line runs into the margin.
+   For an exam, the points must add up to the total the request asks for. A
+   name of a person or work that only the plan mentions, with no source, keeps
+   the document a draft.
    Otherwise it is a **Draft**: the reply starts with `Draft:` and says why, and
    the document opens with **Points to check** (its `% TODO` comments, typeset,
    and the problems found), to delete once they are settled. A ready document

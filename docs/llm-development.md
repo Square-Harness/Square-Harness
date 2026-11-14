@@ -264,6 +264,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   and share one compile deadline. Cancellation stops the compiler process group.
   latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
   which the repair call and the reference checks read.
+- **Write-up outline.** The controller, not the model, decides what blocks: a
+  need blocks only when the model says so and a section depends on it (a
+  decision: when it settles a problem of the material), with at most three
+  decisions. A composed section is kept only when a requirement or a required
+  part asks for it. The writer receives the needs without their text, and a name
+  that only a literature need mentions is a blocking finding if it reaches the
+  document. The outline's kind of document is `state['document_kind']`:
+  `state['kind']` is the job's type (`writeup`), which the store and the runners
+  read. Guideline sheets are model prompts in
+  `mathagent/skills/writeup/guidelines/` (no licence header), one rule per item:
+  `- <ID> [required|style] <text>`.
 
 ### Security posture
 
@@ -593,7 +604,12 @@ budgets and pipeline identity, and ordinary Review's exclusion of proof checking
 Only an explicit request for a full new review follows the complete-review path.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
-call) → `draft` (one writing call, or consecutive parts for long material; the
+call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of
+document, language, requirements, inventory of the material with statuses,
+problems, notation, sections with role/source/required parts, needs; the
+controller settles it in `_settle_outline`, saves it as an artifact and in
+`state['outline']`, and pins the applicable guideline rules in
+`state['guidelines']` so that a resumed job keeps them; summaries skip it) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble, the made bibliography
 and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template

@@ -45,4 +45,4 @@ version = {attr = "mathagent.__version__"}
 include = ["mathagent*"]
 
 [tool.setuptools.package-data]
-mathagent = ["skills/*/SKILL.md", "skills/*/references/*.md", "gui/static/**/*", "numerics/docker/*"]
+mathagent = ["skills/*/SKILL.md", "skills/*/references/*.md", "skills/*/guidelines/*.md", "gui/static/**/*", "numerics/docker/*"]

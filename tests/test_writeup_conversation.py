@@ -16,6 +16,12 @@ except ImportError:  # unittest discover imports test modules as top-level names
     from test_gui import GuiCase, text
 
 
+# The outline call comes first; a plan with no sections leaves the writing to the request.
+PLAN = json.dumps({'kind': 'notes', 'scope': 'document', 'language': 'English', 'title': 'Notes', 'short_title': 'Notes',
+                   'instruction': 'A short note.', 'requirements': [], 'inventory': [], 'problems': [], 'notation': [],
+                   'sections': [], 'needs': []})
+
+
 class ConversationWriteupTests(GuiCase):
     extra_args = ('--ctx', '40960')
 
@@ -29,7 +35,7 @@ class ConversationWriteupTests(GuiCase):
         (paper / 'fig.png').write_bytes(base64.b64decode(
             'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='))
         (paper / 'notes.md').write_text('E[tau] ~ |Omega|/(4 eps) for a small disk window [HS04].')
-        self.fake.replies = [text(r"""\title{Narrow escape}
+        self.fake.replies = [text(PLAN), text(r"""\title{Narrow escape}
 \section{Result}
 The mean exit time satisfies
 \begin{equation}\label{eq:exit}
@@ -51,7 +57,7 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
                                                    'source_files': ['paper/notes.md'],
                                                    'template_files': ['paper/macros.sty', 'paper/refs.bib']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        prompt = self.fake.requests[0]['messages'][1]['content']
+        prompt = self.fake.requests[-1]['messages'][1]['content']
         self.assertIn('HS04: Holcman, D., Escape through a small opening (2004)', prompt)  # the author's .bib
         self.assertIn('never invent a bibliographic entry', prompt)
         self.assertIn('\\eqref{eq:short-name}', prompt)  # numbering and references are asked for
@@ -85,7 +91,7 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
         # Without a .bib, a bibliography is made from the identifiers the material gives; an entry without one is dropped.
         (paper / 'notes2.md').write_text('E[tau] ~ |Omega|/(4 eps) [HS04], '
                                        '[doi:10.1007/s10955-004-5712-8](https://doi.org/10.1007/s10955-004-5712-8).')
-        self.fake.replies = [text(r"""\title{Without a bibliography}
+        self.fake.replies = [text(PLAN), text(r"""\title{Without a bibliography}
 \section{Result}
 By \cite{HS04}, see also \cite{Fake99}.
 % BEGIN BIBTEX
@@ -129,7 +135,7 @@ By \cite{HS04}, see also \cite{Fake99}.
         chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         store.append_items(self.root, chat, [{'role': 'route', 'mode': 'literature', 'status': 'done',
                                               'job_id': literature_id, 'request': 'Find a reference.'}])
-        self.fake.replies = [text(r'\title{A cited note}\section{Reference}By \cite{Holcman2004}.')]
+        self.fake.replies = [text(PLAN), text(r'\title{A cited note}\section{Reference}By \cite{Holcman2004}.')]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': '@writeup this report',
                                                    'mode_call': {'mode': 'writeup', 'start': 0}})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')

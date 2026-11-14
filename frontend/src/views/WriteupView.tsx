@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { api, type ResearchDetail } from '../api'
+import { api, type ResearchDetail, type WriteupPlan } from '../api'
 import { ErrorNote, Loading, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
@@ -16,9 +16,9 @@ import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, Thinking, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['style', 'draft', 'compile', 'export'] as const
+const STEPS = ['style', 'outline', 'draft', 'compile', 'export'] as const
 const STEP_NAMES: Record<string, string> = {
-  style: 'Style', draft: 'Writing', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
+  style: 'Style', outline: 'Outline', draft: 'Writing', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
 }
 
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
@@ -243,6 +243,7 @@ function CompileTab({ data, onArtifact }: { data: ResearchDetail; onArtifact: (n
 
 function OutlineTab({ data }: { data: ResearchDetail }) {
   if (!data.outline) return <p className="empty-note">No outline yet.</p>
+  if ('kind' in data.outline) return <PlanTab plan={data.outline} />
   return (
     <div className="outline">
       <h3 className="section-title">{data.outline.title}</h3>
@@ -254,6 +255,43 @@ function OutlineTab({ data }: { data: ResearchDetail }) {
           </li>
         ))}
       </ol>
+    </div>
+  )
+}
+
+function PlanTab({ plan }: { plan: WriteupPlan }) {
+  const language = plan.language.charAt(0).toUpperCase() + plan.language.slice(1)
+  return (
+    <div className="outline">
+      <h3 className="section-title">{plan.title}</h3>
+      <p className="muted small">{plan.kind.replace('_', ' ')}, {plan.scope === 'part' ? 'a part to paste into a paper' : 'a whole document'}, in {language}.</p>
+      {plan.requirements.length > 0 && <>
+        <p className="detail-label">Asked for</p>
+        <ul className="muted small">{plan.requirements.map((item, index) => <li key={index}>R{index + 1}: {item}</li>)}</ul>
+      </>}
+      <p className="detail-label">Sections</p>
+      <ol className="outline-list">
+        {plan.sections.map((section, index) => (
+          <li key={index}>
+            <strong>{section.heading}</strong>
+            <p className="muted small">{section.source === 'composed' ? 'Composed' : 'From the material'}{section.covers.length > 0 && ` (${section.covers.join(', ')})`}{section.parts.length > 0 && `; required parts ${section.parts.join(', ')}`}. {section.purpose}</p>
+          </li>
+        ))}
+      </ol>
+      {plan.problems.length > 0 && <>
+        <p className="detail-label">Problems in the material</p>
+        <ul className="muted small">{plan.problems.map((problem, index) => <li key={index}>{problem.inventory_id}: {problem.what}</li>)}</ul>
+      </>}
+      {plan.needs.length > 0 && <>
+        <p className="detail-label">Missing from the material</p>
+        <ul className="muted small">{plan.needs.map((need, index) => (
+          <li key={index}>{need.blocking && <span className="objection-label">Needed: </span>}{need.type}{need.concerns.length > 0 && ` (${need.concerns.join(', ')})`}: {need.what}</li>
+        ))}</ul>
+      </>}
+      {plan.notation.length > 0 && <>
+        <p className="detail-label">Notation</p>
+        <ul className="muted small">{plan.notation.map((item, index) => <li key={index}>{item.object}: {item.symbol}{item.also_written && ` (also written ${item.also_written})`}</li>)}</ul>
+      </>}
     </div>
   )
 }

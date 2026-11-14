@@ -52,6 +52,8 @@ jobs:
               resource = files('mathagent').joinpath('skills', skill, 'SKILL.md')
               assert resource.read_text(encoding='utf-8').strip(), skill
           print('All bundled skills are present in the installed wheel.')
+          for sheet in ('paper', 'introduction', 'exam', 'exercise_sheet', 'lecture_notes'):
+              assert files('mathagent').joinpath('skills', 'writeup', 'guidelines', sheet + '.md').is_file(), sheet
           assert files('mathagent').joinpath('numerics', 'docker', 'requirements.lock').is_file()
           static = files('mathagent').joinpath('gui', 'static')
           for name in ('index.html', 'manifest.webmanifest', 'THIRD-PARTY-NOTICES.txt',

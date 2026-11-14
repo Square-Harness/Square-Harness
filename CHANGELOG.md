@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Write-up: plan before writing. One structured call works out the kind of
+  document (article, notes, lecture notes, exercise sheet, exam, part of a
+  paper, summary), its language, what the request asks for, the material's
+  results with their status, its problems and notation, the sections, and what
+  is missing; the controller keeps a generated section only when something asks
+  for it and decides which needs block. The plan is in the job's Outline tab and
+  its report. Each kind follows written guideline sheets
+  (`skills/writeup/guidelines/`). The writer follows the plan, marks new
+  mathematics between `% BEGIN COMPOSED` and `% END COMPOSED` (a draft until it
+  is checked), starts required parts with `% PART:`, and never talks about its
+  notes. Without a template, exams and exercise sheets use `article` with
+  `exercise`, `solution` and `\points{n}`; French, German, Spanish and Italian
+  documents get babel and theorem names in their language; long titles get a
+  short running title. The checker adds an exam's points against the requested
+  total and blocks a name that only the plan mentions.
 - Write-up: say whether a document is ready to go into a paper. A new source
   checker (`mathagent/texcheck.py`, no model call) reads the body and the
   compile log for TODOs, draft notices, hand-typed equation numbers, text about

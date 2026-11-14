@@ -336,6 +336,15 @@ export type ResearchListItem = {
 export type ReviewVariant = 'quick' | 'review' | 'journal' | 'explain'
 
 export type WriteupSection = { title: string; sources: string[]; goal: string; latex: string; complete: boolean; truncated: boolean }
+// The outline call's plan, as the controller settled it (writeup.WriteupRunner._settle_outline).
+export type WriteupPlan = {
+  kind: string; scope: 'document' | 'part'; language: string; title: string; short_title: string; instruction: string
+  requirements: string[]; inventory: { id: string; type: string; text: string; status: string }[]
+  problems: { inventory_id: string; what: string }[]; notation: { object: string; symbol: string; also_written: string }[]
+  sections: { heading: string; role: string; source: 'material' | 'composed'; covers: string[]; parts: string[]; requested_by: string; purpose: string }[]
+  needs: { type: string; what: string; concerns: string[]; blocking: boolean }[]
+  dropped_sections?: string[]; unassigned_parts?: string[]
+}
 
 export type CompileResult = {
   available: boolean
@@ -381,7 +390,7 @@ export type ResearchDetail = {
   running: boolean
   live: Live
   artifacts: { name: string; size: number }[]
-  outline?: { title: string; sections: { title: string; sources: string[]; goal: string }[] } | null
+  outline?: { title: string; sections: { title: string; sources: string[]; goal: string }[] } | WriteupPlan | null
   sections?: WriteupSection[]
   document?: string
   section_lines?: [number, number][]

@@ -6,7 +6,9 @@
 `check(document, body_line, log, material, kind)` returns findings `{category, line, rule, message, excerpt}`:
 
 - BLOCKER: the text cannot go into a paper as it is (a LaTeX error, an unresolved reference, a TODO, a draft
-  notice, an equation number typed by hand, text that talks about its source);
+  notice, an equation number typed by hand, text that talks about its source, generated mathematics between
+  % BEGIN COMPOSED and % END COMPOSED that the review has not checked, an exam's points that are missing or do
+  not add up to the total asked for);
 - MATH: mathematics typeset wrongly ($$, Unicode symbols, ASCII relations, operators in italics, words
   without \\text, ...);
 - PROSE: leftovers of rough notes or Markdown, hand-made structure, positional references;
@@ -24,7 +26,7 @@ import re
 CATEGORIES = ('BLOCKER', 'MATH', 'PROSE', 'LAYOUT', 'FIDELITY')
 # The gate each blocking rule belongs to (writeup.WriteupRunner._gates); PROSE and FIDELITY never block.
 GATE = {'latex-error': 'G1', 'undefined-reference': 'G2', 'undefined-citation': 'G2', 'duplicate-label': 'G2',
-        'todo': 'G4', 'draft-notice': 'G4', 'overfull': 'G7'}
+        'todo': 'G4', 'draft-notice': 'G4', 'composed': 'G4', 'overfull': 'G7'}
 LAYOUT_POINTS = 5.0
 
 # Formulas referred to by position or by a number typed by hand (writeup.reference_problems uses it too).
@@ -72,8 +74,9 @@ def finding(category, rule, message, excerpt='', line=None):
             'excerpt': ' '.join(str(excerpt).split())[:90]}
 
 
-def check(document, body_line, log='', material='', kind=None):
-    """Findings on the body of `document` (from line `body_line`), its compile `log` and the `material`."""
+def check(document, body_line, log='', material='', kind=None, points_total=None):
+    """Findings on the body of `document` (from line `body_line`), its compile `log` and the `material`. `kind` is
+    the outline's kind of document; for an exam, `points_total` is the total the request asks for, if any."""
     out, kept = [], {}
 
     def add(category, rule, message, excerpt='', position=None, line=None):
@@ -110,6 +113,27 @@ def check(document, body_line, log='', material='', kind=None):
         for m in _SOURCE_TALK.finditer(prose):
             add('BLOCKER', 'source-talk', 'the text talks about its source instead of stating the mathematics',
                 around(prose, m, 0, 40), m.start())
+
+    # -- generated mathematics (checked by the review, not by the source checker) and an exam's points
+    begins = list(re.finditer(r'(?<!\\)%\s*BEGIN COMPOSED\b[^\n]*', text))
+    ends = list(re.finditer(r'(?<!\\)%\s*END COMPOSED\b', text))
+    if len(begins) != len(ends):
+        add('BLOCKER', 'composed-markers', 'unbalanced % BEGIN COMPOSED and % END COMPOSED comments', '',
+            (begins or ends)[0].start())
+    for m in begins:
+        following = next((line for line in body[m.end():m.end() + 400].split('\n') if line.strip()), '')
+        add('BLOCKER', 'composed', 'generated mathematics not checked yet (between % BEGIN COMPOSED and % END COMPOSED)',
+            following, m.start())
+    if kind == 'exam':
+        number = lambda value: float(value.replace(',', '.'))
+        points = r'\\points\s*\{\s*(\d+(?:[.,]\d+)?)\s*\}'
+        values = [number(v) for v in re.findall(points, body)]
+        if not values:
+            add('BLOCKER', 'points-missing', 'no question carries its points (\\points{n})')
+        elif points_total is not None and abs(sum(values) - points_total) > 1e-6:
+            sums = [sum(number(v) for v in re.findall(points, part)) for part in re.split(r'\\begin\{exercise\}', body)[1:]]
+            add('BLOCKER', 'points-total', f'the points add up to {sum(values):g}, not the {points_total:g} the request asks for',
+                'exercises: ' + ' + '.join(f'{v:g}' for v in sums) if len(sums) > 1 else '')
 
     # -- mathematics
     for m in re.finditer(r'\$\$', body):
@@ -165,6 +189,8 @@ def check(document, body_line, log='', material='', kind=None):
             add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip())
     reported = set()
     for kind_name, key, number in _LOG_REFERENCE.findall(log):
+        if number and int(number) < body_line:
+            continue  # in the controller's block of points to check, not in the text
         if (kind_name, key) not in reported:
             reported.add((kind_name, key))
             add('BLOCKER', 'undefined-' + kind_name.lower(), f'undefined {kind_name.lower()} {key}', key,
