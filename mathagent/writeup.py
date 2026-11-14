@@ -1704,6 +1704,9 @@ class WriteupRunner(ResearchRunner):
             out += ('\n\nThe environments exercise (numbered) and solution (optional title, as in '
                     '\\begin{solution}[Solution to Exercise~\\ref{ex:one}]) and the command \\points{n} are defined. Write '
                     'the points of each question with \\points{n}, n a number, at the end of the question.')
+        if self.state['outline']['kind'] in ('exam', 'exercise_sheet'):
+            out += (' Number the questions of an exercise with an enumerate list inside it, so that LaTeX numbers them; '
+                    'never type "Question 1." or a number by hand.')
         return out
 
     def _request(self, index, count):

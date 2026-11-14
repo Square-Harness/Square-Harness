@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Write-up: exam and exercise-sheet questions are numbered by a list, not typed
+  by hand; the source checker reports a hand-typed `\textbf{Question 1.}` (and
+  Part, Partie, Aufgabe, Frage...) so the review can fix it.
 - Write-up: generated mathematics counts as checked once the fidelity check has
   run on the version; what is wrong in it is a fidelity issue. Exams and
   exercise sheets can now be ready.

@@ -51,7 +51,8 @@ _OPERATORS = 'sin|cos|tan|cot|sinh|cosh|tanh|log|ln|exp|max|min|sup|inf|lim|limi
 _SHORTHAND = (r'wlog|w\.l\.o\.g\.?|s\.t\.|cts|pf|ptwise|w/o|w/|wrt|cv|cvg|seq|fct|fcts|thm|lem|prop|bdry|nbhd|RHS|LHS|IBP|C-S')
 _UNICODE_MATH = '≤≥→⇒⇔←↦∞∈∉×·≠≈≡∑∏∫∂∇∀∃∅⊂⊆⊃⊇∪∩∘√−±αβγδεζηθικλμνξπρστφχψωΓΔΘΛΞΠΣΦΨΩ‖ℝℕℤℚℂ'
 _HAND_HEADING = (r'\\textbf\{\s*(?:Theorem|Lemma|Proposition|Corollary|Definition|Remark|Proof|Exercise|Example|Claim'
-                 r'|Th[ée]or[èe]me|Lemme|Preuve|D[ée]monstration|Exercice|D[ée]finition|Remarque)\b')
+                 r'|Question|Part|Th[ée]or[èe]me|Lemme|Preuve|D[ée]monstration|Exercice|D[ée]finition|Remarque|Partie'
+                 r'|Aufgabe|Frage|Domanda|Pregunta)\b')
 _SOURCE_TALK = re.compile(r"\b(?:the|these|those|your|author's|user's|original) (?:rough |draft |source )?"
                           r'(?:notes|source|material|draft|conversation|transcript)\b|\bthe (?:user|author) (?:asks?|writes?|says?|notes?)\b', re.I)
 _DRAFT_NOTICE = re.compile(r'Points to check before using this draft|\bthis is a draft\b|\b(?:preliminary|rough) draft\b', re.I)
