@@ -699,6 +699,9 @@ How it works:
    proof, a definition, data, a decision only you can make). The controller
    keeps a generated section only when the request, or a required part of that
    kind of document, asks for it. The plan is shown in the **Outline** tab.
+   When your notes contradict themselves (a constant whose own derivation gives
+   another one), the document keeps your version, marked TODO, and the reply
+   asks you which one to keep, with both versions.
    In a conversation, when a section depends on something the material does
    not contain (earlier work to cite, a proof, a definition, data, or a choice
    only you can make about a problem in your notes), nothing is written: the
@@ -760,9 +763,11 @@ How it works:
    introduction's motivation…) is asked about on its own. Issues that can be
    fixed by rewording are revised one section at a time; a revision that
    changes a formula, loses a label, adds a citation or alters a statement is
-   refused. A correction that would change a formula is never made for you: it
-   is put to you with both versions. Up to three rounds; the best version is
-   kept.
+   refused. A correction that would change a formula of your material is never
+   made for you: it is put to you with both versions. Generated mathematics (an
+   exercise, a solution, exam questions) is corrected when the check finds it
+   wrong, and checked again; once a check has passed over it, it no longer
+   counts as unchecked. Up to three rounds; the best version is kept.
 7. The result is **Ready** only when it compiles, every reference and citation
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing
@@ -787,9 +792,11 @@ From a conversation, the card offers **Download PDF** when compilation succeeds
 and **Sources (.zip)** containing the LaTeX and the exact code, figures and
 template files it needs. Extract that ZIP into a folder to compile it yourself.
 **Main .tex only** gives only the main file, without those dependencies.
-**Body .tex** gives the text alone, without preamble, title, block or
-bibliography commands, to paste into your paper or `\input`; definitions it
-uses that your preamble may lack are listed at its top, as comments.
+**Body .tex** gives the text alone, without preamble, title, block,
+bibliography commands or the review's comments, to paste into your paper or
+`\input`; definitions it uses that your preamble may lack are listed at its
+top, as comments, and a draft says there how many `% TODO` comments it still
+holds.
 The saved copy is deleted with the conversation. From the New write-up
 form or the terminal, the `.tex`, the PDF and the body alone (`-body.tex`) are
 written in your folder, and an existing file is never replaced. A sources ZIP,
