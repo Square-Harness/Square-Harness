@@ -749,6 +749,14 @@ def research_tex(h, body, id):
     return Streamed
 
 
+@route('GET', '/api/research/' + UUID + '/body')
+def research_body(h, body, id):
+    name, data = store.research_body(h.server.hub.root, id)
+    h.send_bytes(200, data, 'application/x-tex; charset=utf-8', [('Content-Disposition', f'attachment; filename="{name}"'),
+                                                                 ('Cache-Control', 'no-store')])
+    return Streamed
+
+
 @route('GET', '/api/research/' + UUID + '/source')
 def research_source(h, body, id):
     name, data = store.research_source(h.server.hub.root, id)

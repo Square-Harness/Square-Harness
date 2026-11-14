@@ -430,7 +430,7 @@ def research_detail(root, job_id, active=None):
         'artifacts': _artifacts(directory, _RESEARCH_ARTIFACT),
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
                                         'outputs', 'macros', 'theorems', 'output_name', 'style', 'scoped', 'deliver',
-                                        'title', 'style_checked')}
+                                        'title', 'style_checked', 'readiness', 'gates', 'checks')}
            if s['kind'] == 'writeup' else {}),
         # The parts hold the material itself: the page needs only how far the writing is.
         **({'parts': [{'complete': bool(part.get('complete')), 'characters': len(part.get('text', ''))} for part in s['parts']]}
@@ -475,6 +475,22 @@ def research_source(root, job_id):
         data = stream.read(SOURCE_BUNDLE_BYTES + 1)
     if len(data) > SOURCE_BUNDLE_BYTES:
         raise ValueError('Source bundle exceeds the download limit')
+    return name, data
+
+
+def research_body(root, job_id):
+    """A write-up's body alone (to paste into a paper) and the file name to save it under."""
+    state = research_state(root, job_id)
+    name = Path(str((state.get('outputs') or {}).get('body') or '')).name
+    if state['kind'] != 'writeup' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.tex', name):
+        raise NotFound('This write-up has no body file')
+    path = _job_directory(root, job_id) / 'artifacts' / 'body.tex'
+    _regular(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(UPLOAD_BYTES + 1)
+    if len(data) > UPLOAD_BYTES:
+        raise ValueError('The body file exceeds the 20 MB download limit')
     return name, data
 
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Write-up: say whether a document is ready to go into a paper. A new source
+  checker (`mathagent/texcheck.py`, no model call) reads the body and the
+  compile log for TODOs, draft notices, hand-typed equation numbers, text about
+  its notes, badly typeset mathematics, rough-note and Markdown leftovers and
+  lines in the margin; numbers absent from the material are reported, never
+  blocking. The controller derives `readiness`: Ready only when it compiles,
+  references resolve, no blocking or mathematical finding, nothing left to
+  settle and no overfull line; the job is complete only then. Replies start
+  with `Ready:` or `Draft:` and say what keeps a draft one. A ready document has
+  no "Points to check" block; a draft's block lists the findings and typesets
+  its TODO comments. The body alone is exported as `-body.tex` (folder, ZIP and
+  a Body .tex download), with the definitions it needs listed as comments. For a
+  part of a paper (its complete `.tex` attached), labels it already uses,
+  citations outside its bibliography and undefined commands block. A `% TODO`
+  that cites a formula keeps its label.
 - Write-up: accept rough notes pasted under the request in an `@writeup`
   message of a new conversation; the message is pinned as the material and the
   writer sees it once. Run latexmk with `-norc`, so a personal latexmkrc that

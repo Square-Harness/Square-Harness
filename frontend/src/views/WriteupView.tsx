@@ -81,7 +81,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile' : data.phase
+  const phase = data.phase === 'repair' || data.phase === 'assemble' || data.phase === 'check' ? 'compile' : data.phase
   const current = STEPS.indexOf(phase as typeof STEPS[number])
   return (
     <header className="job-head">
@@ -105,10 +105,11 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       </div>
       {(data.outputs?.tex || data.outputs?.download || data.outputs?.source || data.compile?.pdf) && (
         <div className="outputs">
-          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <> and <code>{data.outputs.pdf}</code></>} in your folder</span>}
+          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <>, <code>{data.outputs.pdf}</code></>}{data.outputs.body && <> and the body alone, <code>{data.outputs.body}</code>,</>} in your folder</span>}
           {data.compile?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(data.id)} download>Download PDF</a>}
           {data.outputs?.source && <a className={'btn btn-small' + (data.compile?.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(data.id)} download={data.outputs.source}>Sources (.zip)</a>}
           {data.outputs?.download && <a className={'btn btn-small' + (data.compile?.pdf || data.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(data.id)} download={data.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
+          {data.outputs?.download && data.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(data.id)} download={data.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
           {data.compile?.pdf && <a className="btn btn-small btn-quiet" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a>}
         </div>
       )}

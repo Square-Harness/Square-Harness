@@ -701,24 +701,44 @@ How it works:
    folder, without shell escape and with restricted file access; your own
    `latexmkrc` is not read. If it does not
    compile, one repair call fixes the reported errors.
-   A PDF with undefined citations, unresolved references or duplicate labels is
-   offered as a partial draft, with the remaining keys listed. Producing a PDF
-   alone does not make the document complete.
    Missing supported commands are supplied within one bounded compile allowance;
    pausing also stops compilation promptly. So are undefined theorem-like
    environments, including `exercise`, `problem` and `question` (numbered on
    their own) and `solution` (set like a proof).
-4. The document opens with **Points to check**: its `% TODO` comments, citations
-   and figures it could not resolve, and references to undefined labels. Delete
-   that block once they are settled.
+4. A source checker reads the LaTeX and the compile log, with no model call. It
+   reports what keeps the text from going into a paper as it is: `% TODO`
+   comments, a draft notice, equation numbers typed by hand ("by (3)"), text that
+   talks about its notes ("the notes record…"), mathematics typeset wrongly
+   (`$$`, Unicode symbols such as `≤`, `<=`, `sin` without a backslash,
+   `\mathrm{Z}`, words without `\text`, `...`), leftovers of rough notes or
+   Markdown (`wlog`, `**bold**`, `\textbf{Theorem}`, straight quotes), and lines
+   more than 5pt into the margin. Numbers in the mathematics that your material
+   does not contain are listed in the report as points to look at; they never
+   block. These are heuristics, not a proofreading.
+5. The result is **Ready** only when it compiles, every reference and citation
+   resolves, no label is defined twice, the checker found no blocking or
+   mathematical problem, nothing is left to settle (no `% TODO`, no missing
+   figure, no text cut short by time) and no line runs into the margin.
+   Otherwise it is a **Draft**: the reply starts with `Draft:` and says why, and
+   the document opens with **Points to check** (its `% TODO` comments, typeset,
+   and the problems found), to delete once they are settled. A ready document
+   has no such block. "Ready" means these checks passed: read it before using it.
+   When you attach a complete `.tex` of your paper, three more checks apply,
+   because the text is meant to be pasted into it: a label your paper already
+   uses, a citation outside your bibliography, and a command or environment your
+   paper does not define each keep it a draft.
 
 From a conversation, the card offers **Download PDF** when compilation succeeds
 and **Sources (.zip)** containing the LaTeX and the exact code, figures and
 template files it needs. Extract that ZIP into a folder to compile it yourself.
 **Main .tex only** gives only the main file, without those dependencies.
+**Body .tex** gives the text alone, without preamble, title, block or
+bibliography commands, to paste into your paper or `\input`; definitions it
+uses that your preamble may lack are listed at its top, as comments.
 The saved copy is deleted with the conversation. From the New write-up
-form or the terminal, the `.tex` and the PDF are written in your folder, and an
-existing file is never replaced. A sources ZIP is saved alongside them. Code
+form or the terminal, the `.tex`, the PDF and the body alone (`-body.tex`) are
+written in your folder, and an existing file is never replaced. A sources ZIP,
+which also holds the body as `document-body.tex`, is saved alongside them. Code
 listings use the executed sandbox source rather than a model's reconstruction.
 Compilation failures are reported as unfinished drafts, with the compiler error.
 In the web app, a template can be saved under a

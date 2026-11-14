@@ -10,8 +10,9 @@ context is written in consecutive parts. The controller builds the preamble itse
 notation first, then the template's, then a fitting saved style's, multi-token macros braced),
 supplies commands the sources use without defining, and compiles with latexmk in a temporary
 folder without shell escape and with TeX's paranoid file access. A document that does not compile
-gets one repair call on the whole text. Nothing reviews the mathematics: the user writes up results
-they have checked, and the document is theirs to read.
+gets one repair call on the whole text. The source checker (texcheck) and the controller's gate then
+decide whether it is ready to go into a paper or a draft; no model gives that verdict. Nothing reviews
+the mathematics: the user writes up results they have checked, and the document is theirs to read.
 """
 from .reporting import usage_footer
 import copy
@@ -33,6 +34,8 @@ from urllib.parse import unquote
 import zipfile
 
 from .ledger import _atomic_write, _directory, _regular
+from . import texcheck
+from .texcheck import POSITIONAL as _POSITIONAL
 from .research import ResearchBudget, ResearchRunner, remaining_limit
 from .style import (_group, definition_body, environment_definitions, grouped, list_profiles, macro_definitions,
                     style_digest, uses)
@@ -105,6 +108,10 @@ def ascii_punctuation(text):
     return restore(masked.translate(_PUNCTUATION))
 
 
+def _digest(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+
+
 def todo_comments(body):
     """The text of each % TODO comment of a body, with the comment lines that continue it."""
     items, current = [], None
@@ -123,9 +130,6 @@ def todo_comments(body):
 _REFERENCE = re.compile(r'\\(?:eqref|ref|cref|Cref|autoref|pageref)\*?\s*\{([^{}]*)\}')
 _REFERENCE_RANGE = re.compile(r'\\(?:crefrange|Crefrange)\*?\s*\{([^{}]*)\}\s*\{([^{}]*)\}')
 _LABEL = re.compile(r'\\label\s*\{([^{}]*)\}')
-_POSITIONAL = re.compile(r'\b(?:the\s+(?:equation|display|formula|identity|inequality|estimate)\s+above|the\s+(?:above|previous|preceding)\s+'
-                         r'(?:equation|display|formula|identity|inequality|estimate)|(?:equation|formula|identity|inequality|estimate)s?'
-                         r'\s*~?\(\d+(?:\.\d+)*\))', re.I)
 
 
 def normalised_references(body):
@@ -184,7 +188,8 @@ def tidy_numbering(body, protected=(), material=''):
     body, restore = _protect_code(body)
     from_material = lambda content: ' '.join(content.split()) in material
     text = _uncommented(body)
-    referenced = set(reference_keys(text))
+    # A % TODO comment that cites a formula keeps its label: the author settles the point with it.
+    referenced = set(reference_keys(text)) | set(reference_keys(' '.join(todo_comments(body))))
     keep = lambda label: label.strip() in referenced or label.strip() in protected
     pattern = re.compile(r'\\begin\{(' + '|'.join(_NUMBERED) + r')\}(\{[^{}]*\})?(.*?)\\end\{\1\}', re.S)
 
@@ -333,12 +338,16 @@ FILE_ERROR = re.compile(r'^(?:\./)?([^\s:/]+\.(?:tex|sty|cls)):(\d+): (.+)$', re
 DEFAULT_THEOREMS = ('theorem', 'lemma', 'proposition', 'corollary', 'definition', 'remark')
 SUMMARY_REQUEST = 'Summarize the important results obtained so far in this conversation.'
 ATTACHED_REQUEST = 'Write up the attached material as a clean LaTeX document.'
+# Source-checker rules the block's own points already report (TODOs, references, labels, citations).
+_BLOCK_COVERED = ('todo', 'latex-error', 'undefined-reference', 'undefined-citation', 'duplicate-label',
+                  'unknown-citation', 'positional')
 _LEGACY_PHASES = ('plan', 'section', 'notation', 'review')  # jobs saved by the section-by-section pipeline
 _STATE_DEFAULTS = {'macros': [], 'theorems': [], 'definitions': [], 'style': None, 'style_checked': False, 'parts': [],
                    'title': '', 'body': '', 'model_definitions': '', 'document': '', 'compile': None, 'repaired': False,
                    'outputs': {}, 'supplied_macros': {}, 'supplied_environments': {}, 'request_macros': {},
                    'request_environments': {}, 'style_choice': {'mode': 'auto'}, 'variant': None, 'scoped': False,
-                   'deliver': 'folder', 'output_name': '', 'inline_material': False}
+                   'deliver': 'folder', 'output_name': '', 'inline_material': False,
+                   'readiness': None, 'checks': [], 'gates': []}
 
 _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| should)|Let me|First,? I|Before (?:writing|fixing)|"
                        r"To (?:fix|write|verify)|I'm going to)\b", re.I)
@@ -671,13 +680,13 @@ class WriteupRunner(ResearchRunner):
         self._repairing = False
 
     def _check_time(self):
-        """A written document is always assembled, compiled and offered, even when time ran out while
+        """A written document is always assembled, compiled, checked and offered, even when time ran out while
         it was written: those steps call no model. The repair call keeps the limit (see _repair)."""
         cancel = getattr(self.agent.client, 'cancel', None)
         if cancel is not None and cancel.is_set():
             raise KeyboardInterrupt
         phase = self.state.get('phase')
-        if phase in ('assemble', 'compile', 'export') or (phase == 'repair' and not self._repairing):
+        if phase in ('assemble', 'compile', 'check', 'export') or (phase == 'repair' and not self._repairing):
             return
         super()._check_time()
 
@@ -764,7 +773,7 @@ class WriteupRunner(ResearchRunner):
                 'macros': [], 'theorems': [], 'definitions': [],
                 'style': None, 'style_checked': False, 'parts': [], 'title': '', 'body': '', 'model_definitions': '',
                 'document': '', 'compile': None, 'repaired': False, 'outputs': {}, 'supplied_macros': {},
-                'supplied_environments': {}}
+                'supplied_environments': {}, 'readiness': None, 'checks': [], 'gates': []}
 
     def _call(self, role, instruction, *, thinking_budget=None, **kwargs):
         """A reasoning call whose reasoning share of the output is this call's own: a document needs most of
@@ -989,7 +998,7 @@ class WriteupRunner(ResearchRunner):
     # -- workflow -------------------------------------------------------------------------
 
     def _step(self, phase):
-        if phase in _LEGACY_PHASES or (phase in ('draft', 'assemble', 'compile', 'repair', 'export') and 'parts' not in self.state):
+        if phase in _LEGACY_PHASES or (phase in ('draft', 'assemble', 'compile', 'repair', 'check', 'export') and 'parts' not in self.state):
             # A job saved by the earlier pipeline is written again from its sources.
             for key, value in _STATE_DEFAULTS.items():
                 self.state.setdefault(key, copy.deepcopy(value))
@@ -1005,8 +1014,12 @@ class WriteupRunner(ResearchRunner):
             self._compile()
         elif phase == 'repair':
             self._repair()
+        elif phase == 'check':
+            self._check()
         elif phase == 'review':
             self.state['phase'] = 'export'
+        elif phase == 'export' and self.state.get('readiness') is None:
+            self.state['phase'] = 'check'  # saved before the gate existed: check it first
         elif phase == 'export':
             self._export()
             self.state['phase'] = 'done'
@@ -1248,7 +1261,10 @@ class WriteupRunner(ResearchRunner):
         preamble += self._model_preamble(preamble)
         preamble += self._package_preamble(preamble + '\n' + loaded, body)
         before, addition, closing = self._made_bibliography(preamble + '\n' + loaded, body)
-        document = before + preamble + addition + '\n\n' + head + self._checks_block(body) + '\n'
+        # A ready document has no block: it goes into a paper as it is.
+        self.state['block_raw'] = False
+        self.state['block'] = '' if self.state.get('readiness') == 'ready' else self._checks_block(body)
+        document = before + preamble + addition + '\n\n' + head + self.state['block'] + '\n'
         self.state['body_line'] = document.count('\n') + 1
         self.state['document'] = self.state['draft'] = document + body + '\n' + closing + '\n\\end{document}\n'
 
@@ -1287,8 +1303,10 @@ class WriteupRunner(ResearchRunner):
         return ('\n' + '\n'.join(lines)) if lines else ''
 
     def _checks_block(self, body):
-        """What the author must settle, printed at the top of the document: comments alone are invisible in the PDF."""
-        points = todo_comments(body) + self._template_notes()
+        """What the author must settle, printed at the top of the document: comments alone are invisible in the PDF.
+        TODO comments are LaTeX the writer wrote, so they are typeset (escaped instead if the block then fails to
+        compile, see _compile); the controller's points and the source checker's findings are plain text."""
+        todo, points = todo_comments(body), self._template_notes()
         if self.state.get('truncated'):
             points.append('Time ran out while the document was being written: it stops early.')
         self.state['warnings'] = [warning for warning in self.state['warnings']
@@ -1317,9 +1335,15 @@ class WriteupRunner(ResearchRunner):
             points.append(note)
             if note not in self.state['warnings']:
                 self.state['warnings'].append(note)
-        if not points:
+        escaped = self.state.get('block_escaped') == _digest(body)
+        self.state['block_raw'] = bool(todo) and not escaped
+        # Escaped source text has no break point of its own: allow one before each backslash.
+        plain = lambda point: latex_text(point).replace('\\textbackslash{}', '\\allowbreak\\textbackslash{}')
+        items = ['\\item ' + (plain(point) if escaped else point) for point in todo]
+        items += ['\\item ' + plain(point) for point in points + self._finding_points()]
+        if not items:
             return ''
-        items = '\n'.join('\\item ' + latex_text(point) for point in points)
+        items = '\n'.join(items)
         return ('% Points to check before using this draft (from its TODO comments and the controller\'s checks);\n'
                 '% delete this block once they are settled.\n'
                 '\\begin{quote}\\small\\textbf{Points to check before using this draft.}\n'
@@ -1560,6 +1584,11 @@ class WriteupRunner(ResearchRunner):
                                    assets=assets, cancel=cancel)
             if result['ok'] or not result['available'] or time.monotonic() >= deadline:
                 break
+            if self.state.get('block_raw') and self._block_failed(result['errors']):
+                # TODO points are typeset as LaTeX; when they are what fails, the block is printed escaped instead.
+                self.state['block_escaped'] = _digest(self.state['body'])
+                self._assemble()
+                continue
             found = {n: d for n in undefined_names(result['log']) if n not in macros and (d := self._definition_for(n))}
             # Share the theorem counter only when it exists (a template may define no theorem at all).
             counter = '[theorem]' if 'theorem' in set(THEOREM.findall(self.state['document'])) | set(environments) else ''
@@ -1584,14 +1613,129 @@ class WriteupRunner(ResearchRunner):
                                  'references': result.get('references') or reference_diagnostics(result['log'])}
         if not result['available']:
             self.state['warnings'].append('LaTeX (latexmk) is not installed here; the document was not compiled.')
-        self.state['phase'] = 'repair' if result['available'] and not result['ok'] and not self.state['repaired'] else 'export'
+        self.state['phase'] = 'repair' if result['available'] and not result['ok'] and not self.state['repaired'] else 'check'
+
+    def _block_failed(self, errors):
+        """Whether a compile error lies in the block of points to check (or no error has a line to tell)."""
+        end = self.state.get('body_line', 1)
+        start = end - self.state.get('block', '').count('\n') - 1
+        located = [e['line'] for e in errors if e.get('file') == 'document.tex' and e.get('line')]
+        return not located or any(start <= line < end for line in located)
+
+    def _check(self):
+        """The source checker and the gate, with no model call: `readiness` is 'ready' only when every gate passes.
+        When the block of points to check is no longer what the document should print (findings to add, or a
+        ready document that must lose it), the document is assembled and compiled once more."""
+        findings = texcheck.check(self.state['document'], self.state.get('body_line', 1), self._compile_log(),
+                                  '\n'.join(s['content'] for s in self._notes_in()),
+                                  kind='summary' if self.state.get('variant') == 'summary' else None)
+        self.state['checks'] = findings + self._part_findings()
+        self.state['gates'] = self._gates()
+        self.state['readiness'] = 'draft' if self.state['gates'] else 'ready'
+        body = self.state['body']
+        wanted = '' if self.state['readiness'] == 'ready' else self._checks_block(body)
+        if ((self.state.get('compile') or {}).get('ok') and wanted != self.state.get('block')
+                and self.state.get('block_refreshed') != _digest(body)):
+            self.state['block_refreshed'] = _digest(body)
+            self.state['phase'] = 'assemble'
+            return
+        self.state['phase'] = 'export'
+
+    def _compile_log(self):
+        name = (self.state.get('compile') or {}).get('log')
+        if isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_.-]+\.md', name):
+            path = self.directory / 'artifacts' / name
+            if not path.is_symlink() and path.is_file():
+                return path.read_text(encoding='utf-8', errors='replace')
+        return ''
+
+    def _part_findings(self):
+        """For a part of the author's paper (a complete .tex they attached): what would break once it is pasted
+        into that paper. Labels the paper already defines, citations outside its bibliography, and commands or
+        environments that only the model, the controller or a saved style defined."""
+        papers = [s for s in self._templates_in(('.tex',)) if '\\begin{document}' in s['content']
+                  and not s['path'].startswith(('style-template/', 'saved-template/'))]
+        if not papers:
+            return []
+        body, found = self.state['body'], []
+        paper_labels = {label.strip() for s in papers for label in _LABEL.findall(_uncommented(s['content']))}
+        notes_labels = {label.strip() for s in self._notes_in() for label in _LABEL.findall(s['content'])}
+        for label in dict.fromkeys(label.strip() for label in _LABEL.findall(_uncommented(body))):
+            if label in paper_labels and label not in notes_labels:  # a rewritten passage keeps its own labels
+                found.append(texcheck.finding('BLOCKER', 'label-clash', f'the label {label} is already used in your paper', label))
+        for key in self._unknown_citations(body):
+            found.append(texcheck.finding('BLOCKER', 'unknown-citation', f'{key} is not in your bibliography', key))
+        style = self.state.get('style') or {}
+        model = self.state.get('model_definitions') or ''
+        macros = (set(self.state.get('supplied_macros') or {}) | set(macro_definitions(model))
+                  | {m['name'] for m in style.get('macros') or []})
+        own = set(self.state['macros']) | set(self.state.get('request_macros') or {})
+        for name in sorted(n for n in macros - own if uses(body, n)):
+            found.append(texcheck.finding('BLOCKER', 'paper-macro', f'\\{name} is not defined by your paper', '\\' + name))
+        environments = set(self.state.get('supplied_environments') or {}) | set(environment_definitions(model))
+        for name in sorted(n for n in environments - set(self.state['theorems']) if f'\\begin{{{n}}}' in body):
+            found.append(texcheck.finding('BLOCKER', 'paper-macro', f'the environment {name} is not defined by your paper', name))
+        return found
+
+    def _gates(self):
+        """The gates this document fails, as {gate, message}; none means ready. G5 and G6 (fidelity and style,
+        checked by the model) are not run yet."""
+        s, failed = self.state, []
+        fail = lambda gate, message: failed.append({'gate': gate, 'message': message})
+        compile_state = s.get('compile') or {}
+        if not compile_state.get('available'):
+            fail('G1', 'LaTeX is not installed here, so it was not compiled')
+        elif not compile_state.get('ok'):
+            error = next((e['message'] for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), 'see its page')
+            fail('G1', f'it does not compile ({error})')
+        references = self._compiled_references()
+        if references.get('unresolved') or any(texcheck.gate(f) == 'G2' for f in s['checks']):
+            details = [label + ' ' + ', '.join(references[key]) for key, label in
+                       (('citations', 'undefined citations:'), ('labels', 'undefined references:'),
+                        ('duplicates', 'labels defined twice:')) if references.get(key)]
+            fail('G2', 'the PDF has ' + ('; '.join(details) if details else 'references that do not resolve'))
+        problems = [f for f in s['checks'] if texcheck.gate(f) == 'G3']
+        if problems:
+            kinds = list(dict.fromkeys(f['message'] for f in problems))
+            fail('G3', f'{len(problems)} problem{"s" if len(problems) > 1 else ""} found by the source checker ('
+                 + '; '.join(kinds[:3]) + ('; ...' if len(kinds) > 3 else '') + ')')
+        todo = len(todo_comments(s['body']))
+        if todo:
+            fail('G4', f'{todo} TODO comment{"s mark points" if todo > 1 else " marks a point"} to settle')
+        if any(f['rule'] == 'draft-notice' for f in s['checks']):
+            fail('G4', 'the text prints a draft notice')
+        if s.get('truncated') or not all(part['complete'] for part in s.get('parts', [])):
+            fail('G4', 'time ran out; the text is incomplete')
+        if s.get('missing_figures'):
+            fail('G4', 'figures are missing (placeholders in the PDF)')
+        overfull = [f for f in s['checks'] if texcheck.gate(f) == 'G7']
+        if overfull:
+            fail('G7', f'{len(overfull)} line{"s run" if len(overfull) > 1 else " runs"} more than '
+                 f'{texcheck.LAYOUT_POINTS:g}pt into the margin'
+                 + (' (one is the page head: shorten the title)' if any(f['line'] is None for f in overfull) else ''))
+        return failed
+
+    def _finding_points(self):
+        """The source checker's findings for the block, one point per rule. The block's own points already cover
+        TODOs, references, labels and citations; numbers absent from the material are listed in the report."""
+        groups = {}
+        for found in self.state.get('checks') or []:
+            if found['category'] != 'FIDELITY' and found['rule'] not in _BLOCK_COVERED:
+                groups.setdefault(found['rule'], []).append(found)
+        points = []
+        for found in groups.values():
+            message = found[0]['message']
+            examples = list(dict.fromkeys(f['excerpt'] for f in found if f['excerpt']))[:2]
+            points.append(message[0].upper() + message[1:] + (f' ({len(found)} places)' if len(found) > 1 else '')
+                          + (': ' + '; '.join("``" + e + "''" for e in examples) if examples else '') + '.')
+        return points
 
     def _repair(self):
         """One repair call on the whole document: fix the reported errors, change nothing else."""
         body, title = self.state['body'], self.state.get('title', '')
         if len(body) > self._room():
             self.state['warnings'].append('The document is too long for a repair call; fix the LaTeX errors on its page by hand.')
-            self.state['phase'] = 'export'
+            self.state['phase'] = 'check'
             return
         lines, first = self.state['document'].splitlines(), self.state.get('body_line', 1)
         report = []
@@ -1612,7 +1756,7 @@ class WriteupRunner(ResearchRunner):
         seconds_left = self.state['settings']['max_seconds'] - self._elapsed()
         if seconds_left <= 0:
             self.state['warnings'].append('No time was left for a repair call; the LaTeX errors are on its page.')
-            self.state['phase'] = 'export'
+            self.state['phase'] = 'check'
             return
         remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
         cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining))
@@ -1632,7 +1776,7 @@ class WriteupRunner(ResearchRunner):
         except ResearchBudget:
             # Out of time during the repair: the written document is still offered, with its errors.
             self.state['warnings'].append('Time ran out during the repair call; the LaTeX errors are on its page.')
-            self.state['phase'] = 'export'
+            self.state['phase'] = 'check'
             return
         finally:
             self._repairing = False
@@ -1645,7 +1789,7 @@ class WriteupRunner(ResearchRunner):
             self.state['phase'] = 'compile'
         else:
             self.state['warnings'].append('The repair call did not return a corrected document; the errors are on its page.')
-            self.state['phase'] = 'export'
+            self.state['phase'] = 'check'
 
     def _free_path(self, name):
         path = self.agent.workspace.path(name, pdf=True)
@@ -1655,10 +1799,30 @@ class WriteupRunner(ResearchRunner):
             number += 1
         return path
 
+    def _body_file(self):
+        """The body alone, to paste into a paper or \\input: no title, block or bibliography wrapper. Definitions the
+        author's paper may lack (the model's, the controller's, a saved style's) are listed first, as comments."""
+        body, model = self.state['body'], self.state.get('model_definitions') or ''
+        own = set(self.state['macros']) | set(self.state.get('request_macros') or {})
+        style = self.state.get('style') or {}
+        macros = {**{m['name']: m['definition'] for m in style.get('macros') or []}, **macro_definitions(model),
+                  **(self.state.get('supplied_macros') or {})}
+        lines = [grouped(d) for n, d in macros.items() if n not in own and uses(body, n)]
+        environments = {**environment_definitions(model), **(self.state.get('supplied_environments') or {})}
+        lines += [d for n, d in environments.items() if n not in self.state['theorems'] and f'\\begin{{{n}}}' in body]
+        head = '% ' + (self.state.get('title') or 'Body') + ': the text alone, to paste into a paper or to \\input.\n'
+        if lines:
+            head += ('% It uses these definitions, which your preamble may lack:\n'
+                     + ''.join(''.join('% ' + row + '\n' for row in line.splitlines()) for line in dict.fromkeys(lines)))
+        return head + '\n' + body.strip() + '\n'
+
     def _export(self):
         archive = io.BytesIO()
         assets = [(source['name'], self._source_bytes(source)) for source in self.state.get('source_files', [])]
         contents = _compile_files(self.state['document'], (), assets)
+        body = self._body_file().encode('utf-8')
+        contents['document-body.tex'] = body
+        _atomic_write(self.directory / 'artifacts' / 'body.tex', body)
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
             for name, data in contents.items():
                 bundle.writestr(name, data)
@@ -1671,7 +1835,8 @@ class WriteupRunner(ResearchRunner):
         if self.state.get('deliver') == 'download':
             # Kept with the job (the document in state.json, the PDF in artifacts/) until the user downloads it.
             name = download_name(self.state)
-            self.state['outputs'] = {'download': name, 'pdf': pdf_ok, 'source': name[:-4] + '-source.zip'}
+            self.state['outputs'] = {'download': name, 'pdf': pdf_ok, 'source': name[:-4] + '-source.zip',
+                                     'body': name[:-4] + '-body.tex'}
             self.emit('notice', 'Ready to download as ' + name)
             return
         workspace = self.agent.workspace
@@ -1685,6 +1850,9 @@ class WriteupRunner(ResearchRunner):
         tex.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(tex, self.state['document'].encode('utf-8'))
         outputs = {'tex': str(tex.relative_to(workspace.root))}
+        body_path = self._free_path(str(Path(outputs['tex']).with_name(tex.stem + '-body.tex')))
+        _atomic_write(body_path, body)
+        outputs['body'] = str(body_path.relative_to(workspace.root))
         compiled = self.directory / 'artifacts' / 'compiled.pdf'
         if pdf_ok and compiled.exists():
             pdf = self._free_path(str(Path(outputs['tex']).with_suffix('.pdf')))
@@ -1701,14 +1869,13 @@ class WriteupRunner(ResearchRunner):
         self.emit('notice', 'Wrote ' + outputs['tex'] + (' and ' + outputs['pdf'] if 'pdf' in outputs else ''))
 
     def _finish(self):
-        compile_state = self.state.get('compile') or {}
-        references = self._compiled_references()
-        complete = (compile_state.get('ok') and all(part['complete'] for part in self.state.get('parts', []))
-                    and not self.state.get('truncated') and not self.state.get('missing_figures')
-                    and not references.get('unresolved'))
-        self.state['status'] = 'complete' if complete else 'partial'
-        self.state['stop_reason'] = ('Written and compiled; read it before using it.' if complete else
-                                     'Written; see the checks for what still needs you.')
+        """Complete only when the gate says ready (see _check); a draft is partial, with what failed."""
+        ready = self.state.get('readiness') == 'ready'
+        self.state['status'] = 'complete' if ready else 'partial'
+        gates = self.state.get('gates') or []
+        self.state['stop_reason'] = ('Ready: written, compiled and checked; read it before using it.' if ready else
+                                     'Draft: ' + '; '.join(g['message'] for g in gates) + '.' if gates else
+                                     'Draft: see the checks for what still needs you.')
 
     def _compiled_references(self):
         """Read old compile checkpoints without changing their stored documents."""
@@ -1732,38 +1899,39 @@ class WriteupRunner(ResearchRunner):
         return 'The PDF still has ' + ('; '.join(details) if details else 'unresolved references') + '.'
 
     def ready_message(self):
-        """The short reply in the conversation: what is ready, and what still needs the author."""
+        """The short reply in the conversation. It starts with Ready: or Draft:; a draft says what keeps it one."""
         s = self.state
-        outputs, compile_state = s.get('outputs') or {}, s.get('compile') or {}
+        outputs = s.get('outputs') or {}
         name = outputs.get('download') or outputs.get('tex')
-        noun = 'Summary' if s.get('variant') == 'summary' else 'Write-up'
+        noun = 'summary' if s.get('variant') == 'summary' else 'write-up'
         if not name:
-            return f'The {noun.lower()} was not finished: {s.get("stop_reason") or s["status"]}'
-        if compile_state.get('available') and not compile_state.get('ok'):
-            error = next((e['message'] for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), 'see its page')
-            return f'{noun} draft saved, but compilation failed: {error} No PDF was produced; the source bundle and log are available.'
-        label = 'ready' if s['status'] == 'complete' else 'partial draft saved'
-        parts = [f'{noun} {label}: `{name}`' + (' (download it from the card above).' if outputs.get('download') else '.')]
-        if s['status'] == 'complete' and outputs.get('pdf') and outputs.get('source'):
-            parts = [f'{noun} ready: PDF and complete LaTeX sources are available from the card above.'
-                     if outputs.get('download') else f'{noun} ready: `{outputs["pdf"]}` and `{outputs["source"]}`.']
-        if not compile_state.get('available'):
-            parts.append('LaTeX is not installed here; no PDF was produced.')
-        elif s.get('truncated'):
-            parts.append('Time ran out; the text is incomplete.')
-        elif s.get('missing_figures'):
-            parts.append('The PDF contains placeholders for missing figures.')
-        if message := self._reference_message():
-            parts.append(message)
-        if outputs.get('source'):
-            parts.append('Download Sources (.zip) for the LaTeX together with its code, figures and template files.')
-        if compile_state.get('available') and not compile_state.get('ok'):
-            parts.append('It did not compile; the errors are on its page.')
-        todo = len(re.findall(r'%\s*TODO', s.get('document', '')))
-        if todo:
-            parts.append(f'{todo} TODO comment{"s" if todo > 1 else ""} mark{"" if todo > 1 else "s"} points to settle.')
+            return f'The {noun} was not finished: {s.get("stop_reason") or s["status"]}'
+        if outputs.get('download'):
+            files = (('The PDF, the' if outputs.get('pdf') else 'The') + ' LaTeX sources and the body alone (to paste '
+                     'into a paper) are on the card above.')
+        else:
+            files = 'Saved as ' + ', '.join(f'`{outputs[key]}`' for key in ('tex', 'pdf', 'body', 'source')
+                                            if isinstance(outputs.get(key), str)) + '.'
+        if (s.get('readiness') or ('ready' if s['status'] == 'complete' else 'draft')) == 'ready':
+            parts = [f"Ready: the {noun} compiles and passed the controller's checks; read it before using it.", files]
+        else:
+            gates = s.get('gates') or []
+            parts = [f'Draft: the {noun} is not ready to go into a paper'
+                     + (': ' + '; '.join(g['message'] for g in gates) + '.' if gates else '.'), files]
+            if summary := self._check_summary():
+                parts.append(summary)
+            if s.get('block'):
+                parts.append('The points to check are listed at the top of the document.')
         parts += self._template_notes()
         return ' '.join(parts)
+
+    def _check_summary(self):
+        """The source checker's findings counted by category, in words."""
+        words = {'BLOCKER': ('blocking', 'blocking'), 'MATH': ('in the mathematics', 'in the mathematics'),
+                 'PROSE': ('in the prose', 'in the prose'), 'LAYOUT': ('in the layout', 'in the layout'),
+                 'FIDELITY': ('number not in the material', 'numbers not in the material')}
+        counts = texcheck.counts(self.state.get('checks') or [])
+        return ('Source checks: ' + ', '.join(f'{n} {words[c][n > 1]}' for c, n in counts.items()) + '.') if counts else ''
 
     def _progress(self):
         parts = self.state.get('parts', [])
@@ -1791,7 +1959,9 @@ class WriteupRunner(ResearchRunner):
                f'- Document: `{outputs["tex"]}`' if outputs.get('tex') else
                f'- Document: ready to download as `{outputs["download"]}`' if outputs.get('download') else '- Document: not exported yet',
                f'- PDF: `{outputs["pdf"]}`' if isinstance(outputs.get('pdf'), str) else '- PDF: ' + ('ready' if outputs.get('pdf') else 'none'),
+               f'- Body alone (to paste into a paper): `{outputs["body"]}`' if outputs.get('body') else '- Body alone: not exported yet',
                f'- LaTeX: {compiled}', f'- TODO comments left for the author: {todo}',
+               '- Readiness: ' + {'ready': 'ready (every gate passed)', 'draft': 'draft'}.get(s.get('readiness'), 'not checked yet'),
                '- Bibliography: pinned from retrieved records' if catalog else
                '- Bibliography: your .bib' if self._templates_in(('.bib',)) else
                f'- Bibliography: made from the material ({len(s.get("bibliography") or [])} entries, embedded in the .tex)'
@@ -1801,6 +1971,12 @@ class WriteupRunner(ResearchRunner):
                '', '## Request', '', s['goal']]
         if s.get('warnings'):
             out += ['', '## Checks', ''] + ['- ' + w for w in dict.fromkeys(s['warnings'])]
+        if s.get('gates'):
+            out += ['', '## Why it is a draft', ''] + [f'- {g["gate"]}: {g["message"]}' for g in s['gates']]
+        if s.get('checks'):
+            out += ['', '## Source checks', '', self._check_summary(), ''] + [
+                f'- {f["category"]} `{f["rule"]}`' + (f' (line {f["line"]})' if f.get('line') else '') + f': {f["message"]}'
+                + (' — `' + f['excerpt'].replace('`', "'") + '`' if f.get('excerpt') else '') for f in s['checks']]
         if message := self._reference_message():
             out += ['', '## Reference checks', '', message]
         if compile_state.get('errors'):

@@ -199,9 +199,15 @@ Version 1.1.0. The source of truth for the machine-readable version is
   An author-provided `.bib` takes precedence. Exact identifier matches can map
   model citation aliases to supplied keys; unrelated or ambiguous works stay
   unresolved. Parse Markdown DOI links without consuming their link syntax.
-  Compilation success means a PDF was built; completion additionally requires
-  the final LaTeX log to have no unresolved citations/references or duplicate
-  labels. Keep the PDF downloadable when those checks leave the draft partial.
+  Compilation success means a PDF was built; completion requires
+  `readiness == 'ready'`, which the controller derives in the `check` phase
+  (`_check`, `_gates`) from the compile state, the final log (unresolved
+  citations/references, duplicate labels, overfull lines) and the deterministic
+  `texcheck` findings; no model verdict is used, and the field is not called
+  `verdict` (the hub reads that name for reviews). Keep the PDF downloadable when
+  the gate leaves the draft partial. A ready document prints no "Points to
+  check" block; the block's `% TODO` points are typeset as LaTeX and fall back to
+  escaped text when an error lies in the block.
 - **Workflow status.** Operational failures (timeout, budget, context, malformed
   output) retain their own stop reasons. Partial work stays labelled partial.
   Retryable child failures keep their pending native transaction and saved job;
@@ -458,6 +464,7 @@ documented together when releasing these features.
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
 | Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
+| | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; providers that refused (`down`) |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
@@ -592,7 +599,10 @@ where they are referred to) → `assemble` (the preamble, the made bibliography
 and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
 files and the figures the text includes; commands and environments the text
 uses without defining are supplied) → `repair` (one call on the whole body) →
-`export` (the folder, or kept for download when started from a conversation).
+`check` (`texcheck.check` and the gate; when the block must change, assemble and
+compile once more) → `export` (the folder, or kept for download when started
+from a conversation; the body alone is exported too, as `-body.tex` and
+`document-body.tex` in the ZIP).
 `@writeup` and `@summarize` reach it through the Assistant's worker adapter
 with the conversation as material (`store.conversation_record`). With no other
 material, notes pasted under the request are pinned as `request-notes.md`

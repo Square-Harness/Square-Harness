@@ -386,7 +386,7 @@ export type ResearchDetail = {
   document?: string
   section_lines?: [number, number][]
   compile?: CompileResult | null
-  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string }
+  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string }
   macros?: string[]
   theorems?: string[]
   output_name?: string
@@ -436,7 +436,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
-  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string }
+  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string }
   task?: string
   error?: string | null
   missing?: string[]
@@ -609,6 +609,7 @@ export const api = {
   researchPdfDownloadUrl: (id: string) => `/api/research/${id}/pdf?download=1`,
   researchTexUrl: (id: string) => `/api/research/${id}/tex`,
   researchSourceUrl: (id: string) => `/api/research/${id}/source`,
+  researchBodyUrl: (id: string) => `/api/research/${id}/body`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
