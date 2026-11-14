@@ -936,6 +936,12 @@ def salvage_items(text, key):
     return items
 
 
+def without_comments(text):
+    """The text as the style check reads it: no comment lines (TODOs and the review's markers are the source
+    checker's business) and no trailing comments."""
+    return re.sub(r'(?<!\\)%[^\n]*', '', re.sub(r'(?m)^[ \t]*(?<!\\)%[^\n]*\n?', '', text))
+
+
 def without_markers(text):
     """The text without the review's comment lines (% PART:, % BEGIN/END COMPOSED): a ready document goes into a
     paper, where they mean nothing. The PDF is the same."""
@@ -2549,7 +2555,7 @@ class WriteupRunner(ResearchRunner):
                            + ('\n\nNOTATION OF THE DOCUMENT:\n' + notation if notation else '')
                            + '\n\nDEFINED IN EARLIER SECTIONS: labels ' + (', '.join(labels) or 'none')
                            + ('; definitions: ' + ' | '.join(defined) if defined else '')
-                           + '\n\nPART OF THE DOCUMENT TO CHECK:\n' + ''.join(sections[i] for i in group))
+                           + '\n\nPART OF THE DOCUMENT TO CHECK:\n' + without_comments(''.join(sections[i] for i in group)))
             answer = self._structured('style_check', instruction, 3000, STYLE_SCHEMA, salvage='items')
             if answer is None:
                 return {'skipped': 'not run: no usable answer'}
@@ -2563,7 +2569,7 @@ class WriteupRunner(ResearchRunner):
                 return {'skipped': 'not run: no marker'}
             rest = body[at.end():]
             stop = re.search(r'%\s*PART:|^[ \t]*\\section\b', rest, re.M)
-            passage = rest[:stop.start() if stop else 3000][:3000]
+            passage = without_comments(rest[:stop.start() if stop else 3000][:3000])
             answer = self._structured('part_check', f'RULE {rule["id"]}: {rule["text"]}\n\nPASSAGE:\n{passage}', 1000, PART_SCHEMA)
             if answer is None:
                 return {'skipped': 'not run: no usable answer'}
@@ -2595,8 +2601,8 @@ class WriteupRunner(ResearchRunner):
         category and verdict are not used; a fix that changes a formula is for the author, whatever the model said."""
         body = self.state['body']
         quote = ' '.join(str(item.get('quote') or '').split())
-        if not quote or normal(quote) not in normal(body):
-            return None
+        if not quote or normal(quote) not in normal(body) or (layer == 'style' and quote.startswith('%')):
+            return None  # a style issue about a comment (a TODO) is the source checker's
         sections = split_sections(body)
         section = next((i for i, text in enumerate(sections) if normal(quote) in normal(text)), None)
         fix = str(item.get('fix') or '')

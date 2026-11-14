@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Write-up: the style check reads the text without comments, so `% TODO`
+  comments are no longer reported as text that talks about its source.
 - Write-up: a generated section is kept only when a requirement it cites names
   that kind of section (or a required part asks for it): "a short article-style
   note" no longer brings an Introduction. The fidelity check compares each
