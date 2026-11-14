@@ -2594,7 +2594,8 @@ class WriteupRunner(ResearchRunner):
 
     def _issue(self, layer, rule, item):
         """A model's issue as the controller keeps it, or None when its quote is not in the body. The model's own
-        category and verdict are not used; a fix that changes a formula is for the author, whatever the model said."""
+        category and verdict are not used; a fix that brings a new formula into the author's material is the
+        author's, whatever the model said, while an issue inside a generated passage can always be revised."""
         body = self.state['body']
         quote = ' '.join(str(item.get('quote') or '').split())
         if not quote or normal(quote) not in normal(body) or (layer == 'style' and quote.startswith('%')):
@@ -2607,8 +2608,11 @@ class WriteupRunner(ResearchRunner):
             fixable = 'rewrite'
         if layer == 'fidelity' and not fix.strip() and fixable == 'rewrite':
             fixable = 'author'
-        if fix.strip() and set(formulas(fix)) - set(formulas(quote)):
-            fixable = 'formula'  # new mathematics: for the author (a rewording that keeps the formulas is not)
+        if any(normal(quote) in normal(span) for span in _COMPOSED_SPAN.findall(body)):
+            # Generated mathematics: the revision may change it, and the next fidelity check looks at it again.
+            fixable = 'needs_material' if fixable == 'needs_material' else 'rewrite'
+        elif fix.strip() and set(formulas(fix)) - set(formulas(quote)):
+            fixable = 'formula'  # new mathematics in the author's material: for the author
         severity = item.get('severity') if item.get('severity') in SEVERITIES else 'major'
         return {'layer': layer, 'rule': rule, 'severity': severity, 'section': section, 'quote': quote[:500],
                 'problem': ' '.join(str(item.get('problem') or '').split())[:600],
@@ -2753,10 +2757,11 @@ class WriteupRunner(ResearchRunner):
         return {'status': 'rejected', 'reason': reason} if reason else {'status': 'accepted', 'text': text}
 
     def _revision_guard(self, before, after, issues):
-        """Why a revision is refused, or '' when it passes: the formulas outside generated passages are the same
-        (a \\label, or a display getting a number, changes none), no label lost, no new citation, the same theorem-like
-        environments with their statements unchanged unless an issue quotes them, a length between 0.6 and 1.6 times
-        the original, and no new % TODO or \\section."""
+        """Why a revision is refused, or '' when it passes: outside generated passages, the same formulas (a \\label,
+        or a display getting a number, changes none) and the same theorem-like environments with their statements
+        unchanged unless an issue quotes them; as many generated passages; no label lost, no new citation, a length
+        between 0.6 and 1.6 times the original, and no new % TODO or \\section. Inside generated passages the
+        mathematics may change: the next fidelity check looks at it again."""
         outside = lambda text: _COMPOSED_SPAN.sub('', text)
         if formulas(outside(before)) != formulas(outside(after)):
             return 'a formula changed'
@@ -2770,7 +2775,7 @@ class WriteupRunner(ResearchRunner):
             return 'a new citation'
         names = sorted(_THEOREM_LIKE | set(_EXERCISES) | set(self.state.get('theorems') or []), key=len, reverse=True)
         environment = re.compile(r'\\begin\{(' + '|'.join(map(re.escape, names)) + r')\*?\}(.*?)\\end\{\1\*?\}', re.S)
-        old, new = environment.findall(before), environment.findall(after)
+        old, new = environment.findall(outside(before)), environment.findall(outside(after))
         if [n for n, _ in old] != [n for n, _ in new]:
             return 'a theorem-like environment was added, removed or moved'
         quoted = [normal(i['quote']) for i in issues]

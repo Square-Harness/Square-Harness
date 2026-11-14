@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Write-up: an issue the review finds inside generated mathematics (an exercise,
+  a solution, exam questions) is revised, even when the fix changes a formula
+  or a statement there; the next check looks at it again. Formulas of your own
+  material stay protected.
 - Write-up: a draft's "Points to check" block only counts, in the document's
   language, the TODO comments and the other points to settle; the points
   themselves are listed in the report on the write-up's page. No raw LaTeX and
