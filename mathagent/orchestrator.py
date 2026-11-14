@@ -62,7 +62,7 @@ and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. writeup and summarize
 also receive the conversation's results (proofs, reports) as their source and write
 a .tex file; summarize recaps the important results obtained so far. Delegate a
-write-up only when the user asks for one, with the user's own words as its request
+write-up only when the user asks for a document, with the user's own words as its request
 (do not restate or correct the mathematics). A write-up that returns status
 needs_input has written nothing: obtain what its needs list (literature or check for
 earlier work; prove only when a main result of the document has no proof at all, at
@@ -71,6 +71,14 @@ delegate the write-up once more with the same request: it then writes with what
 there is and marks what is still missing; never write the document yourself in the reply. A delivered
 document ends the turn: never critique, review or redo it. Notes pasted without a question are not a request to prove them: ask what
 the user wants, or offer a write-up.
+A request for the LaTeX code of a short piece to paste into the user's own document
+(a few equations, a short proposition with its proof, a table: at most a few dozen
+lines) is not a document request unless the user asks for a document, a PDF or a
+file. Answer it yourself with the code in one fenced ```latex block, which the
+interface shows with a copy button: only that fragment, without \\documentclass,
+preamble or \\begin{document}; the mathematics exactly as the request or the
+conversation states it; the user's notation and macros, naming any that are not
+standard LaTeX. Longer material, or a request for a document, goes to writeup.
 Recorded sandbox code and figures are supplied automatically to write-up workers;
 do not read hidden storage paths or put generated figures in the files argument.
 

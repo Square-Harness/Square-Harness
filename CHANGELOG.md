@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Answer a request for a short LaTeX fragment (a few equations, a short
+  proposition with its proof) in the conversation instead of a write-up, unless
+  a document is asked for. Code blocks in answers show their language and a
+  Copy button.
 - Upgrade Literature review for research mathematicians. Resolve citation leads
   in primary bibliographies, reconsider records linked by later papers, and use
   the original mathematical question throughout. A compact plan selects the

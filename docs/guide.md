@@ -664,6 +664,12 @@ introduction, exercises, solutions, exam questions) is written in sections of
 its own, and any new mathematics in them is marked as generated: a document
 that contains some is a draft until it has been checked.
 
+For a short piece to paste into your own document (a few equations, a short
+proposition with its proof, a table), ask the Assistant for its LaTeX code: it
+answers in the conversation with a LaTeX block and a **Copy** button, without
+making a document. Ask for a document or a PDF, or use `@writeup`, when you want
+one.
+
 Use it for:
 
 - a clean note from your notes or from a proof the Assistant found:

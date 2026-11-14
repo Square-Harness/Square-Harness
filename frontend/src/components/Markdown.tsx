@@ -5,7 +5,7 @@
 // no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.
 // The one image source allowed is an image saved by a sandbox run in this folder, which the
 // authenticated /api/artifacts endpoint serves after validating its id and name.
-import { createContext, memo, useContext, useMemo, type ReactNode } from 'react'
+import { createContext, memo, useContext, useMemo, useState, type ReactNode } from 'react'
 import { renderToString } from 'katex'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -42,6 +42,49 @@ export function MathMacrosProvider({ definitions, children }: { definitions?: Re
 const safeUrl = (url: string) => (/^(https?:|mailto:)/i.test(url) ? url : experimentImage(url))
 const inlineText = ({ children }: { children?: ReactNode }) => <>{children}</>
 
+type Hast = { type: string; value?: string; tagName?: string; properties?: { className?: unknown }; children?: Hast[] }
+const textOf = (node?: Hast): string => (node?.type === 'text' ? node.value || '' : (node?.children || []).map(textOf).join(''))
+
+/** Copy text; outside a secure context (a phone on the local network) the clipboard API is missing. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    try { return document.execCommand('copy') } catch { return false } finally { area.remove() }
+  }
+}
+
+/** A fenced code block with its language and a copy button: a LaTeX fragment is pasted into the user's own document. */
+function CodeBlock({ node, children }: { node?: Hast; children?: ReactNode }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const code = node?.children?.find((child) => child.tagName === 'code')
+  const classes = Array.isArray(code?.properties?.className) ? code.properties.className.map(String) : []
+  const language = classes.find((name) => name.startsWith('language-'))?.slice('language-'.length) || ''
+  const copy = async () => {
+    setState(await copyText(textOf(node).replace(/\n$/, '')) ? 'copied' : 'failed')
+    window.setTimeout(() => setState('idle'), 1600)
+  }
+  return (
+    <div className="code-window">
+      <div className="code-window-head">
+        <span>{/^(la)?tex$/i.test(language) ? 'LaTeX' : language}</span>
+        <button type="button" className="code-copy" onClick={copy}>
+          {state === 'copied' ? 'Copied' : state === 'failed' ? 'Select the code to copy it' : 'Copy'}
+        </button>
+      </div>
+      <pre>{children}</pre>
+    </div>
+  )
+}
+
 type Props = {
   children: string
   className?: string
@@ -62,7 +105,8 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
       : <span className="img-alt">(image{alt ? `: ${alt}` : ''} not loaded)</span>),
     // Compact previews keep heading text and inline math without heading size.
     ...(inline ? { p: inlineText, h1: inlineText, h2: inlineText, h3: inlineText,
-      h4: inlineText, h5: inlineText, h6: inlineText } : {}),
+      h4: inlineText, h5: inlineText, h6: inlineText }
+      : { pre: ({ node, children: code }) => <CodeBlock node={node as Hast | undefined}>{code}</CodeBlock> }),
     cite: (props) => {
       const ref = String((props as Record<string, unknown>)['data-cite'] || '')
       const bad = flagged?.has(ref)
