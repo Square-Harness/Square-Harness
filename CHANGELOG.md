@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Write-up: a generated section is kept only when a requirement it cites names
+  that kind of section (or a required part asks for it): "a short article-style
+  note" no longer brings an Introduction. The fidelity check compares each
+  formula of the document with the material's and treats an uncertain or
+  merely stated claim written as a result as a change; the writer keeps each
+  claim's status. A rewording that keeps the formulas can be revised.
 - Write-up: the body alone never contains the review's `% PART:` and
   `% BEGIN/END COMPOSED` comments; when it still holds `% TODO` comments, its
   first lines and the reply say it is a draft.

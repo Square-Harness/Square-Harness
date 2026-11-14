@@ -753,6 +753,31 @@ _LANGUAGE_NAMES = {'en': 'english', 'anglais': 'english', 'englisch': 'english',
                    'it': 'italian', 'italiano': 'italian', 'italien': 'italian', 'italienisch': 'italian'}
 
 
+# Words a requirement uses when it asks for a composed section of this role (any language the outline handles).
+_ROLE_WORDS = {'introduction': r'introduc|motivat|context|background|overview|einleitung|introduzione|introducción',
+               'abstract': r'abstract|résumé|summary|zusammenfassung|riassunto|resumen',
+               'exercises': r'exerc|question|problem|exam|sheet|quiz|aufgabe|esercizi|ejercicio|sujet|examen|prüfung',
+               'solutions': r'solution|corrig|answer|lösung|soluzion|solución',
+               'header': r'header|en-tête|entête|title|titre|date|duration|durée|instruction|consigne|course|cours|kopf'}
+
+
+def composed_asked(section, requirements, required):
+    """Whether a composed section is asked for: it provides a required part, or a requirement it cites (R1, R2...)
+    names that kind of section (a body section: shares a word of five letters or more with its heading). Citing
+    any requirement is not enough: a probe gave an unrequested Introduction to "a short article-style note"."""
+    if section['parts'] or set(re.findall(r'\b[A-Z]\d+\b', section['requested_by'])) & required:
+        return True
+    words = {w for w in re.findall(r'\w{5,}', section['heading'].casefold())}
+    for number in re.findall(r'\bR(\d+)\b', section['requested_by']):
+        if not 1 <= int(number) <= len(requirements):
+            continue
+        text = requirements[int(number) - 1].casefold()
+        pattern = _ROLE_WORDS.get(section['role'])
+        if (re.search(pattern, text) if pattern else words & set(re.findall(r'\w{5,}', text))):
+            return True
+    return False
+
+
 def language_name(value):
     """A language as the outline gives it ("French", "fr", "français"), as one lowercase English name."""
     word = ' '.join(str(value or '').lower().split()) or 'english'
@@ -795,8 +820,10 @@ PART_SCHEMA = _OBJECT({'provides': {'type': 'boolean'}, 'severity': _SEVERITY, '
 
 FIDELITY_SYSTEM = '''You check a LaTeX document written from a mathematician's material, before it goes into a paper. Do not
 rewrite it and do not judge its style. List each place where it is not faithful:
-- changed: a statement, hypothesis, constant, quantifier or formula that differs from the material, or a problem of the
-  material settled differently from the author's decision;
+- changed: a statement, hypothesis, constant, quantifier or formula that differs from the material (compare each
+  formula of the list given with the material's formula for the same object, symbol by symbol: a term added or
+  removed is a change), a claim the plan's inventory marks uncertain, stated or sketched that the document presents
+  as an established result, or a problem of the material settled differently from the author's decision;
 - missing: a result, hypothesis or step of the material that a section covering it leaves out;
 - added: mathematics the material does not contain, in a section that restates the material (outside the lines
   % BEGIN COMPOSED and % END COMPOSED);
@@ -1502,7 +1529,8 @@ class WriteupRunner(ResearchRunner):
         language are normalised; a section's parts are only required rules of the kind's sheets; a composed section is
         kept only when a requirement (R1, R2...) or a required part asks for it; a need blocks only when the model says
         so and a section depends on it (a decision: when it settles a problem of the material), and at most three
-        decisions are put to the author. Returns (outline, the rules of the applicable guideline sheets)."""
+        decisions are put to the author (see composed_asked). Returns (outline, the rules of the applicable guideline
+        sheets)."""
         text = lambda value, limit=2000: ' '.join(str(value or '').split())[:limit]
         items = lambda value: [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
         strings = lambda value: [text(v, 200) for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
@@ -1522,11 +1550,10 @@ class WriteupRunner(ResearchRunner):
                      'purpose': text(s.get('purpose'), 400)} for s in items(raw.get('sections'))][:30]
         rules = load_guidelines(kind, {s['role'] for s in sections})
         required = {r['id'] for r in rules if r['type'] == 'required'}
-        asked = lambda ref: ref in required or bool(re.fullmatch(r'R(\d+)', ref) and 1 <= int(ref[1:]) <= len(requirements))
         kept, dropped = [], []
         for section in sections:
             section['parts'] = [part for part in dict.fromkeys(section['parts']) if part in required]
-            if section['source'] == 'composed' and not (section['parts'] or asked(section['requested_by'])):
+            if section['source'] == 'composed' and not composed_asked(section, requirements, required):
                 dropped.append(section['heading'])  # the request did not ask for it (a probe added an Introduction)
             else:
                 kept.append(section)
@@ -1625,7 +1652,10 @@ class WriteupRunner(ResearchRunner):
         return (f'Write the document in {language}. In sections whose source is the material, keep the mathematics exactly '
                 f'as in the material ({keep}) and add no lemma, example or reference. A composed section (the outline '
                 'says which) may contain new text; put any new mathematics in it (a statement, an exercise, a question, '
-                'a solution, a computation) between the comment lines % BEGIN COMPOSED and % END COMPOSED. Never mention '
+                'a solution, a computation) between the comment lines % BEGIN COMPOSED and % END COMPOSED. Keep each '
+                'item\'s status from the inventory: an uncertain, stated or sketched claim is never written as an '
+                'established result (it is a remark, a conjecture or an open question, as the material has it), and '
+                'a withdrawn one is left out. Never mention '
                 'the notes, the source, the draft or the author\'s doubts in the text: state the mathematics, and write an '
                 'open point as a remark stated as mathematics. For each problem of the material the outline lists, follow '
                 'the author\'s decision when the conversation records one; otherwise keep the material\'s version and mark '
@@ -2492,7 +2522,10 @@ class WriteupRunner(ResearchRunner):
             given = ('USER REQUEST AND NOTES:\n' + material if self.state.get('inline_material') else
                      'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + material)
             plan = self._outline_text()
+            listed = list(dict.fromkeys(m.group(0) for m in _FORMULA.finditer(_uncommented(body))))[:80]
             instruction = ('Check the DOCUMENT BODY against the material, as the system message says.\n\n'
+                           + ('FORMULAS OF THE DOCUMENT (compare each with the material):\n'
+                              + '\n'.join('- ' + ' '.join(f.split())[:240] for f in listed) + '\n\n' if listed else '')
                            + ('PLAN (requirements R1, R2..., problems of the material, sections):\n' + plan + '\n\n' if plan else '')
                            + given + '\n\nDOCUMENT BODY:\n' + body)
             answer = self._structured('fidelity', instruction, 8192, FIDELITY_SCHEMA, salvage='issues')
@@ -2572,8 +2605,8 @@ class WriteupRunner(ResearchRunner):
             fixable = 'rewrite'
         if layer == 'fidelity' and not fix.strip() and fixable == 'rewrite':
             fixable = 'author'
-        if fix.strip() and formulas(fix) != formulas(quote):
-            fixable = 'formula'
+        if fix.strip() and set(formulas(fix)) - set(formulas(quote)):
+            fixable = 'formula'  # new mathematics: for the author (a rewording that keeps the formulas is not)
         severity = item.get('severity') if item.get('severity') in SEVERITIES else 'major'
         return {'layer': layer, 'rule': rule, 'severity': severity, 'section': section, 'quote': quote[:500],
                 'problem': ' '.join(str(item.get('problem') or '').split())[:600],

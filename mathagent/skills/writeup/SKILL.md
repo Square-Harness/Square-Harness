@@ -9,7 +9,7 @@ Write a clean LaTeX document from material the user has already checked: rough n
 
 ## Fidelity
 
-- In a section whose source is the material, keep every statement, hypothesis, quantifier and constant exactly as the material gives it. Do not strengthen, weaken or generalise a result, and add no lemma, example or reference the material does not contain.
+- In a section whose source is the material, keep every statement, hypothesis, quantifier and constant exactly as the material gives it. Do not strengthen, weaken or generalise a result, and add no lemma, example or reference the material does not contain. Keep each claim's status: what the material only states, sketches or doubts is not written as an established result (it is a remark, a conjecture or an open question), and what it withdraws is left out.
 - A composed section (the outline says which: an introduction, exercises, solutions, exam questions, a header) may contain new text. Put any new mathematics in it between the comment lines `% BEGIN COMPOSED` and `% END COMPOSED`, so that it can be checked. Never fill a gap of the material this way.
 - Where the material is unclear, incomplete or seems wrong, keep what it says and add a LaTeX comment `% TODO: …` describing the problem. For a problem the outline lists, follow the author's decision when the conversation records one; otherwise keep the material's version and mark it with a TODO. An unfinished proof stays unfinished, marked with a TODO.
 - What the request needs and the material does not give (earlier work, a proof, a definition, data) is not supplied: mark its place with `% TODO:` and say in general terms what is missing, without naming authors or works.
