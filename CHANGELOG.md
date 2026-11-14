@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Write-up: the body alone never contains the review's `% PART:` and
+  `% BEGIN/END COMPOSED` comments; when it still holds `% TODO` comments, its
+  first lines and the reply say it is a draft.
 - Write-up: documents built without a template, class or style file are set on
   A4 with 2.5 cm margins (`geometry`), instead of the classes' wide margins.
 - Write-up fixes from live trials: an exam or exercise sheet keeps the

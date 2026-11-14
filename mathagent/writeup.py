@@ -2966,11 +2966,11 @@ class WriteupRunner(ResearchRunner):
         return path
 
     def _body_file(self):
-        """The body alone, to paste into a paper or \\input: no title, block or bibliography wrapper. Definitions the
-        author's paper may lack (the model's, the controller's, a saved style's) are listed first, as comments."""
-        body, model = self.state['body'], self.state.get('model_definitions') or ''
-        if self.state.get('readiness') == 'ready':
-            body = without_markers(body)
+        """The body alone, to paste into a paper or \\input: no title, block, bibliography wrapper or review marker.
+        Definitions the author's paper may lack (the model's, the controller's, a saved style's) are listed first, as
+        comments, and a draft says how many TODO comments it still holds."""
+        # The review's markers never reach the text to paste; open TODOs are said at the top, not shipped silently.
+        body, model = without_markers(self.state['body']), self.state.get('model_definitions') or ''
         own = set(self.state['macros']) | set(self.state.get('request_macros') or {})
         style = self.state.get('style') or {}
         macros = {**{m['name']: m['definition'] for m in style.get('macros') or []}, **macro_definitions(model),
@@ -2979,6 +2979,10 @@ class WriteupRunner(ResearchRunner):
         environments = {**environment_definitions(model), **(self.state.get('supplied_environments') or {})}
         lines += [d for n, d in environments.items() if n not in self.state['theorems'] and f'\\begin{{{n}}}' in body]
         head = '% ' + (self.state.get('title') or 'Body') + ': the text alone, to paste into a paper or to \\input.\n'
+        todo = len(todo_comments(body))
+        if todo:
+            head += (f'% DRAFT: {todo} TODO comment{"s" if todo > 1 else ""} below '
+                     f'{"mark points" if todo > 1 else "marks a point"} to settle before this text goes into a paper.\n')
         if lines:
             head += ('% It uses these definitions, which your preamble may lack:\n'
                      + ''.join(''.join('% ' + row + '\n' for row in line.splitlines()) for line in dict.fromkeys(lines)))
@@ -3088,12 +3092,14 @@ class WriteupRunner(ResearchRunner):
                     'write-up again; or write it anyway from its page, with these as points to check.')
         if not name:
             return f'The {noun} was not finished: {s.get("stop_reason") or s["status"]}'
+        todo = len(todo_comments(s.get('body') or ''))
+        body_note = (f'; it still holds {todo} TODO comment{"s" if todo > 1 else ""}, so it is a draft too' if todo else '')
         if outputs.get('download'):
             files = (('The PDF, the' if outputs.get('pdf') else 'The') + ' LaTeX sources and the body alone (to paste '
-                     'into a paper) are on the card above.')
+                     f'into a paper{body_note}) are on the card above.')
         else:
             files = 'Saved as ' + ', '.join(f'`{outputs[key]}`' for key in ('tex', 'pdf', 'body', 'source')
-                                            if isinstance(outputs.get(key), str)) + '.'
+                                            if isinstance(outputs.get(key), str)) + (f' (the body{body_note})' if body_note else '') + '.'
         if (s.get('readiness') or ('ready' if s['status'] == 'complete' else 'draft')) == 'ready':
             parts = [f"Ready: the {noun} compiles and passed the controller's checks; read it before using it.", files]
             if review := self._review_summary():
