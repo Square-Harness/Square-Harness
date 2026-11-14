@@ -1097,6 +1097,11 @@ class Hub:
         task.ready.set()
         return task
 
+    def writeup_needs(self, job_id, action):
+        """The author's answer, on its page, to a write-up waiting for material: write it anyway, or stop it."""
+        WriteupRunner.decide_needs(self.root, job_id, action)
+        return self.resume_research(job_id) if action == 'waive' else None
+
     # -- conversational modes -----------------------------------------
 
     def chat(self, chat_id, content, *, files=(), mode=None, echo_user=True, on_update=None, queue=False):
@@ -1742,6 +1747,11 @@ class Hub:
                           'artifact': str(Path(result['report_path']).relative_to(root))}
                 if runner.state.get('progress'):
                     result['progress'] = copy.deepcopy(runner.state['progress'])
+                if mode in ('writeup', 'summarize') and runner.state:
+                    # What a write-up lacks goes back to the main agent (status needs_input: nothing was written).
+                    result['kind'] = runner.state.get('document_kind')
+                    result['needs'] = [{key: need[key] for key in ('type', 'what', 'concerns')}
+                                       for need in runner.state.get('needs') or [] if need.get('blocking')]
                 if worker_error:
                     result['error'] = worker_error
             else:

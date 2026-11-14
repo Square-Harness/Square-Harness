@@ -430,8 +430,12 @@ def research_detail(root, job_id, active=None):
         'artifacts': _artifacts(directory, _RESEARCH_ARTIFACT),
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
                                         'outputs', 'macros', 'theorems', 'output_name', 'style', 'scoped', 'deliver',
-                                        'title', 'style_checked', 'readiness', 'gates', 'checks')}
+                                        'title', 'style_checked', 'readiness', 'gates', 'checks', 'needs', 'document_kind',
+                                        'reviews', 'review_round')}
            if s['kind'] == 'writeup' else {}),
+        # Candidates without their texts: the page shows each version's round, score and readiness.
+        **({'candidates': [{key: c.get(key) for key in ('round', 'score', 'readiness', 'compile_ok')} | {'selected': c.get('id') == s.get('selected')}
+                           for c in s.get('candidates') or []]} if s['kind'] == 'writeup' else {}),
         # The parts hold the material itself: the page needs only how far the writing is.
         **({'parts': [{'complete': bool(part.get('complete')), 'characters': len(part.get('text', ''))} for part in s['parts']]}
            if s['kind'] == 'writeup' and isinstance(s.get('parts'), list) else {}),

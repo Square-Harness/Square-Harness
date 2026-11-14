@@ -699,6 +699,14 @@ How it works:
    proof, a definition, data, a decision only you can make). The controller
    keeps a generated section only when the request, or a required part of that
    kind of document, asks for it. The plan is shown in the **Outline** tab.
+   In a conversation, when a section depends on something the material does
+   not contain (earlier work to cite, a proof, a definition, data, or a choice
+   only you can make about a problem in your notes), nothing is written: the
+   Assistant gets the list, obtains what it can (a literature search, a check,
+   a proof) or asks you, then asks for the write-up again. If it still lacks
+   something, it tells you what. On the write-up's page, **Write anyway**
+   writes it with those pieces marked as points to check, and **Stop** leaves
+   it.
    Each kind follows written guidelines (`mathagent/skills/writeup/guidelines`):
    a paper's style rules for articles, notes and parts of papers; an
    introduction's required parts (motivation, literature, positioning, main

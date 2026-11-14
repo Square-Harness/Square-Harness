@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Write-up: hand missing material back to the main agent. In a conversation, a
+  write-up whose plan finds that a section depends on something the material
+  lacks (literature, a proof, a definition, data, or a decision on a problem of
+  the material) writes nothing and returns `needs_input` with the list. The
+  Assistant obtains it (literature, check, prove, or a question to you) and asks
+  for the write-up once more; a second stop in the same turn ends it with the
+  list. The write-up's page shows what is missing, with **Write anyway** (the
+  missing pieces become points to check) and **Stop**, and shows Ready or Draft
+  with the failed checks and the review rounds. Notes pasted without a question
+  are no longer taken as a request to prove them.
 - Write-up: review and revise before delivering, as Proof does. After a
   successful compile each candidate is checked in three layers: the source
   checker; a fidelity check against the material and the request (changed or

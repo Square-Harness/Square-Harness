@@ -273,6 +273,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `style_check`, `part_check` and `revise_section`; `review` would trigger the
   research runner's citation checks. Review and revision stop with less than a
   minute or 2,048 output tokens left; the best candidate is still exported.
+- **Write-up hand-back.** A conversation write-up (`state['scoped']`) with a
+  blocking need stops after its outline with status `needs_input` (in
+  `WriteupRunner.TERMINAL`), writes nothing, and the hub adds `needs` and
+  `kind` to the child's result. The orchestrator does not force a final answer
+  on it and `_document_answer` gives no reply, so the main agent obtains the
+  material and delegates again; the duplicate-child test skips `needs_input`
+  children, and a second `needs_input` in the turn is the reply.
+  `WriteupRunner.decide_needs` (POST `/api/research/<id>/needs`, waive or stop)
+  is the author's answer on the page; waiving resumes at `draft` with
+  `needs_waived`.
 - **Write-up outline.** The controller, not the model, decides what blocks: a
   need blocks only when the model says so and a section depends on it (a
   decision: when it settles a problem of the material), with at most three

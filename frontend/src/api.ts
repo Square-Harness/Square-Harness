@@ -396,6 +396,13 @@ export type ResearchDetail = {
   section_lines?: [number, number][]
   compile?: CompileResult | null
   outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string }
+  // Write-ups: the controller's gate, the outline's needs and the review rounds.
+  readiness?: 'ready' | 'draft' | null
+  gates?: { gate: string; message: string }[]
+  needs?: { type: string; what: string; concerns: string[]; blocking: boolean }[]
+  reviews?: { round: number; issues: { severity: string }[]; dropped: number; complete: boolean }[]
+  review_round?: number
+  candidates?: { round: number; score: number[]; readiness: string | null; compile_ok: boolean; selected: boolean }[]
   macros?: string[]
   theorems?: string[]
   output_name?: string
@@ -619,6 +626,7 @@ export const api = {
   researchTexUrl: (id: string) => `/api/research/${id}/tex`,
   researchSourceUrl: (id: string) => `/api/research/${id}/source`,
   researchBodyUrl: (id: string) => `/api/research/${id}/body`,
+  writeupNeeds: (id: string, action: 'waive' | 'stop') => post<{ task: TaskSummary | null; id: string }>(`/api/research/${id}/needs`, { action }),
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),

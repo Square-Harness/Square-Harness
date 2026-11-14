@@ -299,6 +299,45 @@ function PlanTab({ plan }: { plan: WriteupPlan }) {
 
 type Sources = { id: string; path: string; sha256: string; content: string }[]
 
+/** Ready or draft (the controller's gate), the review rounds, or the material a write-up waits for. */
+function Readiness({ data }: { data: ResearchDetail }) {
+  const [error, setError] = useState('')
+  const [acting, setActing] = useState(false)
+  const decide = (action: 'waive' | 'stop') => {
+    setActing(true)
+    setError('')
+    api.writeupNeeds(data.id, action).catch((reason: Error) => setError(reason.message)).finally(() => setActing(false))
+  }
+  const needs = (data.needs || []).filter((need) => need.blocking)
+  if (data.status === 'needs_input') {
+    return (
+      <section className="aside-section">
+        <h3 className="aside-title">Waiting for material</h3>
+        <p className="small">Nothing was written: the material lacks what the document needs.</p>
+        <ul className="issue-list">{needs.map((need, index) => <li key={index}>{need.type}{need.concerns.length > 0 && ` (${need.concerns.join(', ')})`}: {need.what}</li>)}</ul>
+        <p className="muted small">Provide it in the conversation and ask again, or write it anyway: what is missing becomes points to check.</p>
+        <div className="job-actions">
+          <button type="button" className="btn btn-small btn-primary" disabled={acting} onClick={() => decide('waive')}>Write anyway</button>
+          <button type="button" className="btn btn-small" disabled={acting} onClick={() => decide('stop')}>Stop</button>
+        </div>
+        {error && <ErrorNote>{error}</ErrorNote>}
+      </section>
+    )
+  }
+  if (!data.readiness) return null
+  const reviews = data.reviews || []
+  const candidates = data.candidates || []
+  const kept = candidates.findIndex((candidate) => candidate.selected)
+  return (
+    <section className="aside-section">
+      <h3 className="aside-title">{data.readiness === 'ready' ? 'Ready' : 'Draft'}</h3>
+      <p className="small">{data.readiness === 'ready' ? 'Every check passed. Read it before using it.' : 'Not ready to go into a paper:'}</p>
+      {(data.gates || []).length > 0 && <ul className="issue-list">{(data.gates || []).map((gate, index) => <li key={index}>{gate.message}</li>)}</ul>}
+      {reviews.length > 0 && <p className="muted small">Review: {reviews.length} check{reviews.length === 1 ? '' : 's'}, {data.review_round || 0} revision round{data.review_round === 1 ? '' : 's'}{kept >= 0 && candidates.length > 1 ? `; version ${kept + 1} of ${candidates.length} kept` : ''}.</p>}
+    </section>
+  )
+}
+
 function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; issues: string[]; cite: string | null; onCite: (ref: string | null) => void; sources: Sources | null }) {
   const b = data.budget
   const todo = (data.document?.match(/%\s*TODO/g) || []).length
@@ -306,6 +345,7 @@ function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; 
   return (
     <div className="ledger">
       {cite && <Passage refText={cite} data={data} sources={sources} onClose={() => onCite(null)} />}
+      <Readiness data={data} />
       <section className="aside-section">
         <h3 className="aside-title">Checks</h3>
         <p className="small">{todo ? `${todo} TODO comment${todo === 1 ? '' : 's'} left for you to settle.` : data.document ? 'No TODO comments.' : 'Checks run once the document is assembled.'}</p>
