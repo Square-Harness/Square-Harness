@@ -18,6 +18,7 @@ import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../comp
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
+import { literalUnderscores } from '../mathtext'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
@@ -390,7 +391,7 @@ function UserMessage({ item }: { item: TranscriptItem }) {
     <div className={'entry message message-user' + (item.discarded ? ' message-discarded' : '')}>
       <span className="in-margin speaker speaker-user">You</span>
       <div className="message-body">
-        <Markdown>{item.content}</Markdown>
+        <Markdown>{literalUnderscores(item.content)}</Markdown>
         {item.files && item.files.length > 0 && (
           <div className="attachments">{item.files.filter((path) => !item.images?.length || !isImagePath(path)).map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
         )}

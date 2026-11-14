@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Write-up: material too long for one writing call is written in parts that
+  follow the plan's sections, each later part told its sections, the labels and
+  the commands already defined; two different definitions of one command are a
+  blocker. The LaTeX repair is refused when it changes more than LaTeX (labels,
+  citations, figures, listings, theorem-like environments, displays), and a
+  body too long for one repair call is repaired passage by passage around the
+  errors. The plan decides whether the executed code of the conversation goes
+  into the document. Underscores in your messages are shown as typed in the
+  conversation, not as emphasis.
 - Write-up: hand missing material back to the main agent. In a conversation, a
   write-up whose plan finds that a section depends on something the material
   lacks (literature, a proof, a definition, data, or a decision on a problem of

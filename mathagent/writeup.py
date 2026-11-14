@@ -687,6 +687,7 @@ _OBJECT = lambda properties: {'type': 'object', 'additionalProperties': False, '
 OUTLINE_SCHEMA = _OBJECT({
     'kind': {'type': 'string', 'enum': list(KINDS)}, 'scope': {'type': 'string', 'enum': ['document', 'part']},
     'language': _TEXT, 'title': _TEXT, 'short_title': _TEXT, 'instruction': _TEXT, 'requirements': _TEXTS,
+    'code': {'type': 'boolean'},
     'inventory': {'type': 'array', 'items': _OBJECT({
         'id': _TEXT, 'type': {'type': 'string', 'enum': ['definition', 'statement', 'proof', 'example', 'remark', 'computation']},
         'text': _TEXT, 'status': {'type': 'string', 'enum': ['proved', 'sketched', 'stated', 'uncertain', 'withdrawn']}})},
@@ -709,7 +710,8 @@ into an existing paper. language: the language the document must be written in (
 another). title, and short_title: the title in at most 40 characters, for running heads.
 instruction: the user's request without any notes pasted into it.
 requirements: each thing the request asks for explicitly, one per entry ("a line for the date", "no solutions",
-"points out of 20"). They are numbered R1, R2... in this order.
+"points out of 20"). They are numbered R1, R2... in this order. code: true when the request asks for the code of the
+conversation's computations (listings, the script, the implementation) in the document.
 inventory: every definition, statement, proof, example, remark and computation of the material, each with a short id
 (D1, S1, P1...), its text copied from the material (at most two lines), and its status: proved (a complete argument is
 given), sketched, stated (no argument), uncertain (the author says they are not sure), withdrawn (given up or replaced).
@@ -1018,7 +1020,9 @@ class WriteupRunner(ResearchRunner):
     def _call(self, role, instruction, *, thinking_budget=None, **kwargs):
         """A reasoning call whose reasoning share of the output is this call's own: a document needs most of
         its allowance for the text. The served share applies to every other call; it is set only on a
-        server already configured with one (vLLM thinking budgets), and only for the duration of this call."""
+        server already configured with one (vLLM thinking budgets), and only for the duration of this call.
+        Jobs cannot overlap on it: the hub builds a client per job and per Assistant worker (Hub._engine), and
+        _transport unwraps only this job's budget wrappers."""
         transport = self._transport() if thinking_budget and kwargs.get('think') and not is_ds4(self.agent) else None
         policy = getattr(transport, 'thinking_budget_policy', None)
         if not policy or 'ordinary' not in policy:
@@ -1282,7 +1286,8 @@ class WriteupRunner(ResearchRunner):
     def _prepare(self):
         """Read the templates, cut the material into parts that fit, and pick a fitting saved style."""
         self.state['macros'], self.state['theorems'], self.state['definitions'] = template_vocabulary(self._templates_in())
-        self._pin_experiment_code()
+        if self.state.get('variant') == 'summary':
+            self._pin_experiment_code()  # no outline for a summary
         labels = {'conversation.md': 'CONVERSATION (as the user saw it: messages, answers and job results)',
                   'typed-notes.md': 'NOTES TYPED BY THE USER'}
         blocks = [s['content'].strip() if self.state.get('inline_material') else  # the request itself: _draft labels it
@@ -1370,6 +1375,7 @@ class WriteupRunner(ResearchRunner):
             raw = json_loads(result['text']) if result['complete'] else None
         except (ResearchBudget, ValueError):
             raw = None
+        self._pin_experiment_code(bool(raw.get('code')) if isinstance(raw, dict) and 'code' in raw else None)
         if not isinstance(raw, dict):
             self.state['warnings'].append('The outline call gave no usable plan; the document was written without one.')
         else:
@@ -1377,6 +1383,7 @@ class WriteupRunner(ResearchRunner):
             # Not `kind`: that key is the job's type (writeup) for the store and the runners.
             self.state.update(outline=outline, document_kind=outline['kind'], needs=outline['needs'], guidelines=rules)
             self._artifact('outline', json.dumps(outline, ensure_ascii=False, indent=1))
+            self._outline_parts()
             if (any(n['blocking'] for n in outline['needs']) and self.state.get('scoped')
                     and not self.state.get('needs_waived') and self.state.get('variant') != 'summary'):
                 # From a conversation: nothing is written; the main agent obtains what is missing, or asks.
@@ -1384,6 +1391,46 @@ class WriteupRunner(ResearchRunner):
                 self.state['phase'] = 'done'
                 return
         self.state['phase'] = 'draft'
+
+    def _outline_parts(self):
+        """Material too long for one writing call is written in parts that follow the outline's sections: each
+        section starts where the first inventory item it covers is found in the material (cut at the paragraph
+        before), and consecutive sections are grouped up to one call's room. When the sections cannot be located in
+        order, the character cuts of split_material stay."""
+        parts, outline = self.state['parts'], self.state['outline']
+        if len(parts) < 2 or any(p['complete'] or p['body'] for p in parts):
+            return
+        material, room = '\n\n'.join(p['text'] for p in parts), self._room()
+        where = {}
+        for item in outline['inventory']:
+            words = ' '.join(item['text'].split())[:60].split()
+            found = re.search(r'\s+'.join(map(re.escape, words)), material, re.I) if words else None
+            if found:
+                where[item['id']] = found.start()
+        starts = [min((where[c] for c in s['covers'] if c in where), default=None) for s in outline['sections']]
+        located = [start for start in starts if start is not None]
+        if len(located) < 2 or located != sorted(located):
+            return
+        cuts = [max(0, material.rfind('\n\n', 0, start) + 2) for start in located[1:]]
+        bounds = [0] + cuts + [len(material)]
+        pieces = [{'text': material[a:b], 'sections': []} for a, b in zip(bounds, bounds[1:])]
+        piece = 0
+        for section, start in zip(outline['sections'], starts):
+            if start is not None:
+                piece = located.index(start)
+            pieces[piece]['sections'].append(section['heading'])
+        grouped = []
+        for piece in pieces:
+            if len(piece['text']) > room:
+                return
+            if grouped and len(grouped[-1]['text']) + len(piece['text']) <= room:
+                grouped[-1] = {'text': grouped[-1]['text'] + piece['text'], 'sections': grouped[-1]['sections'] + piece['sections']}
+            else:
+                grouped.append(piece)
+        self.state['parts'] = [{'text': g['text'], 'body': '', 'complete': False, 'sections': g['sections']} for g in grouped]
+        self.state['warnings'] = [w for w in self.state['warnings'] if not w.startswith('The material is longer than one writing call')]
+        self.state['warnings'].append(f'The material is longer than one writing call can read; it was written in '
+                                      f'{len(grouped)} parts that follow the outline\'s sections.')
 
     def _settle_outline(self, raw):
         """The controller's reading of the model's outline; each rule comes from a probe that went wrong. Kind and
@@ -1436,7 +1483,7 @@ class WriteupRunner(ResearchRunner):
                    'language': language_name(raw.get('language')), 'title': text(raw.get('title'), 300),
                    'short_title': text(raw.get('short_title'), 60), 'instruction': text(raw.get('instruction')),
                    'requirements': requirements, 'inventory': inventory, 'problems': problems, 'notation': notation,
-                   'sections': kept, 'needs': needs, 'dropped_sections': dropped,
+                   'sections': kept, 'needs': needs, 'dropped_sections': dropped, 'code': bool(raw.get('code')),
                    'unassigned_parts': sorted(required - given)}
         if dropped:
             self.state['warnings'].append('Sections the request did not ask for were left out of the outline: '
@@ -1487,6 +1534,15 @@ class WriteupRunner(ResearchRunner):
         before = [re.findall(r'\\section\*?\{([^}]*)\}', part['body']) for part in self.state['parts'][:index]]
         titles = [title for group in before for title in group]
         previous = self.state['parts'][index - 1]['body'][-1500:] if index else ''
+        own = self.state['parts'][index].get('sections')
+        if own:
+            task += ' This part writes the sections: ' + '; '.join(own) + '.'
+        labels = [l.strip() for part in self.state['parts'][:index] for l in _LABEL.findall(part['body'])]
+        if labels:
+            task += ' Labels already defined (refer to them; do not define them again): ' + ', '.join(dict.fromkeys(labels)) + '.'
+        if index and self.state.get('model_definitions'):
+            task += (' Commands already defined (use them; define none of them again):\n'
+                     + self.state['model_definitions'][:3000] + '\n')
         return (task + f' The material is long, so the document is written in {count} consecutive parts; this is part '
                 f'{index + 1}. Write only the text that covers this part of the material'
                 + (', starting with \\title{...}.' if not index else
@@ -1900,8 +1956,12 @@ class WriteupRunner(ResearchRunner):
             raise ValueError('A pinned write-up source changed: ' + record['name'])
         return data
 
-    def _pin_experiment_code(self):
-        if not re.search(r'\b(?:code|script|implementation|programme)\b', self.state['goal'], re.I):
+    def _pin_experiment_code(self, wanted=None):
+        """The executed code of the conversation's sandbox runs, pinned for listings when the document wants it: the
+        outline decides (`code`); without an outline, the request's words do."""
+        if wanted is None:
+            wanted = bool(re.search(r'\b(?:code|script|implementation|programme)\b', self.state['goal'], re.I))
+        if not wanted:
             return
         from .numerics.artifacts import ExperimentStore
         experiments = ExperimentStore(self.agent.workspace.root)
@@ -2093,7 +2153,8 @@ class WriteupRunner(ResearchRunner):
                                   '\n'.join(s['content'] for s in self._notes_in()),
                                   kind='summary' if self.state.get('variant') == 'summary' else self.state.get('document_kind'),
                                   points_total=self._points_total())
-        self.state['checks'] = findings + self._part_findings() + self._name_findings() + self._marker_findings()
+        self.state['checks'] = (findings + self._part_findings() + self._name_findings() + self._marker_findings()
+                                + self._definition_findings())
         body = self.state['body']
         digest = _digest(body)
         if self._review_due(digest) and self._review_step(digest):
@@ -2126,6 +2187,16 @@ class WriteupRunner(ResearchRunner):
         text = ' '.join(outline.get('requirements') or []) + ' ' + (outline.get('instruction') or '')
         totals = set(re.findall(r'\b(?:sur|out of|auf|su|total(?: of)?)\s+(\d+)\b', text, re.I))
         return float(totals.pop()) if len(totals) == 1 else None
+
+    def _definition_findings(self):
+        """Two different definitions of one command written by the model (for example in two parts of a long
+        document): the preamble keeps one, so the other part's formulas may change meaning."""
+        bodies = {}
+        for line in (self.state.get('model_definitions') or '').splitlines():
+            for name, definition in macro_definitions(line).items():
+                bodies.setdefault(name, set()).add(' '.join(definition_body(definition).split()))
+        return [texcheck.finding('BLOCKER', 'macro-conflict', f'\\{name} is defined twice, differently', '\\' + name)
+                for name, found in bodies.items() if len(found) > 1]
 
     def _name_findings(self):
         """Names of people or works that the outline's literature needs mention and the material does not: the model
@@ -2649,11 +2720,12 @@ class WriteupRunner(ResearchRunner):
         return ' '.join(out)
 
     def _repair(self):
-        """One repair call on the whole document: fix the reported errors, change nothing else."""
+        """One repair call on the whole document: fix the reported errors, change nothing else. A body too long for
+        one call is repaired passage by passage around the error lines. A repair that changes more than LaTeX
+        (_repair_guard) is refused and the errors stay on the document's page."""
         body, title = self.state['body'], self.state.get('title', '')
         if len(body) > self._room():
-            self.state['warnings'].append('The document is too long for a repair call; fix the LaTeX errors on its page by hand.')
-            self.state['phase'] = 'check'
+            self._repair_passages()
             return
         lines, first = self.state['document'].splitlines(), self.state.get('body_line', 1)
         report = []
@@ -2700,6 +2772,11 @@ class WriteupRunner(ResearchRunner):
             self._repairing = False
         _, definitions, fixed = split_body(result['text'])
         fixed = normalised_references(fixed)
+        refused = self._repair_guard(body, fixed) if result['complete'] and fixed and not announces_only(fixed) else ''
+        if refused:
+            self.state['warnings'].append(f'The repair call was refused ({refused}); the LaTeX errors are on its page.')
+            self.state['phase'] = 'check'
+            return
         if result['complete'] and fixed and not announces_only(fixed) and len(fixed) >= 0.6 * len(body):
             self.state['body'] = tidy_numbering(self._take_bibtex(fixed), self._material_labels(), self._material_text())
             self.state['model_definitions'] = (self.state.get('model_definitions', '') + '\n' + definitions).strip()
@@ -2708,6 +2785,92 @@ class WriteupRunner(ResearchRunner):
         else:
             self.state['warnings'].append('The repair call did not return a corrected document; the errors are on its page.')
             self.state['phase'] = 'check'
+
+    def _repair_guard(self, before, after):
+        """Why a repaired text is refused, or '' when it only fixed LaTeX: the labels (a new one only for a reference
+        that had none), the citation keys, the figures, the code listings, the theorem-like environments and the
+        displays stay as they were, and the text does not shrink below 0.6 of its length."""
+        old, new = (_uncommented(before), _uncommented(after))
+        labels = lambda text: {label.strip() for label in _LABEL.findall(text)}
+        if labels(old) - labels(new):
+            return 'a label was lost'
+        if labels(new) - labels(old) - (set(reference_keys(old)) - labels(old)):
+            return 'a label was added that nothing referred to'
+        keys = lambda text: {k.strip() for m in _CITE.finditer(text) for k in m.group(1).split(',') if k.strip()}
+        if keys(old) != keys(new):
+            return 'the citations changed'
+        if sorted(_GRAPHIC.findall(before)) != sorted(_GRAPHIC.findall(after)):
+            return 'the figures changed'
+        listings = lambda text: len(re.findall(r'\\begin\{(?:lstlisting|verbatim|Verbatim|minted)\*?\}|\\lstinputlisting', text))
+        if listings(before) != listings(after):
+            return 'the code listings changed'
+        names = sorted(_THEOREM_LIKE | set(_EXERCISES) | set(self.state.get('theorems') or []), key=len, reverse=True)
+        environments = lambda text: sorted(re.findall(r'\\begin\{(' + '|'.join(map(re.escape, names)) + r')\*?\}', text))
+        if environments(old) != environments(new):
+            return 'the theorem-like environments changed'
+        displays = lambda text: (len(re.findall(r'\\\[|\\begin\{(?:equation|align|gather|multline|flalign|alignat)\*?\}', text))
+                                 + text.count('$$') // 2)
+        if displays(old) != displays(new):
+            return 'the displays changed'
+        if len(after) < 0.6 * len(before):
+            return 'the text got much shorter'
+        return ''
+
+    def _repair_passages(self):
+        """Repair a body too long for one call: the passage around each error line (its paragraph, widened until its
+        environments balance, at most 80 lines), one call each, at most five, each under the same guard."""
+        lines, first = self.state['body'].split('\n'), self.state.get('body_line', 1)
+        balanced = lambda chunk: (len(re.findall(r'\\begin\s*\{', chunk)) == len(re.findall(r'\\end\s*\{', chunk)))
+        spans = []
+        for error in self.state['compile']['errors']:
+            at = (error.get('line') or 0) - first
+            if error.get('file') != 'document.tex' or not 0 <= at < len(lines):
+                continue
+            a = b = at
+            while a > 0 and lines[a - 1].strip():
+                a -= 1
+            while b < len(lines) - 1 and lines[b + 1].strip():
+                b += 1
+            while not balanced('\n'.join(lines[a:b + 1])) and b - a < 80 and (a > 0 or b < len(lines) - 1):
+                a, b = max(0, a - 1), min(len(lines) - 1, b + 1)
+            if spans and a <= spans[-1][1] + 1:
+                spans[-1] = (spans[-1][0], max(b, spans[-1][1]), spans[-1][2] + [error['message']])
+            else:
+                spans.append((a, b, [error['message']]))
+        if not spans or self.state['settings']['max_seconds'] - self._elapsed() <= 0:
+            self.state['warnings'].append('The document is too long for one repair call and its errors could not be located; '
+                                          'fix them on its page by hand.')
+            self.state['phase'] = 'check'
+            return
+        self.state['repaired'] = True
+        replaced = 0
+        for a, b, messages in reversed(spans[:5]):
+            passage = '\n'.join(lines[a:b + 1])
+            instruction = ('This passage of a longer LaTeX document does not compile. Fix these errors and change nothing else: '
+                           'the same text, mathematics and notation. Output the corrected passage only, in the same form, with '
+                           'no commentary. ' + MATH_RULES + '\n\n' + self._notation() + '\n\nERRORS:\n' + '\n'.join(messages)
+                           + '\n\nPASSAGE:\n' + passage)
+            remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
+            cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, max(2048, len(passage) // 2 + 1024)))
+            self._repairing = True
+            try:
+                result = self._call('repair', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
+                                    sampling=sampling(self.agent, self.SAMPLING), trailer='Output the corrected passage now.')
+            except ResearchBudget:
+                break
+            finally:
+                self._repairing = False
+            fixed = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
+            if result['complete'] and fixed.strip() and not announces_only(fixed) and not self._repair_guard(passage, fixed):
+                lines[a:b + 1] = fixed.split('\n')
+                replaced += 1
+        if not replaced:
+            self.state['warnings'].append('No passage repair was accepted; the LaTeX errors are on its page.')
+            self.state['phase'] = 'check'
+            return
+        self.state['body'] = tidy_numbering(normalised_references('\n'.join(lines)), self._material_labels(), self._material_text())
+        self._assemble()
+        self.state['phase'] = 'compile'
 
     def _free_path(self, name):
         path = self.agent.workspace.path(name, pdf=True)

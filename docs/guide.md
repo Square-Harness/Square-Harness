@@ -714,7 +714,9 @@ How it works:
    notation; rules for exercise sheets and lecture notes.
 2. One writing call reads all the material, the plan, the guidelines, your
    request, your notation and your style, and writes the document in the
-   requested language. Long material is written in consecutive parts.
+   requested language. Material too long for one call is written in parts that
+   follow the plan's sections; each part knows the labels and commands the
+   earlier parts defined. Long material is written in consecutive parts.
    With at most a minute left, it writes directly without a hidden reasoning
    prelude. If time runs out, the text already written is compiled and offered
    as a partial draft. A conversation's sandbox results supply the executed
@@ -730,7 +732,10 @@ How it works:
 4. The document is compiled with `latexmk` when it is installed, in a temporary
    folder, without shell escape and with restricted file access; your own
    `latexmkrc` is not read. If it does not
-   compile, one repair call fixes the reported errors.
+   compile, one repair call fixes the reported errors (passage by passage for a
+   long document). A repair that changes more than LaTeX (a label, a citation,
+   a figure, a listing, a theorem or a display) is refused, and the errors are
+   left on the document's page.
    Missing supported commands are supplied within one bounded compile allowance;
    pausing also stops compilation promptly. So are undefined theorem-like
    environments, including `exercise`, `problem` and `question` (numbered on

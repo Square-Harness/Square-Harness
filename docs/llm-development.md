@@ -273,6 +273,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `style_check`, `part_check` and `revise_section`; `review` would trigger the
   research runner's citation checks. Review and revision stop with less than a
   minute or 2,048 output tokens left; the best candidate is still exported.
+- **Long write-ups.** After the outline, `_outline_parts` re-cuts the parts at
+  the sections' first located inventory item (character cuts of
+  `split_material` stay when the sections cannot be located in order); `_task`
+  gives later parts their sections, the labels and the model's definitions so
+  far, and `_definition_findings` blocks two different definitions of one
+  command.
 - **Write-up hand-back.** A conversation write-up (`state['scoped']`) with a
   blocking need stops after its outline with status `needs_input` (in
   `WriteupRunner.TERMINAL`), writes nothing, and the hub adds `needs` and
@@ -633,7 +639,10 @@ controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble, the made bibliography
 and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
 files and the figures the text includes; commands and environments the text
-uses without defining are supplied) → `repair` (one call on the whole body) →
+uses without defining are supplied) → `repair` (one call on the whole body, or
+one per error passage when the body is too long, each refused by `_repair_guard`
+when it changes labels, citations, figures, listings, theorem-like environments
+or displays) →
 `check` (`texcheck.check`, then the review of the candidate: fidelity, style
 per section batch, required parts, one call per step saved in
 `review_progress`; then the gate; when the block must change, assemble and
