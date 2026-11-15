@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Write-up: the review keeps a ledger of its findings across rounds, each with
+  a status (open, fixed, set aside, for the author, gone). The writer answers
+  each finding with an edit or a rebuttal; an independent judge rules on every
+  edit (before and after) and every rebuttal. An upheld rebuttal closes the
+  finding, a rejected one goes to the author. Each round has one focus: first
+  fidelity and required parts, then the reading of the whole, then the
+  sentences; a finding already raised is not raised again.
+
 - Write-up: the review's fixes are applied as small edits of a few lines, each
   checked alone, so one refused edit no longer cancels the others; reviewers cite
   line numbers, so a finding is no longer lost when its quote is retyped.

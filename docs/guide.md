@@ -767,7 +767,14 @@ How it works:
    made for you: it is put to you with both versions. Generated mathematics (an
    exercise, a solution, exam questions) is corrected when the check finds it
    wrong, and checked again; once a check has passed over it, it no longer
-   counts as unchecked. Up to three rounds; the best version is kept.
+   counts as unchecked. Up to three rounds, each with its own focus: first
+   fidelity and the required parts, then how the whole reads, then the
+   sentences. Every finding is kept with what became of it (fixed, set aside,
+   for you, its passage gone) and is not raised again. The writer answers each
+   one with an edit or a rebuttal, and a separate judge rules on both: an edit
+   is kept only if the passage is better, an upheld rebuttal closes the
+   finding, and a rejected one is put to you in the report. The best version is
+   kept.
 7. The result is **Ready** only when it compiles, every reference and citation
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing

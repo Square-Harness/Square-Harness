@@ -52,7 +52,11 @@ class WriteupReviewTests(GuiCase):
                  '\\begin{theorem}\\label{thm:two}\n'
                  '@@ issue 2 lines 8-12\n\\[\nx^2+2>0.\n\\]\n\\end{theorem}\nThe bound follows from Lemma~\\ref{lem:one}.\n')
         (self.root / 'notes.md').write_text('Rough notes.')
-        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, edits, NOTHING, PASS, PASS)]
+        # One round: the review (fidelity, reader, style), the writer's edits, then the judge's ruling on the edit
+        # that passed the guard. Nothing is reviewed again from scratch after the revision.
+        ruling = json.dumps({'items': [{'n': 1, 'verdict': 'accept', 'reason': 'The lemma is now introduced.'}]})
+        again = '@@ issue 1 lines 9-12\n\\[\nx^2+3>0.\n\\]\n\\end{theorem}\n'  # the second attempt changes the formula too
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, edits, ruling, again)]
         started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 2,
                                                    'source_files': ['notes.md']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
@@ -64,11 +68,40 @@ class WriteupReviewTests(GuiCase):
         self.assertIn('gives the positivity used in the next result', document)  # the first edit is in
         self.assertIn('x^2+1>0', document)  # the second changed a formula no finding was about: refused alone
         self.assertNotIn('x^2+2>0', document)
-        first = state['reviews'][0]
-        self.assertEqual(first['dropped'], 0)
-        refused = [i for i in first['issues'] if i.get('revision')]
-        self.assertEqual([i['rule'] for i in refused], ['N9'])
-        self.assertIn('a formula changed', refused[0]['revision'])
+        self.assertNotIn('x^2+3>0', document)
+        self.assertEqual(state['reviews'][0]['dropped'], 0)
+        ledger = {item['rule']: item for item in state['ledger']}
+        self.assertEqual(ledger['N7']['status'], 'fixed')
+        self.assertEqual(ledger['N9']['status'], 'open')
+        self.assertEqual(ledger['N9']['attempts'], 2)  # refused by the guard (a formula changed), then tried once more
+        self.assertEqual([i['rule'] for i in state['reviews'][-1]['issues']], ['N9'])  # what still stands
+        self.assertEqual(sum(call['role'] == 'fidelity' for call in state['calls']), 1)  # reviewed once, not twice
+        self.assertEqual(sum(call['role'] == 'revise_section' for call in state['calls']), 2)
+
+    def test_a_rebuttal_the_judge_upholds_closes_the_finding_and_a_rejected_one_goes_to_the_author(self):
+        reader = json.dumps({'summary': 'A bound.', 'items': [
+            {'rule': 'N7', 'severity': 'major', 'line': 0, 'last_line': 0, 'quote': 'We have $x^2\\ge 0$.',
+             'problem': 'The lemma is not motivated.', 'instruction': 'Say what it is for.', 'fixable': 'rewrite'},
+            {'rule': 'N9', 'severity': 'major', 'line': 0, 'last_line': 0, 'quote': 'It follows from Lemma~\\ref{lem:one}.',
+             'problem': 'Vague.', 'instruction': 'Say what follows.', 'fixable': 'rewrite'}]})
+        answers = ('@@ issue 1 rebut\nThe sentence after the theorem says what the lemma is for.\n'
+                   '@@ issue 2 rebut\nThe sentence is clear.\n')
+        ruling = json.dumps({'items': [{'n': 1, 'verdict': 'accept', 'reason': 'The link exists.'},
+                                       {'n': 2, 'verdict': 'reject', 'reason': 'It does not say what follows.'}]})
+        (self.root / 'notes.md').write_text('Rough notes.')
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, answers, ruling)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 2,
+                                                   'source_files': ['notes.md']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        folder = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((folder / 'state.json').read_text())
+        ledger = {item['rule']: item for item in state['ledger']}
+        self.assertEqual(ledger['N7']['status'], 'refuted')  # the judge agreed with the writer
+        self.assertEqual(ledger['N9']['status'], 'disputed')  # neither overrules the other: it goes to the author
+        self.assertEqual(state['readiness'], 'draft')
+        self.assertEqual([i['rule'] for i in state['reviews'][-1]['issues']], ['N9'])
+        self.assertIn('The sentence is clear.', (folder / 'report.md').read_text())
+        self.assertIn('x^2+1>0', state['document'])  # no edit: the text is unchanged
 
 
 class WriteupPlanTests(unittest.TestCase):

@@ -270,7 +270,10 @@ Version 1.1.0. The source of truth for the machine-readable version is
   controller derives readiness from issue severities and never uses a model
   verdict or category, drops issues whose quote is not in the body, and treats
   a fix that changes a formula as the author's. Revisions pass
-  `_revision_guard` or are discarded. Calls use the roles `fidelity`,
+  `_revision_guard` or are discarded. Findings live in `state['ledger']` across
+  rounds with a status (open, fixed, refuted, disputed, gone); the writer
+  answers each with an edit or a rebuttal and the role `judge` rules on both.
+  Each round has one focus (`_focus`). Calls use the roles `fidelity`,
   `style_check`, `part_check` and `revise_section`; `review` would trigger the
   research runner's citation checks. Review and revision stop with less than a
   minute or 2,048 output tokens left; the best candidate is still exported.
