@@ -103,6 +103,52 @@ a &= b \\
         self.assertFalse(WriteupRunner.reopen_for_repair(self.root, started['id']))  # it compiles now: nothing to repair
 
 
+    def test_broken_references_are_repaired_the_abstract_is_front_matter_and_links_are_clickable(self):
+        (self.root / 'refs.bib').write_text('@article{Rannacher1984,\n  author = {Rannacher, R.},\n'
+                                            '  title = {Finite element solution of diffusion problems},\n  year = {1984},\n}\n')
+        draft = r"""\title{The theta-scheme}
+\begin{abstract}
+We prove that the theta-scheme converges for every theta between one half and one, with no condition linking the
+time step and the mesh size, and we observe the predicted rates and the oscillations of Crank--Nicolson on a
+discontinuous datum in numerical experiments that use the same grid and the same norm as the theorem.
+\end{abstract}
+\section{The $\theta$-scheme}\label{sec:scheme}
+The main result is Theorem~\ref{thm:main-result}; the experiments are in Section~\ref{sec:numerical}, and the first
+steps are smoothed as in \cite{Rannacher1985}.
+\begin{equation}\label{eq:scheme} U^{n+1}=U^n+\Delta t\,D U^{n+1}. \end{equation}
+\section{Proof}\label{sec:proof}
+\begin{equation}\label{eq:scheme} U^{n+1}-U^n=\Delta t\,D U^{n+1}. \end{equation}
+\begin{theorem}\label{thm:convergence} The scheme \eqref{eq:scheme} converges. \end{theorem}
+\section{Numerical experiments}\label{sec:numerics}
+The rates agree with Theorem~\ref{thm:convergence}."""
+        resolve = json.dumps({'items': [{'n': 1, 'label': 'thm:convergence'}]})
+        (self.root / 'notes.md').write_text('Rough notes on the theta-scheme.')
+        self.fake.replies = [text(PLAN), text(draft), text(resolve)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'source_files': ['notes.md'],
+                                                   'template_files': ['refs.bib']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        job = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((job / 'state.json').read_text())
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        document = state['document']
+        # amsart sets the abstract in the title block: before \maketitle, outside the body the review numbers.
+        self.assertLess(document.index('\\begin{abstract}'), document.index('\\maketitle'))
+        self.assertNotIn('\\begin{abstract}', state['body'])
+        self.assertLess(document.index('\\usepackage{hyperref}'), document.index('\\newtheorem'))
+        self.assertIn('\\texorpdfstring{$\\theta$}{theta}', state['body'])
+        self.assertIn('Theorem~\\ref{thm:convergence}; the experiments are in Section~\\ref{sec:numerics}', state['body'])
+        self.assertIn('\\cite{Rannacher1984}', state['body'])
+        self.assertIn('\\label{eq:scheme-b}', state['body'])
+        self.assertIn('scheme \\eqref{eq:scheme-b} converges', state['body'])  # after the second definition: its name
+        self.assertEqual([c['role'] for c in state['calls']].count('resolve_refs'), 1)
+        self.assertFalse(state['compile']['references']['unresolved'])
+        self.assertNotIn('G2', [g['gate'] for g in state['gates']])
+        self.assertEqual([w for w in state['log_warnings'] if w['kind'] in ('class', 'reference', 'citation', 'duplicate')], [])
+        report = (job / 'report.md').read_text()
+        self.assertIn('- References: clickable (hyperref is loaded)', report)
+        self.assertIn('## Fixed automatically', report)
+        self.assertIn('\\begin{abstract}', (job / 'artifacts' / 'body.tex').read_text())  # the body to paste keeps it
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -15,6 +15,9 @@
 - LAYOUT: lines that run more than 5pt into the margin, from the log;
 - FIDELITY: numbers in the mathematics that the material does not contain (a signal, never a blocker).
 
+`log_warnings(log, body_line)` lists every warning of the log, classified as fix, hold or list (writeup's
+`tidy` phase fixes, its gates hold).
+
 Lines are lines of `document`. Only the body is read (from `body_line` to \\end{document}), so the
 controller's preamble and its "Points to check" block are never findings. Comments, code listings,
 mathematics and the arguments of \\ref, \\label, \\cite... are blanked before the prose rules, keeping
@@ -221,6 +224,76 @@ def check(document, body_line, log='', material='', kind=None, points_total=None
                     add('FIDELITY', 'number', f'the number {number} is not in the material', inner, m.start())
     order = {category: index for index, category in enumerate(CATEGORIES)}
     return sorted(out, key=lambda f: (order[f['category']], f['line'] or 0))
+
+
+# Every warning of the compile log, classified (log_warnings). `fix`: the controller has an automatic fix (the
+# `tidy` phase of writeup); `hold`: the document stays a draft while it is there (G2, G7, G8); `list`: the report
+# shows it. A fix that fails leaves the warning in the next log, where its gate holds the draft.
+_WARNING_KINDS = (
+    ('citation', r"(?:LaTeX|Package natbib|Package biblatex) Warning: Citation [`'‘]([^'’\n]+)['’]"),
+    ('reference', r"LaTeX Warning: Reference [`'‘]([^'’\n]+)['’] on page \S+ undefined"),
+    ('duplicate', r"LaTeX Warning: Label [`'‘]([^'’\n]+)['’] multiply defined"),
+    ('summary', r'LaTeX Warning: There were (?:undefined references|multiply-defined labels)'),
+    ('rerun', r'LaTeX Warning: Label\(s\) may have changed|Rerun to get|Package rerunfilecheck Warning'),
+    ('class', r'Class (\S+) Warning: (.*)'),
+    ('float', r"LaTeX Warning: [`'‘]([^'’\n]+)['’] float specifier changed"),
+    ('float', r'LaTeX Warning: (Float too large) for page'),
+    ('overfull', r'Overfull \\hbox \(([\d.]+)pt too wide\)'),
+    ('layout', r'(?:Overfull|Underfull) \\[hv]box'),
+    ('pdfstring', r'Package hyperref Warning: (Token not allowed in a PDF string)'),
+    ('links', r'destination with the same identifier \(name\{([^}]*)\}\)'),
+    ('font', r'LaTeX Font Warning: (.*)'),
+    ('font', r'Missing character: There is no (\S+)'),
+    ('package', r'Package (\S+) Warning: (.*)'),
+    ('other', r'LaTeX Warning: (.*)'))
+_WARNING_ACTION = {'reference': 'fix', 'citation': 'fix', 'duplicate': 'fix', 'float': 'fix', 'overfull': 'fix',
+                   'pdfstring': 'fix', 'class': 'hold'}
+_LOG_LINE = re.compile(r'on input line (\d+)|at lines (\d+)--\d+|detected at line (\d+)')
+
+
+def log_warnings(log, body_line=1):
+    """Every distinct warning of the compile log, as {kind, key, message, line, count, action}, in the order of the
+    log. `line` is a line of the document (None when the log gives none). An overfull line is fixable only in the
+    body (from `body_line`); one in the head, or without a line, is held (G7 reads it from `check`); one of at most
+    LAYOUT_POINTS is only listed."""
+    out, seen = [], {}
+    lines = log.split('\n')
+    for index, line in enumerate(lines):
+        text = line.strip()
+        # A package continues its warning on lines that start with its name in parentheses.
+        for following in lines[index + 1:index + 4]:
+            if not re.match(r'\([A-Za-z@.-]+\)\s', following.strip()):
+                break
+            text += ' ' + re.sub(r'^\([A-Za-z@.-]+\)\s+', '', following.strip())
+        for kind, pattern in _WARNING_KINDS:
+            m = re.search(pattern, text)
+            if not m:
+                continue
+            if kind == 'summary':
+                break
+            number = _LOG_LINE.search(text)
+            at = int(next(g for g in number.groups() if g)) if number else None
+            key = ' '.join(g for g in m.groups() if g)[:120] if m.groups() else m.group(0)
+            action = _WARNING_ACTION.get(kind, 'list')
+            if kind == 'overfull':
+                if float(m.group(1)) <= LAYOUT_POINTS:
+                    kind, action = 'layout', 'list'
+                elif at is None or at < body_line:
+                    action = 'hold' if at is None else 'list'
+                key = str(at)
+            elif kind == 'float' and key == 'Float too large':
+                key = f'too large at {at}'
+            elif kind in ('class', 'package', 'font', 'other', 'pdfstring'):
+                key = re.sub(r'[;,]?\s*(?:reported )?on input line \d+\.?', '', key)[:120]
+            record = seen.get((kind, key))
+            if record:
+                record['count'] += 1
+            else:
+                record = seen[(kind, key)] = {'kind': kind, 'key': key, 'message': text[:300], 'line': at, 'count': 1,
+                                              'action': action}
+                out.append(record)
+            break
+    return out
 
 
 def counts(findings):

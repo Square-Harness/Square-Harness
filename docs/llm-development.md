@@ -202,7 +202,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Compilation success means a PDF was built; completion requires
   `readiness == 'ready'`, which the controller derives in the `check` phase
   (`_check`, `_gates`) from the compile state, the final log (unresolved
-  citations/references, duplicate labels, overfull lines) and the deterministic
+  citations/references, duplicate labels, overfull lines, class and float
+  warnings: G8) and the deterministic
   `texcheck` findings; no model verdict is used, and the field is not called
   `verdict` (the hub reads that name for reviews). Keep the PDF downloadable when
   the gate leaves the draft partial. A ready document prints no "Points to
@@ -640,13 +641,17 @@ controller settles it in `_settle_outline`, saves it as an artifact and in
 `state['outline']`, and pins the applicable guideline rules in
 `state['guidelines']` so that a resumed job keeps them; summaries skip it) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
-where they are referred to) → `assemble` (the preamble, the made bibliography
-and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
+where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,
+`state['abstract']` as front matter and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
 files and the figures the text includes; commands and environments the text
 uses without defining are supplied) → `repair` (one call on the whole body, or
 one per error passage when the body is too long, each refused by `_repair_guard`
 when it changes labels, citations, figures, listings, theorem-like environments
 or displays) →
+`tidy` (after a successful compile: `texcheck.log_warnings` classifies every
+log warning as fix, hold or list; fixes by code, at most one `resolve_refs` call
+and one passage repair per step, three passes per text, recorded in
+`state['tidy']`; `keep_latex` in the outline turns it off) →
 `check` (`texcheck.check`, then the review of the candidate: fidelity, style
 per section batch, required parts, one call per step saved in
 `review_progress`; then the gate; when the block must change, assemble and

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Write-up: references are clickable. When the harness builds the preamble it
+  loads `hyperref` (blue links) and `cleveref` before the theorem declarations;
+  your own template gets a bare `hyperref` unless it loads it already, and is
+  compiled without it (the report says so) if it does not compile with it.
+- Write-up: the abstract is front matter, printed in the title block of an AMS
+  class (no more "Abstract should precede \maketitle"); its citations,
+  references and length (100 to 200 words) are checked.
+- Write-up: every warning of the compile log is classified and listed in the
+  report. A new `tidy` phase fixes what code can fix: a reference to a label
+  written slightly differently, a citation key one letter off the
+  bibliography's, a label defined twice, mathematics in a section title,
+  floats placed `[h]` or too large, a line running into the margin; one model
+  call may point a remaining reference at an existing label of the right kind.
+  What is left keeps the draft (class and float warnings now too, gate G8) and
+  the report asks which target is meant. Ask to keep your LaTeX as it is and
+  nothing is changed; the report lists what would have been.
+
 - Write-up: the review keeps a ledger of its findings across rounds, each with
   a status (open, fixed, set aside, for the author, gone). The writer answers
   each finding with an edit or a rebuttal; an independent judge rules on every

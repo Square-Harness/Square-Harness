@@ -744,6 +744,25 @@ How it works:
    pausing also stops compilation promptly. So are undefined theorem-like
    environments, including `exercise`, `problem` and `question` (numbered on
    their own) and `solution` (set like a proof).
+   References are clickable: the harness's preamble loads `hyperref` (blue
+   links) and, when the text uses `\cref`, `cleveref`; your own template gets a
+   bare `hyperref` unless it loads it, and if it then fails to compile it is
+   compiled without and the report says links are not clickable. The abstract is
+   printed as front matter, in the title block for the AMS classes.
+   Once the PDF is built, every warning of the log is read and classified. What
+   code can fix is fixed (the report lists each fix under "Fixed
+   automatically"): a reference to a label written slightly differently
+   (`sec:numerical` for `sec:numerics`), a citation key one letter off your
+   `.bib`'s, a label defined twice (the second gets a new name and the
+   references after it follow), mathematics in a section title, figures and
+   tables placed `[h]`, a figure too tall for the page, a line running into
+   the margin (its passage is set again, symbols unchanged). A reference with
+   no close label goes to one short call that may only pick an existing label
+   whose kind fits ("Theorem~\ref" needs a theorem); what stays unresolved is
+   put to you as a question ("`\ref{sec:numerics}` in the section
+   Introduction has no target: which section is meant?"). This applies to an
+   introduction you supply too. Ask to keep your LaTeX as it is and nothing is
+   changed; the report lists what would have been fixed.
 5. A source checker reads the LaTeX and the compile log, with no model call. It
    reports what keeps the text from going into a paper as it is: `% TODO`
    comments, a draft notice, equation numbers typed by hand ("by (3)"), text that
@@ -779,7 +798,9 @@ How it works:
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing
    figure, no text cut short by time, no generated mathematics left unchecked,
-   nothing missing that a section depends on) and no line runs into the margin.
+   nothing missing that a section depends on), no line runs into the margin,
+   and the log has no class warning and no float problem. Other warnings
+   (packages, underfull boxes, fonts) are listed in the report.
    The review must have found nothing serious against your material or the
    guidelines, and every required part must be there.
    For an exam, the points must add up to the total the request asks for. A

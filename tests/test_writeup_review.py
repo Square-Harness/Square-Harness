@@ -131,5 +131,45 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertIn('M2', {r['id'] for r in writeup.load_guidelines('notes', size='short', numerics=True)})
         self.assertIn('A1', {r['id'] for r in writeup.load_guidelines('article', {'abstract'})})
 
+    def test_every_warning_of_the_log_is_classified(self):
+        from mathagent import texcheck
+        log = ("Class amsart Warning: Abstract should precede \\maketitle in AMS document classes; reported on input line 31.\n"
+               "LaTeX Warning: Reference `sec:numerics' on page 2 undefined on input line 85.\n"
+               "LaTeX Warning: Reference `sec:numerics' on page 2 undefined on input line 87.\n"
+               "Package hyperref Warning: Token not allowed in a PDF string (Unicode):\n"
+               "(hyperref)                removing `math shift' on input line 40.\n"
+               "LaTeX Warning: `h' float specifier changed to `ht'.\n"
+               "Overfull \\hbox (3.1pt too wide) in paragraph at lines 50--52\n"
+               "Overfull \\hbox (12.0pt too wide) in paragraph at lines 60--61\n"
+               "LaTeX Warning: There were undefined references.\n")
+        found = {(w['kind'], w['key']): w for w in texcheck.log_warnings(log, body_line=40)}
+        self.assertEqual(found[('class', 'amsart Abstract should precede \\maketitle in AMS document classes')]['action'], 'hold')
+        self.assertEqual((found[('reference', 'sec:numerics')]['count'], found[('reference', 'sec:numerics')]['action']), (2, 'fix'))
+        self.assertEqual(found[('pdfstring', 'Token not allowed in a PDF string')]['line'], 40)  # read on its second line
+        self.assertEqual(found[('float', 'h')]['action'], 'fix')
+        self.assertEqual(found[('overfull', '60')]['action'], 'fix')
+        self.assertEqual([w['kind'] for w in found.values()].count('layout'), 1)  # 3pt is only listed
+        self.assertNotIn('summary', [w['kind'] for w in found.values()])
+
+    def test_labels_references_and_titles_are_repaired_by_code(self):
+        body = (r"\section{Bounds in $L^{2}$}\label{sec:bounds}" "\n" r"See Section~\ref{sec:bound} and \eqref{eq:a}." "\n"
+                r"\begin{equation}\label{eq:a} x=1 \end{equation}" "\n" r"\begin{equation}\label{eq:a} y=2 \end{equation}" "\n"
+                r"By \eqref{eq:a} and \cite{Rannacher1985}. % \label{eq:a}")
+        renamed, pairs = writeup.rename_duplicates(body)
+        self.assertEqual(pairs, [('eq:a', 'eq:a-b')])
+        self.assertIn(r'and \eqref{eq:a}.', renamed)  # before the second definition: the first
+        self.assertIn(r'By \eqref{eq:a-b}', renamed)  # after it: the second
+        self.assertIn(r'% \label{eq:a}', renamed)  # comments are left alone
+        self.assertEqual(writeup.repoint(body, ['sec:bound'], ['sec:bounds', 'eq:a'])[1], {'sec:bound': 'sec:bounds'})
+        self.assertEqual(writeup.repoint(body, ['sec:x'], ['sec:bounds'])[1], {})
+        self.assertIn(r'\texorpdfstring{$L^{2}$}{L2}', writeup.pdf_titles(body))
+        self.assertIn(r'\cite{Rannacher1984}', writeup.recite(body, {'Rannacher1985': 'Rannacher1984'}))
+        self.assertEqual(writeup.cut_abstract('\\begin{abstract}\nWe prove it.\n\\end{abstract}\n\n\\section{A}x'),
+                         ('We prove it.', '\\section{A}x'))
+        figure = '\\begin{figure}[h]\n\\includegraphics[width=3cm]{f}\n\\end{figure}'
+        self.assertIn('[htbp]', writeup.float_placements(figure))
+        self.assertIn('[width=3cm,height=0.8\\textheight,keepaspectratio]', writeup.fit_figure(figure, 3))
+        self.assertEqual(writeup.label_targets(body)['sec:bounds'][0], 'section')
+
 if __name__ == '__main__':
     unittest.main()
