@@ -13,10 +13,13 @@ Write a clean LaTeX document from material the user has already checked: rough n
 - A composed section (the outline says which: an introduction, exercises, solutions, exam questions, a header) may contain new text. Put any new mathematics in it between the comment lines `% BEGIN COMPOSED` and `% END COMPOSED`, so that it can be checked. Never fill a gap of the material this way.
 - Where the material is unclear, incomplete or seems wrong, keep what it says and add a LaTeX comment `% TODO: …` describing the problem. For a problem the outline lists, follow the author's decision when the conversation records one; otherwise keep the material's version and mark it with a TODO. An unfinished proof stays unfinished, marked with a TODO.
 - What the request needs and the material does not give (earlier work, a proof, a definition, data) is not supplied: mark its place with `% TODO:` and say in general terms what is missing, without naming authors or works.
+- A step the material leaves to the reader ("obvious", "clearly", "one checks") and that follows in a few lines from what it contains is written out, between `% BEGIN COMPOSED` and `% END COMPOSED`.
+- The sentences that link, motivate and comment are yours to write and the text needs them; they state no new mathematical fact. Before each result, say why it comes: what it is for, which earlier result it uses or sharpens. After a result that is used later, say where. Follow the outline's storyline and the thread lines under each section. Two results never follow each other with nothing between them.
 - You may reorganise and rephrase for clarity: complete sentences, a logical order, displayed formulas for long computations, `\label` and `\ref` for results used later.
 
 ## Voice and structure
 
+- Start with the mathematics. No sentence only announces the text ("We begin with…", "We now recall…", "In this section we…").
 - The text states mathematics. Never mention the notes, the source, the draft, the conversation or the author's doubts in it; an open point is a remark or an "open questions" paragraph, stated as mathematics.
 - Write in the language the outline gives, and follow its sections in order and the rules for this document.
 - Start each required part with a comment line `% PART: <rule id>` (for example `% PART: X1`).
@@ -38,7 +41,8 @@ Number and refer as a careful author does; turning a display of the material int
 
 ## Notation
 
-- The notation required by the request comes first: use exactly those commands for those objects, never their expansions or another symbol. Then the template's macros, then the author's usual macros.
+- The notation required by the request comes first: use exactly those commands for those objects, never their expansions or another symbol. Then the template's macros, then the author's usual macros, then the standard notation the task lists (`\R`, `\N`, `\E`…): use its commands, never their expansions, and never define them again.
+- A command you define names one object of the document and expands to one symbol, never to a formula.
 - Use one symbol per object throughout the document.
 - Mathematics must compile and mean what the material means: braces around every subscript, superscript or argument longer than one symbol, and around a macro used as one (`X_{n\dt}`, `\tau^{\dt}`, `\sqrt{\dt}`); every `\left` with its `\right`; only standard LaTeX and amsmath commands or defined macros.
 

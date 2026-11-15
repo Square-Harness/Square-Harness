@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Write-up: the review's fixes are applied as small edits of a few lines, each
+  checked alone, so one refused edit no longer cancels the others; reviewers cite
+  line numbers, so a finding is no longer lost when its quote is retyped.
+- Write-up: a standard notation (`\R`, `\N`, `\Z`, `\E`, `\P`, `\ind`, `\dd`,
+  `\abs{}`, `\norm{}`...) is defined in the preamble and used unless your
+  template, request or saved style has its own; `\mathbb{R}` becomes `\R`.
+- Write-up: the plan gives the size of the document (short, section, paper), a
+  storyline and the links between results, the questions of an exam with their
+  points, and the experiments of a numerical section. A short write-up follows
+  the core rules only and has no sections of its own.
+- Write-up: a reader of the whole document checks that results are linked and
+  ordered, and that exam questions are real tasks; new rule sheets for notes,
+  numerical commentary and abstracts; the paper, introduction and exam sheets
+  are rewritten.
+- Write-up: a literature check finished in the same turn now reaches the
+  write-up, and the second write-up of a turn writes with what there is.
+- Write-up: repair goes on passage by passage, a text accent used as notation
+  gets a definition, and a character pdfLaTeX cannot print in a retrieved
+  reference no longer stops the document.
+
 - Write-up: when your notes contradict themselves (the `1+k` constant whose
   derivation gives `1-k`), the reply asks you which version to keep, with both
   versions; the document keeps yours, marked TODO, until you answer, and the

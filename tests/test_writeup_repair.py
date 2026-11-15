@@ -61,6 +61,24 @@ a &= b \\
         self.assertIn('The bound is $a_{1,2}$ here.', state['document'])
         self.assertEqual(state['document'].count('Paragraph 3 recalls'), 2)
 
+    def test_two_errors_take_two_rounds_and_an_unchanged_passage_is_no_repair(self):
+        one, two = 'The bound is $a_1_2$ here.', 'The rate is $b^3^4$ there.'
+        state = self.run_writeup([f'\\title{{A note}}\n\\section{{Result}}\n{one}\n\n{FILLER}\n\n{two}',
+                                  'The bound is $a_{1,2}$ here.', 'The rate is $b^{12}$ there.'])
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertEqual(sum(call['role'] == 'repair' for call in state['calls']), 2)  # LaTeX stops at its first error
+        self.assertEqual(state['repair_rounds'], 2)
+
+    def test_a_text_accent_used_as_notation_gets_a_definition_and_the_text_is_not_rewritten(self):
+        state = self.run_writeup(['\\title{Half-plane}\n\\section{Setting}\nLet $\\H = \\{z : \\operatorname{Im} z > 0\\}$ '
+                                  'be the upper half-plane.\n\n' + FILLER, '\\newcommand{\\H}{\\mathbb{H}}'])
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertIn('\\renewcommand{\\H}{{\\mathbb{H}}}', state['document'])
+        asked = [r['messages'][1]['content'] for r in self.fake.requests if 'text accents' in r['messages'][1]['content']]
+        self.assertEqual(len(asked), 1)
+        self.assertNotIn('Paragraph 3 recalls', asked[0])  # only the lines that use \H
+        self.assertTrue(any('\\H' in warning and 'check' in warning for warning in state['warnings']))
+
     def test_a_finished_write_up_that_did_not_compile_is_reopened_and_repaired_not_rewritten(self):
         from mathagent.writeup import WriteupRunner
         broken = 'The bound is $a_1_2$ here.'

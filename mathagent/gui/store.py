@@ -1150,6 +1150,9 @@ def _saved_result(root, mode, job_id):
         if mode == 'prove':
             detail = proof_detail(root, job_id)
             return detail.get('answer') or '', _PROOF_STATUS.get(detail['status'], detail['status'])
+        if mode == 'check':  # literature checks are saved in their own folder; their text is the answer
+            state = _read_research(_job_directory(root, job_id, 'checks'), job_id)
+            return state.get('answer') or state.get('draft') or '', state['status']
         state = research_state(root, job_id)
         return state.get('document') or state.get('draft') or '', state['status']
     except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
