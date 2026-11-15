@@ -103,6 +103,49 @@ class WriteupReviewTests(GuiCase):
         self.assertIn('The sentence is clear.', (folder / 'report.md').read_text())
         self.assertIn('x^2+1>0', state['document'])  # no edit: the text is unchanged
 
+    def test_the_skeleton_fixes_the_labels_every_call_reads(self):
+        plan = json.loads(PLAN)
+        plan.update(kind='article', size='section', sections=[
+            {'heading': 'Stability', 'role': 'body', 'source': 'material', 'covers': ['S1'], 'parts': [], 'requested_by': '',
+             'purpose': 'The bound.', 'thread': []},
+            {'heading': 'Convergence', 'role': 'body', 'source': 'material', 'covers': ['S2'], 'parts': [], 'requested_by': '',
+             'purpose': 'The theorem.', 'thread': []}])
+        skeleton = json.dumps({'sections': [{'heading': 'Stability', 'label': 'sec:stability', 'opens': 'the scheme', 'closes': 'the bound'},
+                                            {'heading': 'Convergence', 'label': 'sec:convergence', 'opens': 'the bound', 'closes': ''}],
+                               'items': [{'id': 'S1', 'environment': 'lemma', 'label': 'lem:stability', 'name': 'stability of the step',
+                                          'section': 'sec:stability', 'role': 'auxiliary', 'uses': []},
+                                         {'id': 'S2', 'environment': 'theorem', 'label': 'thm:convergence', 'name': 'convergence',
+                                          'section': 'sec:convergence', 'role': 'main', 'uses': ['S1']}],
+                               'equations': [], 'floats': [], 'aliases': []})
+        draft = r"""\title{A note}
+\section{Stability}\label{sec:stab}
+\begin{lemma} The step is stable. \end{lemma}
+\section{Convergence}
+\begin{theorem}\label{thm:convergence} The scheme converges. \end{theorem}
+\begin{proof} Sum the errors. \end{proof}
+Section~\ref{sec:stab} gives the bound."""
+        (self.root / 'notes.md').write_text('Rough notes.')
+        self.fake.replies = [text(reply) for reply in (json.dumps(plan), skeleton, draft)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 1, 'source_files': ['notes.md']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        job = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((job / 'state.json').read_text())
+        self.assertEqual([c['role'] for c in state['calls']][:3], ['plan', 'skeleton', 'writing'])
+        writing = next(r['messages'][1]['content'] for r in self.fake.requests if 'Output the LaTeX body only' in r['messages'][1]['content'])
+        self.assertIn('SKELETON OF THE WHOLE DOCUMENT', writing)
+        self.assertIn('Theorem "convergence" [thm:convergence], main; uses lem:stability', writing)
+        self.assertNotIn('Before each result, say why it comes', writing)
+        body = state['body']
+        self.assertIn('\\section{Stability}\\label{sec:stability}', body)  # the writer's label takes the skeleton's
+        self.assertIn('Section~\\ref{sec:stability} gives', body)  # and its references follow
+        self.assertIn('\\begin{lemma}\\label{lem:stability}', body)  # the only lemma of its section
+        self.assertIn('\\section{Convergence}\\label{sec:convergence}', body)
+        rules = {f['rule'] for f in state['checks']}
+        self.assertIn('skeleton-link', rules)  # the proof of the theorem does not cite the lemma it uses
+        self.assertIn('G6', [g['gate'] for g in state['gates']])
+        self.assertIn('## Skeleton', (job / 'report.md').read_text())
+        self.assertTrue(any((job / 'artifacts').glob('*skeleton*')))
+
 
 class WriteupPlanTests(unittest.TestCase):
     def test_a_display_set_again_keeps_its_mathematics_and_a_new_relation_does_not(self):
@@ -170,6 +213,56 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertIn('[htbp]', writeup.float_placements(figure))
         self.assertIn('[width=3cm,height=0.8\\textheight,keepaspectratio]', writeup.fit_figure(figure, 3))
         self.assertEqual(writeup.label_targets(body)['sec:bounds'][0], 'section')
+
+    def test_the_skeleton_is_settled_by_the_controller(self):
+        outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},
+                                {'heading': 'Stability', 'role': 'body', 'covers': ['S1']},
+                                {'heading': 'Convergence', 'role': 'body', 'covers': ['S2']}]}
+        raw = {'sections': [{'heading': 'Introduction', 'label': 'sec:intro', 'opens': '', 'closes': ''},
+                            {'heading': 'Stability', 'label': 'Stabilité, uniforme!', 'opens': 'the scheme', 'closes': ''},
+                            {'heading': 'Convergence', 'label': 'sec:conv', 'opens': '', 'closes': ''}],
+               'items': [{'id': 'S1', 'environment': 'lemma', 'label': 'lem:stab', 'name': 'stability', 'section': 'sec:intro',
+                          'role': 'auxiliary', 'uses': ['S2', 'S1', 'X9']},
+                         {'id': 'S2', 'environment': 'theorem', 'label': 'thm:main', 'name': 'convergence', 'section': 'sec:conv',
+                          'role': 'main', 'uses': ['S1']}],
+               'equations': [], 'floats': [],
+               'aliases': [{'from': 'sec:numerical', 'to': 'sec:conv'}, {'from': 'sec:other', 'to': 'sec:missing'}]}
+        skeleton = writeup.settle_skeleton(raw, outline, {'thm:main'}, ['sec:numerical', 'sec:other'])
+        self.assertEqual([s['label'] for s in skeleton['sections']], ['sec:intro', 'sec:stabilite-uniforme', 'sec:conv'])
+        items = {i['id']: i for i in skeleton['items']}
+        self.assertEqual(items['S1']['section'], 'sec:stabilite-uniforme')  # the outline's covers win
+        self.assertEqual(items['S1']['uses'], [])  # no self-reference, no unknown id, and the cycle's forward edge is dropped
+        self.assertEqual((items['S2']['uses'], items['S1']['used_by']), (['S1'], ['S2']))
+        self.assertEqual(skeleton['aliases'], [{'from': 'sec:numerical', 'to': 'sec:conv'}])
+        fallback = writeup.settle_skeleton(None, outline)
+        self.assertEqual([s['label'] for s in fallback['sections']], ['sec:introduction', 'sec:stability', 'sec:convergence'])
+        self.assertTrue(fallback['warning'] and not fallback['items'])
+
+    def test_the_text_is_checked_against_the_skeleton(self):
+        skeleton = {'sections': [{'heading': 'Introduction', 'label': 'sec:intro', 'role': 'introduction'},
+                                 {'heading': 'Stability', 'label': 'sec:stab', 'role': 'body'},
+                                 {'heading': 'Convergence', 'label': 'sec:conv', 'role': 'body'}],
+                    'items': [{'id': 'S1', 'environment': 'lemma', 'label': 'lem:stab', 'name': 'stability', 'section': 'sec:stab',
+                               'role': 'auxiliary', 'uses': [], 'used_by': ['S2']},
+                              {'id': 'S2', 'environment': 'theorem', 'label': 'thm:main', 'name': 'convergence',
+                               'section': 'sec:conv', 'role': 'main', 'uses': ['S1'], 'used_by': []}],
+                    'equations': [{'label': 'eq:scheme', 'what': 'the scheme', 'section': 'sec:stab'}], 'floats': []}
+        body = (r"\section{Introduction}\label{sec:intro}" "\nOur main result is Theorem~\\ref{thm:main}.\n"
+                r"\section{Stability}\label{sec:stab}" "\nBy Theorem~\\ref{thm:main} the step is stable.\n"
+                r"\begin{lemma}\label{lem:stab} Stable. \end{lemma}" "\n" r"\begin{equation}\label{eq:scheme} U=V \end{equation}" "\n"
+                r"\section{Convergence}\label{sec:conv}" "\n" r"\begin{theorem}\label{thm:main} It converges. \end{theorem}" "\n"
+                r"\begin{proof} Sum the errors. \end{proof}")
+        found = {rule: line for rule, _, _, _, line in writeup.skeleton_findings(body, skeleton, ['sec:intro'])}
+        self.assertEqual(found['skeleton-link'], 8)  # the theorem's proof does not cite the lemma
+        self.assertEqual(found['skeleton-order'], 4)  # cited in Stability before Convergence states it; the introduction may
+        self.assertIn('skeleton-orphan', found)
+        self.assertIn('skeleton-equation', found)
+        self.assertNotIn('skeleton-label', found)
+        fixed = body.replace('Sum the errors.', 'By Lemma~\\ref{lem:stab}, sum the errors \\eqref{eq:scheme}.')
+        fixed = fixed.replace('By Theorem~\\ref{thm:main} the', 'The')
+        self.assertEqual(writeup.skeleton_findings(fixed, skeleton, ['sec:intro']), [])
+        missing = writeup.skeleton_findings(body.replace('\\label{lem:stab}', ''), skeleton)
+        self.assertIn(('skeleton-label', 'blocker'), [(f[0], f[1]) for f in missing])
 
 if __name__ == '__main__':
     unittest.main()

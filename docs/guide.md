@@ -715,6 +715,13 @@ How it works:
    introduction's required parts (motivation, literature, positioning, main
    result, method, organisation); an exam's header, points and recalled
    notation; rules for exercise sheets and lecture notes.
+   For an article, a part of a paper, notes or lecture notes of a section or
+   more, a second short call then fixes the **skeleton** of the document: its
+   sections, its results, the formulas cited at a distance and the figures,
+   each with its label, and which result uses which. The labels your material
+   already has are kept. Every later call reads the skeleton: the writer uses
+   its labels and writes the linking sentences its connections call for, and
+   no others; the reviewers check the text against it. The report prints it.
 2. One writing call reads all the material, the plan, the guidelines, your
    request, your notation and your style, and writes the document in the
    requested language. Material too long for one call is written in parts that
@@ -803,6 +810,10 @@ How it works:
    (packages, underfull boxes, fonts) are listed in the report.
    The review must have found nothing serious against your material or the
    guidelines, and every required part must be there.
+   When the document has a skeleton, each of its labels must be defined once,
+   and a result whose proof does not cite a result it uses, or a result cited
+   before it is stated with no word that it comes later, keeps it a draft (a
+   lemma cited nowhere, or a listed formula never cited, is listed).
    For an exam, the points must add up to the total the request asks for. A
    name of a person or work that only the plan mentions, with no source, keeps
    the document a draft.

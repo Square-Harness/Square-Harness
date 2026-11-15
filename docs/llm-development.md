@@ -292,8 +292,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   material and delegates again; the duplicate-child test skips `needs_input`
   children, and a second `needs_input` in the turn is the reply.
   `WriteupRunner.decide_needs` (POST `/api/research/<id>/needs`, waive or stop)
-  is the author's answer on the page; waiving resumes at `draft` with
-  `needs_waived`.
+  is the author's answer on the page; waiving resumes at `skeleton` (then
+  `draft`) with `needs_waived`.
 - **Write-up outline.** The controller, not the model, decides what blocks: a
   need blocks only when the model says so and a section depends on it (a
   decision: when it settles a problem of the material), with at most three
@@ -639,7 +639,12 @@ document, language, requirements, inventory of the material with statuses,
 problems, notation, sections with role/source/required parts, needs; the
 controller settles it in `_settle_outline`, saves it as an artifact and in
 `state['outline']`, and pins the applicable guideline rules in
-`state['guidelines']` so that a resumed job keeps them; summaries skip it) → `draft` (one writing call, or consecutive parts for long material; the
+`state['guidelines']` so that a resumed job keeps them; summaries skip it) →
+`skeleton` (one structured call, role `skeleton`, for `SKELETON_KINDS` of size
+section or paper with outline sections; `settle_skeleton` fixes labels, `uses`
+without cycles and aliases; saved in `state['skeleton']`; `_skeleton_text`
+renders it for the writer, the reviewers, the reviser and the judge;
+`place_skeleton_labels` in `_join_parts` and `skeleton_findings` in `_check`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,
 `state['abstract']` as front matter and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template

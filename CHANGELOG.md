@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Write-up: after the outline, one call fixes the skeleton of an article, a part
+  of a paper, notes or lecture notes (a section or longer): its sections,
+  results, cited formulas and figures with their labels, and what uses what.
+  Every writing call and every reviewer reads it, so labels are no longer
+  invented call by call; the controller puts its labels in the text where their
+  place is certain and checks the rest (a label missing or defined twice, a
+  result whose proof does not cite what it uses, a lemma cited nowhere, a result
+  cited before it is stated, a listed formula never cited). Linking sentences
+  come from the skeleton's connections only: the writer is no longer asked for
+  a sentence before every result. Rule P11 is rewritten and P21 (every sentence
+  earns its place) is new.
+
 - Write-up: references are clickable. When the harness builds the preamble it
   loads `hyperref` (blue links) and `cleveref` before the theorem declarations;
   your own template gets a bare `hyperref` unless it loads it already, and is

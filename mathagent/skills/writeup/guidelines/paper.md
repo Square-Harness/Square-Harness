@@ -33,12 +33,10 @@ reader of the whole text. A rule tagged `section` applies from the size of a sec
   not repetition.
 - P16 [style] Definitions. Most terms are defined in the running text where they are first needed ("we say that",
   "is called"). A Definition environment is kept for the few central notions and for those cited later by number.
-- P11 [reader, section] Thread. A reader always knows why the next theorem, lemma, proposition or corollary is there:
-  the text before it leads to it (what it is for, or which earlier result it uses or sharpens), and a result that is
-  used later is cited where it is used. The rule fails only where such a result comes with no lead-in at all, where two
-  results follow each other with nothing between them, or where a section starts with a theorem-like environment.
-  Remarks, examples and definitions need no sentence of their own, and a lead-in that only announces ("The following
-  remark shows that") is worse than none.
+- P11 [reader, section] Thread. Where one result uses another, the text says so at the place of use, with the
+  reference; a result used later is said to be, once. The rule fails where such a link is missing, where a section
+  starts with a theorem-like environment, or where a result arrives with nothing that tells where it fits. It does not
+  ask for a sentence before every statement.
 - P12 [reader, section] Hierarchy. The reader can tell the main result from the auxiliary ones: the main result is
   named as such, an auxiliary lemma is introduced by what it serves, and a consequence is presented as one.
 - P13 [reader, section] Opening. The document (or the section, for a part of a paper) starts with a few sentences that
@@ -54,3 +52,6 @@ reader of the whole text. A rule tagged `section` applies from the size of a sec
 - P19 [reader, paper] Ending. A paper whose content is its theorems ends with its last result, with no summary. A paper
   about a method or about numerical evidence ends with a short discussion that states its limits.
 - P20 [style, paper] Title. At most about twelve words and no symbols; it names the object, the method or the claim.
+- P21 [reader, section] Earned sentences. Every sentence gives the reader a fact, a reason or a reference. A sentence
+  that only restates the statement that follows, announces what comes next or says that a result is important is
+  removed, not reworded.
