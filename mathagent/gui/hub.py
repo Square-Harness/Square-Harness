@@ -16,6 +16,7 @@ import json
 import copy
 import math
 from pathlib import Path
+import re
 import socket
 import threading
 import time
@@ -53,6 +54,9 @@ RUNNING = ('starting', 'running', 'pausing')
 # Tool rounds for user-selected sandbox workers: write, run, fix and rerun; three checks.
 USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Task labels shown in the interface; the engine's kind stays 'referee'.
+# A short request to fix the LaTeX of the write-up just delivered ("fix this error", "corrige l'erreur de compilation").
+REPAIR_REQUEST = re.compile(r"^\W*(?:please\s+|can you\s+|peux[- ]tu\s+|merci de\s+)?(?:fix|repair|correct|corrige[rz]?|r[ée]pare[rz]?)\b"
+                            r".{0,60}\b(?:errors?|erreurs?|compil\w*|latex|tex)\b.{0,40}$", re.I | re.S)
 LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
           'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
 # Assistant and router modes that run as review variants of the referee kind.
@@ -1695,8 +1699,15 @@ class Hub:
                           else ReviewRunner(agent, emit) if mode == 'literature'
                           else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=self.review_concurrency()))
                 runner.cancel = task.cancel
+                extra = 0
+                if mode == 'writeup' and not child.get('job_id') and REPAIR_REQUEST.search(context['query']):
+                    # "Fix this error" after a write-up that did not compile repairs that document; it is not rewritten.
+                    previous = self._uncompiled_writeup(root, chat_id)
+                    if previous and WriteupRunner.reopen_for_repair(root, previous):
+                        child['job_id'], extra = previous, max(0.1, seconds)
+                        save()
                 if child.get('job_id'):
-                    result = runner.resume(child['job_id'])
+                    result = runner.resume(child['job_id'], additional_seconds=extra)
                 else:
                     kwargs = dict(source_files=files, max_rounds=level['tries'], max_tokens=allocation,
                         max_input_tokens=input_limit,
@@ -1838,6 +1849,18 @@ class Hub:
                          'scope': 'operation', 'details': {'mode': mode}}
             return {'status': 'failed', 'answer': '', 'warnings': [str(exc)], 'error': error,
                     'job_id': child.get('job_id') or child['id']}
+
+    @staticmethod
+    def _uncompiled_writeup(root, chat_id):
+        """The conversation's latest write-up job, when its document did not compile; else None."""
+        for item in reversed(store.load_chat(root, chat_id)['transcript']):
+            if item.get('role') == 'route' and item.get('mode') == 'writeup' and item.get('job_id') and item.get('outputs'):
+                try:
+                    compiled = store.research_state(root, item['job_id']).get('compile') or {}
+                except (ValueError, store.NotFound):
+                    return None
+                return item['job_id'] if compiled.get('available') and not compiled.get('ok') else None
+        return None
 
     @staticmethod
     def _turn_start(root, chat_id):
