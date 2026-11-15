@@ -21,8 +21,8 @@ introduction usually takes one and a half to three pages.
   exponent is sharp, immediate consequences. Every term of the statement is defined, explained or standard.
 - I5 [required] Method. One or two paragraphs give the strategy of the proof, step by step; they name the main
   obstacle and the idea that overcomes it, and say which step is new.
-- I6 [style] Organisation. When the material gives the sections of the paper, the introduction ends with its plan,
-  section by section, with `\ref`. When it does not, or when the paper is short, there is no plan: none is made up.
+- I6 [style] Organisation. When the paper has three body sections or more, the introduction ends with its plan,
+  section by section, with `\ref` (the skeleton gives the sections, so nothing is made up). A shorter paper has no plan.
 - I7 [style] Restraint. No proof in the introduction, only the notation needed to state the results, and at most about
   four displayed statements.
 - I8 [reader] One section. The introduction is a single `\section`; its parts are paragraphs, never sections of their own.
@@ -31,3 +31,5 @@ introduction usually takes one and a half to three pages.
 - I10 [reader] Something concrete. When the material has an example, a special case or a figure that shows what the
   result says, the introduction gives it.
 - I11 [style] Contributions are written as prose, not as a bulleted list.
+- I12 [style] Links. The introduction points to where things are: the main result, the step that overcomes the
+  obstacle, the experiments.

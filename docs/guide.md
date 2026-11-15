@@ -722,7 +722,17 @@ How it works:
    already has are kept. Every later call reads the skeleton: the writer uses
    its labels and writes the linking sentences its connections call for, and
    no others; the reviewers check the text against it. The report prints it.
-2. One writing call reads all the material, the plan, the guidelines, your
+2. A whole paper (an article, or a part of a paper with its introduction) is
+   written section by section: each call writes a few consecutive sections of
+   the body, with the skeleton, the text already written and the guidelines of
+   the body only. The introduction comes last, written from the finished body:
+   it cites the main result, the experiments and, when the body has three
+   sections or more, each section in a closing plan. When your material has its
+   own introduction in LaTeX, it is kept: one call only adds those links and
+   repairs its references. The abstract is written after the introduction,
+   checked once against the main result, and written again once if it fails.
+   Any other document is written as follows.
+   One writing call reads all the material, the plan, the guidelines, your
    request, your notation and your style, and writes the document in the
    requested language. Material too long for one call is written in parts that
    follow the plan's sections; each part knows the labels and commands the

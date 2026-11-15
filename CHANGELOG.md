@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Write-up: a whole paper is written section by section. Each call writes a
+  group of consecutive body sections with the skeleton, the text already
+  written (in full, or the statements and the first and last paragraph of each
+  section when long) and the rules of its role only. The introduction is
+  written last, from the finished body, and must cite the main result, every
+  section when there are three or more (rule I6, new I12) and the experiments;
+  an introduction you supply is kept, and one call only adds those links and
+  repairs its references. The abstract is written after it and checked once
+  against the main result; it is written again once when it fails.
+
 - Write-up: after the outline, one call fixes the skeleton of an article, a part
   of a paper, notes or lecture notes (a section or longer): its sections,
   results, cited formulas and figures with their labels, and what uses what.

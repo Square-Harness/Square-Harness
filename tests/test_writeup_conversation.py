@@ -164,5 +164,89 @@ By \cite{HS04}, see also \cite{Fake99}.
         self.assertTrue(completed['outputs']['pdf'])
         self.assertIn('Holcman2004: D. Holcman', writing_prompt(self.fake))
 
+@unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
+class WholePaperTests(GuiCase):
+    """A whole paper is written section by section, its introduction and its abstract last."""
+    extra_args = ('--ctx', '40960')
+
+    def paper(self, intro_source):
+        section = lambda heading, role, source, covers=(): {
+            'heading': heading, 'role': role, 'source': source, 'covers': list(covers), 'parts': [],
+            'requested_by': 'R1' if source == 'composed' else '', 'purpose': heading + '.', 'thread': []}
+        plan = json.loads(PLAN)
+        plan.update(kind='article', requirements=['an abstract and an introduction'], sections=[
+            section('Abstract', 'abstract', 'composed'), section('Introduction', 'introduction', intro_source),
+            section('Stability', 'body', 'material', ['S1']), section('Convergence', 'body', 'material', ['S2']),
+            section('Numerical results', 'body', 'material')])
+        skeleton = {'sections': [{'heading': 'Abstract', 'label': 'sec:abstract', 'opens': '', 'closes': ''},
+                                 {'heading': 'Introduction', 'label': 'sec:intro', 'opens': '', 'closes': ''},
+                                 {'heading': 'Stability', 'label': 'sec:stability', 'opens': '', 'closes': ''},
+                                 {'heading': 'Convergence', 'label': 'sec:convergence', 'opens': '', 'closes': ''},
+                                 {'heading': 'Numerical results', 'label': 'sec:numerics', 'opens': '', 'closes': ''}],
+                    'items': [{'id': 'S1', 'environment': 'lemma', 'label': 'lem:stability', 'name': 'stability',
+                               'section': 'sec:stability', 'role': 'auxiliary', 'uses': []},
+                              {'id': 'S2', 'environment': 'theorem', 'label': 'thm:convergence', 'name': 'convergence',
+                               'section': 'sec:convergence', 'role': 'main', 'uses': ['S1']}],
+                    'equations': [], 'floats': [], 'aliases': [{'from': 'sec:numerical', 'to': 'sec:numerics'}]}
+        body = (r'\title{The theta-scheme}' '\n' r'\section{Stability}\label{sec:stability}' '\n'
+                r'\begin{lemma}\label{lem:stability} The step is stable. \end{lemma}' '\n'
+                r'\section{Convergence}\label{sec:convergence}' '\n'
+                r'\begin{theorem}\label{thm:convergence} The scheme converges. \end{theorem}' '\n'
+                r'\begin{proof} By Lemma~\ref{lem:stability}. \end{proof}' '\n'
+                r'\section{Numerical results}\label{sec:numerics}' '\n' r'The rates agree with Theorem~\ref{thm:convergence}.')
+        abstract = ('We prove that the theta-scheme for the heat equation converges for every theta between one half and '
+                    'one, with no condition linking the time step and the mesh size, by a stability estimate of the '
+                    'one-step operator and a bound of the truncation error, and we observe the predicted rates.')
+        return json.dumps(plan), json.dumps(skeleton), body, abstract
+
+    def run_paper(self, replies, sources):
+        self.fake.replies = [text(reply) for reply in replies]
+        started = self.ok('POST', '/api/writeup', {'goal': 'An article with an abstract and an introduction.', 'seconds': 300,
+                                                   'rounds': 1, 'source_files': sources})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        job = self.root / '.mathagent' / 'research' / started['id']
+        return json.loads((job / 'state.json').read_text()), job
+
+    def test_the_body_comes_first_then_the_introduction_and_the_abstract(self):
+        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
+        plan, skeleton, body, abstract = self.paper('composed')
+        intro = (r'\section{Introduction}' '\n' r'We prove Theorem~\ref{thm:convergence}, using Lemma~\ref{lem:stability}. '
+                 r'Section~\ref{sec:stability} bounds the step, Section~\ref{sec:convergence} proves the theorem and '
+                 r'Section~\ref{sec:numerics} reports the experiments.')
+        state, job = self.run_paper([plan, skeleton, body, intro, abstract], ['notes.md'])
+        self.assertEqual([c['role'] for c in state['calls']], ['plan', 'skeleton', 'writing', 'writing', 'abstract'])
+        prompts = [r['messages'][1]['content'] for r in self.fake.requests if 'Output the LaTeX body only' in r['messages'][1]['content']]
+        self.assertIn('This call writes the sections Stability; Convergence; Numerical results and nothing else', prompts[0])
+        self.assertNotIn('I1 [required]', prompts[0])  # the body's rules only
+        self.assertIn('This call writes the introduction only', prompts[1])
+        self.assertIn('THE TEXT ALREADY WRITTEN (in full', prompts[1])
+        self.assertIn('I12 [style]', prompts[1])
+        self.assertLess(state['body'].index('\\section{Introduction}\\label{sec:intro}'), state['body'].index('\\section{Stability}'))
+        self.assertEqual(state['title'], 'The theta-scheme')
+        self.assertEqual(state['abstract'], abstract)
+        self.assertLess(state['document'].index('\\begin{abstract}'), state['document'].index('\\maketitle'))
+        self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
+        self.assertIn('## Writing calls', (job / 'report.md').read_text())
+
+    def test_the_authors_introduction_is_kept_and_only_its_links_are_edited(self):
+        context = ' '.join(['The theta-scheme combines the implicit and the explicit Euler steps with a weight theta.'] * 4)
+        (self.root / 'intro.tex').write_text(r'\section{Introduction}\label{sec:intro}' '\nWe study the theta-scheme.\n'
+                                             'The experiments are in Section~\\ref{sec:numerical}.\n' + context + '\n')
+        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
+        plan, skeleton, body, abstract = self.paper('material')
+        edits = ('@@ issue 1 lines 2-2\nWe study the theta-scheme and prove Theorem~\\ref{thm:convergence}.\n'
+                 '@@ issue 2 lines 3-3\nSection~\\ref{sec:stability} bounds the step, Section~\\ref{sec:convergence} proves '
+                 'the theorem, and the experiments are in Section~\\ref{sec:numerics}.\n')
+        state, _ = self.run_paper([plan, skeleton, body, edits, abstract], ['intro.tex', 'notes.md'])
+        self.assertEqual([c['role'] for c in state['calls']], ['plan', 'skeleton', 'writing', 'revise_section', 'abstract'])
+        asked = next(r['messages'][1]['content'] for r in self.fake.requests if 'in this introduction by edits' in r['messages'][1]['content'])
+        self.assertIn('does not cite the main result', asked)
+        self.assertNotIn('points to no label', asked)  # the skeleton's alias repaired sec:numerical by code
+        self.assertIn('We study the theta-scheme and prove Theorem~\\ref{thm:convergence}.', state['body'])
+        self.assertIn('the experiments are in Section~\\ref{sec:numerics}', state['body'])
+        self.assertEqual(state['frame_edits']['applied'], 2, state['frame_edits'])
+        self.assertIn('combines the implicit and the explicit Euler steps', state['body'])  # the author's text stays
+        self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
+
 if __name__ == '__main__':
     unittest.main()

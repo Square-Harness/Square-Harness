@@ -262,6 +262,16 @@ class WriteupPlanTests(unittest.TestCase):
         fixed = fixed.replace('By Theorem~\\ref{thm:main} the', 'The')
         self.assertEqual(writeup.skeleton_findings(fixed, skeleton, ['sec:intro']), [])
         missing = writeup.skeleton_findings(body.replace('\\label{lem:stab}', ''), skeleton)
+        # The frame: the introduction cites the main result and, from three body sections on, every section.
+        skeleton['sections'].append({'heading': 'Numerics', 'label': 'sec:num', 'role': 'body'})
+        self.assertEqual(len(writeup.frame_findings('We prove Theorem~\\ref{thm:main}. Experiments follow.', skeleton)), 2)
+        self.assertEqual(writeup.frame_findings('We prove Theorem~\\ref{thm:main}; Sections~\\ref{sec:stab}, '
+                                                '\\ref{sec:conv} and \\ref{sec:num} give the proof and the experiments.',
+                                                skeleton), [])
+        outline = writeup.text_outline('\\section{A}\\label{sec:a}\nFirst.\n\nMiddle.\n\n\\begin{lemma}\\label{lem:x} L. '
+                                       '\\end{lemma}\n\nMore.\n\nLast.')
+        self.assertEqual(outline, '\\section{A}\\label{sec:a}\nFirst.\n\n\\begin{lemma}\\label{lem:x} L. \\end{lemma}'
+                                  '\n\n[...]\n\nLast.')
         self.assertIn(('skeleton-label', 'blocker'), [(f[0], f[1]) for f in missing])
 
 if __name__ == '__main__':

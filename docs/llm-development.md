@@ -644,7 +644,12 @@ controller settles it in `_settle_outline`, saves it as an artifact and in
 section or paper with outline sections; `settle_skeleton` fixes labels, `uses`
 without cycles and aliases; saved in `state['skeleton']`; `_skeleton_text`
 renders it for the writer, the reviewers, the reviser and the judge;
-`place_skeleton_labels` in `_join_parts` and `skeleton_findings` in `_check`) → `draft` (one writing call, or consecutive parts for long material; the
+`place_skeleton_labels` in `_join_parts` and `skeleton_findings` in `_check`) →
+`draft` and `frame` for a whole paper (`_units`: parts are units of the
+outline in document order, the introduction a frame part written last, by the
+writing call or, when a `.tex` source has it, kept and edited by
+`_frame_edits`; then `_frame_abstract`; `state['framed']`; the material is read
+through `_whole_material()`, stored once in `state['material']`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,
 `state['abstract']` as front matter and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
