@@ -842,7 +842,8 @@ How it works:
    and the log has no class warning and no float problem. Other warnings
    (packages, underfull boxes, fonts) are listed in the report.
    The review must have found nothing serious against your material or the
-   guidelines, and every required part must be there.
+   guidelines, and every required part must be there (in an introduction you
+   wrote, a missing part is put to you instead: the text is yours).
    When the document has a skeleton, each of its labels that something refers
    to (and the main result's) must be defined once. A result whose proof does
    not cite a result it uses, or a result cited before it is stated, is sent to

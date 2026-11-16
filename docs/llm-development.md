@@ -659,8 +659,11 @@ outline in document order, the introduction a frame part written last, by the
 writing call or, when a `.tex` source has it, kept and edited by
 `_frame_edits`; then `_frame_abstract`; `state['framed']`; the material is read
 through `_whole_material()`, stored once in `state['material']`); with the
-outline's `assemble` and two `.tex` texts, `splice` (`_splice_plan` after the
-skeleton, `splice_texts` by code, changes in `state['splice']`) and `stitch`
+outline's `assemble` and two `.tex` texts, the texts are spliced inside the
+`skeleton` phase (`_splice_plan` maps sections to texts by heading,
+`splice_texts` by code, changes in `state['splice']`), the skeleton is read from
+them (`skeleton_from_texts`) and the model only annotates it
+(`annotate_skeleton`); then `stitch`
 (after the frame: `_stitch_notation` under `notation_guard`, duplicates and
 bridges under `frozen_guard`; fidelity then reads `state['splice']['hunks']`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only

@@ -205,10 +205,10 @@ class WholePaperTests(GuiCase):
                     'one-step operator and a bound of the truncation error, and we observe the predicted rates.')
         return json.dumps(plan), json.dumps(skeleton), body, abstract
 
-    def run_paper(self, replies, sources):
+    def run_paper(self, replies, sources, rounds=1):
         self.fake.replies = [text(reply) for reply in replies]
         started = self.ok('POST', '/api/writeup', {'goal': 'An article with an abstract and an introduction.', 'seconds': 300,
-                                                   'rounds': 1, 'source_files': sources})
+                                                   'rounds': rounds, 'source_files': sources})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
         job = self.root / '.mathagent' / 'research' / started['id']
         return json.loads((job / 'state.json').read_text()), job
@@ -253,6 +253,28 @@ class WholePaperTests(GuiCase):
         self.assertEqual(state['frame_edits']['applied'], 2, state['frame_edits'])
         self.assertIn('combines the implicit and the explicit Euler steps', state['body'])  # the author's text stays
         self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
+
+    def test_the_parts_of_an_authors_introduction_are_read_not_asked_and_hold_nothing(self):
+        context = ' '.join(['The theta-scheme combines the implicit and the explicit Euler steps with a weight theta.'] * 4)
+        (self.root / 'intro.tex').write_text('\\section{Introduction}\\label{sec:intro}\nWe study the theta-scheme.\n' + context + '\n')
+        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
+        plan, skeleton, body, abstract = self.paper('material')
+        plan = json.loads(plan)
+        plan['kind'] = 'paper_part'
+        next(s for s in plan['sections'] if s['role'] == 'introduction')['parts'] = ['I1', 'I2', 'I3', 'I4', 'I5']
+        parts = json.dumps({'items': [{'rule': r, 'provides': r != 'I2', 'quote': 'We study the theta-scheme.',
+                                       'problem': 'No earlier work is cited.' if r == 'I2' else ''} for r in ('I1', 'I2', 'I3', 'I4', 'I5')]})
+        agrees = json.dumps({'agrees': True, 'problem': ''})
+        state, job = self.run_paper([json.dumps(plan), skeleton, body, 'No edits.', abstract, NOTHING_FOUND,
+                                     json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}), agrees, abstract, parts],
+                                    ['intro.tex', 'notes.md'], rounds=2)
+        self.assertNotIn('part-missing', [f['rule'] for f in state['checks']])  # no % PART: marker is asked of the author's text
+        self.assertIn('intro_parts', [c['role'] for c in state['calls']])
+        item = next(i for i in state['ledger'] if i['rule'] == 'I2')
+        self.assertEqual((item['layer'], item['fixable'], item['status']), ('intro', 'author', 'open'))
+        self.assertFalse([g for g in state['gates'] if 'required parts' in g['message']])  # the author's text: not held
+        report = (job / 'report.md').read_text()
+        self.assertIn('No earlier work is cited.', report[report.index('### For you to settle'):])
 
     def test_finished_texts_are_assembled_and_only_what_is_new_is_written(self):
         from mathagent import writeup

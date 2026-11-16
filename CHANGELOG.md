@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Write-up: an introduction you wrote is no longer asked for `% PART:`
+  markers. One review call reads it against the required parts (motivation,
+  literature, positioning, main result, method) and quotes each; a missing part
+  is put to you and does not keep the document a draft.
+
 - Write-up: the skeleton lists results only (theorems, lemmas, propositions,
   corollaries, and definitions the text cites), never remarks or examples, and
   the abstract is not one of its sections. When texts are merged, it is read
