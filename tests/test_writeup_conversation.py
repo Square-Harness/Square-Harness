@@ -126,7 +126,9 @@ By \cite{HS04}, see also \cite{Fake99}.
 % END BIBTEX""")]
         started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'source_files': ['paper/notes2.md']})
         made = self.root / '.mathagent' / 'research' / started['id'] / 'state.json'
-        self.wait_for(lambda: made.exists() and json.loads(made.read_text())['status'] in ('complete', 'partial'), timeout=240)
+        # The runner saves its state, then writes its report: wait for both.
+        self.wait_for(lambda: made.exists() and json.loads(made.read_text())['status'] in ('complete', 'partial')
+                      and (made.parent / 'report.md').exists(), timeout=240)
         self.assertIn('There is no bibliography file', writing_prompt(self.fake))
         state = json.loads(made.read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
