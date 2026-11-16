@@ -274,8 +274,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `_revision_guard` or are discarded. Findings live in `state['ledger']` across
   rounds with a status (open, fixed, refuted, disputed, gone); the writer
   answers each with an edit or a rebuttal and the role `judge` rules on both.
-  Each round has one focus (`_focus`). Calls use the roles `fidelity`,
-  `style_check`, `part_check` and `revise_section`; `review` would trigger the
+  Each round has one focus (`_focus`). Flow findings (reader, `skeleton-*`,
+  `frame-links`) and second attempts go to `_rewrite_section`: the section is
+  `freeze`d (displays, statements, floats, generated passages, headings and
+  inline formulas become tokens), the answer must pass `frozen_guard`, is
+  `thaw`ed, and `judge_section` rules on the section and each finding (accept,
+  partial, reject). Findings whose fix changes mathematics keep the line edits
+  under `_revision_guard`. `CODE_RULES` lists the rules checked by code, kept
+  out of the review prompts; `state['rule_checks']` keeps the reviewers'
+  per-rule verdicts for the report's table. Calls use the roles `fidelity`,
+  `style_check`, `part_check`, `revise_section`, `rewrite_section`, `judge`,
+  `judge_section`, `abstract_check` and `resolve_refs`; `review` would trigger the
   research runner's citation checks. Review and revision stop with less than a
   minute or 2,048 output tokens left; the best candidate is still exported.
 - **Long write-ups.** After the outline, `_outline_parts` re-cuts the parts at

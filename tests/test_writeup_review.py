@@ -41,13 +41,15 @@ class WriteupReviewTests(GuiCase):
     extra_args = ('--ctx', '40960')
 
     def test_edits_are_applied_one_by_one_and_the_standard_notation_is_used(self):
-        reader = json.dumps({'summary': 'A bound.', 'items': [
+        style = json.dumps({'items': [
             # The quote is retyped, not word for word: the lines keep the finding.
-            {'rule': 'N7', 'severity': 'major', 'line': 6, 'last_line': 6, 'quote': 'begin theorem (thm two)',
+            {'rule': 'N2', 'verdict': 'fail', 'severity': 'major', 'line': 6, 'last_line': 6, 'quote': 'begin theorem (thm two)',
              'problem': 'The theorem follows the lemma with no link.', 'instruction': 'Say what the lemma is for.',
              'fixable': 'rewrite'},
-            {'rule': 'N9', 'severity': 'minor', 'line': 0, 'last_line': 0, 'quote': 'It follows from Lemma~\\ref{lem:one}.',
-             'problem': 'Vague.', 'instruction': 'Say what follows.', 'fixable': 'rewrite'}]})
+            {'rule': 'N4', 'verdict': 'fail', 'severity': 'minor', 'line': 0, 'last_line': 0,
+             'quote': 'It follows from Lemma~\\ref{lem:one}.', 'problem': 'Vague.', 'instruction': 'Say what follows.',
+             'fixable': 'rewrite'}]})
+        reader = json.dumps({'summary': 'A bound.', 'items': []})
         edits = ('@@ issue 1 lines 5-6\n\\end{lemma}\nLemma~\\ref{lem:one} gives the positivity used in the next result.\n'
                  '\\begin{theorem}\\label{thm:two}\n'
                  '@@ issue 2 lines 8-12\n\\[\nx^2+2>0.\n\\]\n\\end{theorem}\nThe bound follows from Lemma~\\ref{lem:one}.\n')
@@ -55,8 +57,9 @@ class WriteupReviewTests(GuiCase):
         # One round: the review (fidelity, reader, style), the writer's edits, then the judge's ruling on the edit
         # that passed the guard. Nothing is reviewed again from scratch after the revision.
         ruling = json.dumps({'items': [{'n': 1, 'verdict': 'accept', 'reason': 'The lemma is now introduced.'}]})
-        again = '@@ issue 1 lines 9-12\n\\[\nx^2+3>0.\n\\]\n\\end{theorem}\n'  # the second attempt changes the formula too
-        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, edits, ruling, again)]
+        # The second attempt is a rewrite with the mathematics frozen: an answer that writes a formula is refused.
+        again = '@@ issue 1 lines 9-12\n\\[\nx^2+3>0.\n\\]\n\\end{theorem}\n'
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, style, edits, ruling, again)]
         started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 2,
                                                    'source_files': ['notes.md']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
@@ -71,37 +74,81 @@ class WriteupReviewTests(GuiCase):
         self.assertNotIn('x^2+3>0', document)
         self.assertEqual(state['reviews'][0]['dropped'], 0)
         ledger = {item['rule']: item for item in state['ledger']}
-        self.assertEqual(ledger['N7']['status'], 'fixed')
-        self.assertEqual(ledger['N9']['status'], 'open')
-        self.assertEqual(ledger['N9']['attempts'], 2)  # refused by the guard (a formula changed), then tried once more
-        self.assertEqual([i['rule'] for i in state['reviews'][-1]['issues']], ['N9'])  # what still stands
+        self.assertEqual(ledger['N2']['status'], 'fixed')
+        self.assertEqual(ledger['N4']['status'], 'open')
+        self.assertEqual(ledger['N4']['attempts'], 2)  # refused by the guard (a formula changed), then tried once more
+        self.assertIn('the rewrite was refused', ledger['N4']['reasons'][-1])
+        self.assertEqual([i['rule'] for i in state['reviews'][-1]['issues']], ['N4'])  # what still stands
         self.assertEqual(sum(call['role'] == 'fidelity' for call in state['calls']), 1)  # reviewed once, not twice
-        self.assertEqual(sum(call['role'] == 'revise_section' for call in state['calls']), 2)
+        self.assertEqual([call['role'] for call in state['calls'] if call['role'] in ('revise_section', 'rewrite_section')],
+                         ['revise_section', 'rewrite_section'])
 
     def test_a_rebuttal_the_judge_upholds_closes_the_finding_and_a_rejected_one_goes_to_the_author(self):
-        reader = json.dumps({'summary': 'A bound.', 'items': [
-            {'rule': 'N7', 'severity': 'major', 'line': 0, 'last_line': 0, 'quote': 'We have $x^2\\ge 0$.',
+        style = json.dumps({'items': [
+            {'rule': 'N2', 'verdict': 'fail', 'severity': 'major', 'line': 0, 'last_line': 0, 'quote': 'We have $x^2\\ge 0$.',
              'problem': 'The lemma is not motivated.', 'instruction': 'Say what it is for.', 'fixable': 'rewrite'},
-            {'rule': 'N9', 'severity': 'major', 'line': 0, 'last_line': 0, 'quote': 'It follows from Lemma~\\ref{lem:one}.',
-             'problem': 'Vague.', 'instruction': 'Say what follows.', 'fixable': 'rewrite'}]})
+            {'rule': 'N4', 'verdict': 'fail', 'severity': 'major', 'line': 0, 'last_line': 0,
+             'quote': 'It follows from Lemma~\\ref{lem:one}.', 'problem': 'Vague.', 'instruction': 'Say what follows.',
+             'fixable': 'rewrite'},
+            {'rule': 'N1', 'verdict': 'fail', 'severity': 'minor', 'line': 0, 'last_line': 0, 'quote': 'Let $x\\in\\R$',
+             'problem': 'Wordy.', 'instruction': 'Shorten.', 'fixable': 'rewrite'}]})
         answers = ('@@ issue 1 rebut\nThe sentence after the theorem says what the lemma is for.\n'
-                   '@@ issue 2 rebut\nThe sentence is clear.\n')
+                   '@@ issue 2 rebut\nThe sentence is clear.\n')  # nothing on the third: it is asked again, alone
         ruling = json.dumps({'items': [{'n': 1, 'verdict': 'accept', 'reason': 'The link exists.'},
                                        {'n': 2, 'verdict': 'reject', 'reason': 'It does not say what follows.'}]})
         (self.root / 'notes.md').write_text('Rough notes.')
-        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, answers, ruling)]
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, json.dumps({'summary': '', 'items': []}), style,
+                                                      answers, ruling, 'Nothing to change.')]
         started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 2,
                                                    'source_files': ['notes.md']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
         folder = self.root / '.mathagent' / 'research' / started['id']
         state = json.loads((folder / 'state.json').read_text())
         ledger = {item['rule']: item for item in state['ledger']}
-        self.assertEqual(ledger['N7']['status'], 'refuted')  # the judge agreed with the writer
-        self.assertEqual(ledger['N9']['status'], 'disputed')  # neither overrules the other: it goes to the author
+        self.assertEqual(ledger['N2']['status'], 'refuted')  # the judge agreed with the writer
+        self.assertEqual(ledger['N4']['status'], 'disputed')  # neither overrules the other: it goes to the author
+        self.assertEqual(ledger['N1']['reasons'][0], 'unanswered')  # asked twice, answered by nothing
+        asked = [r['messages'][1]['content'] for r in self.fake.requests if 'got no answer the first time' in r['messages'][1]['content']]
+        self.assertEqual(len(asked), 1)
+        self.assertIn('[N1]', asked[0])
+        self.assertNotIn('[N4]', asked[0])
         self.assertEqual(state['readiness'], 'draft')
-        self.assertEqual([i['rule'] for i in state['reviews'][-1]['issues']], ['N9'])
-        self.assertIn('The sentence is clear.', (folder / 'report.md').read_text())
+        self.assertEqual(sorted(i['rule'] for i in state['reviews'][-1]['issues']), ['N1', 'N4'])
+        report = (folder / 'report.md').read_text()
+        self.assertIn('The sentence is clear.', report)
+        self.assertIn('### For you to settle (1)', report)
+        self.assertIn('| N2 | style | style reviewer | followed', report)  # set aside: nothing stands
+        self.assertIn('| N4 | style | style reviewer | 1 open (author) |', report)
         self.assertIn('x^2+1>0', state['document'])  # no edit: the text is unchanged
+
+    def test_a_finding_about_the_flow_is_fixed_by_a_rewrite_with_the_mathematics_frozen(self):
+        reader = json.dumps({'summary': 'A bound.', 'items': [
+            {'rule': 'N7', 'severity': 'major', 'line': 6, 'last_line': 6, 'quote': 'begin theorem (thm two)',
+             'problem': 'The theorem follows the lemma with no link.', 'instruction': 'Say what the lemma is for.',
+             'fixable': 'rewrite'}]})
+        rewrite = ('[[H1]]\nLet [[M1]] and [[M2]].\n[[S1]]\nThe lemma gives the positivity used below.\n[[S2]]\n'
+                   'It follows from Lemma~\\ref{lem:one}.\n')
+        ruling = json.dumps({'section': {'verdict': 'better', 'reason': 'Linked.'},
+                             'items': [{'n': 1, 'verdict': 'partial', 'reason': 'Better.', 'remains': 'Say which bound is used.'}]})
+        (self.root / 'notes.md').write_text('Rough notes.')
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, PASS, rewrite, ruling)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 2,
+                                                   'source_files': ['notes.md']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        folder = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((folder / 'state.json').read_text())
+        asked = next(r['messages'][1]['content'] for r in self.fake.requests if 'SECTION TO REWRITE' in r['messages'][1]['content'])
+        self.assertIn('[[S2]] statement: \\begin{theorem}\\label{thm:two} We have', asked)  # the legend
+        self.assertNotIn('x^2+1>0.\n', asked.split('SECTION TO REWRITE')[1])  # the mathematics is frozen
+        self.assertIn('The lemma gives the positivity used below.', state['body'])
+        self.assertIn('\\begin{theorem}\\label{thm:two}\nWe have\n\\[\nx^2+1>0.\n\\]\n\\end{theorem}', state['body'])
+        item = state['ledger'][0]
+        # Partly fixed: the text was kept, the finding stays open with what remains; the second rewrite (no answer) is refused.
+        self.assertEqual((item['status'], item['attempts'], item['problem']), ('open', 2, 'Say which bound is used.'))
+        self.assertEqual(state['rewrites'], {'proposed': 2, 'guard': 1, 'judge': 0, 'applied': 1})
+        report = (folder / 'report.md').read_text()
+        self.assertIn('### Not fixed after two attempts (1)', report)
+        self.assertIn('| N7 | reader | reader | 1 open (reviser) |', report)
 
     def test_the_skeleton_fixes_the_labels_every_call_reads(self):
         plan = json.loads(PLAN)
@@ -213,6 +260,26 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertIn('[htbp]', writeup.float_placements(figure))
         self.assertIn('[width=3cm,height=0.8\\textheight,keepaspectratio]', writeup.fit_figure(figure, 3))
         self.assertEqual(writeup.label_targets(body)['sec:bounds'][0], 'section')
+
+    def test_frozen_text_keeps_the_mathematics_of_a_rewrite(self):
+        text = ('\\section{Stability}\\label{sec:stab}\nLet $x>0$ and $y$. Then\n\\[\na=b\n\\]\n'
+                '\\begin{lemma}\\label{lem:a} For $x>0$, it holds. \\end{lemma}\n% TODO: check\nBy Lemma~\\ref{lem:a} and $x>0$ we conclude.\n')
+        frozen, legend = writeup.freeze(text)
+        self.assertEqual(frozen, '[[H1]]\nLet [[M1]] and [[M2]]. Then\n[[D1]]\n[[S1]]\n[[C1]]\nBy Lemma~\\ref{lem:a} and [[M1]] we conclude.\n')
+        self.assertEqual(writeup.thaw(frozen, legend), text)
+        guard = lambda after, rules=(): writeup.frozen_guard(frozen, after, legend, rules, {'lem:a', 'sec:stab'})
+        better = frozen.replace('Then', 'Hence, by the definition,')
+        self.assertEqual(guard(better), '')
+        self.assertIn('moved, lost or repeated', guard(better.replace('[[D1]]\n[[S1]]', '[[S1]]\n[[D1]]')))
+        self.assertIn('outside the frozen', guard(better + ' Since $z>0$.'))
+        self.assertIn('inline formula', guard(better.replace(' and [[M2]]', '')))
+        self.assertEqual(guard(better.replace(' and [[M2]]', ''), ['P21']), '')  # a sentence deleted on purpose
+        self.assertIn('does not exist', guard(better + ' See Theorem~\\ref{thm:x}.'))
+        self.assertIn('does not exist', guard(better + ' [[D7]]'))
+        self.assertIn('TODO', guard(better + '% TODO: more\n'))
+        numbered, _ = writeup.numbered_frozen(text)
+        self.assertIn('6| [[S1]]', numbered)  # the line numbers stay those of the text
+        self.assertIn('8| By Lemma', numbered)
 
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},

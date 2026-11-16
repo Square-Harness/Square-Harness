@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Write-up: findings about how the text reads (the reader's, the skeleton's
+  links, the introduction's) and findings a first edit did not fix are now
+  answered by a rewrite of their section with its mathematics frozen: every
+  display, statement and formula is a token the rewrite must keep, so it can
+  reorder and rephrase but not change the mathematics; a judge compares the
+  section before and after and keeps the old one if the new one is worse. The
+  judge can also rule an edit "partial": it is kept and the finding stays open
+  with what remains. A finding the writer answers with nothing is asked again,
+  alone; still nothing is recorded as unanswered.
+- Write-up: rules that code checks exactly (formula and result references,
+  margins, the title, the introduction's plan, links, lists and statements,
+  the abstract) are no longer put to the reviewers; the style reviewer gets
+  the lines the code flags for P6 and P9. The reader sees the whole document
+  with its displays and statements as one-line tokens, so a paper of some
+  pages fits in one call. The report has a table of every rule (followed, open
+  and for whom, not applicable, or not checked and why) and groups the
+  findings by what became of them.
+
 - Write-up: a whole paper is written section by section. Each call writes a
   group of consecutive body sections with the skeleton, the text already
   written (in full, or the statements and the first and last paragraph of each

@@ -808,9 +808,17 @@ How it works:
    sentences. Every finding is kept with what became of it (fixed, set aside,
    for you, its passage gone) and is not raised again. The writer answers each
    one with an edit or a rebuttal, and a separate judge rules on both: an edit
-   is kept only if the passage is better, an upheld rebuttal closes the
-   finding, and a rejected one is put to you in the report. The best version is
-   kept.
+   is kept only if the passage is better (partly better: kept, and the finding
+   stays open with what remains), an upheld rebuttal closes the finding, and a
+   rejected one is put to you in the report. A finding left without an answer
+   is asked again, alone. Findings about how the text reads, and those a first
+   edit did not fix, are answered by a rewrite of their section in which every
+   display, statement and formula is frozen as a token: the rewrite can reorder
+   and rephrase, never change the mathematics, and the judge keeps the old
+   section when the new one is worse. Rules that code checks exactly are not
+   asked of the reviewers. The report has a table of every rule of the
+   guidelines (followed, open and for whom, not applicable, or not checked and
+   why) and groups the findings by outcome. The best version is kept.
 7. The result is **Ready** only when it compiles, every reference and citation
    resolves, no label is defined twice, the checker found no blocking or
    mathematical problem, nothing is left to settle (no `% TODO`, no missing
