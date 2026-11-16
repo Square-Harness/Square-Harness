@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Write-up: a generated passage no longer hides its sentences from the reader
+  and the rewrite: its `% BEGIN COMPOSED` and `% END COMPOSED` lines are frozen
+  apart, and what stands between them is frozen like any text. The writer puts
+  the markers around new mathematics only, not around a whole section.
+
 - Write-up: a revision that breaks the compile is undone, section by section,
   instead of being repaired by the model; its findings are open again, with the
   error as the reason, and the next round of the review runs. A rewrite that

@@ -823,7 +823,8 @@ How it works:
    rejected one is put to you in the report. A finding left without an answer
    is asked again, alone. Findings about how the text reads, and those a first
    edit did not fix, are answered by a rewrite of their section in which every
-   display, statement and formula is frozen as a token: the rewrite can reorder
+   display, statement and formula is frozen as a token (a generated passage's
+   sentences stay visible; only its markers are frozen): the rewrite can reorder
    and rephrase, never change the mathematics, and the judge keeps the old
    section when the new one is worse. A revision that does not compile is
    undone, its findings reopened, and the review goes on; the model repairs only

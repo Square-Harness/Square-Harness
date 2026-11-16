@@ -340,6 +340,16 @@ class WriteupPlanTests(unittest.TestCase):
                                           'Text.\n\\begin{theorem}\\label{thm:b} The scheme converges for every step. \\end{theorem}'])
         self.assertEqual(pairs, [(0, '[[S1]]', 1, '[[S1]]')])
 
+    def test_a_generated_passage_is_frozen_like_any_text_between_its_markers(self):
+        text = ('\\section{Discussion}\n% BEGIN COMPOSED\nThe theorem needs $\\theta\\ge 1/2$.\n\n'
+                'Its constant is explicit:\n\\[ C=C_1. \\]\n% TODO: check the constant\n% END COMPOSED\n')
+        frozen, legend = writeup.freeze(text)
+        self.assertEqual(frozen, '[[H1]]\n[[C1]]\nThe theorem needs [[M1]].\n\nIts constant is explicit:\n[[D1]]\n[[C2]]\n[[C3]]\n')
+        self.assertEqual(writeup.thaw(frozen, legend), text)
+        guard = lambda after: writeup.frozen_guard(frozen, after, legend)
+        self.assertEqual(guard(frozen.replace('needs', 'requires')), '')  # its sentences can be rewritten
+        self.assertIn('moved', guard(frozen.replace('[[C1]]\n', '').replace('[[C3]]', '[[C3]]\n[[C1]]')))  # the markers stay paired
+
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},
                                 {'heading': 'Stability', 'role': 'body', 'covers': ['S1']},

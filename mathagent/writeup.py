@@ -1425,8 +1425,10 @@ def skeleton_findings(body, skeleton, introduction=()):
 # -- frozen text: a passage whose mathematics is replaced by tokens, so that a rewrite cannot change it --------
 
 _FROZEN_BLOCKS = (
-    ('C', re.compile(r'(?<!\\)%[ \t]*BEGIN COMPOSED.*?(?<!\\)%[ \t]*END COMPOSED[^\n]*', re.S)),
-    ('C', re.compile(r'(?m)^[ \t]*(?<!\\)%[ \t]*(?:PART:|TODO\b)[^\n]*(?:\n[ \t]*%[^\n]*)*')),
+    # The markers of a generated passage are one token each: what stands between them is frozen like any text, so
+    # that its sentences stay visible and the markers stay paired (the guard keeps the C tokens in order).
+    ('C', re.compile(r'(?m)^[ \t]*(?<!\\)%[ \t]*(?:BEGIN|END) COMPOSED\b[^\n]*')),
+    ('C', re.compile(r'(?m)^[ \t]*(?<!\\)%[ \t]*(?:PART:|TODO\b)[^\n]*(?:\n[ \t]*%(?![ \t]*(?:BEGIN|END) COMPOSED)[^\n]*)*')),
     ('T', re.compile(r'\\begin\{(figure|table|lstlisting|verbatim|Verbatim|minted|tikzpicture|tikzcd)(\*?)\}.*?\\end\{\1\2\}', re.S)),
     ('T', re.compile(r'\\lstinputlisting\s*(?:\[[^\]]*\]\s*)?\{[^{}]*\}')),
     ('S', None),  # theorem-like environments: built from the names in use
@@ -1476,7 +1478,7 @@ def _freeze(text, theorems=(), inline=True):
 def freeze(text, theorems=(), inline=True):
     """(frozen, legend): the text with its mathematics replaced by tokens, which the legend maps back ({token: {kind,
     text}}). Each display (with its labels) becomes [[D1]], each theorem-like environment [[S1]], each figure, table,
-    listing or picture [[T1]], each generated passage (% BEGIN/END COMPOSED) and marker comment (% PART, % TODO) [[C1]],
+    listing or picture [[T1]], each marker comment (% BEGIN COMPOSED, % END COMPOSED, % PART, % TODO) [[C1]],
     each \\section line with its label [[H1]]; with `inline`, each $...$ or \\(...\\) [[M1]], one token for one formula
     written the same way twice. \\ref, \\eqref and \\cite stay as they are. Another bracket pair is used when [[ occurs."""
     return _freeze(text, theorems, inline)[:2]
