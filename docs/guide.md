@@ -825,7 +825,9 @@ How it works:
    edit did not fix, are answered by a rewrite of their section in which every
    display, statement and formula is frozen as a token: the rewrite can reorder
    and rephrase, never change the mathematics, and the judge keeps the old
-   section when the new one is worse. Rules that code checks exactly are not
+   section when the new one is worse. A revision that does not compile is
+   undone, its findings reopened, and the review goes on; the model repairs only
+   a first draft. Rules that code checks exactly are not
    asked of the reviewers. The report has a table of every rule of the
    guidelines (followed, open and for whom, not applicable, or not checked and
    why) and groups the findings by outcome. The best version is kept.

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Write-up: a revision that breaks the compile is undone, section by section,
+  instead of being repaired by the model; its findings are open again, with the
+  error as the reason, and the next round of the review runs. A rewrite that
+  opens or closes an environment (a proof) is refused, and so is a repair that
+  puts two labels on one equation. When an earlier version is delivered, the
+  report's findings are those of that version, and it says why the later one
+  was dropped.
+
 - Write-up: asked to merge finished LaTeX texts, the write-up assembles them
   instead of rewriting them. The skeleton says which text each section comes
   from; the texts are spliced by code (a label used twice is renamed in the

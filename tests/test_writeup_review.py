@@ -150,6 +150,44 @@ class WriteupReviewTests(GuiCase):
         self.assertIn('### Not fixed after two attempts (1)', report)
         self.assertIn('| N7 | reader | reader | 1 open (reviser) |', report)
 
+    def test_a_revision_that_does_not_compile_is_undone_and_the_next_round_runs(self):
+        reader = json.dumps({'summary': 'A bound.', 'items': [
+            {'rule': 'N7', 'severity': 'major', 'line': 6, 'last_line': 6, 'quote': 'begin theorem (thm two)',
+             'problem': 'The theorem follows the lemma with no link.', 'instruction': 'Say what the lemma is for.',
+             'fixable': 'rewrite'}]})
+        broken = ('[[H1]]\nLet [[M1]] and [[M2]].\n[[S1]]\nThe lemma \\pfoo is used below.\n[[S2]]\n'
+                  'It follows from Lemma~\\ref{lem:one}.\n')
+        ruling = json.dumps({'section': {'verdict': 'better', 'reason': 'Linked.'},
+                             'items': [{'n': 1, 'verdict': 'accept', 'reason': 'Fixed.', 'remains': ''}]})
+        (self.root / 'notes.md').write_text('Rough notes.')
+        self.fake.replies = [text(reply) for reply in (PLAN, DRAFT, NOTHING, reader, broken, ruling, PASS)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'rounds': 3,
+                                                   'source_files': ['notes.md']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        folder = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((folder / 'state.json').read_text())
+        roles = [c['role'] for c in state['calls']]
+        self.assertNotIn('repair', roles)  # a revision is undone, not repaired by the model
+        self.assertIn('style_check', roles[roles.index('judge_section'):])  # the next round's focus ran
+        self.assertTrue(state['compile']['ok'])
+        self.assertNotIn("pfoo", state["document"])
+        item = state['ledger'][0]
+        self.assertEqual(item['status'], 'open')
+        self.assertTrue(item['reasons'][0].startswith('its rewrite did not compile'))
+        report = (folder / 'report.md').read_text()
+        self.assertIn('did not compile', report)
+        self.assertNotIn('### Fixed', report)  # nothing the delivered text does not have
+
+    def test_a_rewrite_that_loses_an_environment_or_doubles_a_label_is_refused(self):
+        frozen = '[[H1]]\nIntro.\n\\begin{proof}\nBy [[M1]].\n\\end{proof}\n'
+        legend = {'[[H1]]': {'kind': 'H', 'text': '\\section{A}'}, '[[M1]]': {'kind': 'M', 'text': '$x$'}}
+        self.assertEqual(writeup.frozen_guard(frozen, frozen.replace('Intro.', 'Intro, then.'), legend), '')
+        self.assertIn('environment', writeup.frozen_guard(frozen, frozen.replace('\\end{proof}\n', ''), legend))
+        self.assertEqual(writeup.doubled_labels('\\begin{equation}\\label{a} x \\end{equation}'), 0)
+        self.assertEqual(writeup.doubled_labels('\\begin{equation}\\label{a}\\label{b} x \\end{equation}'), 1)
+        self.assertEqual(writeup.doubled_labels('\\begin{align}x\\label{a}\\\\ y\\label{b}\\end{align}'), 0)
+        self.assertEqual(writeup.doubled_labels('\\begin{lemma}\\label{l} \\begin{equation}\\label{e} x\\end{equation}\\end{lemma}'), 0)
+
     def test_the_skeleton_fixes_the_labels_every_call_reads(self):
         plan = json.loads(PLAN)
         plan.update(kind='article', size='section', sections=[

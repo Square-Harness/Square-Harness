@@ -1510,12 +1510,51 @@ def numbered_frozen(body, theorems=()):
     return '\n'.join(out), legend
 
 
+_ENVIRONMENT_EDGE = re.compile(r'\\(begin|end)\s*\{([^{}]+)\}')
+
+
+def doubled_labels(text, theorems=()):
+    """How many displays, rows of a multi-line display, or statements carry two \\label's (LaTeX stops on it)."""
+    text = _uncommented(text)
+    count = 0
+    single = re.compile(r'\\begin\{(equation|multline|displaymath)(\*?)\}(.*?)\\end\{\1\2\}', re.S)
+    count += sum(len(_LABEL.findall(m.group(3))) > 1 for m in single.finditer(text))
+    multi = re.compile(r'\\begin\{(align|gather|flalign|alignat)(\*?)\}(.*?)\\end\{\1\2\}', re.S)
+    count += sum(len(_LABEL.findall(row)) > 1 for m in multi.finditer(text) for row in _rows(m.group(3)))
+    names = '|'.join(map(re.escape, sorted(set(theorems) | _THEOREM_LIKE, key=len, reverse=True)))
+    for m in re.finditer(r'\\begin\{(' + names + r')(\*?)\}(.*?)\\end\{\1\2\}', text, re.S):
+        outside = _MATH_ENVIRONMENT.sub(' ', m.group(3))
+        count += len(_LABEL.findall(outside)) > 1
+    return count
+
+
+def environments(text):
+    """{name: (begins, ends)} of the environments a text opens and closes, outside comments."""
+    out = {}
+    for m in _ENVIRONMENT_EDGE.finditer(_uncommented(text)):
+        begins, ends = out.get(m.group(2), (0, 0))
+        out[m.group(2)] = (begins + 1, ends) if m.group(1) == 'begin' else (begins, ends + 1)
+    return out
+
+
+def balanced(text):
+    """Whether every environment a text opens is closed in it, in order (an \\end without its \\begin fails too)."""
+    stack = []
+    for m in _ENVIRONMENT_EDGE.finditer(_uncommented(text)):
+        if m.group(1) == 'begin':
+            stack.append(m.group(2))
+        elif not stack or stack.pop() != m.group(2):
+            return False
+    return not stack
+
+
 def frozen_guard(before, after, legend, rules=(), labels=(), keys=()):
     """Why a rewrite of frozen text is refused, or '': its displays, statements, floats, generated passages and headings
     (D, S, T, C, H tokens) all there, once, in order; no inline formula lost, unless the findings are P9, P10 or P21
     (which delete sentences); no token invented; no mathematics outside the tokens; no \\label added or lost; no
     reference to a label outside `labels`; no citation outside `keys` that was not there; no new % TODO; no talk about
-    the source; no new \\section; a length within 0.6 to 1.6 of the original."""
+    the source; no new \\section; the environments of the prose (a proof) opened and closed as before, and balanced;
+    a length within 0.6 to 1.6 of the original."""
     token = re.compile('|'.join(map(re.escape, sorted(legend, key=len, reverse=True)))) if legend else None
     found = lambda text: [m.group(0) for m in token.finditer(text)] if token else []
     blocks = lambda tokens: [t for t in tokens if legend[t]['kind'] != 'M']
@@ -1531,6 +1570,8 @@ def frozen_guard(before, after, legend, rules=(), labels=(), keys=()):
     if re.search(r'(?<!\\)\$|\\\(|\\\[|\\begin\{(?:equation|align|gather|multline|displaymath|math)\b', outside):
         return 'mathematics outside the frozen formulas'
     prose = lambda text: token.sub(' ', text) if token else text
+    if environments(prose(after)) != environments(prose(before)) or balanced(prose(before)) and not balanced(prose(after)):
+        return 'an environment was opened or closed'
     if len(_LABEL.findall(prose(before))) != len(_LABEL.findall(prose(after))):
         return 'a label was added or lost'
     if set(reference_keys(_uncommented(prose(after)))) - set(labels) - set(reference_keys(_uncommented(prose(before)))):
@@ -2576,7 +2617,7 @@ class WriteupRunner(ResearchRunner):
     # -- workflow -------------------------------------------------------------------------
 
     def _step(self, phase):
-        if phase in _LEGACY_PHASES or (phase in ('skeleton', 'splice', 'draft', 'frame', 'stitch', 'assemble', 'compile', 'repair', 'tidy', 'check', 'revise',
+        if phase in _LEGACY_PHASES or (phase in ('skeleton', 'splice', 'draft', 'frame', 'stitch', 'undo', 'assemble', 'compile', 'repair', 'tidy', 'check', 'revise',
                                                   'select', 'export')
                                         and 'parts' not in self.state):
             # A job saved by the earlier pipeline is written again from its sources.
@@ -2605,6 +2646,8 @@ class WriteupRunner(ResearchRunner):
             self._compile()
         elif phase == 'repair':
             self._repair()
+        elif phase == 'undo':
+            self._undo()
         elif phase == 'tidy':
             self._tidy()
         elif phase == 'check':
@@ -4352,8 +4395,16 @@ class WriteupRunner(ResearchRunner):
         # only `repaired`.
         done = self.state.get('repair_done', self.state['repaired'] and 'repair_rounds' not in self.state)
         self.state['math_accents'] = list(dict.fromkeys(_MATH_ACCENT.findall(result['log'] or '')))
-        self.state['phase'] = ('repair' if result['available'] and not result['ok'] and not done else
-                               'tidy' if result['ok'] else 'check')
+        undo = self.state.get('revision_undo')
+        if result['ok']:
+            self.state.pop('revision_undo', None)  # the revised text compiles: nothing to undo
+        if result['available'] and not result['ok'] and undo is not None:
+            # A revision broke the compile: its changed sections are undone, one at a time; the model repairs a first
+            # draft only.
+            self.state['phase'] = 'undo' if undo.get('sections') else 'check'
+        else:
+            self.state['phase'] = ('repair' if result['available'] and not result['ok'] and not done else
+                                   'tidy' if result['ok'] else 'check')
 
     # -- tidy: the warnings of a compiled document, fixed by code where a fix exists ----------------------
 
@@ -5262,7 +5313,7 @@ class WriteupRunner(ResearchRunner):
                   'abstract': self.state.get('abstract', ''),
                   'body': self.state['body'], 'model_definitions': self.state.get('model_definitions', ''),
                   'compile_ok': bool((self.state.get('compile') or {}).get('ok')), 'score': [blockers, majors, minors],
-                  'hard': hard, 'readiness': self.state['readiness']}
+                  'hard': hard, 'readiness': self.state['readiness'], 'ledger': copy.deepcopy(self._ledger())}
         candidates = self.state.setdefault('candidates', [])
         existing = next((i for i, c in enumerate(candidates) if c['id'] == digest), None)
         if existing is None:
@@ -5343,9 +5394,14 @@ class WriteupRunner(ResearchRunner):
         ledger = {item['id']: item for item in self._ledger()}
         tried = self.state.setdefault('source_tried', [])
         current = self.state.get('review_round', 0) + 1
+        undo = {'sections': {}, 'order': []}
         for key, result in progress['results'].items():
             outcomes = result.get('outcomes') or {}
             if result['status'] == 'accepted' and int(key) < len(sections):
+                # What the section was, and its findings before the round: undone if the new text does not compile.
+                undo['sections'][key] = {'before': sections[int(key)], 'items': {
+                    i['id']: copy.deepcopy(ledger[i['id']]) for i in progress['issues'][key] if i['id'] in ledger}}
+                undo['order'].append(key)
                 sections[int(key)] = result['text']
                 accepted += 1
             for issue in progress['issues'][key]:
@@ -5382,7 +5438,38 @@ class WriteupRunner(ResearchRunner):
             return
         revised = normalised_references(''.join(sections))
         self.state['body'] = ascii_punctuation(tidy_numbering(revised, self._material_labels(), self._material_text()))
-        self.state.update(repaired=False, readiness=None)
+        self.state.update(repaired=False, readiness=None, revision_undo=undo)
+        self.state['phase'] = 'assemble'
+
+    def _undo(self):
+        """A revised text that does not compile: the changed section that holds the error is put back as it was before
+        the round, or, when the error has no usable line, the last changed section; then the document is compiled
+        again. The findings of a restored section are open again, with one attempt counted and the error as reason."""
+        undo, errors = self.state['revision_undo'], self.state['compile'].get('errors') or []
+        sections, first = split_sections(self.state['body']), self.state.get('body_line', 1)
+        starts, line = [], 1
+        for text in sections:
+            starts.append(line)
+            line += text.count('\n')
+        lines = [e['line'] - first + 1 for e in errors if e.get('file') == 'document.tex' and (e.get('line') or 0) >= first]
+        held = {str(max(i for i, start in enumerate(starts) if start <= at)) for at in lines}
+        changed = [key for key in undo['order'] if key in undo['sections']]
+        key = next((k for k in reversed(changed) if k in held), changed[-1])
+        error = next((e['message'] for e in errors if 'Fatal error' not in e['message']), 'it does not compile')[:200]
+        entry = undo['sections'].pop(key)
+        if int(key) < len(sections):
+            sections[int(key)] = entry['before']
+        ledger = {item['id']: item for item in self._ledger()}
+        for ident, before in entry['items'].items():
+            item = ledger.get(ident)
+            if item is None:
+                continue
+            item.clear()
+            item.update(before, attempts=before.get('attempts', 0) + 1, reasons=(before.get('reasons') or []) + [
+                'its rewrite did not compile: ' + error], revision='its rewrite did not compile: ' + error)
+        self.state.setdefault('undone', []).append({'section': int(key), 'error': error})
+        self.state['warnings'].append(f'A revision of section {int(key)} did not compile ({error}); it was undone.')
+        self.state['body'] = ''.join(sections)
         self.state['phase'] = 'assemble'
 
     def _assembled_only(self):
@@ -5707,6 +5794,14 @@ class WriteupRunner(ResearchRunner):
                                                           candidates[i].get('hard', candidates[i]['score'][0]), -i))
         chosen = candidates[best]
         self.state['selected'] = chosen['id']
+        if best != len(candidates) - 1:
+            # The findings as they stood with the version delivered: what a later version fixed is not fixed here.
+            if chosen.get('ledger') is not None:
+                self.state['ledger'] = copy.deepcopy(chosen['ledger'])
+            later = candidates[-1]
+            self.state['dropped_version'] = (f'A later version (round {later["round"] + 1}) was dropped: '
+                                             + ('it did not compile.' if not later['compile_ok'] else
+                                                'the source checker found more in it.'))
         if chosen['id'] == _digest(self.state['body']):
             self.state['phase'] = 'export'
             return
@@ -5913,6 +6008,8 @@ class WriteupRunner(ResearchRunner):
             return 'the displays changed'
         if len(after) < 0.6 * len(before):
             return 'the text got much shorter'
+        if doubled_labels(after, names) > doubled_labels(before, names):
+            return 'two labels on one display or statement'
         return ''
 
     def _repair_passages(self, last=True):
@@ -6344,6 +6441,10 @@ class WriteupRunner(ResearchRunner):
                 old, new = first.split('\n'), (s.get('body') or '').split('\n')
                 changed = sum(max(b - a, d - c) for tag, a, b, c, d in SequenceMatcher(None, old, new).get_opcodes() if tag != 'equal')
                 out.append(f'- Lines changed since the first version: {changed} of {len(old)}.')
+            if s.get('dropped_version'):
+                out.append('- ' + s['dropped_version'])
+            for undone in s.get('undone') or []:
+                out.append(f'- The revision of section {undone["section"]} did not compile ({undone["error"]}); it was undone.')
             out += [''] + self._findings_by_outcome()
         if s.get('guidelines') and s.get('readiness'):
             out += ['', '## Rules', '', 'Each rule of the guidelines, with what its checker found on the final text.', '',
