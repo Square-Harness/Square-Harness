@@ -227,7 +227,8 @@ Section~\ref{sec:stab} gives the bound."""
         self.assertIn('\\section{Convergence}\\label{sec:convergence}', body)
         rules = {f['rule'] for f in state['checks']}
         self.assertIn('skeleton-link', rules)  # the proof of the theorem does not cite the lemma it uses
-        self.assertIn('G6', [g['gate'] for g in state['gates']])
+        self.assertNotIn('G6', [g['gate'] for g in state['gates']])  # a guessed dependency holds nothing
+        self.assertIn('links the skeleton expects', (job / 'report.md').read_text())
         self.assertIn('## Skeleton', (job / 'report.md').read_text())
         self.assertTrue(any((job / 'artifacts').glob('*skeleton*')))
 
@@ -350,6 +351,40 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertEqual(guard(frozen.replace('needs', 'requires')), '')  # its sentences can be rewritten
         self.assertIn('moved', guard(frozen.replace('[[C1]]\n', '').replace('[[C3]]', '[[C3]]\n[[C1]]')))  # the markers stay paired
 
+    def test_in_a_merge_the_skeleton_is_read_from_the_texts_and_only_annotated(self):
+        proof = ('\\section{Setting}\\label{sec:setting}\n\\begin{definition}\\label{def:grid} A grid. \\end{definition}\n'
+                 '\\begin{definition}\\label{def:unused} Another. \\end{definition}\n'
+                 '\\begin{equation}\\label{eq:scheme} U=V \\end{equation}\n\\begin{theorem}\\label{thm:main} On \\ref{def:grid}. \\end{theorem}\n'
+                 '\\begin{remark}\\label{rem:sign} A sign. \\end{remark}\n'
+                 '\\section{Stability}\\label{sec:stability}\n\\begin{lemma}\\label{lem:stab} Stable. \\end{lemma}\n')
+        numerics = ('\\section{Experiments}\\label{sec:experiments}\nWe run \\eqref{eq:scheme}.\n'
+                    '\\begin{table}\\caption{Rates}\\label{tab:rates}\\end{table}\n')
+        skeleton = writeup.skeleton_from_texts([
+            {'file': 'proof.tex', 'role': 'body', 'body': proof, 'headings': ['Setting', 'Stability']},
+            {'file': 'numerics.tex', 'role': 'body', 'body': numerics, 'headings': ['Experiments']},
+            {'file': '', 'role': 'body', 'body': '', 'headings': ['Discussion']}])
+        self.assertEqual([s['label'] for s in skeleton['sections']], ['sec:setting', 'sec:stability', 'sec:experiments', 'sec:discussion'])
+        self.assertEqual([(i['label'], i['section']) for i in skeleton['items']],
+                         [('def:grid', 'sec:setting'), ('thm:main', 'sec:setting'), ('lem:stab', 'sec:stability')])  # no remark, no uncited definition
+        self.assertEqual([e['label'] for e in skeleton['equations']], ['eq:scheme'])  # cited outside its section
+        self.assertEqual([f['label'] for f in skeleton['floats']], ['tab:rates'])
+        answer = {'sections': [{'heading': 'Stability', 'label': 'sec:stab-new', 'opens': 'the scheme', 'closes': ''}],
+                  'items': [{'id': 'S1', 'environment': 'theorem', 'label': 'thm:main', 'name': 'convergence', 'section': 'sec:discussion',
+                             'role': 'main', 'uses': ['S2', 'lem:invented']},
+                            {'id': 'S2', 'environment': 'lemma', 'label': 'lem:stab', 'name': 'stability', 'section': 'sec:stability',
+                             'role': 'auxiliary', 'uses': []},
+                            {'id': 'S9', 'environment': 'lemma', 'label': 'lem:invented', 'name': 'x', 'section': 'sec:setting',
+                             'role': 'auxiliary', 'uses': []}],
+                  'aliases': [{'from': 'thm:convergence', 'to': 'thm:main'}]}
+        annotated = writeup.annotate_skeleton(skeleton, answer, ['thm:convergence'])
+        items = {i['label']: i for i in annotated['items']}
+        self.assertNotIn('lem:invented', items)  # the model adds no item
+        self.assertEqual((items['thm:main']['section'], items['thm:main']['role']), ('sec:setting', 'main'))  # and moves none
+        self.assertEqual(items['thm:main']['uses'], ['lem:stab'])  # its id S2 read as the label it gave
+        self.assertEqual(annotated['sections'][1]['opens'], 'the scheme')  # matched by heading; its label stays
+        self.assertEqual(annotated['sections'][1]['label'], 'sec:stability')
+        self.assertEqual(annotated['aliases'], [{'from': 'thm:convergence', 'to': 'thm:main'}])
+
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},
                                 {'heading': 'Stability', 'role': 'body', 'covers': ['S1']},
@@ -397,7 +432,9 @@ class WriteupPlanTests(unittest.TestCase):
         fixed = body.replace('Sum the errors.', 'By Lemma~\\ref{lem:stab}, sum the errors \\eqref{eq:scheme}.')
         fixed = fixed.replace('By Theorem~\\ref{thm:main} the', 'The')
         self.assertEqual(writeup.skeleton_findings(fixed, skeleton, ['sec:intro']), [])
-        missing = writeup.skeleton_findings(body.replace('\\label{lem:stab}', ''), skeleton)
+        # A missing label counts when something refers to it, or for the main result; not for a lemma nobody cites.
+        self.assertNotIn('skeleton-label', [f[0] for f in writeup.skeleton_findings(body.replace('\\label{lem:stab}', ''), skeleton)])
+        missing = writeup.skeleton_findings(body.replace('\\label{thm:main}', ''), skeleton)
         # The frame: the introduction cites the main result and, from three body sections on, every section.
         skeleton['sections'].append({'heading': 'Numerics', 'label': 'sec:num', 'role': 'body'})
         self.assertEqual(len(writeup.frame_findings('We prove Theorem~\\ref{thm:main}. Experiments follow.', skeleton)), 2)

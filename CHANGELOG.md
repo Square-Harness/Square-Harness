@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Write-up: the skeleton lists results only (theorems, lemmas, propositions,
+  corollaries, and definitions the text cites), never remarks or examples, and
+  the abstract is not one of its sections. When texts are merged, it is read
+  from them by code (their sections, labelled results, cited formulas, tables
+  and figures) and the model only annotates it; it can neither add a result nor
+  move one. A missing label is reported only when something refers to it, or
+  for the main result, and the links the skeleton expects no longer hold the
+  document as a draft: they go to the reviser, then to you.
+
 - Write-up: a generated passage no longer hides its sentences from the reader
   and the rewrite: its `% BEGIN COMPOSED` and `% END COMPOSED` lines are frozen
   apart, and what stands between them is frozen like any text. The writer puts

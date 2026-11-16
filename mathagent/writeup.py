@@ -1117,7 +1117,7 @@ def required_parts():
 
 SKELETON_KINDS, SKELETON_SIZES = ('article', 'paper_part', 'notes', 'lecture_notes'), ('section', 'paper')
 UNIT_KINDS = SKELETON_KINDS  # a whole paper of these kinds is written section by section, its frame last
-SKELETON_ENVIRONMENTS = ('theorem', 'lemma', 'proposition', 'corollary', 'definition', 'remark', 'example')
+SKELETON_ENVIRONMENTS = ('theorem', 'lemma', 'proposition', 'corollary', 'definition')  # results, and cited definitions
 SKELETON_ROLES = ('main', 'auxiliary', 'consequence', 'background')
 _LABEL_PREFIX = {'section': 'sec', 'theorem': 'thm', 'lemma': 'lem', 'proposition': 'prop', 'corollary': 'cor',
                  'definition': 'def', 'remark': 'rem', 'example': 'ex', 'equation': 'eq', 'figure': 'fig', 'table': 'tab'}
@@ -1138,11 +1138,14 @@ sections: the sections of the outline, in its order: heading (as in the outline)
 sentence: what the section starts from, which earlier result or question), closes (what it leaves for later sections,
 or an empty string), file (when the document is assembled from the author's LaTeX texts, listed in the task: the name of
 the text this section's text comes from; an empty string when the section is to be written).
-items: one per inventory item that the document states in an environment: id (the inventory id), environment
-(theorem, lemma, proposition, corollary, definition, remark, example), label (thm:..., lem:..., prop:..., cor:...,
-def:..., rem:..., ex:...), name (a few words: "stability of the one-step operator"), section (the label of the section
+items: the results only, one per result the document states in an environment: id (the inventory id), environment
+(theorem, lemma, proposition, corollary; definition only for a definition stated in a Definition environment that
+the text cites by its label; never a remark, an example or a computation), label (thm:..., lem:..., prop:..., cor:...,
+def:...), name (a few words: "stability of the one-step operator"), section (the label of the section
 that states it), role (main: the result the document establishes; auxiliary: a step towards it; consequence; background:
-recalled or standard), uses (the ids of the items its statement or proof relies on, nothing else).
+recalled or standard), uses (the ids of the items its statement or proof relies on: ids of other items, nothing else). A section with the role abstract is not a section of the skeleton.
+When the task gives the skeleton already read from the author's texts, keep its sections, items and labels exactly:
+only fill in what it leaves empty (opens, closes, name, role, uses, the inventory id) and the aliases.
 equations: only the formulas the text cites at a distance (the scheme, the key estimate), not every display: label
 (eq:...), what (a few words), section. floats: the figures and tables: label (fig:..., tab:...), kind, what, file (the
 graphics file, or an empty string), section.
@@ -1212,7 +1215,7 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
     text = lambda value, limit=200: ' '.join(str(value or '').split())[:limit]
     listed = lambda key: [x for x in raw.get(key) or [] if isinstance(x, dict)] if isinstance(raw.get(key), list) else []
     material, taken, renamed = set(material_labels), set(), {}
-    wanted = [s for s in outline.get('sections') or []]
+    wanted = [s for s in outline.get('sections') or [] if s.get('role') != 'abstract']  # front matter, not a section
     proposed = listed('sections')
     by_heading = {' '.join(p.get('heading', '').casefold().split()): p for p in proposed}
     sections = []
@@ -1280,6 +1283,98 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
     return {'sections': sections, 'items': items, 'equations': equations, 'floats': floats, 'aliases': aliases,
             'warning': '' if usable else 'The skeleton call gave no usable answer: section labels were made from the '
                                          'headings, and no result has a label fixed in advance.'}
+
+
+def skeleton_from_texts(pieces, theorems=()):
+    """The skeleton of an assembled document, read from its texts by code. `pieces`: [{file, role, body, headings}]
+    in document order; a piece with a body gives its sections (each \\section with its label; one made from the
+    heading when it has none), its results (labelled theorem, lemma, proposition, corollary, and a labelled
+    definition that the texts cite), the labelled displays cited outside their section, and its labelled figures and
+    tables; a piece without a body is a section to be written (its headings). Item ids are their labels."""
+    taken, sections, read = set(), [], []
+    for piece in pieces:
+        body = piece.get('body') or ''
+        if not body.strip():
+            for heading in piece.get('headings') or []:
+                sections.append({'heading': heading, 'label': skeleton_label('section', '', heading, taken), 'role': piece['role'],
+                                 'opens': '', 'closes': '', 'file': ''})
+            continue
+        text, starts = _uncommented(body), []
+        for m in re.finditer(r'(?m)^[ \t]*\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', text):
+            inner, end = _group(text, m.end())
+            label = re.match(r'\s*\\label\s*\{([^{}]*)\}', text[end:]) if inner is not None else None
+            heading = ' '.join((inner or '').split())
+            name = label.group(1).strip() if label else skeleton_label('section', '', heading, taken)
+            taken.add(name)
+            starts.append((m.start(), name))
+            sections.append({'heading': heading, 'label': name, 'role': piece['role'], 'opens': '', 'closes': '',
+                             'file': piece.get('file') or ''})
+        first = sections[-1]['label'] if not starts and sections else ''
+        where = lambda at, starts=starts, first=first: ([name for start, name in starts if start <= at] or [first])[-1]
+        read.append((body, text, where))
+    references = [(key.strip(), where(m.start())) for _, text, where in read
+                  for m in _REFERENCE_GROUP.finditer(text) for key in m.group(2).split(',')]
+    cited = {key for key, _ in references}
+    items, equations, floats = [], [], []
+    for body, text, where in read:
+        targets = label_targets(body, theorems)
+        for m in _LABEL.finditer(text):
+            label = m.group(1).strip()
+            kind, what = targets.get(label, ('label', ''))
+            section = where(m.start())
+            if kind in ('theorem', 'lemma', 'proposition', 'corollary') or kind == 'definition' and label in cited:
+                items.append({'id': label, 'environment': kind, 'label': label, 'name': what[:60], 'section': section,
+                              'role': 'auxiliary', 'uses': [], 'used_by': []})
+            elif kind == 'equation' and any(key == label and at != section for key, at in references):
+                equations.append({'label': label, 'what': what[:60], 'section': section})
+            elif kind in ('figure', 'table'):
+                floats.append({'label': label, 'kind': kind, 'what': what[:60], 'file': '', 'section': section})
+    return {'sections': sections, 'items': items, 'equations': equations, 'floats': floats, 'aliases': [], 'warning': '',
+            'read_from_texts': True}
+
+
+def annotate_skeleton(skeleton, raw, dangling=()):
+    """A skeleton read from the texts, with what the model says of it, by label: a section's `opens` and `closes`; a
+    result's `name`, `role`, `uses` (only results of the skeleton; the model's own ids are translated through the
+    labels it gave them) and its inventory id; aliases from a dangling reference to a label of the skeleton. The model
+    adds no item and moves none."""
+    raw = raw if isinstance(raw, dict) else {}
+    text = lambda value, limit=300: ' '.join(str(value or '').split())[:limit]
+    listed = lambda key: [x for x in raw.get(key) or [] if isinstance(x, dict)] if isinstance(raw.get(key), list) else []
+    by_label = {s['label']: s for s in skeleton['sections']}
+    by_heading = {' '.join(s['heading'].casefold().split()): s for s in skeleton['sections']}
+    for answer in listed('sections'):
+        section = by_label.get(text(answer.get('label'), 80)) or by_heading.get(' '.join(text(answer.get('heading')).casefold().split()))
+        if section:
+            section.update(opens=text(answer.get('opens')) or section['opens'], closes=text(answer.get('closes')) or section['closes'])
+    items = {i['label']: i for i in skeleton['items']}
+    answered = [a for a in listed('items') if text(a.get('label'), 80) in items]
+    alias = {text(a.get('id'), 20): text(a.get('label'), 80) for a in answered if a.get('id')}
+    for answer in answered:
+        item = items[text(answer.get('label'), 80)]
+        item['name'] = text(answer.get('name'), 120) or item['name']
+        item['role'] = answer.get('role') if answer.get('role') in SKELETON_ROLES else item['role']
+        if answer.get('id'):
+            item['inventory'] = text(answer.get('id'), 20)
+        uses = [alias.get(text(u, 80), text(u, 80)) for u in answer.get('uses') or [] if isinstance(u, str)]
+        item['uses'] = list(dict.fromkeys(u for u in uses if u in items and u != item['label']))
+    order = {label: n for n, label in enumerate(items)}
+    uses = {label: item['uses'] for label, item in items.items()}
+    while (cycle := _cycle(uses)):
+        edges = list(zip(cycle, cycle[1:]))
+        forward = [edge for edge in edges if order[edge[0]] < order[edge[1]]] or edges
+        uses[forward[0][0]].remove(forward[0][1])
+    for item in items.values():
+        item['used_by'] = [other['label'] for other in items.values() if item['label'] in other['uses']]
+    labels = set(by_label) | set(items) | {e['label'] for e in skeleton['equations']} | {f['label'] for f in skeleton['floats']}
+    skeleton['aliases'] = []
+    for answer in listed('aliases'):
+        source, target = text(answer.get('from'), 80), text(answer.get('to'), 80)
+        if source in dangling and target in labels and source not in [a['from'] for a in skeleton['aliases']]:
+            skeleton['aliases'].append({'from': source, 'to': target})
+    if not answered and not listed('sections'):
+        skeleton['warning'] = 'The skeleton call gave no usable answer: the skeleton read from your texts is used as it is.'
+    return skeleton
 
 
 _LATER = re.compile(r'\b(?:below|later|will|shall|forthcoming|ahead|postponed?|deferred|we prove|is proved|are proved|'
@@ -1377,8 +1472,11 @@ def skeleton_findings(body, skeleton, introduction=()):
     labels = [(s['label'], s['heading']) for s in skeleton.get('sections') or []] + [
         (i['label'], i['name'] or i['id']) for i in skeleton.get('items') or []] + [
         (e['label'], e['what']) for e in skeleton.get('equations') or []] + [(f['label'], f['what']) for f in skeleton.get('floats') or []]
+    referred = {key for key, _, _ in references} | {i['label'] for i in skeleton.get('items') or [] if i.get('role') == 'main'}
     for label, what in labels:
         places = definitions.get(label, [])
+        if not places and label not in referred:
+            continue  # a label nothing refers to: its absence hurts no reader
         if not places:
             out.append(('skeleton-label', 'blocker', f'the skeleton\'s label {label} ({what[:60]}) is not defined in the text', label, None))
         elif len(places) > 1:
@@ -2637,8 +2735,9 @@ class WriteupRunner(ResearchRunner):
             self._draft()
         elif phase == 'frame':
             self._frame()
-        elif phase == 'splice':
+        elif phase == 'splice':  # a job saved between its skeleton and its splice (before guide 3)
             self._splice()
+            self.state['phase'] = 'draft'
         elif phase == 'stitch':
             self._stitch()
         elif phase == 'assemble':
@@ -2798,6 +2897,17 @@ class WriteupRunner(ResearchRunner):
                 or outline.get('size') not in SKELETON_SIZES or self.state.get('variant') == 'summary'):
             self.state['phase'] = 'draft'
             return
+        if self._assembling() and (self.state.get('splice') or self._splice_plan()):
+            # Finished texts to put together: spliced by code first; the skeleton is read from them.
+            if not self.state.get('splice'):
+                self._splice()
+            skeleton = self._assembled_skeleton()
+            if skeleton['warning']:
+                self.state['warnings'].append(skeleton['warning'])
+            self.state['skeleton'] = skeleton
+            self._artifact('skeleton', json.dumps(skeleton, ensure_ascii=False, indent=1))
+            self.state['phase'] = 'draft'
+            return
         material = self._whole_material()
         if len(material) > self._room():
             material = material[:self._room()] + '\n[The material continues.]'
@@ -2808,24 +2918,20 @@ class WriteupRunner(ResearchRunner):
             p.name for folder in folders if folder.is_dir() for p in folder.iterdir()
             if p.suffix.lower() in GRAPHIC_SUFFIXES and not p.name.startswith('.'))))[:20]
         keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
-        texts = [Path(s['path']).name for s in self._assembly_files()] if self._assembling() else []
         instruction = ('Fix the skeleton of the document the outline plans, as the system message says.\n\nOUTLINE:\n'
                        + self._outline_text()
                        + '\n\nLABELS THE MATERIAL ALREADY HAS (keep them exactly): ' + (', '.join(sorted(self._material_labels())) or 'none')
                        + '\nREFERENCES OF THE MATERIAL THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none')
                        + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys[:60]) or 'none')
                        + '\nFIGURE FILES: ' + (', '.join(figures) or 'none')
-                       + ('\nTHE AUTHOR\'S LATEX TEXTS TO ASSEMBLE (name each section\'s file): '
-                          + ', '.join(texts) if texts else '')
                        + '\n\nMATERIAL:\n' + material)
         raw = self._structured('skeleton', instruction, 8192, SKELETON_SCHEMA)
-        skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling, texts)
+        skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling)
         if skeleton['warning']:
             self.state['warnings'].append(skeleton['warning'])
         self.state['skeleton'] = skeleton
         self._artifact('skeleton', json.dumps(skeleton, ensure_ascii=False, indent=1))
-        # Finished texts to put together: spliced by code, and only what is new is written.
-        self.state['phase'] = 'splice' if texts and self._splice_plan() else 'draft'
+        self.state['phase'] = 'draft'
 
     def _skeleton_text(self, focus=None, only=False):
         """The skeleton as a call reads it, in at most about 60 lines: each section with its label, what it starts
@@ -3450,18 +3556,34 @@ class WriteupRunner(ResearchRunner):
         return bool((self.state.get('outline') or {}).get('assemble')) and len(self._assembly_files()) >= 2
 
     def _splice_plan(self):
-        """The parts of an assembled document, in the skeleton's order: each source text once, at the first section
-        the skeleton takes from it (an introduction's text is kept and edited by the frame); the sections no text
-        provides are written by the model, as units. Returns False when the skeleton names no text."""
-        skeleton = self.state.get('skeleton') or {}
-        files = {Path(s['path']).name: s for s in self._assembly_files()}
-        if not any(s.get('file') in files for s in skeleton.get('sections') or []):
-            return False
+        """The parts of an assembled document, in the outline's order, by code: an outline section belongs to the text
+        that has a \\section with its heading (or that the outline's `files` names for it; an introduction, to a text
+        whose first heading says so); each text is placed once, at its first section (an introduction's text is kept
+        and edited by the frame); the sections no text provides are written by the model, as units; a text no section
+        names comes last. Returns False when no text is placed."""
+        outline, files = self.state['outline'], {Path(s['path']).name: s for s in self._assembly_files()}
+        norm = lambda heading: ' '.join(re.sub(r'\\texorpdfstring\{((?:[^{}]|\{[^{}]*\})*)\}\{[^{}]*\}', r'\1', heading).casefold().split())
+        headings = {}
+        for name, source in files.items():
+            body = _uncommented(split_body(source['content'])[2])
+            headings[name] = [norm(_group(body, m.end())[0] or '') for m in
+                              re.finditer(r'(?m)^[ \t]*\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', body)]
+        named = {norm(f.get('heading', '')): Path(str(f.get('file', ''))).name for f in outline.get('files') or []
+                 if isinstance(f, dict)}
         material, parts, placed = self._whole_material(), [], {}
-        for section in skeleton['sections']:
+
+        def text_of(section):
+            key = norm(section['heading'])
+            if named.get(key) in files:
+                return named[key]
+            found = next((name for name, own in headings.items() if key in own), '')
+            if not found and section.get('role') == 'introduction':
+                found = next((name for name, own in headings.items() if own and re.search(_ROLE_WORDS['introduction'], own[0])), '')
+            return found
+        for section in outline['sections']:
             if section.get('role') == 'abstract':
                 continue
-            name = section.get('file') if section.get('file') in files else ''
+            name = text_of(section)
             if name and name in placed:
                 placed[name]['sections'].append(section['heading'])
             elif name:
@@ -3479,6 +3601,12 @@ class WriteupRunner(ResearchRunner):
                 parts[-1]['sections'].append(section['heading'])
             else:
                 parts.append({'text': material, 'body': '', 'complete': False, 'sections': [section['heading']]})
+        for name in files:
+            if name not in placed:  # a text no section names: it is not left out
+                placed[name] = {'text': '', 'body': '', 'complete': False, 'sections': [], 'file': name, 'spliced': True}
+                parts.append(placed[name])
+        if not placed:
+            return False
         self.state['parts'], self.state['framed'] = parts, True
         self.state['warnings'] = [w for w in self.state['warnings'] if not w.startswith(('Written section by section',
                                                                                          'The material is longer than one'))]
@@ -3487,10 +3615,10 @@ class WriteupRunner(ResearchRunner):
         return True
 
     def _splice(self):
-        """The texts put together by code (splice_texts): labels, commands and BibTeX entries made consistent, the
-        skeleton's aliases applied to references that point nowhere, and each change recorded per text. The spliced
-        parts are then complete; the model writes only what is new (draft, frame, stitch)."""
-        skeleton, files = self.state.get('skeleton') or {}, {Path(s['path']).name: s for s in self._assembly_files()}
+        """The texts put together by code (splice_texts): labels, commands and BibTeX entries made consistent, and each
+        change recorded per text. The spliced parts are then complete; the model writes only what is new (draft,
+        frame, stitch)."""
+        files = {Path(s['path']).name: s for s in self._assembly_files()}
         parts = [p for p in self.state['parts'] if p.get('file')]
         texts = []
         for part in parts:
@@ -3502,31 +3630,7 @@ class WriteupRunner(ResearchRunner):
                 definitions += '\n' + '\n'.join(line.strip().lstrip('%').strip() for line in listed.group(1).splitlines())
             texts.append((part['file'], body, definitions))
         bodies, definitions, entries, changes = splice_texts(texts)
-        everywhere = {label.strip() for body in bodies for label in _LABEL.findall(_uncommented(body))}
-        # The skeleton takes the labels the author's sections already have.
-        given = {}
-        for body in bodies:
-            for m in re.finditer(r'\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', body):
-                inner, end = _group(body, m.end())
-                label = re.match(r'\s*\\label\s*\{([^{}]*)\}', body[end:]) if inner is not None else None
-                if label:
-                    given.setdefault(' '.join(inner.casefold().split()), label.group(1).strip())
-        adopted = {}
-        for section in skeleton.get('sections') or []:
-            label = given.get(' '.join(section['heading'].casefold().split()))
-            if section.get('file') and section['label'] not in everywhere and label and label != section['label']:
-                adopted[section['label']] = section['label'] = label
-        for kind in ('items', 'equations', 'floats'):
-            for x in skeleton.get(kind) or []:
-                x['section'] = adopted.get(x['section'], x['section'])
-        for alias in skeleton.get('aliases') or []:
-            alias['to'] = adopted.get(alias['to'], alias['to'])
-        aliases = {a['from']: a['to'] for a in skeleton.get('aliases') or []}
         for part, body in zip(parts, bodies):
-            dangling = {k: aliases[k] for k in reference_keys(_uncommented(body)) if k not in everywhere and k in aliases}
-            if dangling:
-                body = retarget(body, dangling)
-                changes[part['file']] += [f'reference {k} pointed at {v} (the skeleton\'s alias)' for k, v in dangling.items()]
             if part.get('frame'):
                 part['kept'] = body
             else:
@@ -3539,7 +3643,39 @@ class WriteupRunner(ResearchRunner):
             self.state['bibliography'] = (self.state.get('bibliography') or []) + [
                 {'key': key, 'text': text} for key, text in entries if key not in known]
         self.state['splice'] = {'changes': changes, 'stitch': None}
-        self.state['phase'] = 'draft'
+
+    def _assembled_skeleton(self):
+        """The skeleton of an assembled document: read from the spliced texts by code (skeleton_from_texts), then one
+        call that only annotates it, by label (annotate_skeleton). The skeleton's aliases then repair, by code, the
+        references of the texts that point nowhere."""
+        parts, outline = self.state['parts'], self.state['outline']
+        roles = {s['heading']: s.get('role', 'body') for s in outline.get('sections') or []}
+        pieces = [{'file': p.get('file') or '', 'role': 'introduction' if p.get('frame') else roles.get((p['sections'] or [''])[0], 'body'),
+                   'body': p.get('kept') if p.get('frame') else p['body'], 'headings': p['sections']} for p in parts]
+        skeleton = skeleton_from_texts(pieces, self.state.get('theorems') or [])
+        text = '\n\n'.join(piece['body'] or '' for piece in pieces)
+        everywhere = {label.strip() for label in _LABEL.findall(_uncommented(text))}
+        dangling = list(dict.fromkeys(k for k in reference_keys(_uncommented(text)) if k not in everywhere))
+        listing = json.dumps({key: skeleton[key] for key in ('sections', 'items', 'equations', 'floats')}, ensure_ascii=False)
+        instruction = ('The document is assembled from the author\'s LaTeX texts. Its skeleton was read from them by code '
+                       '(below): keep its sections, items and labels exactly, and only fill in what it leaves empty, as '
+                       'the system message says: opens and closes of each section; name, role, uses (labels of other '
+                       'items) and the inventory id (in id) of each item; and the aliases.\n\nSKELETON READ FROM THE TEXTS:\n'
+                       + listing[:40000] + '\n\nOUTLINE:\n' + self._outline_text()
+                       + '\n\nREFERENCES OF THE TEXTS THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none'))
+        raw = self._structured('skeleton', instruction, 8192, SKELETON_SCHEMA)
+        skeleton = annotate_skeleton(skeleton, raw, dangling)
+        aliases = {a['from']: a['to'] for a in skeleton['aliases']}
+        for part in parts:
+            if not part.get('file'):
+                continue
+            key = 'kept' if part.get('frame') else 'body'
+            found = {k: aliases[k] for k in reference_keys(_uncommented(part[key])) if k in aliases}
+            if found:
+                part[key] = part['spliced_text'] = retarget(part[key], found)
+                self.state['splice']['changes'][part['file']] += [f'reference {k} pointed at {v} (the skeleton\'s alias)'
+                                                                   for k, v in found.items()]
+        return skeleton
 
     def _stitch_tasks(self):
         """What the model writes into the assembled texts, one call each: one notation (per text whose formulas use a
@@ -4835,13 +4971,14 @@ class WriteupRunner(ResearchRunner):
             fail('G5', f'the review found {len(serious("fidelity"))} place{"s" if len(serious("fidelity")) > 1 else ""} '
                  f'that differ{"" if len(serious("fidelity")) > 1 else "s"} from the material or the request (' + '; '.join(dict.fromkeys(i['problem'][:80] for i in serious('fidelity')))[:300] + ')')
         parts = [f for f in s['checks'] if f['rule'] == 'part-missing']
-        links = [f for f in s['checks'] if f['rule'] in ('skeleton-link', 'skeleton-order', 'frame-links')]
+        # A dependency the skeleton guessed is no reason to hold the document: skeleton links are reported, not gated.
+        links = [f for f in s['checks'] if f['rule'] == 'frame-links']
         if serious('style') or parts or links:
             fail('G6', ', '.join(filter(None, [
                 f'{len(serious("style"))} style issue{"s" if len(serious("style")) > 1 else ""} '
                 '(' + ', '.join(dict.fromkeys(i['rule'] for i in serious('style'))) + ')' if serious('style') else '',
                 'required parts missing: ' + ', '.join(f['excerpt'] for f in parts) if parts else '',
-                f'{len(links)} link{"s" if len(links) > 1 else ""} of the skeleton missing in the text' if links else ''])))
+                f'{len(links)} link{"s" if len(links) > 1 else ""} of the introduction missing' if links else ''])))
         warnings = s.get('log_warnings')
         if warnings is None:  # checked before the warnings were kept: read them from the log
             warnings = texcheck.log_warnings(self._compile_log(), s.get('body_line', 1))
@@ -6448,6 +6585,11 @@ class WriteupRunner(ResearchRunner):
             for undone in s.get('undone') or []:
                 out.append(f'- The revision of section {undone["section"]} did not compile ({undone["error"]}); it was undone.')
             out += [''] + self._findings_by_outcome()
+        # Links the skeleton expects and the text lacks: sent to the reviser, and the author's when they stay.
+        links = [f for f in s.get('checks') or [] if f['rule'] in ('skeleton-link', 'skeleton-order')]
+        if links:
+            out += ['', f'## For you to settle: links the skeleton expects ({len(links)})', ''] + [
+                f'- [{f["rule"]}] {f["message"]}' for f in links]
         if s.get('guidelines') and s.get('readiness'):
             out += ['', '## Rules', '', 'Each rule of the guidelines, with what its checker found on the final text.', '',
                     '| Rule | Kind | Checker | Status |', '|---|---|---|---|'] + self._rules_rows()

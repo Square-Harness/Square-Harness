@@ -733,7 +733,9 @@ How it works:
    checked once against the main result, and written again once if it fails.
    When you ask to merge finished LaTeX texts (attached without
    `\begin{document}`), they are assembled, not rewritten: the skeleton says
-   which text each section comes from, the texts are put together by code (a
+   which text each section comes from (read by code from the texts' headings;
+   the skeleton is then read from the texts and the model only annotates it),
+   the texts are put together by code (a
    label or a command two texts both define is renamed in the later one,
    bibliographies are united) and the report lists each change. The model
    writes only what is new: one notation where the texts differ (refused, and
@@ -841,10 +843,11 @@ How it works:
    (packages, underfull boxes, fonts) are listed in the report.
    The review must have found nothing serious against your material or the
    guidelines, and every required part must be there.
-   When the document has a skeleton, each of its labels must be defined once,
-   and a result whose proof does not cite a result it uses, or a result cited
-   before it is stated with no word that it comes later, keeps it a draft (a
-   lemma cited nowhere, or a listed formula never cited, is listed).
+   When the document has a skeleton, each of its labels that something refers
+   to (and the main result's) must be defined once. A result whose proof does
+   not cite a result it uses, or a result cited before it is stated, is sent to
+   the reviser and, if it stays, listed for you; it does not keep the document
+   a draft (nor does a lemma cited nowhere or a listed formula never cited).
    For an exam, the points must add up to the total the request asks for. A
    name of a person or work that only the plan mentions, with no source, keeps
    the document a draft.
