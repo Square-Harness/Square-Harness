@@ -3897,38 +3897,32 @@ class WriteupRunner(ResearchRunner):
         return {'result': 'applied' if counts else 'nothing to change', 'reason': '; '.join(questions[:3])}
 
     def _stitch_duplicates(self, task, part):
-        """A statement or display another text states where the skeleton places it: the model replaces it by a sentence
-        that cites it; the guard allows exactly those tokens to go, and the removed block's label then points to the
-        kept one."""
-        frozen, legend = freeze(part['body'], self.state.get('theorems') or [])
+        """A statement or display another text states where the skeleton places it: the model edits the few lines
+        around it (_frozen_edits), replacing it by a sentence that refers to the kept one (a theorem repeated in an
+        introduction: its statement in words, with the reference); the guard lets that one token go in that edit and
+        nothing else. The removed block's label then points to the kept one."""
+        legend = freeze(part['body'], self.state.get('theorems') or [], inline=False)[1]
         others = {i: freeze(self.state['parts'][i]['body'], self.state.get('theorems') or [], inline=False)[1]
                   for i in {item['kept'][0] for item in task['remove']}}
-        listing, mapping = [], {}
+        problems, mapping = [], {}
         for item in task['remove']:
             kept = others[item['kept'][0]].get(item['kept'][1], {'text': ''})['text']
             label = next(iter(_LABEL.findall(kept)), '').strip()
             dropped = next(iter(_LABEL.findall(legend.get(item['token'], {}).get('text', ''))), '').strip()
             if label and dropped:
                 mapping[dropped] = label
-            listing.append(f'{item["token"]}: stated elsewhere' + (f' with the label {label}' if label else '')
-                           + ': replace it by one sentence that refers to it' + (f' (\\ref{{{label}}} or \\eqref{{{label}}})' if label else ''))
-        tokens = {item['token'] for item in task['remove']}
-        instruction = ('This LaTeX text is part of a longer document. Some of its statements or displays are stated elsewhere '
-                       'in the document: replace each listed token by one sentence that refers to the statement elsewhere, '
-                       'and change nothing else. The mathematics is frozen as tokens (listed); keep every other token as it '
-                       'is. Output the whole text, with no commentary.\n\nTO REPLACE:\n' + '\n'.join(listing)
-                       + '\n\nTOKENS:\n' + legend_text(legend) + '\n\nTEXT:\n' + frozen)
-        new = self._stitch_call(instruction, frozen)
-        if new is None:
-            return {'result': 'refused', 'reason': 'no complete answer'}
-        kept_legend = {t: v for t, v in legend.items() if t not in tokens}
-        labels = self._known_labels() | {l for p in self.state['parts'] for l in _LABEL.findall(_uncommented(p['body']))}
-        keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
-        reason = frozen_guard(_drop_tokens(frozen, tokens), new, kept_legend, ('P10',), labels, keys)
-        if reason or any(t in new for t in tokens):
-            return {'result': 'refused', 'reason': reason or 'a duplicate is still there'}
-        part['body'] = retarget(thaw(new, legend), mapping)
-        return {'result': 'applied', 'removed': len(tokens)}
+            cite = f' (\\ref{{{label}}} or \\eqref{{{label}}})' if label else ''
+            problems.append({'token': item['token'], 'quote': item['token'],
+                             'problem': f'{item["token"]} states again what the document states elsewhere' + cite,
+                             'instruction': f'replace the line of {item["token"]} by one sentence that refers to it{cite}: '
+                                            'a theorem repeated in an introduction becomes its statement in words, with '
+                                            'the reference; keep every other token'})
+        text, applied, refused = self._frozen_edits(part['body'], problems, 'this text, which is part of a longer document')
+        if not applied:
+            return {'result': 'refused', 'reason': '; '.join(refused[:3]) or 'no edit'}
+        part['body'] = retarget(text, {old: new for old, new in mapping.items()
+                                       if not re.search(r'\\label\s*\{' + re.escape(old) + r'\}', text)})
+        return {'result': 'applied', 'removed': applied, 'reason': '; '.join(refused[:3])}
 
     def _stitch_bridges(self, part):
         """The first paragraph of each section of a spliced text, rewritten against what the skeleton says the section
@@ -3948,18 +3942,6 @@ class WriteupRunner(ResearchRunner):
         part['body'] = text
         return {'result': 'applied' if applied else 'refused', 'applied': applied, 'reason': '; '.join(refused[:3])}
 
-    def _stitch_call(self, instruction, frozen):
-        """One stitch call that returns a whole text, or None."""
-        remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
-        cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, len(frozen) // 2 + 2048))
-        try:
-            result = self._call('stitch', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the whole text now.')
-        except ResearchBudget:
-            return None
-        new = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
-        return new + ('\n' if frozen.endswith('\n') else '') if result['complete'] and new.strip() else None
-
     def _frozen_edits(self, text, problems, what):
         """(text, applied, refused): one revise_section call on `text` with its mathematics frozen, answering
         `problems` ([{problem, instruction, quote}]) by line edits, each under frozen_guard. Used for the author's
@@ -3967,7 +3949,8 @@ class WriteupRunner(ResearchRunner):
         skeleton = self.state.get('skeleton') or {}
         frozen, legend = freeze(text, self.state.get('theorems') or [])
         for issue in problems:
-            issue['quote'] = next((line for line in frozen.split('\n') if issue['quote'] in thaw(line, legend)), issue['quote'])
+            issue['quote'] = next((line for line in frozen.split('\n') if issue['quote'] in line
+                                   or issue['quote'] in thaw(line, legend)), issue['quote'])
         listing = '\n'.join(f'{n}. passage: {i["quote"][:200]}\n  problem: {i["problem"]}\n  do: {i["instruction"]}'
                             for n, i in enumerate(problems, 1))
         others = '\n\n'.join(p['body'] for p in self.state['parts'] if p['body'] != text)
@@ -3992,13 +3975,19 @@ class WriteupRunner(ResearchRunner):
         keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
         allowed = ({label.strip() for label in _LABEL.findall(_uncommented(others + '\n' + text))}
                    | {x['label'] for kind in ('sections', 'items', 'equations', 'floats') for x in skeleton.get(kind) or []})
-        lines, taken, applied, refused = frozen.split('\n'), [], 0, []
+        lines, taken, applied, refused, gone = frozen.split('\n'), [], 0, [], set()
         for edit in sorted(edits, key=lambda e: -e['first']):  # from the end: earlier line numbers stay valid
             a, b = edit['first'] - 1, edit['last']
             if not 1 <= edit['issue'] <= len(problems) or a < 0 or b > len(lines) or any(a < d and c < b for c, d in taken):
                 continue
             after = lines[:a] + edit['text'].split('\n') + lines[b:]
-            reason = frozen_guard(frozen, '\n'.join(after), legend, (), allowed, keys)
+            # A problem may name the one token its edit may remove (a duplicate); nothing else may go.
+            token = problems[edit['issue'] - 1].get('token')
+            leaving = gone | ({token} if token and token not in '\n'.join(after) else set())
+            reason = frozen_guard(_drop_tokens(frozen, leaving), '\n'.join(after),
+                                  {k: v for k, v in legend.items() if k not in leaving}, (), allowed, keys)
+            if not reason:
+                gone = leaving
             if reason:
                 refused.append(reason)
                 continue

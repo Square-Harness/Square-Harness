@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Write-up: a statement that two merged texts both give is removed by an edit
+  of the few lines around it, not by writing the whole text again: the edit may
+  remove that statement and nothing else, and a theorem repeated in the
+  introduction becomes its statement in words with a reference.
+
 - Write-up: when merged texts write the same object differently, one call
   answers with a table of symbols (no text) and code applies it inside the
   mathematics only, on whole tokens. The text that holds the main result and

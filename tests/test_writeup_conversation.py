@@ -300,8 +300,9 @@ class WholePaperTests(GuiCase):
         spliced, _, _, _ = writeup.splice_texts([(n, writeup.split_body(x)[2], writeup.split_body(x)[1]) for n, x in (('a.tex', a), ('b.tex', b))])
         # The table keeps the experiments' dx: code turns it round, since a.tex holds the theorem.
         table = json.dumps({'rows': [{'object': 'mesh size', 'keep': 'dx', 'replace': [{'file': 'a.tex', 'from': 'h'}]}]})
-        frozen, legend = writeup.freeze(writeup.replace_symbol(spliced[1], 'dx', 'h')[0] + '\n')
-        cited = frozen.replace('We recall the scheme\n[[D1]]', 'The scheme is \\eqref{eq:scheme}.')
+        frozen, _ = writeup.freeze(writeup.replace_symbol(spliced[1], 'dx', 'h')[0])
+        self.assertEqual(frozen.split('\n')[1:3], ['We recall the scheme', '[[D1]]'])
+        cited = '@@ issue 1 lines 2-3\nThe scheme is \\eqref{eq:scheme}.\n'  # an edit of two lines, not the whole text
         self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(skeleton), table, cited, NOTHING_FOUND,
                                                        json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}))]
         started = self.ok('POST', '/api/writeup', {'goal': 'Merge a.tex and b.tex into one article.', 'seconds': 300, 'rounds': 2,
@@ -311,7 +312,7 @@ class WholePaperTests(GuiCase):
         state = json.loads((job / 'state.json').read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
         roles = [c['role'] for c in state['calls']]
-        self.assertEqual(roles[:4], ['plan', 'skeleton', 'notation', 'stitch'])
+        self.assertEqual(roles[:4], ['plan', 'skeleton', 'notation', 'revise_section'])
         self.assertNotIn('writing', roles)  # nothing new to write but the stitches
         body = state['body']
         self.assertEqual(body.count('\\label{eq:scheme}'), 1)  # stated once, where the skeleton places it

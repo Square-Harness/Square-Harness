@@ -741,9 +741,9 @@ How it works:
    writes only what is new: one notation where the texts differ (a table of
    symbols that code applies inside the formulas; the text with the main result
    and its proof keeps its own notation, unless your request names another; a
-   replacement that would clash with a symbol already used is put to you), a
-   sentence that
-   cites a statement another text already gives, the opening of each section,
+   replacement that would clash with a symbol already used is put to you), an
+   edit of a few lines that replaces a statement another text already gives
+   by a sentence citing it, the opening of each section,
    the introduction's links and the abstract. The fidelity check then reads
    only the passages that changed.
    Any other document is written as follows.
