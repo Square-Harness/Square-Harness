@@ -738,8 +738,11 @@ How it works:
    the texts are put together by code (a
    label or a command two texts both define is renamed in the later one,
    bibliographies are united) and the report lists each change. The model
-   writes only what is new: one notation where the texts differ (refused, and
-   put to you, unless undoing it gives back the same formulas), a sentence that
+   writes only what is new: one notation where the texts differ (a table of
+   symbols that code applies inside the formulas; the text with the main result
+   and its proof keeps its own notation, unless your request names another; a
+   replacement that would clash with a symbol already used is put to you), a
+   sentence that
    cites a statement another text already gives, the opening of each section,
    the introduction's links and the abstract. The fidelity check then reads
    only the passages that changed.

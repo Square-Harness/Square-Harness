@@ -282,8 +282,8 @@ class WholePaperTests(GuiCase):
              '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+h\\,D U^{n+1}.\n\\end{equation}\n'
              '\\begin{theorem}\\label{thm:main} The scheme \\eqref{eq:scheme} converges for every $h$. \\end{theorem}\n')
         b = ('\\newcommand{\\Op}{\\mathcal{B}}\n\\section{Experiments}\\label{sec:experiments}\nWe recall the scheme\n'
-             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+h\\,D U^{n+1}.\n\\end{equation}\n'
-             'With $h=1/10$ and $\\Op$ the rates agree with \\eqref{eq:scheme} and Theorem~\\ref{thm:main}.\n')
+             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+dx\\,D U^{n+1}.\n\\end{equation}\n'
+             'With $dx=1/10$ and $\\Op$ the rates agree with \\eqref{eq:scheme} and Theorem~\\ref{thm:main}.\n')
         (self.root / 'a.tex').write_text(a)
         (self.root / 'b.tex').write_text(b)
         section = lambda heading: {'heading': heading, 'role': 'body', 'source': 'material', 'covers': [], 'parts': [],
@@ -298,10 +298,11 @@ class WholePaperTests(GuiCase):
                     'equations': [{'label': 'eq:scheme', 'what': 'the scheme', 'section': 'sec:setting'}], 'floats': [], 'aliases': []}
         # What the model is scripted to answer: the texts as spliced, with the one symbol, and the duplicate display cited.
         spliced, _, _, _ = writeup.splice_texts([(n, writeup.split_body(x)[2], writeup.split_body(x)[1]) for n, x in (('a.tex', a), ('b.tex', b))])
-        one = [re.sub(r'(?<=[$ ])h(?=[>=\\$])', r'\\Delta x', piece) for piece in spliced]
-        frozen, legend = writeup.freeze(one[1] + '\n')
+        # The table keeps the experiments' dx: code turns it round, since a.tex holds the theorem.
+        table = json.dumps({'rows': [{'object': 'mesh size', 'keep': 'dx', 'replace': [{'file': 'a.tex', 'from': 'h'}]}]})
+        frozen, legend = writeup.freeze(writeup.replace_symbol(spliced[1], 'dx', 'h')[0] + '\n')
         cited = frozen.replace('We recall the scheme\n[[D1]]', 'The scheme is \\eqref{eq:scheme}.')
-        self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(skeleton), one[0], one[1], cited, NOTHING_FOUND,
+        self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(skeleton), table, cited, NOTHING_FOUND,
                                                        json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}))]
         started = self.ok('POST', '/api/writeup', {'goal': 'Merge a.tex and b.tex into one article.', 'seconds': 300, 'rounds': 2,
                                                    'source_files': ['a.tex', 'b.tex']})
@@ -310,13 +311,13 @@ class WholePaperTests(GuiCase):
         state = json.loads((job / 'state.json').read_text())
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
         roles = [c['role'] for c in state['calls']]
-        self.assertEqual(roles[:5], ['plan', 'skeleton', 'stitch', 'stitch', 'stitch'])
+        self.assertEqual(roles[:4], ['plan', 'skeleton', 'notation', 'stitch'])
         self.assertNotIn('writing', roles)  # nothing new to write but the stitches
         body = state['body']
         self.assertEqual(body.count('\\label{eq:scheme}'), 1)  # stated once, where the skeleton places it
         self.assertIn('The scheme is \\eqref{eq:scheme}.', body)
         self.assertIn('rates agree with \\eqref{eq:scheme}', body)  # the removed display's references follow the kept one
-        self.assertIn('With $\\Delta x=1/10$ and $\\OpB$', body)  # one notation; the other \\Op renamed
+        self.assertIn('With $h=1/10$ and $\\OpB$', body)  # one notation, the theorem's; the other \\Op renamed
         self.assertIn('\\newcommand{\\OpB}', state['document'])
         self.assertIn('notation-clash', [f['rule'] for f in state['checks']])
         fidelity = next(r['messages'][1]['content'] for r in self.fake.requests if 'CHANGED PASSAGES' in r['messages'][1]['content'])

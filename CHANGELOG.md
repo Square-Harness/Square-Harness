@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Write-up: when merged texts write the same object differently, one call
+  answers with a table of symbols (no text) and code applies it inside the
+  mathematics only, on whole tokens. The text that holds the main result and
+  its proof keeps its notation (a table that says otherwise is turned round),
+  unless your request names the symbol to use. A change that would clash with a
+  symbol a text already uses is not made and is put to you; the report lists
+  each replacement and how often it was made.
+
 - Write-up: an introduction you wrote is no longer asked for `% PART:`
   markers. One review call reads it against the required parts (motivation,
   literature, positioning, main result, method) and quotes each; a missing part

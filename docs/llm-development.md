@@ -664,7 +664,9 @@ outline's `assemble` and two `.tex` texts, the texts are spliced inside the
 `splice_texts` by code, changes in `state['splice']`), the skeleton is read from
 them (`skeleton_from_texts`) and the model only annotates it
 (`annotate_skeleton`); then `stitch`
-(after the frame: `_stitch_notation` under `notation_guard`, duplicates and
+(after the frame: `_stitch_notation`, one `notation` call whose rows
+`settle_notation` checks and turns towards `_main_text`, applied by
+`replace_symbol`; duplicates and
 bridges under `frozen_guard`; fidelity then reads `state['splice']['hunks']`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,

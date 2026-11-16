@@ -333,10 +333,6 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertIn('\\cite{K1}', bodies[1])  # one work under two keys takes the first
         self.assertEqual([key for key, _ in entries], ['K1'])
         self.assertEqual(len(changes['b.tex']), 3)
-        table = [('h', '\\dx')]
-        self.assertEqual(writeup.notation_guard('Let $h>0$ and $u_h$.', 'Let $\\dx>0$ and $u_\\dx$.', table), '')
-        self.assertIn('beyond', writeup.notation_guard('Let $h>0$.', 'Let $\\dx>1$.', table))
-        self.assertIn('around', writeup.notation_guard('Let $h>0$.', 'Take $\\dx>0$.', table))
         pairs = writeup.duplicate_blocks(['\\begin{theorem} The scheme converges for every step. \\end{theorem}',
                                           'Text.\n\\begin{theorem}\\label{thm:b} The scheme converges for every step. \\end{theorem}'])
         self.assertEqual(pairs, [(0, '[[S1]]', 1, '[[S1]]')])
@@ -384,6 +380,26 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertEqual(annotated['sections'][1]['opens'], 'the scheme')  # matched by heading; its label stays
         self.assertEqual(annotated['sections'][1]['label'], 'sec:stability')
         self.assertEqual(annotated['aliases'], [{'from': 'thm:convergence', 'to': 'thm:main'}])
+
+    def test_one_notation_is_a_table_that_code_applies_and_the_mathematical_part_wins(self):
+        texts = {'proof.tex': 'Let $h>0$ and $\\Delta>0$; the norm $\\|v\\|_h$ and $t_n=n\\Delta$.\n\\label{eq:dt}',
+                 'numerics.tex': 'Take $dx=1/10$ and $dt=dx$, with $\\|v\\|_h$ and $M=T/dt$ \\eqref{eq:dt}; dt is the step.'}
+        rows = [{'object': 'time step', 'keep': 'dt', 'replace': [{'file': 'proof.tex', 'from': '\\Delta'}]},
+                {'object': 'mesh size', 'keep': 'h', 'replace': [{'file': 'numerics.tex', 'from': 'dx'}]},
+                {'object': 'the theorem', 'keep': 'thm:main', 'replace': [{'file': 'numerics.tex', 'from': 'norm'}]}]
+        plan, questions, turned = writeup.settle_notation(rows, texts, 'proof.tex')
+        self.assertEqual(plan, {'numerics.tex': [('dt', '\\Delta', 'time step'), ('dx', 'h', 'mesh size')]})  # turned round
+        self.assertEqual(len(turned), 1)
+        self.assertEqual(len(questions), 1)  # a label is not a symbol
+        text = texts['numerics.tex']
+        for old, new, _ in plan['numerics.tex']:
+            text, _ = writeup.replace_symbol(text, old, new)
+        # Whole tokens inside mathematics only: the prose's "dt", the label and the norm's index stay.
+        self.assertEqual(text, 'Take $h=1/10$ and $\\Delta=h$, with $\\|v\\|_h$ and $M=T/\\Delta$ \\eqref{eq:dt}; dt is the step.')
+        clash = writeup.settle_notation([{'object': 'mesh size', 'keep': 'M', 'replace': [{'file': 'numerics.tex', 'from': 'dx'}]}],
+                                        texts, 'other.tex')
+        self.assertEqual(clash[0], {})  # numerics.tex already writes M: it would mean something else there
+        self.assertIn('writes both', clash[1][0])
 
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},
