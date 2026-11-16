@@ -281,6 +281,27 @@ class WriteupPlanTests(unittest.TestCase):
         self.assertIn('6| [[S1]]', numbered)  # the line numbers stay those of the text
         self.assertIn('8| By Lemma', numbered)
 
+    def test_texts_are_spliced_by_code_and_a_change_of_notation_is_guarded(self):
+        bodies, definitions, entries, changes = writeup.splice_texts([
+            ('a.tex', '\\section{A}\\label{sec:a}\n\\begin{equation}\\label{eq:x} x=1 \\end{equation}\nBy \\eqref{eq:x}.\n'
+                      '@article{K1, title = {On schemes}, doi = {10.1/abc}}\n\\cite{K1}', '\\newcommand{\\T}{\\mathcal{T}}'),
+            ('b.tex', '\\section{B}\\label{sec:b}\n\\begin{equation}\\label{eq:x} x=1 \\end{equation}\nBy \\eqref{eq:x} and $\\T$.\n'
+                      '@article{K2, title = {On Schemes}, doi = {10.1/ABC}}\n\\cite{K2}', '\\newcommand{\\T}{\\mathbb{T}}')])
+        self.assertIn('\\label{eq:x-b}', bodies[1])
+        self.assertIn('By \\eqref{eq:x-b} and $\\TB$', bodies[1])  # its own references follow; the other \\T is \\TB
+        self.assertIn('By \\eqref{eq:x}.', bodies[0])
+        self.assertEqual(definitions, ['\\newcommand{\\T}{\\mathcal{T}}', '\\newcommand{\\TB}{\\mathbb{T}}'])
+        self.assertIn('\\cite{K1}', bodies[1])  # one work under two keys takes the first
+        self.assertEqual([key for key, _ in entries], ['K1'])
+        self.assertEqual(len(changes['b.tex']), 3)
+        table = [('h', '\\dx')]
+        self.assertEqual(writeup.notation_guard('Let $h>0$ and $u_h$.', 'Let $\\dx>0$ and $u_\\dx$.', table), '')
+        self.assertIn('beyond', writeup.notation_guard('Let $h>0$.', 'Let $\\dx>1$.', table))
+        self.assertIn('around', writeup.notation_guard('Let $h>0$.', 'Take $\\dx>0$.', table))
+        pairs = writeup.duplicate_blocks(['\\begin{theorem} The scheme converges for every step. \\end{theorem}',
+                                          'Text.\n\\begin{theorem}\\label{thm:b} The scheme converges for every step. \\end{theorem}'])
+        self.assertEqual(pairs, [(0, '[[S1]]', 1, '[[S1]]')])
+
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},
                                 {'heading': 'Stability', 'role': 'body', 'covers': ['S1']},

@@ -731,6 +731,16 @@ How it works:
    own introduction in LaTeX, it is kept: one call only adds those links and
    repairs its references. The abstract is written after the introduction,
    checked once against the main result, and written again once if it fails.
+   When you ask to merge finished LaTeX texts (attached without
+   `\begin{document}`), they are assembled, not rewritten: the skeleton says
+   which text each section comes from, the texts are put together by code (a
+   label or a command two texts both define is renamed in the later one,
+   bibliographies are united) and the report lists each change. The model
+   writes only what is new: one notation where the texts differ (refused, and
+   put to you, unless undoing it gives back the same formulas), a sentence that
+   cites a statement another text already gives, the opening of each section,
+   the introduction's links and the abstract. The fidelity check then reads
+   only the passages that changed.
    Any other document is written as follows.
    One writing call reads all the material, the plan, the guidelines, your
    request, your notation and your style, and writes the document in the

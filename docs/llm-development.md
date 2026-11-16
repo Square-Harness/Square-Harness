@@ -658,7 +658,11 @@ renders it for the writer, the reviewers, the reviser and the judge;
 outline in document order, the introduction a frame part written last, by the
 writing call or, when a `.tex` source has it, kept and edited by
 `_frame_edits`; then `_frame_abstract`; `state['framed']`; the material is read
-through `_whole_material()`, stored once in `state['material']`) → `draft` (one writing call, or consecutive parts for long material; the
+through `_whole_material()`, stored once in `state['material']`); with the
+outline's `assemble` and two `.tex` texts, `splice` (`_splice_plan` after the
+skeleton, `splice_texts` by code, changes in `state['splice']`) and `stitch`
+(after the frame: `_stitch_notation` under `notation_guard`, duplicates and
+bridges under `frozen_guard`; fidelity then reads `state['splice']['hunks']`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
 where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,
 `state['abstract']` as front matter and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template

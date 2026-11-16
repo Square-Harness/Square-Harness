@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Write-up: asked to merge finished LaTeX texts, the write-up assembles them
+  instead of rewriting them. The skeleton says which text each section comes
+  from; the texts are spliced by code (a label used twice is renamed in the
+  later text with its references, a command defined differently is renamed,
+  BibTeX entries are united) and every change is listed in the report. The
+  model then writes only what is new: one notation (refused unless undoing it
+  gives back the same mathematics, and then put to you), a sentence citing a
+  statement that another text already states, the first paragraph of each
+  section, and the introduction's links and abstract. The fidelity check reads
+  only the passages that changed.
+
 - Write-up: findings about how the text reads (the reader's, the skeleton's
   links, the introduction's) and findings a first edit did not fix are now
   answered by a rewrite of their section with its mathematics frozen: every

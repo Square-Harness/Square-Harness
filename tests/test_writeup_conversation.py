@@ -4,6 +4,7 @@
 """Compile a conversation write-up with figures, a table, citations and honest draft status."""
 import base64
 import json
+import re
 import shutil
 import unittest
 from uuid import uuid4
@@ -20,6 +21,9 @@ except ImportError:  # unittest discover imports test modules as top-level names
 PLAN = json.dumps({'kind': 'notes', 'scope': 'document', 'language': 'English', 'title': 'Notes', 'short_title': 'Notes',
                    'instruction': 'A short note.', 'requirements': [], 'inventory': [], 'problems': [], 'notation': [],
                    'sections': [], 'needs': []})
+
+
+NOTHING_FOUND = json.dumps({'issues': []})
 
 
 def report_points(job):
@@ -247,6 +251,55 @@ class WholePaperTests(GuiCase):
         self.assertEqual(state['frame_edits']['applied'], 2, state['frame_edits'])
         self.assertIn('combines the implicit and the explicit Euler steps', state['body'])  # the author's text stays
         self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
+
+    def test_finished_texts_are_assembled_and_only_what_is_new_is_written(self):
+        from mathagent import writeup
+        a = ('\\newcommand{\\Op}{\\mathcal{A}}\n\\section{Setting}\\label{sec:setting}\nLet $h>0$ be the mesh size and $\\Op$ the operator.\n'
+             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+h\\,D U^{n+1}.\n\\end{equation}\n'
+             '\\begin{theorem}\\label{thm:main} The scheme \\eqref{eq:scheme} converges for every $h$. \\end{theorem}\n')
+        b = ('\\newcommand{\\Op}{\\mathcal{B}}\n\\section{Experiments}\\label{sec:experiments}\nWe recall the scheme\n'
+             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+h\\,D U^{n+1}.\n\\end{equation}\n'
+             'With $h=1/10$ and $\\Op$ the rates agree with \\eqref{eq:scheme} and Theorem~\\ref{thm:main}.\n')
+        (self.root / 'a.tex').write_text(a)
+        (self.root / 'b.tex').write_text(b)
+        section = lambda heading: {'heading': heading, 'role': 'body', 'source': 'material', 'covers': [], 'parts': [],
+                                   'requested_by': '', 'purpose': '', 'thread': []}
+        plan = json.loads(PLAN)
+        plan.update(kind='article', assemble=True, sections=[section('Setting'), section('Experiments')],
+                    notation=[{'object': 'mesh size', 'symbol': '\\Delta x', 'also_written': 'h'}])
+        skeleton = {'sections': [{'heading': 'Setting', 'label': 'sec:setting', 'opens': '', 'closes': '', 'file': 'a.tex'},
+                                 {'heading': 'Experiments', 'label': 'sec:experiments', 'opens': '', 'closes': '', 'file': 'b.tex'}],
+                    'items': [{'id': 'S1', 'environment': 'theorem', 'label': 'thm:main', 'name': 'convergence',
+                               'section': 'sec:setting', 'role': 'main', 'uses': []}],
+                    'equations': [{'label': 'eq:scheme', 'what': 'the scheme', 'section': 'sec:setting'}], 'floats': [], 'aliases': []}
+        # What the model is scripted to answer: the texts as spliced, with the one symbol, and the duplicate display cited.
+        spliced, _, _, _ = writeup.splice_texts([(n, writeup.split_body(x)[2], writeup.split_body(x)[1]) for n, x in (('a.tex', a), ('b.tex', b))])
+        one = [re.sub(r'(?<=[$ ])h(?=[>=\\$])', r'\\Delta x', piece) for piece in spliced]
+        frozen, legend = writeup.freeze(one[1] + '\n')
+        cited = frozen.replace('We recall the scheme\n[[D1]]', 'The scheme is \\eqref{eq:scheme}.')
+        self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(skeleton), one[0], one[1], cited, NOTHING_FOUND,
+                                                       json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}))]
+        started = self.ok('POST', '/api/writeup', {'goal': 'Merge a.tex and b.tex into one article.', 'seconds': 300, 'rounds': 2,
+                                                   'source_files': ['a.tex', 'b.tex']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        job = self.root / '.mathagent' / 'research' / started['id']
+        state = json.loads((job / 'state.json').read_text())
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        roles = [c['role'] for c in state['calls']]
+        self.assertEqual(roles[:5], ['plan', 'skeleton', 'stitch', 'stitch', 'stitch'])
+        self.assertNotIn('writing', roles)  # nothing new to write but the stitches
+        body = state['body']
+        self.assertEqual(body.count('\\label{eq:scheme}'), 1)  # stated once, where the skeleton places it
+        self.assertIn('The scheme is \\eqref{eq:scheme}.', body)
+        self.assertIn('rates agree with \\eqref{eq:scheme}', body)  # the removed display's references follow the kept one
+        self.assertIn('With $\\Delta x=1/10$ and $\\OpB$', body)  # one notation; the other \\Op renamed
+        self.assertIn('\\newcommand{\\OpB}', state['document'])
+        self.assertIn('notation-clash', [f['rule'] for f in state['checks']])
+        fidelity = next(r['messages'][1]['content'] for r in self.fake.requests if 'CHANGED PASSAGES' in r['messages'][1]['content'])
+        self.assertNotIn('MATERIAL:', fidelity)  # the changed passages, not the whole material
+        report = (job / 'report.md').read_text()
+        self.assertIn('## Assembly', report)
+        self.assertIn('label eq:scheme renamed eq:scheme-b', report)
 
 if __name__ == '__main__':
     unittest.main()

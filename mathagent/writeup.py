@@ -917,7 +917,7 @@ _OBJECT = lambda properties: {'type': 'object', 'additionalProperties': False, '
 OUTLINE_SCHEMA = _OBJECT({
     'kind': {'type': 'string', 'enum': list(KINDS)}, 'scope': {'type': 'string', 'enum': ['document', 'part']},
     'language': _TEXT, 'title': _TEXT, 'short_title': _TEXT, 'instruction': _TEXT, 'requirements': _TEXTS,
-    'code': {'type': 'boolean'}, 'keep_latex': {'type': 'boolean'}, 'storyline': _TEXT, 'size': {'type': 'string', 'enum': ['short', 'section', 'paper']},
+    'code': {'type': 'boolean'}, 'keep_latex': {'type': 'boolean'}, 'assemble': {'type': 'boolean'}, 'storyline': _TEXT, 'size': {'type': 'string', 'enum': ['short', 'section', 'paper']},
     'central': _TEXTS, 'informal': _TEXT, 'obstacle': _TEXT, 'example': _TEXT,
     'experiments': {'type': 'array', 'items': _OBJECT({'what': _TEXT, 'metric': _TEXT, 'comparison': _TEXT,
                                                        'conclusion': _TEXT})},
@@ -949,7 +949,9 @@ instruction: the user's request without any notes pasted into it.
 requirements: each thing the request asks for explicitly, one per entry ("a line for the date", "no solutions",
 "points out of 20"). They are numbered R1, R2... in this order. code: true when the request asks for the code of the
 conversation's computations (listings, the script, the implementation) in the document. keep_latex: true only when the
-request asks to leave the LaTeX source as it is (its references, labels or warnings), false otherwise.
+request asks to leave the LaTeX source as it is (its references, labels or warnings), false otherwise. assemble: true
+when the request asks to merge, assemble or combine existing LaTeX texts into one document rather than to write from
+notes, false otherwise.
 inventory: every definition, statement, proof, example, remark and computation of the material, each with a short id
 (D1, S1, P1...), its text copied from the material (at most two lines), and its status: proved (a complete argument is
 given), sketched, stated (no argument), uncertain (the author says they are not sure), withdrawn (given up or replaced).
@@ -1120,7 +1122,8 @@ SKELETON_ROLES = ('main', 'auxiliary', 'consequence', 'background')
 _LABEL_PREFIX = {'section': 'sec', 'theorem': 'thm', 'lemma': 'lem', 'proposition': 'prop', 'corollary': 'cor',
                  'definition': 'def', 'remark': 'rem', 'example': 'ex', 'equation': 'eq', 'figure': 'fig', 'table': 'tab'}
 SKELETON_SCHEMA = _OBJECT({
-    'sections': {'type': 'array', 'items': _OBJECT({'heading': _TEXT, 'label': _TEXT, 'opens': _TEXT, 'closes': _TEXT})},
+    'sections': {'type': 'array', 'items': _OBJECT({'heading': _TEXT, 'label': _TEXT, 'opens': _TEXT, 'closes': _TEXT,
+                                                     'file': _TEXT})},
     'items': {'type': 'array', 'items': _OBJECT({
         'id': _TEXT, 'environment': {'type': 'string', 'enum': list(SKELETON_ENVIRONMENTS)}, 'label': _TEXT, 'name': _TEXT,
         'section': _TEXT, 'role': {'type': 'string', 'enum': list(SKELETON_ROLES)}, 'uses': _TEXTS})},
@@ -1133,7 +1136,8 @@ SKELETON_SYSTEM = '''You fix the skeleton of a LaTeX document before it is writt
 depends on what. Do not write the document. Every writing call and every reviewer reads this skeleton.
 sections: the sections of the outline, in its order: heading (as in the outline), label (sec:short-name), opens (one
 sentence: what the section starts from, which earlier result or question), closes (what it leaves for later sections,
-or an empty string).
+or an empty string), file (when the document is assembled from the author's LaTeX texts, listed in the task: the name of
+the text this section's text comes from; an empty string when the section is to be written).
 items: one per inventory item that the document states in an environment: id (the inventory id), environment
 (theorem, lemma, proposition, corollary, definition, remark, example), label (thm:..., lem:..., prop:..., cor:...,
 def:..., rem:..., ex:...), name (a few words: "stability of the one-step operator"), section (the label of the section
@@ -1196,13 +1200,14 @@ def _cycle(uses):
     return None
 
 
-def settle_skeleton(raw, outline, material_labels=(), dangling=()):
+def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
     """The controller's reading of the model's skeleton. Sections are the outline's, matched by position (on a
     mismatch, by heading; a label is made from the heading otherwise); a label of the material is kept exactly, any
     other is normalised and unique; `uses` keeps known ids, no self-reference and no cycle (the edge of a cycle that
     points forward in the document is dropped), and `used_by` is its inverse; an item's section is the outline's
     section that covers it when there is one; an alias is kept only from a dangling reference to a skeleton label.
-    Without a usable answer: the sections with labels made from their headings, no items, and `warning`."""
+    A section's `file` is kept only when it names one of `files` (the texts of an assembly). Without a usable answer:
+    the sections with labels made from their headings, no items, and `warning`."""
     raw = raw if isinstance(raw, dict) else {}
     text = lambda value, limit=200: ' '.join(str(value or '').split())[:limit]
     listed = lambda key: [x for x in raw.get(key) or [] if isinstance(x, dict)] if isinstance(raw.get(key), list) else []
@@ -1218,7 +1223,9 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=()):
         if match.get('label'):
             renamed[text(match['label'])] = label
         sections.append({'heading': section['heading'], 'label': label, 'role': section.get('role', 'body'),
-                         'opens': text(match.get('opens'), 300), 'closes': text(match.get('closes'), 300)})
+                         'opens': text(match.get('opens'), 300), 'closes': text(match.get('closes'), 300),
+                         'file': next((f for f in files if Path(f).name == Path(text(match.get('file'))).name), '')
+                         if match.get('file') else ''})
     where = {}
     for section in sections:
         where[section['label']] = where[' '.join(section['heading'].casefold().split())] = section['label']
@@ -1540,6 +1547,125 @@ def frozen_guard(before, after, legend, rules=(), labels=(), keys=()):
     if not 0.6 <= len(after) / max(1, len(before)) <= 1.6:
         return 'the length changed too much'
     return ''
+
+
+# -- assembly: finished LaTeX texts put together, and only what is new written ---------------------------------
+
+def rename_labels(text, mapping):
+    """The text with the labels of `mapping` renamed, and its references to them following (outside code)."""
+    if not mapping:
+        return text
+    masked, restore = _protect_code(text)
+    masked = _LABEL.sub(lambda m: '\\label{' + mapping.get(m.group(1).strip(), m.group(1).strip()) + '}', masked)
+    return retarget(restore(masked), mapping)
+
+
+def rename_command(text, old, new):
+    """The text with the command \\old renamed \\new, in its definition and its uses (outside code)."""
+    masked, restore = _protect_code(text)
+    return restore(re.sub(r'\\' + re.escape(old) + r'(?![A-Za-z@])', lambda m: '\\' + new, masked))
+
+
+def unique_name(name, taken):
+    """`name` with a letter added (b, c...) until it is not in `taken`; `taken` is updated."""
+    suffix, joint = 'b', '' if re.fullmatch(r'[A-Za-z@]+', name) else '-'
+    while f'{name}{joint}{suffix}' in taken:
+        suffix = chr(ord(suffix) + 1)
+    taken.add(f'{name}{joint}{suffix}')
+    return f'{name}{joint}{suffix}'
+
+
+def splice_texts(texts):
+    """Finished texts put together in this order, by code: [(name, body, definitions)] -> (bodies, definitions,
+    entries, changes). A label defined in an earlier text is renamed in the later one, whose own references follow
+    it; a command defined twice the same way is defined once; defined differently, it is renamed in the later text
+    (\\name becomes \\nameB) and its definition kept beside the first. BibTeX entries written in the texts are united:
+    one work under two keys takes the first key; two works under one key: the second is renamed. `changes`:
+    {name: [what was changed]}."""
+    labels, macros, keys, works = set(), {}, {}, {}
+    out, definitions, kept, changes = [], [], [], {}
+    for name, body, defined in texts:
+        notes = changes.setdefault(name, [])
+        own = [label.strip() for label in _LABEL.findall(_uncommented(body))]
+        clash = {label: unique_name(label, labels | set(own)) for label in dict.fromkeys(own) if label in labels}
+        if clash:
+            body = rename_labels(body, clash)
+            notes += [f'label {old} renamed {new} (also defined in an earlier text)' for old, new in clash.items()]
+        labels |= {clash.get(label, label) for label in own}
+        for command, definition in macro_definitions(defined).items():
+            meaning = ' '.join(definition_body(definition).split())
+            if command not in macros:
+                macros[command] = meaning
+                definitions.append(definition)
+            elif macros[command] != meaning:
+                new = next(command + letter for letter in 'BCDEFGH' if command + letter not in macros)
+                body, definition = rename_command(body, command, new), rename_command(definition, command, new)
+                macros[new] = meaning
+                definitions.append(definition)
+                notes.append(f'\\{command} is defined differently here: renamed \\{new} in this text')
+        entries, body = bibtex_entries(body)
+        recited = {}
+        for key, entry in entries:
+            title = re.search(r'title\s*=\s*[{"](.+?)[}"]\s*,?\s*$', entry, re.I | re.M)
+            identity = sorted(entry_identifiers(entry)) or (['title:' + ' '.join(re.sub(r'[^a-z0-9 ]', ' ', title.group(1).lower()).split())]
+                                                            if title else ['key:' + key])
+            known = next((works[i] for i in identity if i in works), None)
+            if known:
+                if known != key:
+                    recited[key] = known
+                    notes.append(f'citation {key} is {known} (the same work)')
+                continue
+            if key in keys:  # another work under a key already used
+                recited[key] = unique_name(key, set(keys))
+                notes.append(f'citation key {key} names another work here: renamed {recited[key]}')
+                entry = entry.replace(key, recited[key], 1)
+                key = recited[key]
+            keys[key] = identity
+            works.update({i: key for i in identity})
+            kept.append((key, entry))
+        if recited:
+            body = recite(body, recited)
+        out.append(body)
+    return out, definitions, kept, changes
+
+
+def notation_guard(before, after, table):
+    """Why a change of notation is refused, or '': the text outside mathematics must stay the same, and the inverse
+    table applied to the new mathematics must give back the old (table: [(old symbol, new symbol)])."""
+    words = lambda text: re.findall(r'[^\W\d_]+', re.sub(r'\\[A-Za-z]+\*?|(?<!\\)\$[^$]*\$|\\\(.*?\\\)|\\\[.*?\\\]', ' ',
+                                                         _MATH_ENVIRONMENT.sub(' ', without_comments(text)), flags=re.S))
+    if words(before) != words(after):
+        return 'the text around the formulas changed'
+    undo = lambda formula: [formula := formula.replace(re.sub(r'\s+', '', new), re.sub(r'\s+', '', old))
+                            for old, new in table][-1] if table else formula
+    if sorted(map(undo, mathematics(after))) != sorted(mathematics(before)):
+        return 'the formulas changed beyond the substitution'
+    return ''
+
+
+def duplicate_blocks(texts, theorems=()):
+    """Statements and displays that appear in two texts: [(i, token of i, j, token of j)], the texts frozen as
+    freeze does; two blocks are the same when their normalised text, labels aside, agrees at 0.9 or more."""
+    frozen = [freeze(text, theorems, inline=False) for text in texts]
+    content = lambda value: normal(_LABEL.sub('', value['text']))
+    pairs = []
+    for i, (_, first) in enumerate(frozen):
+        for j in range(i + 1, len(frozen)):
+            for a, value in first.items():
+                if value['kind'] not in 'SD' or len(content(value)) < 30:
+                    continue
+                for b, other in frozen[j][1].items():
+                    if other['kind'] == value['kind'] and SequenceMatcher(None, content(value), content(other)).ratio() >= 0.9:
+                        pairs.append((i, a, j, b))
+                        break
+    return pairs
+
+
+def _drop_tokens(frozen, tokens):
+    """Frozen text without these tokens (what a guard compares with when they may go)."""
+    for token in tokens:
+        frozen = frozen.replace(token, '')
+    return frozen
 
 
 def text_outline(body):
@@ -2450,7 +2576,7 @@ class WriteupRunner(ResearchRunner):
     # -- workflow -------------------------------------------------------------------------
 
     def _step(self, phase):
-        if phase in _LEGACY_PHASES or (phase in ('skeleton', 'draft', 'frame', 'assemble', 'compile', 'repair', 'tidy', 'check', 'revise',
+        if phase in _LEGACY_PHASES or (phase in ('skeleton', 'splice', 'draft', 'frame', 'stitch', 'assemble', 'compile', 'repair', 'tidy', 'check', 'revise',
                                                   'select', 'export')
                                         and 'parts' not in self.state):
             # A job saved by the earlier pipeline is written again from its sources.
@@ -2468,6 +2594,10 @@ class WriteupRunner(ResearchRunner):
             self._draft()
         elif phase == 'frame':
             self._frame()
+        elif phase == 'splice':
+            self._splice()
+        elif phase == 'stitch':
+            self._stitch()
         elif phase == 'assemble':
             self._assemble()
             self.state['phase'] = 'compile'
@@ -2633,20 +2763,24 @@ class WriteupRunner(ResearchRunner):
             p.name for folder in folders if folder.is_dir() for p in folder.iterdir()
             if p.suffix.lower() in GRAPHIC_SUFFIXES and not p.name.startswith('.'))))[:20]
         keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
+        texts = [Path(s['path']).name for s in self._assembly_files()] if self._assembling() else []
         instruction = ('Fix the skeleton of the document the outline plans, as the system message says.\n\nOUTLINE:\n'
                        + self._outline_text()
                        + '\n\nLABELS THE MATERIAL ALREADY HAS (keep them exactly): ' + (', '.join(sorted(self._material_labels())) or 'none')
                        + '\nREFERENCES OF THE MATERIAL THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none')
                        + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys[:60]) or 'none')
                        + '\nFIGURE FILES: ' + (', '.join(figures) or 'none')
+                       + ('\nTHE AUTHOR\'S LATEX TEXTS TO ASSEMBLE (name each section\'s file): '
+                          + ', '.join(texts) if texts else '')
                        + '\n\nMATERIAL:\n' + material)
         raw = self._structured('skeleton', instruction, 8192, SKELETON_SCHEMA)
-        skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling)
+        skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling, texts)
         if skeleton['warning']:
             self.state['warnings'].append(skeleton['warning'])
         self.state['skeleton'] = skeleton
         self._artifact('skeleton', json.dumps(skeleton, ensure_ascii=False, indent=1))
-        self.state['phase'] = 'draft'
+        # Finished texts to put together: spliced by code, and only what is new is written.
+        self.state['phase'] = 'splice' if texts and self._splice_plan() else 'draft'
 
     def _skeleton_text(self, focus=None, only=False):
         """The skeleton as a call reads it, in at most about 60 lines: each section with its label, what it starts
@@ -2933,7 +3067,7 @@ class WriteupRunner(ResearchRunner):
                    'short_title': text(raw.get('short_title'), 60), 'instruction': text(raw.get('instruction')),
                    'requirements': requirements, 'inventory': inventory, 'problems': problems, 'notation': notation,
                    'sections': kept, 'needs': needs, 'dropped_sections': dropped, 'code': bool(raw.get('code')),
-                   'keep_latex': raw.get('keep_latex', False) is True,
+                   'keep_latex': raw.get('keep_latex', False) is True, 'assemble': raw.get('assemble', False) is True,
                    'storyline': text(raw.get('storyline'), 1500), 'questions': questions, 'recalled': recalled,
                    'size': size, 'central': strings(raw.get('central'))[:4], 'informal': text(raw.get('informal'), 600),
                    'obstacle': text(raw.get('obstacle'), 600), 'example': text(raw.get('example'), 600),
@@ -3260,6 +3394,307 @@ class WriteupRunner(ResearchRunner):
         else:
             self._join_parts()
 
+    # -- assembly of finished texts (the outline's `assemble`) ------------------------------------------------
+
+    def _assembly_files(self):
+        """The material's LaTeX texts (sources ending in .tex: a complete document is a template, not material)."""
+        return [s for s in self._notes_in() if s['path'].lower().endswith('.tex')]
+
+    def _assembling(self):
+        """Whether the request asks to put finished LaTeX texts together: the outline says so and two texts are given."""
+        return bool((self.state.get('outline') or {}).get('assemble')) and len(self._assembly_files()) >= 2
+
+    def _splice_plan(self):
+        """The parts of an assembled document, in the skeleton's order: each source text once, at the first section
+        the skeleton takes from it (an introduction's text is kept and edited by the frame); the sections no text
+        provides are written by the model, as units. Returns False when the skeleton names no text."""
+        skeleton = self.state.get('skeleton') or {}
+        files = {Path(s['path']).name: s for s in self._assembly_files()}
+        if not any(s.get('file') in files for s in skeleton.get('sections') or []):
+            return False
+        material, parts, placed = self._whole_material(), [], {}
+        for section in skeleton['sections']:
+            if section.get('role') == 'abstract':
+                continue
+            name = section.get('file') if section.get('file') in files else ''
+            if name and name in placed:
+                placed[name]['sections'].append(section['heading'])
+            elif name:
+                part = {'text': '', 'body': '', 'complete': False, 'sections': [section['heading']], 'file': name}
+                if section.get('role') == 'introduction':
+                    part.update(frame='introduction', mode='material')
+                else:
+                    part['spliced'] = True
+                placed[name] = part
+                parts.append(part)
+            elif section.get('role') == 'introduction':
+                parts.append({'text': material, 'body': '', 'complete': False, 'sections': [section['heading']],
+                              'frame': 'introduction'})
+            elif parts and not parts[-1].get('file') and not parts[-1].get('frame'):
+                parts[-1]['sections'].append(section['heading'])
+            else:
+                parts.append({'text': material, 'body': '', 'complete': False, 'sections': [section['heading']]})
+        self.state['parts'], self.state['framed'] = parts, True
+        self.state['warnings'] = [w for w in self.state['warnings'] if not w.startswith(('Written section by section',
+                                                                                         'The material is longer than one'))]
+        self.state['warnings'].append(f'Assembled from {len(placed)} of your texts; '
+                                      f'{sum(not p.get("file") and not p.get("frame") for p in parts)} sections written.')
+        return True
+
+    def _splice(self):
+        """The texts put together by code (splice_texts): labels, commands and BibTeX entries made consistent, the
+        skeleton's aliases applied to references that point nowhere, and each change recorded per text. The spliced
+        parts are then complete; the model writes only what is new (draft, frame, stitch)."""
+        skeleton, files = self.state.get('skeleton') or {}, {Path(s['path']).name: s for s in self._assembly_files()}
+        parts = [p for p in self.state['parts'] if p.get('file')]
+        texts = []
+        for part in parts:
+            content = files[part['file']]['content']
+            _, definitions, body = split_body(content)
+            # A body exported by a write-up lists, as comments at its top, the definitions it uses.
+            listed = re.search(r'which your preamble may lack:[ \t]*\n((?:[ \t]*%[^\n]*\n)+)', content)
+            if listed:
+                definitions += '\n' + '\n'.join(line.strip().lstrip('%').strip() for line in listed.group(1).splitlines())
+            texts.append((part['file'], body, definitions))
+        bodies, definitions, entries, changes = splice_texts(texts)
+        everywhere = {label.strip() for body in bodies for label in _LABEL.findall(_uncommented(body))}
+        # The skeleton takes the labels the author's sections already have.
+        given = {}
+        for body in bodies:
+            for m in re.finditer(r'\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', body):
+                inner, end = _group(body, m.end())
+                label = re.match(r'\s*\\label\s*\{([^{}]*)\}', body[end:]) if inner is not None else None
+                if label:
+                    given.setdefault(' '.join(inner.casefold().split()), label.group(1).strip())
+        adopted = {}
+        for section in skeleton.get('sections') or []:
+            label = given.get(' '.join(section['heading'].casefold().split()))
+            if section.get('file') and section['label'] not in everywhere and label and label != section['label']:
+                adopted[section['label']] = section['label'] = label
+        for kind in ('items', 'equations', 'floats'):
+            for x in skeleton.get(kind) or []:
+                x['section'] = adopted.get(x['section'], x['section'])
+        for alias in skeleton.get('aliases') or []:
+            alias['to'] = adopted.get(alias['to'], alias['to'])
+        aliases = {a['from']: a['to'] for a in skeleton.get('aliases') or []}
+        for part, body in zip(parts, bodies):
+            dangling = {k: aliases[k] for k in reference_keys(_uncommented(body)) if k not in everywhere and k in aliases}
+            if dangling:
+                body = retarget(body, dangling)
+                changes[part['file']] += [f'reference {k} pointed at {v} (the skeleton\'s alias)' for k, v in dangling.items()]
+            if part.get('frame'):
+                part['kept'] = body
+            else:
+                part.update(body=body, complete=True)
+            part['spliced_text'] = body
+        model = self.state.get('model_definitions') or ''
+        self.state['model_definitions'] = (model + '\n' + '\n'.join(d for d in definitions if d not in model)).strip()
+        if entries and not self._templates_in(('.bib',)):
+            known = {e['key'] for e in self.state.get('bibliography') or []}
+            self.state['bibliography'] = (self.state.get('bibliography') or []) + [
+                {'key': key, 'text': text} for key, text in entries if key not in known]
+        self.state['splice'] = {'changes': changes, 'stitch': None}
+        self.state['phase'] = 'draft'
+
+    def _stitch_tasks(self):
+        """What the model writes into the assembled texts, one call each: one notation (per text whose formulas use a
+        symbol the outline replaces), duplicates (per text holding a statement or display another text states), and
+        the bridges (the first paragraph of each spliced section)."""
+        parts = self.state['parts']
+        table = self._notation_table()
+        tasks = []
+        for index, part in enumerate(parts):
+            if part.get('file') and table and any(re.sub(r'\s+', '', old) in re.sub(r'\s+', '', ' '.join(formulas(part['body'])))
+                                                  for old, _ in table):
+                tasks.append({'kind': 'notation', 'part': index})
+        spliced = [i for i, p in enumerate(parts) if p.get('file')]
+        removals = {}
+        for i, a, j, b in duplicate_blocks([parts[k]['body'] for k in spliced], self.state.get('theorems') or []):
+            keep, drop = self._duplicate_keeper(spliced[i], a, spliced[j], b)
+            removals.setdefault(drop[0], []).append({'token': drop[1], 'kept': keep})
+        tasks += [{'kind': 'duplicates', 'part': index, 'remove': items} for index, items in removals.items()]
+        tasks += [{'kind': 'bridges', 'part': index} for index in spliced if parts[index].get('spliced')]
+        return tasks
+
+    def _notation_table(self):
+        """[(symbol the texts also write, the outline's one symbol)] for the objects the outline lists with two."""
+        table = []
+        for n in (self.state.get('outline') or {}).get('notation') or []:
+            for old in re.split(r'\s*(?:,|;|\bor\b|\band\b)\s*', n.get('also_written') or ''):
+                old = old.strip().strip('$')
+                if old and n['symbol'].strip('$') and old != n['symbol'].strip('$'):
+                    table.append((old, n['symbol'].strip('$')))
+        return table
+
+    def _duplicate_keeper(self, i, a, j, b):
+        """(kept, removed) of a block two texts both state, each as (part index, token): kept where the skeleton states
+        it (the text of the section its label belongs to), else in the earlier text."""
+        parts, skeleton = self.state['parts'], self.state.get('skeleton') or {}
+        frozen = {k: freeze(parts[k]['body'], self.state.get('theorems') or [], inline=False)[1] for k in (i, j)}
+        label = lambda k, token: next(iter(_LABEL.findall(frozen[k][token]['text'])), '').strip()
+        home = {s['label']: s.get('file') for s in skeleton.get('sections') or []}
+        where = {x['label']: home.get(x['section']) for x in (skeleton.get('items') or []) + (skeleton.get('equations') or [])}
+        for (k, token), (other, other_token) in (((i, a), (j, b)), ((j, b), (i, a))):
+            if where.get(label(k, token)) == parts[k].get('file') and where.get(label(other, other_token)) != parts[other].get('file'):
+                return (k, token), (other, other_token)
+        return (i, a), (j, b)
+
+    def _stitch(self):
+        """One call per step for what is new in an assembled document (_stitch_tasks), each answer under its guard;
+        then the parts are joined. What a guard refused is listed in the report, and a refused notation is put to
+        the author."""
+        splice = self.state['splice']
+        if splice.get('stitch') is None:
+            splice['stitch'] = {'tasks': self._stitch_tasks(), 'done': []}
+        stitch = splice['stitch']
+        pending = [t for n, t in enumerate(stitch['tasks']) if n not in [d['n'] for d in stitch['done']]]
+        if not pending or not self._affordable():
+            self._join_parts()
+            return
+        task = pending[0]
+        number = stitch['tasks'].index(task)
+        part = self.state['parts'][task['part']]
+        if task['kind'] == 'notation':
+            outcome = self._stitch_notation(part)
+        elif task['kind'] == 'duplicates':
+            outcome = self._stitch_duplicates(task, part)
+        else:
+            outcome = self._stitch_bridges(part)
+        stitch['done'].append({'n': number, 'kind': task['kind'], 'file': part['file'], **outcome})
+
+    def _stitch_notation(self, part):
+        """One notation in a text: the model applies the table; refused unless the inverse table gives back the text's
+        mathematics and the words are the same (notation_guard)."""
+        table = self._notation_table()
+        instruction = ('In the LaTeX text below, write each object with the one symbol of the document: replace, inside the '
+                       'mathematics only, each symbol on the left by the one on the right. Change nothing else: not a word, '
+                       'not another formula. Output the whole text, with no commentary and no Markdown fence.\n\nTABLE:\n'
+                       + '\n'.join(f'{old} -> {new}' for old, new in table) + '\n\nTEXT:\n' + part['body'])
+        remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
+        cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, len(part['body']) // 2 + 2048))
+        try:
+            result = self._call('stitch', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
+                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the whole text now.')
+        except ResearchBudget:
+            return {'result': 'skipped', 'reason': 'no budget left'}
+        new = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
+        reason = ('the answer was not complete' if not result['complete'] or not new.strip() else
+                  notation_guard(part['body'], new, table))
+        if reason:
+            return {'result': 'refused', 'reason': reason}
+        part['body'] = new + ('\n' if part['body'].endswith('\n') else '')
+        return {'result': 'applied'}
+
+    def _stitch_duplicates(self, task, part):
+        """A statement or display another text states where the skeleton places it: the model replaces it by a sentence
+        that cites it; the guard allows exactly those tokens to go, and the removed block's label then points to the
+        kept one."""
+        frozen, legend = freeze(part['body'], self.state.get('theorems') or [])
+        others = {i: freeze(self.state['parts'][i]['body'], self.state.get('theorems') or [], inline=False)[1]
+                  for i in {item['kept'][0] for item in task['remove']}}
+        listing, mapping = [], {}
+        for item in task['remove']:
+            kept = others[item['kept'][0]].get(item['kept'][1], {'text': ''})['text']
+            label = next(iter(_LABEL.findall(kept)), '').strip()
+            dropped = next(iter(_LABEL.findall(legend.get(item['token'], {}).get('text', ''))), '').strip()
+            if label and dropped:
+                mapping[dropped] = label
+            listing.append(f'{item["token"]}: stated elsewhere' + (f' with the label {label}' if label else '')
+                           + ': replace it by one sentence that refers to it' + (f' (\\ref{{{label}}} or \\eqref{{{label}}})' if label else ''))
+        tokens = {item['token'] for item in task['remove']}
+        instruction = ('This LaTeX text is part of a longer document. Some of its statements or displays are stated elsewhere '
+                       'in the document: replace each listed token by one sentence that refers to the statement elsewhere, '
+                       'and change nothing else. The mathematics is frozen as tokens (listed); keep every other token as it '
+                       'is. Output the whole text, with no commentary.\n\nTO REPLACE:\n' + '\n'.join(listing)
+                       + '\n\nTOKENS:\n' + legend_text(legend) + '\n\nTEXT:\n' + frozen)
+        new = self._stitch_call(instruction, frozen)
+        if new is None:
+            return {'result': 'refused', 'reason': 'no complete answer'}
+        kept_legend = {t: v for t, v in legend.items() if t not in tokens}
+        labels = self._known_labels() | {l for p in self.state['parts'] for l in _LABEL.findall(_uncommented(p['body']))}
+        keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
+        reason = frozen_guard(_drop_tokens(frozen, tokens), new, kept_legend, ('P10',), labels, keys)
+        if reason or any(t in new for t in tokens):
+            return {'result': 'refused', 'reason': reason or 'a duplicate is still there'}
+        part['body'] = retarget(thaw(new, legend), mapping)
+        return {'result': 'applied', 'removed': len(tokens)}
+
+    def _stitch_bridges(self, part):
+        """The first paragraph of each section of a spliced text, rewritten against what the skeleton says the section
+        starts from, by edits of the frozen text under frozen_guard."""
+        skeleton = self.state.get('skeleton') or {}
+        sections = {s['heading']: s for s in skeleton.get('sections') or []}
+        problems = []
+        for heading in part['sections']:
+            section = sections.get(heading)
+            if section and section.get('opens'):
+                problems.append({'problem': f'the opening of the section "{heading}" does not say where it starts from',
+                                 'instruction': f'rewrite its first paragraph so that it starts from: {section["opens"]}',
+                                 'quote': heading})
+        if not problems:
+            return {'result': 'nothing to do'}
+        text, applied, refused = self._frozen_edits(part['body'], problems, 'the openings of the sections of this text')
+        part['body'] = text
+        return {'result': 'applied' if applied else 'refused', 'applied': applied, 'reason': '; '.join(refused[:3])}
+
+    def _stitch_call(self, instruction, frozen):
+        """One stitch call that returns a whole text, or None."""
+        remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
+        cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, len(frozen) // 2 + 2048))
+        try:
+            result = self._call('stitch', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
+                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the whole text now.')
+        except ResearchBudget:
+            return None
+        new = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
+        return new + ('\n' if frozen.endswith('\n') else '') if result['complete'] and new.strip() else None
+
+    def _frozen_edits(self, text, problems, what):
+        """(text, applied, refused): one revise_section call on `text` with its mathematics frozen, answering
+        `problems` ([{problem, instruction, quote}]) by line edits, each under frozen_guard. Used for the author's
+        introduction (_frame_edits) and the bridges of an assembled document."""
+        skeleton = self.state.get('skeleton') or {}
+        frozen, legend = freeze(text, self.state.get('theorems') or [])
+        for issue in problems:
+            issue['quote'] = next((line for line in frozen.split('\n') if issue['quote'] in thaw(line, legend)), issue['quote'])
+        listing = '\n'.join(f'{n}. passage: {i["quote"][:200]}\n  problem: {i["problem"]}\n  do: {i["instruction"]}'
+                            for n, i in enumerate(problems, 1))
+        others = '\n\n'.join(p['body'] for p in self.state['parts'] if p['body'] != text)
+        known = '\n'.join(f'- {label}: {kind} {what_}' for label, (kind, what_)
+                          in label_targets(others, self.state.get('theorems') or []).items())[:6000]
+        instruction = (f'Fix the issues below in {what} by edits, as the system message says. It is the author\'s text: '
+                       'change only what an issue asks. Its mathematics is frozen: each formula, display, statement and '
+                       'heading is a token (listed below) that an edit keeps as it is and writes no mathematics around.'
+                       '\n\nISSUES TO FIX:\n' + listing + ('\n\n' + self._skeleton_text() if skeleton else '')
+                       + '\n\nLABELS OF THE DOCUMENT:\n' + known + '\n\nTOKENS:\n' + legend_text(legend)
+                       + '\n\nTEXT (with line numbers):\n' + numbered(frozen))
+        remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
+        cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, max(2048, len(frozen) // 2 + 1024)))
+        try:
+            result = self._call('revise_section', instruction, cap=cap, think=False, minimum_output=min(cap, 256),
+                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the edits now.')
+        except ResearchBudget:
+            return text, 0, ['no budget left']
+        edits = parse_edits(result['text'])
+        if not result['complete'] and edits:
+            edits.pop()  # the last edit may be cut
+        keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
+        allowed = ({label.strip() for label in _LABEL.findall(_uncommented(others + '\n' + text))}
+                   | {x['label'] for kind in ('sections', 'items', 'equations', 'floats') for x in skeleton.get(kind) or []})
+        lines, taken, applied, refused = frozen.split('\n'), [], 0, []
+        for edit in sorted(edits, key=lambda e: -e['first']):  # from the end: earlier line numbers stay valid
+            a, b = edit['first'] - 1, edit['last']
+            if not 1 <= edit['issue'] <= len(problems) or a < 0 or b > len(lines) or any(a < d and c < b for c, d in taken):
+                continue
+            after = lines[:a] + edit['text'].split('\n') + lines[b:]
+            reason = frozen_guard(frozen, '\n'.join(after), legend, (), allowed, keys)
+            if reason:
+                refused.append(reason)
+                continue
+            lines, applied = after, applied + 1
+            taken.append((a, b))
+        return thaw('\n'.join(lines), legend), applied, refused
+
     def _frame(self):
         """The introduction and the abstract of a whole paper, written after its body, one call per step. A composed
         introduction is written by the writing call with the body before it; the author's own introduction is kept and
@@ -3274,6 +3709,9 @@ class WriteupRunner(ResearchRunner):
             return
         if self._abstract_wanted() and not self.state.get('abstract_written'):
             self._frame_abstract()
+            return
+        if self.state.get('splice'):
+            self.state['phase'] = 'stitch'  # an assembled document: what is new between the texts
             return
         self._join_parts()
 
@@ -3299,46 +3737,8 @@ class WriteupRunner(ResearchRunner):
         if not problems or not self._affordable():
             part.update(body=text, complete=True)
             return
-        frozen, legend = freeze(text, self.state.get('theorems') or [])
-        for issue in problems:
-            issue['quote'] = next((line for line in frozen.split('\n') if issue['quote'] in thaw(line, legend)), issue['quote'])
-        listing = '\n'.join(f'{n}. [frame-links] passage: {i["quote"][:200]}\n  problem: {i["problem"]}\n  do: {i["instruction"]}'
-                            for n, i in enumerate(problems, 1))
-        known = '\n'.join(f'- {label}: {kind} {what}' for label, (kind, what)
-                          in label_targets(others, self.state.get('theorems') or []).items())[:6000]
-        instruction = ('Fix the issues below in this introduction by edits, as the system message says. It is the author\'s '
-                       'text: change only what an issue asks. Its mathematics is frozen: each formula, display, statement '
-                       'and heading is a token (listed below) that an edit keeps as it is and writes no mathematics around.'
-                       '\n\nISSUES TO FIX:\n' + listing
-                       + ('\n\n' + self._skeleton_text() if skeleton else '') + '\n\nLABELS OF THE DOCUMENT:\n' + known
-                       + '\n\nTOKENS:\n' + legend_text(legend) + '\n\nSECTION (with line numbers):\n' + numbered(frozen))
-        remaining = remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
-        cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, max(2048, len(text) // 2 + 1024)))
-        try:
-            result = self._call('revise_section', instruction, cap=cap, think=False, minimum_output=min(cap, 256),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the edits now.')
-        except ResearchBudget:
-            part.update(body=text, complete=True)
-            return
-        edits = parse_edits(result['text'])
-        if not result['complete'] and edits:
-            edits.pop()  # the last edit may be cut
-        keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
-        allowed = labels | {x['label'] for kind in ('sections', 'items', 'equations', 'floats') for x in skeleton.get(kind) or []}
-        lines, taken, applied, refused = frozen.split('\n'), [], 0, []
-        for edit in sorted(edits, key=lambda e: -e['first']):  # from the end: earlier line numbers stay valid
-            a, b = edit['first'] - 1, edit['last']
-            issue = problems[edit['issue'] - 1] if 1 <= edit['issue'] <= len(problems) else None
-            if issue is None or a < 0 or b > len(lines) or any(a < d and c < b for c, d in taken):
-                continue
-            after = lines[:a] + edit['text'].split('\n') + lines[b:]
-            reason = frozen_guard(frozen, '\n'.join(after), legend, (), allowed, keys)
-            if reason:
-                refused.append(reason)
-                continue
-            lines, applied = after, applied + 1
-            taken.append((a, b))
-        part.update(body=thaw('\n'.join(lines), legend), complete=True)
+        body, applied, refused = self._frozen_edits(text, problems, 'this introduction')
+        part.update(body=body, complete=True)
         self.state['frame_edits'] = {'problems': [i['problem'] for i in problems], 'applied': applied, 'refused': refused}
 
     def _main_statement(self, body):
@@ -3399,6 +3799,16 @@ class WriteupRunner(ResearchRunner):
         return '\n\n' + text if text else ''
 
     def _join_parts(self):
+        if self.state.get('splice'):
+            # What the model changed in the author's texts: the fidelity check reads these passages only.
+            hunks = []
+            for part in self.state['parts']:
+                if part.get('spliced_text') is None:
+                    continue
+                old, new = part['spliced_text'].split('\n'), part['body'].split('\n')
+                hunks += [{'file': part['file'], 'before': '\n'.join(old[a:b]), 'after': '\n'.join(new[c:d])}
+                          for tag, a, b, c, d in SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if tag != 'equal']
+            self.state['splice']['hunks'] = hunks[:60]
         body = self._take_bibtex('\n\n'.join(p['body'] for p in self.state['parts']))
         if len(self.state['parts']) > 1:
             # Written in several calls: a later part may cite a label under a slightly different name
@@ -3593,6 +4003,10 @@ class WriteupRunner(ResearchRunner):
         points = self._template_notes() + ['Missing from the material: ' + piece + '.' for piece in self._missing_pieces()]
         points += ['Question about your notes: ' + question for question in self._problem_questions()]
         points += self._review_points()
+        for done in ((self.state.get('splice') or {}).get('stitch') or {}).get('done') or []:
+            if done['kind'] == 'notation' and done['result'] == 'refused':
+                points.append(f'The notation of {done["file"]} could not be made the document\'s ({done["reason"]}): it still '
+                              'writes ' + ', '.join(f'{old} for {new}' for old, new in self._notation_table()) + '. Which do you want?')
         if self.state.get('truncated'):
             points.append('Time ran out while the document was being written: it stops early.')
         self.state['warnings'] = [warning for warning in self.state['warnings']
@@ -4111,7 +4525,7 @@ class WriteupRunner(ResearchRunner):
                                   points_total=self._points_total())
         self.state['checks'] = (findings + self._part_findings() + self._name_findings() + self._marker_findings()
                                 + self._definition_findings() + self._structure_findings() + self._skeleton_checks()
-                                + self._frame_checks())
+                                + self._frame_checks() + self._splice_checks())
         body = self.state['body']
         digest = _digest(body)
         if self._review_due(digest) and self._review_step(digest):
@@ -4243,6 +4657,13 @@ class WriteupRunner(ResearchRunner):
                                        line + first - 1 if line else None)
             found.append({**finding, 'severity': severity})
         return found
+
+    def _splice_checks(self):
+        """An assembled document: a command two texts define differently was renamed in the later one (a notation
+        finding: one object, two names, or two objects, one name)."""
+        changes = (self.state.get('splice') or {}).get('changes') or {}
+        return [texcheck.finding('PROSE', 'notation-clash', f'{name}: {change}', change.split(' ', 1)[0])
+                for name, items in changes.items() for change in items if change.startswith('\\')]
 
     def _frame_checks(self):
         """frame_findings on the introduction of a document with a skeleton, as findings (frame-links, major)."""
@@ -4626,7 +5047,23 @@ class WriteupRunner(ResearchRunner):
                     # Two independent readings of the material agree: the reviser may put the material's formula back.
                     asked[number - 1].update(fixable='rewrite', formula_ok=True)
             return {'issues': [], 'dropped': 0}
-        if task['kind'] == 'fidelity':
+        if task['kind'] == 'fidelity' and self._assembled_only():
+            hunks = self.state['splice'].get('hunks') or []
+            if not hunks:
+                return {'issues': [], 'dropped': 0}  # the author's texts, spliced unchanged
+            listing = '\n\n'.join(f'{n}. In {h["file"]}:\nBEFORE (the author\'s text):\n{h["before"] or "(nothing)"}\n'
+                                   f'AFTER (the document):\n{h["after"] or "(removed)"}' for n, h in enumerate(hunks, 1))
+            instruction = ('The document below was assembled from the author\'s LaTeX texts, which are kept as they are except '
+                           'for the CHANGED PASSAGES listed. Check each AFTER against its BEFORE, as the system message says: a '
+                           'change of notation or a sentence that refers to a statement given elsewhere is faithful when the '
+                           'mathematics is the same. quote copies the AFTER passage; line and last_line may be 0.'
+                           + already + '\n\nCHANGED PASSAGES:\n' + listing[:room])
+            answer = self._structured('fidelity', instruction, 8192, FIDELITY_SCHEMA, salvage='issues')
+            if answer is None:
+                return {'skipped': 'not run: no usable answer'}
+            records = [self._issue('fidelity', 'F-' + item.get('category', 'changed'), item) for item in answer.get('issues') or []
+                       if isinstance(item, dict)]
+        elif task['kind'] == 'fidelity':
             material = self._whole_material()
             if len(material) + len(body) > room:
                 return {'skipped': 'not run: the material and the document do not fit in one call'}
@@ -4947,6 +5384,11 @@ class WriteupRunner(ResearchRunner):
         self.state['body'] = ascii_punctuation(tidy_numbering(revised, self._material_labels(), self._material_text()))
         self.state.update(repaired=False, readiness=None)
         self.state['phase'] = 'assemble'
+
+    def _assembled_only(self):
+        """An assembled document none of whose body sections was written by the model: its fidelity is by
+        construction, and only what changed is checked."""
+        return bool(self.state.get('splice')) and all(p.get('file') for p in self.state.get('parts') or [])
 
     def _changes_mathematics(self, issue):
         """A finding whose fix changes mathematics: a formula two checks confirmed against the material, or a passage
@@ -5863,6 +6305,16 @@ class WriteupRunner(ResearchRunner):
                         for i in skeleton.get('items') or [] if i['section'] == section['label']]
             if skeleton.get('aliases'):
                 out.append('- Aliases: ' + ', '.join(f'`{a["from"]}` -> `{a["to"]}`' for a in skeleton['aliases']))
+        splice = s.get('splice') or {}
+        if splice:
+            out += ['', '## Assembly', '', 'Your texts were put together as they are, except for these changes.', '']
+            for name, changes in (splice.get('changes') or {}).items():
+                out.append(f'- `{name}`: ' + ('; '.join(changes) if changes else 'unchanged by code') + '.')
+            for done in (splice.get('stitch') or {}).get('done') or []:
+                out.append(f'- `{done["file"]}`, {done["kind"]}: {done["result"]}' + (f' ({done["reason"]})' if done.get('reason') else '')
+                           + (f', {done["removed"]} removed' if done.get('removed') else '') + '.')
+            if splice.get('hunks') is not None:
+                out.append(f'- Passages the model changed in your texts (the fidelity check reads these only): {len(splice["hunks"])}.')
         writing = [c for c in s.get('calls') or [] if c['role'] in ('writing', 'abstract')]
         if len(writing) > 1 or s.get('framed'):
             out += ['', '## Writing calls', ''] + [
