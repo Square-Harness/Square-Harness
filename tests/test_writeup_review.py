@@ -425,6 +425,13 @@ class WriteupPlanTests(unittest.TestCase):
                                         texts, 'other.tex')
         self.assertEqual(clash[0], {})  # numerics.tex already writes M: it would mean something else there
         self.assertIn('writes both', clash[1][0])
+        # The mathematical part is the text that proves the main result, not the introduction that states it.
+        merged = {'intro.tex': '\\begin{theorem}\\label{thm:main} A bound.\\end{theorem}',
+                  'proof.tex': '\\begin{theorem}\\label{thm:conv} A bound.\\end{theorem}\n\\begin{proof} Clear.\\end{proof}',
+                  'numerics.tex': 'A table.'}
+        self.assertEqual(writeup.mathematical_part(merged, ['intro.tex', 'proof.tex']), 'proof.tex')
+        self.assertEqual(writeup.mathematical_part(merged, ['intro.tex']), 'proof.tex')  # the proof is elsewhere
+        self.assertEqual(writeup.mathematical_part({'a.tex': 'Text.', 'b.tex': merged['intro.tex']}), 'b.tex')
 
     def test_in_a_merge_a_text_is_one_section_and_its_sections_move_down(self):
         text = ('\\section{Setting}\\label{sec:setting}\nA.\n\\subsection{Grid}\\label{sec:grid}\nB.\n'

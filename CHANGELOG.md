@@ -27,6 +27,11 @@
   symbol a text already uses is not made and is put to you; the report lists
   each replacement and how often it was made.
 
+- Write-up: in a merge, the text whose notation is kept is the one that
+  proves the main result; an introduction that only states the theorem no
+  longer counts as that text. The abstract of a merged document is written
+  after its notation is made one, with the symbols of the introduction.
+
 - Write-up: an introduction you wrote is no longer asked for `% PART:`
   markers. One review call reads it against the required parts (motivation,
   literature, positioning, main result, method) and quotes each; a missing part

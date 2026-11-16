@@ -746,8 +746,9 @@ How it works:
    label or a command two texts both define is renamed in the later one,
    bibliographies are united) and the report lists each change. The model
    writes only what is new: one notation where the texts differ (a table of
-   symbols that code applies inside the formulas; the text with the main result
-   and its proof keeps its own notation, unless your request names another; a
+   symbols that code applies inside the formulas; the text that proves the
+   main result keeps its own notation, unless your request names another; the
+   abstract is written after this, with the same symbols; a
    replacement that would clash with a symbol already used is put to you), an
    edit of a few lines that replaces a statement another text already gives
    by a sentence citing it, the opening of each section,

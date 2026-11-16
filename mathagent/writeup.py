@@ -1932,6 +1932,26 @@ def _without_index(text, symbol):
     return re.sub(r'_\s*(?:\{\s*' + escaped + r'\s*\}|' + escaped + r'(?![A-Za-z]))', '_{}', text)
 
 
+def mathematical_part(texts, mains=()):
+    """The mathematical part of a merge, whose notation wins: the text ({file: text}) that holds the proof of the main
+    result. Among the texts that state a main result (`mains`, the files of the skeleton's main items), the one with
+    the most proofs: an introduction states the theorem and proves nothing. When none of them has a proof, the text
+    with the most proofs; when no text has one, the first of `mains`, else the text with the most theorem-like
+    environments."""
+    if not texts:
+        return ''
+    proofs = {name: len(re.findall(r'\\begin\s*\{proof\}', _uncommented(text))) for name, text in texts.items()}
+    stated = [name for name in dict.fromkeys(mains) if name in texts]
+    for names in (stated, list(texts)):
+        proving = [name for name in names if proofs[name]]
+        if proving:
+            return max(proving, key=lambda name: proofs[name])
+    if stated:
+        return stated[0]
+    names = '|'.join(sorted(_THEOREM_LIKE, key=len, reverse=True))
+    return max(texts, key=lambda name: len(re.findall(r'\\begin\{(?:' + names + r')\*?\}', texts[name])))
+
+
 def settle_notation(rows, texts, main, request=''):
     """The changes of notation to make, from the model's rows {object, keep, replace: [{file, from}]}: (plan, questions,
     turned) with plan = {file: [(from, keep, object)]}. Only symbols. The mathematical part `main` (the text with the
@@ -3966,6 +3986,9 @@ class WriteupRunner(ResearchRunner):
         stitch = splice['stitch']
         pending = [t for n, t in enumerate(stitch['tasks']) if n not in [d['n'] for d in stitch['done']]]
         if not pending or not self._affordable():
+            if self._abstract_wanted() and not self.state.get('abstract_written') and self._affordable():
+                self._frame_abstract()  # last: it reads the texts once their notation is one
+                return
             self._join_parts()
             return
         task = pending[0]
@@ -3978,17 +4001,12 @@ class WriteupRunner(ResearchRunner):
         stitch['done'].append({'n': number, 'kind': task['kind'], 'file': part['file'], **outcome})
 
     def _main_text(self):
-        """The mathematical part of a merge: the text that holds the main result (the skeleton's main item), else the
-        text with the most theorem-like environments."""
+        """The mathematical part of a merge (mathematical_part): the text that holds the proof of the main result."""
         skeleton = self.state.get('skeleton') or {}
         home = {s['label']: s.get('file') for s in skeleton.get('sections') or []}
-        main = next((i for i in skeleton.get('items') or [] if i.get('role') == 'main'), None)
-        if main and home.get(main['section']):
-            return home[main['section']]
-        names = '|'.join(sorted(_THEOREM_LIKE, key=len, reverse=True))
-        texts = [(p['file'], len(re.findall(r'\\begin\{(?:' + names + r')\*?\}', p.get('kept') or p['body'])))
-                 for p in self.state['parts'] if p.get('file')]
-        return max(texts, key=lambda pair: pair[1])[0] if texts else ''
+        mains = [home.get(i['section']) for i in skeleton.get('items') or [] if i.get('role') == 'main']
+        texts = {p['file']: p.get('kept') or p['body'] for p in self.state['parts'] if p.get('file')}
+        return mathematical_part(texts, [name for name in mains if name])
 
     def _stitch_notation(self):
         """One notation for the merge, by a table that code applies. One structured call (role notation) reads, per text,
@@ -4138,11 +4156,13 @@ class WriteupRunner(ResearchRunner):
             else:
                 self._draft(index)
             return
+        if self.state.get('splice'):
+            # An assembled document: what is new between the texts comes first, and the abstract is written after it
+            # (_stitch), from the text in its one notation.
+            self.state['phase'] = 'stitch'
+            return
         if self._abstract_wanted() and not self.state.get('abstract_written'):
             self._frame_abstract()
-            return
-        if self.state.get('splice'):
-            self.state['phase'] = 'stitch'  # an assembled document: what is new between the texts
             return
         self._join_parts()
 
@@ -4197,8 +4217,9 @@ class WriteupRunner(ResearchRunner):
         instruction = (f'Write the abstract of the document below, in {outline.get("language", "english").capitalize()}: plain '
                        'text of 100 to 200 words, from the context to the result with the hypotheses that decide its scope, '
                        'then the idea of the proof and a consequence. No \\begin{abstract}, no citation, no \\ref or \\eqref, '
-                       'no numbered formula, no term its reader cannot know; mathematics in $...$ is allowed. Output the '
-                       'abstract only.\n\nRULES:\n' + '\n'.join(f'- {r["id"]} {r["text"]}' for r in rules)
+                       'no numbered formula, no term its reader cannot know; mathematics in $...$ is allowed. Write each '
+                       'object with the symbol the introduction uses for it, exactly as it is written there (its commands, '
+                       'such as \\dt, never their expansion or another symbol). Output the abstract only.\n\nRULES:\n' + '\n'.join(f'- {r["id"]} {r["text"]}' for r in rules)
                        + ('\n\nTHE FIRST VERSION:\n' + self.state.get('abstract', '') + '\nITS PROBLEMS:\n'
                           + '\n'.join('- ' + p for p in problems) if problems else '')
                        + '\n\nTITLE: ' + (self.state.get('title') or outline.get('title') or '')
