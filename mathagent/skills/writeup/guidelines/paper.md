@@ -55,3 +55,5 @@ reader of the whole text. A rule tagged `section` applies from the size of a sec
 - P21 [reader, section] Earned sentences. Every sentence gives the reader a fact, a reason or a reference. A sentence
   that only restates the statement that follows, announces what comes next or says that a result is important is
   removed, not reworded.
+- P22 [reader, paper] Sections. A section is a part of the paper with its own purpose and runs two to five pages; a
+  step of an argument is a subsection or a paragraph.

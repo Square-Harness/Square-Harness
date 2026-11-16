@@ -731,9 +731,16 @@ How it works:
    own introduction in LaTeX, it is kept: one call only adds those links and
    repairs its references. The abstract is written after the introduction,
    checked once against the main result, and written again once if it fails.
+   A section runs two to five pages: the plan says how long the document is and
+   makes a step of an argument a subsection or plain text, and is asked again
+   when it has too many or too few sections; after the compile, a section
+   outside two to five pages is listed for you (the introduction and a closing
+   discussion may be shorter).
    When you ask to merge finished LaTeX texts (attached without
    `\begin{document}`), they are assembled, not rewritten: the skeleton says
-   which text each section comes from (read by code from the texts' headings;
+   which text each section comes from (each text is one section: its sections
+   become subsections, unless you ask to keep them; read by code from the
+   texts' headings;
    the skeleton is then read from the texts and the model only annotates it),
    the texts are put together by code (a
    label or a command two texts both define is renamed in the later one,

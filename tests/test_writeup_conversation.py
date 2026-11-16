@@ -180,7 +180,7 @@ class WholePaperTests(GuiCase):
             'heading': heading, 'role': role, 'source': source, 'covers': list(covers), 'parts': [],
             'requested_by': 'R1' if source == 'composed' else '', 'purpose': heading + '.', 'thread': []}
         plan = json.loads(PLAN)
-        plan.update(kind='article', requirements=['an abstract and an introduction'], sections=[
+        plan.update(kind='article', pages=8, requirements=['an abstract and an introduction'], sections=[
             section('Abstract', 'abstract', 'composed'), section('Introduction', 'introduction', intro_source),
             section('Stability', 'body', 'material', ['S1']), section('Convergence', 'body', 'material', ['S2']),
             section('Numerical results', 'body', 'material')])

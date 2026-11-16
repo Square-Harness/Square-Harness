@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Write-up: fewer, longer sections. A section runs two to five pages (new rule
+  P22): the plan gives each section a level (a step of an argument is a
+  subsection or plain text) and the document's length in pages, and is asked
+  once more when its number of sections does not fit. After the compile, the
+  pages of the sections' labels show how long each runs, and a section outside
+  two to five pages is listed for you (the introduction and a closing
+  discussion may be shorter). In a merge, each text becomes one section: its
+  sections become subsections and its subsections subsubsections, labels
+  unchanged, unless you ask to keep a text's sections. The main theorem stated
+  again in your introduction is turned into its statement in words citing it.
+  A repair no longer takes the heading above the failing paragraph with it.
+
 - Write-up: a statement that two merged texts both give is removed by an edit
   of the few lines around it, not by writing the whole text again: the edit may
   remove that statement and nothing else, and a theorem repeated in the

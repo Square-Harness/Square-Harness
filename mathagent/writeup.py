@@ -533,7 +533,7 @@ _OPENER = re.compile(r"\b(?:We (?:begin|start) (?:with|by)|We now (?:turn|recall
                      r"(?:shows|states|gives))\b", re.I)
 # Rules whose checker is code (writeup._structure_findings and others), out of the review prompts, and the
 # source-checker rules that report each; the report's table of rules reads them.
-CODE_RULES = {'P1': ('positional', 'hand-number', 'skeleton-equation'), 'P2': ('ref-kind',), 'P8': ('overfull',),
+CODE_RULES = {'P22': ('section-length',), 'P1': ('positional', 'hand-number', 'skeleton-equation'), 'P2': ('ref-kind',), 'P8': ('overfull',),
               'P20': ('title-length',), 'I6': ('frame-links',), 'I12': ('frame-links',), 'I7': ('intro-statements',),
               'I8': ('intro-sections',), 'I11': ('intro-list',), 'A2': ('abstract-length',), 'A3': ('abstract-cite', 'abstract-ref')}
 CODE_CHECKED = set(CODE_RULES)
@@ -837,9 +837,14 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
                     pass
                 process.wait()
         log_path, pdf_path = Path(folder, 'document.log'), Path(folder, 'document.pdf')
+        aux_path = Path(folder, 'document.aux')
+        aux = aux_path.read_text(encoding='utf-8', errors='replace') if aux_path.exists() else ''
+        # The page of each label (\newlabel{key}{{number}{page}...}): how long each section runs.
+        pages = {m.group(1): int(m.group(2)) for m in re.finditer(r'\\newlabel\{([^{}]*)\}\{\{[^{}]*\}\{(\d+)\}', aux)}
         log = log_path.read_text(encoding='utf-8', errors='replace') if log_path.exists() else ''
         # Packages are listed at the start of the log, which is cut to its end below.
         hyperref = bool(re.search(r'[/(]hyperref\.sty\b', log))
+        written = re.search(r'Output written on document\.pdf \((\d+) pages?', log)
         log = log[-60000:]
         pdf = (pdf_path.read_bytes() if process.returncode == 0 and not timed_out and pdf_path.exists()
                and pdf_path.stat().st_size < 20_000_000 else None)
@@ -853,7 +858,8 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
     if not errors and pdf is None:
         errors = [{'file': None, 'line': None, 'message': 'LaTeX produced no PDF; see the log'}]
     return {'available': True, 'ok': pdf is not None, 'errors': errors[:20], 'log': log, 'pdf': pdf,
-            'references': reference_diagnostics(log), 'hyperref': hyperref}
+            'references': reference_diagnostics(log), 'hyperref': hyperref,
+            'pages': dict(list(pages.items())[:500]), 'page_count': int(written.group(1)) if written else None}
 
 
 # -- the outline: what kind of document, what the material holds, what is missing --------------
@@ -930,7 +936,9 @@ OUTLINE_SCHEMA = _OBJECT({
     'sections': {'type': 'array', 'items': _OBJECT({
         'heading': _TEXT, 'role': {'type': 'string', 'enum': list(ROLES)},
         'source': {'type': 'string', 'enum': ['material', 'composed']}, 'covers': _TEXTS, 'parts': _TEXTS,
-        'requested_by': _TEXT, 'purpose': _TEXT, 'thread': _TEXTS})},
+        'requested_by': _TEXT, 'purpose': _TEXT, 'thread': _TEXTS, 'level': {'type': 'integer', 'enum': [1, 2]}})},
+    'pages': {'type': 'number'},
+    'files': {'type': 'array', 'items': _OBJECT({'file': _TEXT, 'heading': _TEXT, 'flat': {'type': 'boolean'}})},
     'questions': {'type': 'array', 'items': _OBJECT({'exercise': _TEXT, 'asks': _TEXT, 'given': _TEXT, 'uses': _TEXTS,
                                                      'proves': _TEXTS, 'points': {'type': 'number'}})},
     'recalled': _TEXTS,
@@ -969,6 +977,14 @@ sentence per item the section covers, in the order of the text, saying why it co
 earlier item it uses, and where it is used later ("S2 (a priori bound): needed in P3 to pass to the limit"). The writer
 turns these into the sentences that link the results; an empty list for other kinds.
 An introduction is ONE section, with role introduction, that provides all the required parts of an introduction.
+level: 1 for a section, 2 for a subsection of the level-1 section before it. A section is a part of the paper with its
+own purpose and runs two to five pages; a step of an argument is not a section: a lemma with its proof is a level-2
+section when it runs over about a page, and plain text inside its section otherwise. A document of `pages` pages has
+between pages/5 and pages/2 level-1 sections (rounded), the introduction included: two to five for ten pages.
+pages: the length the request asks for, or your estimate of the document's length in pages.
+files: when the request asks to merge existing LaTeX texts, one entry per text: file (its name), heading (the heading of
+the one section it becomes; its own sections become subsections), flat (true only when the request asks to keep that
+text's sections as sections). An empty list otherwise.
 size: how much the request asks for. short: a result or a few results to clean up, a comment on a computation, a
 proof to write out: about two pages at most, as long as its material and no longer, with no introduction and no
 sections the material does not have. section: one part of a paper. paper: a whole article, or its introduction. When
@@ -1160,6 +1176,12 @@ def _slug(text):
     return re.sub(r'[^a-z0-9]+', '-', text).strip('-')
 
 
+def section_range(pages):
+    """(fewest, most) level-1 sections of a document of `pages` pages, when a section runs two to five pages."""
+    pages = max(1, int(round(pages or 1)))
+    return -(-pages // 5), max(1, pages // 2)
+
+
 def skeleton_label(kind, proposed, fallback, taken, material=()):
     """A label for the skeleton: one the material already has is kept exactly; any other is normalised (the prefix of
     its kind, lower-case ASCII with hyphens, at most 30 characters) and made unique. `taken` is updated."""
@@ -1215,7 +1237,15 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
     text = lambda value, limit=200: ' '.join(str(value or '').split())[:limit]
     listed = lambda key: [x for x in raw.get(key) or [] if isinstance(x, dict)] if isinstance(raw.get(key), list) else []
     material, taken, renamed = set(material_labels), set(), {}
-    wanted = [s for s in outline.get('sections') or [] if s.get('role') != 'abstract']  # front matter, not a section
+    # Level-1 sections only (a subsection's items belong to its section); the abstract is front matter.
+    wanted, parent = [], {}
+    for s in outline.get('sections') or []:
+        if s.get('role') == 'abstract':
+            continue
+        if s.get('level', 1) == 2 and wanted:
+            parent[id(s)] = wanted[-1]
+        else:
+            wanted.append(s)
     proposed = listed('sections')
     by_heading = {' '.join(p.get('heading', '').casefold().split()): p for p in proposed}
     sections = []
@@ -1236,6 +1266,10 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
         where.setdefault(str(number), section['label'])
     place = lambda value: where.get(renamed.get(text(value), text(value))) or where.get(' '.join(text(value).casefold().split()), '')
     covered = {item: s_label['label'] for s, s_label in zip(wanted, sections) for item in s.get('covers') or []}
+    label_of = {id(s): s_label['label'] for s, s_label in zip(wanted, sections)}
+    for s in outline.get('sections') or []:
+        if id(s) in parent:
+            covered.update({item: label_of[id(parent[id(s)])] for item in s.get('covers') or [] if item not in covered})
     items, ids = [], set()
     for item in listed('items')[:60]:
         ident = text(item.get('id'), 20)
@@ -1714,6 +1748,56 @@ def unique_name(name, taken):
         suffix = chr(ord(suffix) + 1)
     taken.add(f'{name}{joint}{suffix}')
     return f'{name}{joint}{suffix}'
+
+
+_DEMOTED = {'section': 'subsection', 'subsection': 'subsubsection', 'subsubsection': 'paragraph'}
+
+
+def label_sections(body):
+    """The body with a label after each \\section that has none (made from its heading)."""
+    masked, restore = _protect_code(body, comments=True)
+    taken = {label.strip() for label in _LABEL.findall(masked)}
+    out, at = [], 0
+    for m in re.finditer(r'(?m)^[ \t]*\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', masked):
+        inner, end = _group(masked, m.end())
+        if inner is None or re.match(r'\s*\\label\s*\{', masked[end:]):
+            continue
+        out.append(masked[at:end] + '\\label{' + skeleton_label('section', '', inner, taken) + '}')
+        at = end
+    return restore(''.join(out) + masked[at:])
+
+
+def demote_headings(body, heading, taken):
+    """(body, label, moved): a text with several \\section's made one section: every heading moved down one level
+    (\\section to \\subsection, \\subsection to \\subsubsection, \\subsubsection to \\paragraph) under a new
+    \\section{heading} whose label is made here (unique against `taken`). When `heading` is the text's own first
+    heading (same words), that one stays the \\section, with its subsections, and only the others move down. Labels
+    never change. A text
+    with one \\section (or none) is returned as it is, with label None."""
+    masked, restore = _protect_code(body, comments=True)
+    pattern = re.compile(r'(?m)^([ \t]*)\\(section|subsection|subsubsection)(\*?)\s*(?:\[[^\]]*\]\s*)?(?=\{)')
+    heads = list(pattern.finditer(masked))
+    sections = [m for m in heads if m.group(2) == 'section']
+    if len(sections) < 2:
+        return body, None, []
+    words = lambda value: ' '.join(re.sub(r'\\texorpdfstring\{((?:[^{}]|\{[^{}]*\})*)\}\{[^{}]*\}', r'\1', value or '').casefold().split())
+    title = lambda m: _group(masked, m.end())[0] or ''
+    same = words(title(sections[0])) == words(heading)
+    moved, out, at = [], [], 0
+    for m in heads:
+        if same and m.start() < sections[1].start():
+            continue  # the first section stays, with its own subsections
+        out.append(masked[at:m.start()] + m.group(1) + '\\' + _DEMOTED[m.group(2)] + m.group(3))
+        at = m.start() + len(m.group(1)) + 1 + len(m.group(2)) + len(m.group(3))
+        moved.append(f'{" ".join(title(m).split())[:60]}: \\{m.group(2)} -> \\{_DEMOTED[m.group(2)]}')
+    masked = ''.join(out) + masked[at:]
+    if same:
+        own = re.match(r'\s*\\label\s*\{([^{}]*)\}', masked[_group(masked, sections[0].end())[1]:])
+        label = own.group(1).strip() if own else None
+    else:
+        label = skeleton_label('section', '', heading, taken)
+        masked = f'\\section{{{heading}}}\\label{{{label}}}\n\n' + masked.lstrip('\n')
+    return restore(masked), label, moved
 
 
 def splice_texts(texts):
@@ -2972,8 +3056,9 @@ class WriteupRunner(ResearchRunner):
                  if self.state.get('inline_material') else 'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + material)
         scoped = (' The material is a conversation: plan from the final version of each result (the proof the review '
                   'accepted, the repaired argument); a superseded or withdrawn claim is withdrawn.' if self.state.get('scoped') else '')
-        instruction = ('Plan the document the user asks for, as the system message says.' + scoped +
-                       '\n\nREQUIRED PARTS:\n' + required_parts() + '\n\n' + given)
+        again = self.state.get('outline_again')
+        instruction = ('Plan the document the user asks for, as the system message says.' + scoped
+                       + ('\n\n' + again if again else '') + '\n\nREQUIRED PARTS:\n' + required_parts() + '\n\n' + given)
         raw = None
         cap = int(min(16384, output_limit(self.agent, 'writeup', self.WRITE_TOKENS)))
         compact = ('\n\nThe material is long: keep the plan compact. At most forty inventory items (group routine steps), '
@@ -2995,6 +3080,16 @@ class WriteupRunner(ResearchRunner):
             self.state['warnings'].append('The outline call gave no usable plan; the document was written without one.')
         else:
             outline, rules = self._settle_outline(raw)
+            low, high = section_range(outline['pages'])
+            count = sum(s.get('level', 1) == 1 and s['role'] != 'abstract' for s in outline['sections'])
+            if (outline['kind'] in SKELETON_KINDS and outline['size'] != 'short' and not outline.get('assemble')
+                    and count and not low <= count <= high and 'outline_again' not in self.state):
+                # A section runs two to five pages: the outline is asked once more, with the numbers.
+                self.state['outline_again'] = (f'A first plan had {count} level-1 sections for about {outline["pages"]:g} '
+                                               f'pages; a section runs two to five pages, so this document has {low} to '
+                                               f'{high} level-1 sections, the introduction included. Make the steps of '
+                                               'an argument level-2 sections or plain text.')
+                return
             # Not `kind`: that key is the job's type (writeup) for the store and the runners.
             self.state.update(outline=outline, document_kind=outline['kind'], needs=outline['needs'], guidelines=rules)
             self._artifact('outline', json.dumps(outline, ensure_ascii=False, indent=1))
@@ -3150,8 +3245,9 @@ class WriteupRunner(ResearchRunner):
                 units.append({'sections': [section['heading']], 'frame': 'introduction', 'text': text, 'estimate': estimate})
                 continue
             last = units[-1] if units else None
-            if (last and not last.get('frame') and last['estimate'] + estimate <= target
-                    and (whole or len(last['text']) + len(text) <= room * 0.6)):
+            sub = section.get('level', 1) == 2 and last and not last.get('frame')  # a subsection stays with its section
+            if sub or (last and not last.get('frame') and last['estimate'] + estimate <= target
+                       and (whole or len(last['text']) + len(text) <= room * 0.6)):
                 last.update(sections=last['sections'] + [section['heading']], text=last['text'] + text,
                             estimate=last['estimate'] + estimate)
             else:
@@ -3266,8 +3362,11 @@ class WriteupRunner(ResearchRunner):
         sections = [{'heading': text(s.get('heading'), 200), 'role': pick(s.get('role'), ROLES, 'other'),
                      'source': pick(s.get('source'), ('material', 'composed'), 'material'), 'covers': strings(s.get('covers'))[:50],
                      'parts': strings(s.get('parts')), 'requested_by': text(s.get('requested_by'), 20),
-                     'purpose': text(s.get('purpose'), 400), 'thread': [text(t, 400) for t in strings(s.get('thread'))][:40]}
+                     'purpose': text(s.get('purpose'), 400), 'thread': [text(t, 400) for t in strings(s.get('thread'))][:40],
+                     'level': 2 if s.get('level') == 2 else 1}
                     for s in items(raw.get('sections'))][:30]
+        if sections:
+            sections[0]['level'] = 1  # a subsection needs a section before it
         merged = []
         for section in sections:  # an introduction is one section: its parts are paragraphs
             if merged and section['role'] == 'introduction' and merged[-1]['role'] == 'introduction':
@@ -3339,6 +3438,10 @@ class WriteupRunner(ResearchRunner):
                    'requirements': requirements, 'inventory': inventory, 'problems': problems, 'notation': notation,
                    'sections': kept, 'needs': needs, 'dropped_sections': dropped, 'code': bool(raw.get('code')),
                    'keep_latex': raw.get('keep_latex', False) is True, 'assemble': raw.get('assemble', False) is True,
+                   'pages': (float(raw['pages']) if isinstance(raw.get('pages'), (int, float)) and not isinstance(raw.get('pages'), bool)
+                             and raw['pages'] > 0 else max(1.0, round(len(self._whole_material()) / 3000))),
+                   'files': [{'file': text(f.get('file'), 200), 'heading': text(f.get('heading'), 200), 'flat': f.get('flat') is True}
+                             for f in items(raw.get('files'))][:12],
                    'storyline': text(raw.get('storyline'), 1500), 'questions': questions, 'recalled': recalled,
                    'size': size, 'central': strings(raw.get('central'))[:4], 'informal': text(raw.get('informal'), 600),
                    'obstacle': text(raw.get('obstacle'), 600), 'example': text(raw.get('example'), 600),
@@ -3360,7 +3463,8 @@ class WriteupRunner(ResearchRunner):
         out += [f'R{i}: {r}' for i, r in enumerate(o['requirements'], 1)]
         out.append('Inventory of the material (id, status, text): '
                    + '; '.join(f'{i["id"]} ({i["status"]}) {i["text"]}' for i in o['inventory']))
-        out += ['Sections:'] + [f'{n}. {s["heading"]} [{s["role"]}; '
+        out += ['Sections (a level-2 section is a \\subsection of the section before it):'] + [
+                f'{n}. ' + ('(level 2) ' if s.get('level', 1) == 2 else '') + f'{s["heading"]} [{s["role"]}; '
                                 + ('from the material' if s['source'] == 'material' else 'composed, asked by ' + (s['requested_by'] or ', '.join(s['parts'])))
                                 + (f'; covers {", ".join(s["covers"])}' if s['covers'] else '')
                                 + (f'; required parts {", ".join(s["parts"])}' if s['parts'] else '') + f'] {s["purpose"]}'
@@ -3750,6 +3854,19 @@ class WriteupRunner(ResearchRunner):
                 definitions += '\n' + '\n'.join(line.strip().lstrip('%').strip() for line in listed.group(1).splitlines())
             texts.append((part['file'], body, definitions))
         bodies, definitions, entries, changes = splice_texts(texts)
+        # Each text is one section: its own sections become subsections (Louis's rule), unless the outline keeps it flat.
+        given = {Path(f['file']).name: f for f in (self.state['outline'].get('files') or [])}
+        taken = {label.strip() for body in bodies for label in _LABEL.findall(_uncommented(body))}
+        for index, (part, body) in enumerate(zip(parts, bodies)):
+            entry = given.get(part['file']) or {}
+            if part.get('frame') or entry.get('flat'):
+                continue
+            first = re.search(r'(?m)^[ \t]*\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', _uncommented(body))
+            heading = entry.get('heading') or (_group(_uncommented(body), first.end())[0] if first else '') or part['file']
+            bodies[index], label, moved = demote_headings(body, heading, taken)
+            if label:
+                part['sections'] = [heading]
+                changes[part['file']] += [f'one section "{heading}" ({label}); headings moved down: ' + '; '.join(moved)]
         for part, body in zip(parts, bodies):
             if part.get('frame'):
                 part['kept'] = body
@@ -3808,6 +3925,20 @@ class WriteupRunner(ResearchRunner):
         for i, a, j, b in duplicate_blocks([parts[k]['body'] for k in spliced], self.state.get('theorems') or []):
             keep, drop = self._duplicate_keeper(spliced[i], a, spliced[j], b)
             removals.setdefault(drop[0], []).append({'token': drop[1], 'kept': keep})
+        # The main theorem stated again in the author's introduction (in other words, so no text matches it): it
+        # becomes its statement in words there, citing the theorem where the skeleton states it (rule I4).
+        main = next((i for i in (self.state.get('skeleton') or {}).get('items') or [] if i.get('role') == 'main'), None)
+        theorems = self.state.get('theorems') or []
+        if main:
+            legends = {k: freeze(parts[k]['body'], theorems, inline=False)[1] for k in spliced}
+            home = next(((k, token) for k in spliced for token, value in legends[k].items()
+                         if value['kind'] == 'S' and re.search(r'\\label\s*\{' + re.escape(main['label']) + r'\}', value['text'])), None)
+            intro = next((k for k in spliced if parts[k].get('frame') == 'introduction'), None)
+            if home and intro is not None and intro != home[0]:
+                for token, value in legends[intro].items():
+                    if (value['kind'] == 'S' and re.match(r'\\begin\{(?:theorem|thm)\*?\}', value['text'])
+                            and token not in [r['token'] for r in removals.get(intro, [])]):
+                        removals.setdefault(intro, []).append({'token': token, 'kept': home})
         tasks += [{'kind': 'duplicates', 'part': index, 'remove': items} for index, items in removals.items()]
         tasks += [{'kind': 'bridges', 'part': index} for index in spliced if parts[index].get('spliced')]
         return tasks
@@ -4119,6 +4250,8 @@ class WriteupRunner(ResearchRunner):
         abstract, body = cut_abstract(body)
         if abstract:
             self.state['abstract'] = ascii_punctuation(abstract)
+        if outline.get('kind') in SKELETON_KINDS and outline.get('size') != 'short' and not outline.get('keep_latex'):
+            body = label_sections(body)  # every section has a label: its length is read from the pages of the labels
         if self.state.get('skeleton'):
             body, placed = place_skeleton_labels(body, self.state['skeleton'], self._material_labels())
             if placed:
@@ -4642,6 +4775,7 @@ class WriteupRunner(ResearchRunner):
         self.state['undefined'] = [n for n in undefined_names(result['log']) if n not in macros]
         self.state['compile'] = {'available': result['available'], 'ok': result['ok'], 'errors': result['errors'],
                                  'log': log_name, 'pdf': bool(result['pdf']), 'hyperref': bool(result.get('hyperref')),
+                                 'pages': result.get('pages') or {}, 'page_count': result.get('page_count'),
                                  'references': result.get('references') or reference_diagnostics(result['log'])}
         self.state['log_warnings'] = texcheck.log_warnings(result['log'] or '', self.state.get('body_line', 1))
         if not result['available']:
@@ -4831,7 +4965,7 @@ class WriteupRunner(ResearchRunner):
                                   points_total=self._points_total())
         self.state['checks'] = (findings + self._part_findings() + self._name_findings() + self._marker_findings()
                                 + self._definition_findings() + self._structure_findings() + self._skeleton_checks()
-                                + self._frame_checks() + self._splice_checks())
+                                + self._frame_checks() + self._splice_checks() + self._section_length_findings())
         body = self.state['body']
         digest = _digest(body)
         if self._review_due(digest) and self._review_step(digest):
@@ -4963,6 +5097,31 @@ class WriteupRunner(ResearchRunner):
                                        line + first - 1 if line else None)
             found.append({**finding, 'severity': severity})
         return found
+
+    def _section_length_findings(self):
+        """P22, checked after the compile: each level-1 section runs two to five pages, read from the pages of the
+        sections' labels. The introduction and a closing discussion may be shorter. For the author; no gate."""
+        compiled = self.state.get('compile') or {}
+        pages, total = compiled.get('pages') or {}, compiled.get('page_count')
+        if not total or not any(r['id'] == 'P22' for r in self.state.get('guidelines') or []):
+            return []
+        body, first = self.state['body'], self.state.get('body_line', 1)
+        found = []
+        for m in re.finditer(r'(?m)^[ \t]*\\section\*?\s*(?:\[[^\]]*\]\s*)?(?=\{)', body):
+            inner, end = _group(body, m.end())
+            label = re.match(r'\s*\\label\s*\{([^{}]*)\}', body[end:]) if inner is not None else None
+            if label and label.group(1).strip() in pages:
+                found.append((' '.join((inner or '').split()), pages[label.group(1).strip()], body.count('\n', 0, m.start()) + first))
+        out = []
+        for index, (heading, page, line) in enumerate(found):
+            length = (found[index + 1][1] if index + 1 < len(found) else total + 1) - page
+            short_allowed = (index == 0 and re.search(_ROLE_WORDS['introduction'], heading, re.I)
+                             or index == len(found) - 1 and re.search(r'discuss|conclu|outlook|perspective|summary', heading, re.I))
+            if length > 5 or length < 2 and not short_allowed:
+                out.append(texcheck.finding('PROSE', 'section-length', f'the section "{heading[:60]}" runs about {length} '
+                                            'page' + ('s' if length != 1 else '') + ' (a section runs two to five, P22)',
+                                            heading, line))
+        return out
 
     def _splice_checks(self):
         """An assembled document: a command two texts define differently was renamed in the later one (a notation
@@ -6355,7 +6514,9 @@ class WriteupRunner(ResearchRunner):
         balance, at most 80 lines."""
         balanced = lambda chunk: (len(re.findall(r'\\begin\s*\{', chunk)) == len(re.findall(r'\\end\s*\{', chunk)))
         a = b = max(0, min(at, len(lines) - 1))
-        while a > 0 and lines[a - 1].strip():
+        heading = lambda line: re.match(r'\s*\\(?:part|chapter|(?:sub)*section|paragraph)\*?\s*[\[{]', line)
+        # The paragraph, without a heading above it on the paragraph's first line: a repair must not lose a heading.
+        while a > 0 and lines[a - 1].strip() and not heading(lines[a - 1]):
             a -= 1
         while b < len(lines) - 1 and lines[b + 1].strip():
             b += 1

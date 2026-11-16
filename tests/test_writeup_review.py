@@ -4,6 +4,7 @@
 """The review of a write-up: findings kept by their lines, revisions as small edits guarded one by one, the standard
 notation, and the outline of an introduction."""
 import json
+import re
 import shutil
 import unittest
 
@@ -188,9 +189,33 @@ class WriteupReviewTests(GuiCase):
         self.assertEqual(writeup.doubled_labels('\\begin{align}x\\label{a}\\\\ y\\label{b}\\end{align}'), 0)
         self.assertEqual(writeup.doubled_labels('\\begin{lemma}\\label{l} \\begin{equation}\\label{e} x\\end{equation}\\end{lemma}'), 0)
 
+    def test_a_plan_with_too_many_sections_is_asked_again_and_long_sections_are_reported(self):
+        section = lambda heading: {'heading': heading, 'role': 'body', 'source': 'material', 'covers': [], 'parts': [],
+                                   'requested_by': '', 'purpose': '', 'thread': [], 'level': 1}
+        plan = json.loads(PLAN)
+        plan.update(kind='article', size='paper', pages=10, sections=[section(f'Step {n}') for n in range(1, 11)])
+        better = dict(plan, sections=[section('Proof'), section('Remark')])
+        filler = '\n\n'.join(f'Paragraph {i} recalls that the bound $a_{{{i}}}\\le b_{{{i}}}$ holds for every index '
+                             'of the sequence considered here, with the same constant.' for i in range(260))
+        draft = '\\title{A note}\n\\section{Proof}\n' + filler + '\n\\section{Remark}\nIt is short.'
+        (self.root / 'notes.md').write_text('Rough notes.')
+        self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(better), json.dumps({'sections': []}), draft)]
+        started = self.ok('POST', '/api/writeup', {'goal': 'A note.', 'seconds': 300, 'rounds': 1, 'source_files': ['notes.md']})
+        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
+        state = json.loads((self.root / '.mathagent' / 'research' / started['id'] / 'state.json').read_text())
+        plans = [r['messages'][1]['content'] for r in self.fake.requests if 'Plan the document' in r['messages'][1]['content']]
+        self.assertEqual(len(plans), 2)
+        self.assertIn('A first plan had 10 level-1 sections for about 10 pages', plans[1])
+        self.assertEqual([s['heading'] for s in state['outline']['sections']], ['Proof', 'Remark'])
+        self.assertTrue(state['compile']['ok'])
+        self.assertIn('sec:proof', state['compile']['pages'])  # the page of each section, from the .aux
+        lengths = [f['message'] for f in state['checks'] if f['rule'] == 'section-length']
+        self.assertEqual(len(lengths), 2, lengths)  # the proof runs over five pages, the remark under two
+        self.assertNotIn('G', ''.join(g['gate'] for g in state['gates'] if 'section' in g['message']))
+
     def test_the_skeleton_fixes_the_labels_every_call_reads(self):
         plan = json.loads(PLAN)
-        plan.update(kind='article', size='section', sections=[
+        plan.update(kind='article', size='section', pages=5, sections=[
             {'heading': 'Stability', 'role': 'body', 'source': 'material', 'covers': ['S1'], 'parts': [], 'requested_by': '',
              'purpose': 'The bound.', 'thread': []},
             {'heading': 'Convergence', 'role': 'body', 'source': 'material', 'covers': ['S2'], 'parts': [], 'requested_by': '',
@@ -400,6 +425,22 @@ class WriteupPlanTests(unittest.TestCase):
                                         texts, 'other.tex')
         self.assertEqual(clash[0], {})  # numerics.tex already writes M: it would mean something else there
         self.assertIn('writes both', clash[1][0])
+
+    def test_in_a_merge_a_text_is_one_section_and_its_sections_move_down(self):
+        text = ('\\section{Setting}\\label{sec:setting}\nA.\n\\subsection{Grid}\\label{sec:grid}\nB.\n'
+                '\\section{Stability}\\label{sec:stability}\nC.\n\\subsection{Steps}\nD.\n\\subsubsection{One}\nE.\n')
+        body, label, moved = writeup.demote_headings(text, 'Convergence of the scheme', set())
+        self.assertEqual(label, 'sec:convergence-of-the-scheme')
+        self.assertEqual(re.findall(r'\\((?:sub)*section|paragraph)\{', body),
+                         ['section', 'subsection', 'subsubsection', 'subsection', 'subsubsection', 'paragraph'])
+        self.assertEqual(sorted(writeup._LABEL.findall(body)), sorted(writeup._LABEL.findall(text) + [label]))  # labels kept
+        self.assertEqual(len(moved), 5)
+        same, own, moved = writeup.demote_headings(text, 'Setting', set())  # its own first heading: that one stays
+        self.assertEqual((own, len(moved)), ('sec:setting', 3))
+        self.assertIn('\\subsection{Grid}', same)
+        self.assertEqual(writeup.demote_headings('\\section{One}\nx', 'Other', set())[1], None)  # one section: as it is
+        self.assertEqual((writeup.section_range(10), writeup.section_range(3)), ((2, 5), (1, 1)))
+        self.assertEqual(writeup.label_sections('\\section{A}\nx\n\\section{B}\\label{sec:b}'), '\\section{A}\\label{sec:a}\nx\n\\section{B}\\label{sec:b}')
 
     def test_the_skeleton_is_settled_by_the_controller(self):
         outline = {'sections': [{'heading': 'Introduction', 'role': 'introduction', 'covers': []},

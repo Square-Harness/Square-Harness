@@ -661,7 +661,8 @@ writing call or, when a `.tex` source has it, kept and edited by
 through `_whole_material()`, stored once in `state['material']`); with the
 outline's `assemble` and two `.tex` texts, the texts are spliced inside the
 `skeleton` phase (`_splice_plan` maps sections to texts by heading,
-`splice_texts` by code, changes in `state['splice']`), the skeleton is read from
+`splice_texts` by code, `demote_headings` makes each text one section unless the
+outline's `files` says `flat`, changes in `state['splice']`), the skeleton is read from
 them (`skeleton_from_texts`) and the model only annotates it
 (`annotate_skeleton`); then `stitch`
 (after the frame: `_stitch_notation`, one `notation` call whose rows
