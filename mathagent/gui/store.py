@@ -23,6 +23,8 @@ import time
 import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
+from ..literature import LiteratureTools
+from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, source_suffix
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
@@ -33,7 +35,7 @@ from . import personalization, projects
 CHAT_MODES = ('explore', 'free')
 SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
 # How the interface names a suggestion in chat previews, including saved suggestions.
-ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
+ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature review',
                'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
                'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
                'sanity_check': 'Numerical sanity check'}
@@ -407,7 +409,9 @@ def research_detail(root, job_id, active=None):
         'stop_reason': s.get('stop_reason'), 'created_at': s['created_at'], 'updated_at': s['updated_at'],
         'settings': settings,
         'images': s.get('images', []),
-        'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
+        # A literature review's interface meter is "Model calls": the calls made, with no round limit.
+        'budget': {'rounds': (_budget(len(s.get('calls') or []), None) if s.get('pipeline') == ReviewRunner.PIPELINE
+                              else _budget(s['rounds_started'], settings['max_rounds'])),
                    'tokens': _output_budget(s, running),
                    'input_tokens': _budget(s['input_tokens_charged'], settings['max_input_tokens']),
                    'seconds': _working_time(s, running),
@@ -441,6 +445,9 @@ def research_detail(root, job_id, active=None):
            if s['kind'] == 'writeup' and isinstance(s.get('parts'), list) else {}),
         **({key: s.get(key) for key in ('style_name', 'articles', 'domains', 'observations', 'profile', 'saved_to')}
            if s['kind'] == 'style' else {}),
+        **({'review_evidence_count': len(_review_evidence_order(s))} if s.get('pipeline') == ReviewRunner.PIPELINE else {}),
+        **({key: s[key] for key in ('references', 'coverage', 'outputs') if key in s}
+           if s['kind'] == 'literature' else {}),
     }
 
 
@@ -498,6 +505,34 @@ def research_body(root, job_id):
     return name, data
 
 
+# A literature review's files: fixed names in its job directory, never a name taken from its state.
+REVIEW_FILES = {'review': 'review.md', 'bib': 'references.bib'}
+
+
+def research_review_file(root, job_id, output):
+    """A literature review's Markdown text ('review') or BibTeX file ('bib') and the file name to save it under."""
+    state = research_state(root, job_id)
+    path = _job_directory(root, job_id) / REVIEW_FILES[output]
+    if state['kind'] != 'literature' or not path.exists():
+        raise NotFound('This literature review has no ' + ('review' if output == 'review' else 'BibTeX') + ' file yet')
+    _regular(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(UPLOAD_BYTES + 1)
+    if len(data) > UPLOAD_BYTES:
+        raise ValueError('The file exceeds the 20 MB download limit')
+    return _review_name(state) + path.suffix, data
+
+
+def _review_name(state):
+    """A download name for a literature review: its title (else its topic, else its request), made safe."""
+    scope = state.get('scope') if isinstance(state.get('scope'), dict) else {}
+    title = next((value for value in (scope.get('title'), scope.get('topic')) if isinstance(value, str) and value.strip()),
+                 state['goal'])
+    title = re.sub(r'\\[a-zA-Z]+|[$^_{}]', ' ', title.lower())
+    return re.sub(r'[^a-z0-9]+', '-', title).strip('-')[:60].rstrip('-') or 'literature-review'
+
+
 def discard_download(root, job_id):
     """Delete a write-up kept for download (its conversation is gone); other jobs stay."""
     try:
@@ -509,6 +544,82 @@ def discard_download(root, job_id):
         return False
     shutil.rmtree(directory)
     return True
+
+
+def _review_evidence_order(state):
+    # Final citation numbers correspond to the report. Read cards have pool IDs until assembly.
+    cited = state.get('bibliography') or [r['n'] for r in state.get('references') or [] if type(r.get('n')) is int]
+    if cited or state.get('phase') == 'done':
+        return [(n, k) for k, n in enumerate(cited, 1)]
+    cards = state.get('cards') or {}
+    return [(n, None) for n in state.get('selected') or [] if str(n) in cards]
+
+
+def _legacy_review_passages(root, record, document, results):
+    """Recover a quote from an earlier card only if it occurs uniquely in the cached public paper."""
+    if not document.get('document_id') or not results:
+        return []
+    try:
+        meta, lines = LiteratureTools(root)._document(document['document_id'])
+    except (OSError, ValueError, TypeError):
+        return []
+    canon = str(meta.get('canonical_identifier') or '')
+    if not ((record.get('arxiv') and canon == 'arxiv:' + record['arxiv'])
+            or (record.get('doi') and canon == 'https://doi.org/' + record['doi'])):
+        return []
+    body = '\n'.join(lines)
+    passages = []
+    for result in results[:8]:
+        quote = result.get('quote') or ''
+        if not isinstance(quote, str) or not 20 <= len(quote) <= 1600:
+            continue
+        pattern = re.compile(r'\s+'.join(re.escape(w) for w in quote.split()))
+        match = pattern.search(body)
+        if not match or pattern.search(body, match.end()):
+            continue
+        first = body.count('\n', 0, match.start()) + 1
+        end = first + match[0].count('\n')
+        locator = str(result.get('locator') or '').strip().rstrip('.')
+        before = ' '.join(lines[max(0, first - 5):end]).strip()
+        if not STATEMENT.match(locator) or not _has_locator(locator, before):
+            locator = ''
+        item = {'lines': f'L{first}-L{end}', 'locator': locator, 'text': match[0]}
+        if item not in passages:
+            passages.append(item)
+    return passages
+
+
+def review_evidence(root, job_id):
+    state = research_state(root, job_id)
+    if state.get('pipeline') != ReviewRunner.PIPELINE:
+        raise NotFound('This job has no literature-review evidence')
+    pool = {r['n']: r for r in state.get('pool') or []}
+    references = {r['n']: r for r in state.get('references') or []}
+    items = []
+    for n, k in _review_evidence_order(state):
+        r = pool.get(n) or references.get(n)
+        if not r:
+            continue
+        r = _publication_record(dict(r))
+        card = (state.get('cards') or {}).get(str(n)) or {}
+        verified = [v for v in card.get('results') or [] if isinstance(v, dict) and v.get('verified') is True]
+        passages = []
+        # Current cards store only passages selected from the source, with their original extraction ranges.
+        for lines, text in (card.get('passages') or {}).items():
+            if not re.fullmatch(r'L[1-9]\d*-L[1-9]\d*', lines) or not isinstance(text, str) or not text.strip():
+                continue
+            locators = [(card.get('primary_locators') or {}).get(lines, '')]
+            locators.extend(v.get('locator') for v in verified if v.get('lines') == lines)
+            locator = next((loc.rstrip('.') for loc in locators if isinstance(loc, str)
+                            and STATEMENT.match(loc) and _has_locator(loc.rstrip('.'), text)), '')
+            passages.append({'lines': lines, 'locator': locator, 'text': text})
+        if card.get('mode') == 'full_text' and 'passages' not in card:
+            document = (state.get('documents') or {}).get(str(n)) or {}
+            passages = _legacy_review_passages(root, r, document, verified)
+        items.append({'k': k, 'n': n, 'title': r.get('title'), 'doi': r.get('doi'), 'arxiv': r.get('arxiv'),
+                      'zbl': r.get('zbl'), 's2': r.get('s2'), 'passages': passages,
+                      'abstract': '' if passages else r.get('abstract') or ''})
+    return items
 
 
 def research_sources(root, job_id):
@@ -1139,7 +1250,7 @@ def set_style_template(root, workspace, name, paths):
 
 
 _RESULT_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'check': 'Literature check',
-                 'literature': 'Literature report', 'referee': 'Review', 'detailed_review': 'Detailed review',
+                 'literature': 'Literature review', 'referee': 'Review', 'detailed_review': 'Detailed review',
                  'quick_review': 'Quick review', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
 _PROOF_STATUS = {'candidate_complete': 'response reviewed; it may be a proof or counterexample', 'uncertain': 'the model review is uncertain',
                  'review_unavailable': 'not reviewed'}
@@ -1185,16 +1296,21 @@ def conversation_references(root, chat_id, before=None, skip=None):
         if state.get('kind') != mode:
             continue
         if mode == 'literature':
-            organisation = state.get('organisation')
-            if not isinstance(organisation, dict):
-                continue
-            numbers = list(organisation.get('entry') or []) if isinstance(organisation.get('entry'), list) else []
-            themes = organisation.get('themes') or []
-            for theme in themes if isinstance(themes, list) else []:
-                if isinstance(theme, dict):
-                    for key in ('core', 'deeper'):
-                        if isinstance(theme.get(key), list):
-                            numbers.extend(theme[key])
+            if state.get('pipeline') == ReviewRunner.PIPELINE:
+                # A review's reference [k] is pool number bibliography[k-1].
+                bibliography = state.get('bibliography')
+                numbers = list(bibliography) if isinstance(bibliography, list) else []
+            else:  # an old reading list: its entry points and themes
+                organisation = state.get('organisation')
+                if not isinstance(organisation, dict):
+                    continue
+                numbers = list(organisation.get('entry') or []) if isinstance(organisation.get('entry'), list) else []
+                themes = organisation.get('themes') or []
+                for theme in themes if isinstance(themes, list) else []:
+                    if isinstance(theme, dict):
+                        for key in ('core', 'deeper'):
+                            if isinstance(theme.get(key), list):
+                                numbers.extend(theme[key])
             pool = state.get('pool') or []
             records = {record['n']: record for record in pool if isinstance(record, dict) and type(record.get('n')) is int} \
                 if isinstance(pool, list) else {}
@@ -1242,6 +1358,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
     In the order the user saw it: their messages, the answers, and the full final
     text of each finished job, and sandbox code, output and figure names.
     Reading and web tools are left out: their output is source material, not a result.
+    An answer that repeats a job's result verbatim (a literature review) appears once, as that result.
     `before` stops at that transcript index; `skip` leaves out one item (the current request, so that
     results finished earlier in the same turn still count).
     """
@@ -1264,7 +1381,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
                 arguments = {}
         if isinstance(value, dict) and isinstance(value.get('result'), dict):
             delegated.setdefault(value.get('mode') or arguments.get('mode'), []).append(value)
-    parts = []
+    parts, results = [], set()
     for index, item in enumerate(chat['transcript'][:before]):
         if index == skip:
             continue
@@ -1272,7 +1389,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
         if role == 'user' and content:
             files = item.get('files') or []
             parts.append('## User' + (f' (attached: {", ".join(files)})' if files else '') + '\n\n' + content)
-        elif role == 'assistant' and content:
+        elif role == 'assistant' and content and content.strip() not in results:
             parts.append('## Assistant\n\n' + content)
         elif role == 'experiment':
             from ..numerics.artifacts import ExperimentStore
@@ -1307,6 +1424,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
                 if text:
                     parts.append(f'## {_RESULT_NAMES[mode]} saved\n\nA {_RESULT_NAMES[mode].lower()} of the results above was written.')
             elif isinstance(text, str) and text.strip():
+                results.add(text.strip())
                 parts.append(f'## {_RESULT_NAMES.get(mode, mode)} result' + (f' ({status})' if status else '')
                              + '\n\nTask: ' + ' '.join(str(item.get('request') or '').split())[:1500] + '\n\n' + text.strip())
     return '\n\n'.join(parts)

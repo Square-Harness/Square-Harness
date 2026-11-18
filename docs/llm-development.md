@@ -273,6 +273,38 @@ Version 1.1.0. The source of truth for the machine-readable version is
   server processes do not share a rate limiter.
   Source-only follow-ups return the worker's qualified answer directly, preserving
   its metadata and limits instead of inviting unverified bibliographic additions.
+- **Literature reviews.** `litreview.ReviewRunner` checkpoints the
+  `literature-review-v2` pipeline from scope, search, screen and citation
+  expansion through rank, read, outline, write, check and assembly. Saved v2
+  jobs remain readable and resumable. Old `reading-list-v1` jobs remain readable.
+  The original question guides the search. A recalled work, a proposed
+  characterization or a claim in a delegation brief requires independent evidence.
+  Only retrieved records enter citations. Markdown and BibTeX are rendered from
+  the same numbered selection and served by the review and bib research endpoints.
+  The Assistant displays the review verbatim in the conversation.
+  `LEVELS` sets the search, reading and section allowances. It supplies the CLI
+  and server's effort presets. Explicit job budgets take precedence. Time shares
+  reserve capacity for writing and checking, and deterministic assembly can
+  deliver partial results after the deadline. Missing checks, marked cuts and
+  unresolved source findings are recorded in the job. The discovery shares begin
+  when scoping finishes. Registry screening and first drafts run without model
+  reasoning. Each effort level reserves reasoning for source checking and
+  recovery. DS4 uses its configured effort for a fully funded section check. A response
+  that spends its entire allowance thinking can retry in answer-only mode within
+  the remaining job budget. A missing core result can be reconstructed from a
+  primary passage and independently checked before export. A final comparison of the
+  surviving sections can remove a paragraph that lost a hypothesis or duplicates
+  a theorem treated elsewhere. Removed material and reasons remain in the
+  checkpoint. When no prose survives, verified result numbers can still support
+  a short primary-source reading guide.
+- **Source transport.** A transient network failure is retried once after 1.5 s
+  and a 5xx once after 2 s; a 429 is retried twice (2 s, then 6 s, or a
+  Retry-After up to 15 s). A provider is marked `down` after two failed requests
+  in a row (each already retried) and probed again after `DOWN_COOLDOWN` (240 s);
+  a TLS failure marks it down for the instance. A certificate the default store
+  cannot verify is retried once with the default trust plus the platform's
+  Mozilla-derived bundles (`EXTRA_CA_FILES`, and `certifi` when importable);
+  hostname checks stay on.
 - **Compile retries.** Missing-command retries require a new inferred definition
   and share one compile deadline. Cancellation stops the compiler process group.
   latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
@@ -495,7 +527,7 @@ documented together when releasing these features.
                     │                          gui/server.py ─ gui/hub.py ─ gui/store.py, watch.py
                     ▼                                   ▼
    ┌───────────── controllers ("runners"), one per skill ─────────────────────────┐
-   │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (reading list)
+   │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (literature review)
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
    │ agent.Agent (Explore and ordinary chat)      ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
    │ numerics.session (sandbox skills)             │   / JournalRunner (Detailed review) / ExplainRunner
@@ -526,7 +558,7 @@ documented together when releasing these features.
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
 | Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
 | | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
-| Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; providers that refused (`down`) |
+| Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; retries and the provider breaker (`down`); a wider CA-bundle fallback for TLS |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
 | Assistant | `orchestrator.py` | Owns the conversation, delegates to `router.JOB_MODES`, persists each child before running it and its result before returning it |
@@ -707,6 +739,31 @@ with the conversation as material (`store.conversation_record`). With no other
 material, notes pasted under the request are pinned as `request-notes.md`
 (`state['inline_material']`) and printed once in the writing call.
 
+Literature review screens candidates in batches and reserves places for papers
+discovered during citation expansion. It reconsiders records when a citation
+establishes a new connection. The controller follows identifier-bearing leads
+in source bibliographies before using title lookups. Ranking accounts for
+relevance, links and recent work. The abstract is available directly to the
+writer. Primary text can come from arXiv, the journal or an author deposit identified by
+DOI through OpenAIRE. Check the paper identity and content before assigning
+full-text evidence.
+Source passages retain their line ranges. A locator must occur with the
+corresponding evidence. A metadata-only entry cannot substantiate a theorem.
+
+For a numbered result with an identifiable source heading and complete text block,
+retain the original theorem, setup and available proof passage directly. Resort
+to model extraction for documents with ambiguous structure. Keep a locator only
+when it matches the heading of a retained source passage.
+
+A single compact plan assigns the selected results to sections under one word
+target. Tables count towards that target. The opening belongs to the first
+checked section. Writing and checking run in bounded waves. The checker sees
+original evidence, locates a defect in a particular paragraph or table row and
+proposes a source-supported local change. The controller checks the cited source,
+quotation and location before applying it. An unsupported unit can be withheld.
+`_issues` and the review's coverage note record incomplete checks and cuts.
+Keep the old call roles renderable for saved jobs.
+
 ### Saved state
 
 `<workspace>/.mathagent/` contains:
@@ -794,8 +851,8 @@ mode touches, in this order:
     `scripts/test-local-mlx.py` for a protocol check).
 - **A literature source**:
   - add it to `literature.py`; it must work without a key, respect the request
-    and character budgets, cache under `.mathagent/literature/`, and mark itself
-    `down` on quota refusal;
+    and character budgets, cache under `.mathagent/literature/`, and go through
+    `_fetch` (retry, back-off and the `down` breaker);
   - never send private text;
   - records are evidence of identity only, never of a theorem's content.
 - **Interface behaviour**: change the view or component, keep the API shapes in

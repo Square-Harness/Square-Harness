@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { activeTasks, concurrencyLimits } from '../concurrency'
-import { api, type Artifact, type Review, type ToolCall } from '../api'
+import { api, REVIEW_PIPELINE, type Artifact, type Review, type ToolCall } from '../api'
 import { Collapse, ErrorNote, Loading, Modal } from '../components/common'
 import { BackIcon, FileIcon, PanelRightIcon } from '../components/Icons'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
@@ -70,7 +70,9 @@ export function useJobClass() {
   return 'job' + (usePanelHidden('aside') ? ' job-aside-hidden' : '')
 }
 
-export const ROLES: Record<string, { active: string; name: string; structured?: boolean }> = {
+type RoleInfo = { active: string; name: string; structured?: boolean }
+
+export const ROLES: Record<string, RoleInfo> = {
   solver: { active: 'The solver is writing a complete proof', name: 'Solver' },
   verifier: { active: 'A fresh verifier is reviewing the whole proof', name: 'Verifier', structured: true },
   // Roles of legacy v0.4 proof jobs, whose saved files stay readable
@@ -122,6 +124,29 @@ export const ROLES: Record<string, { active: string; name: string; structured?: 
   'explain-check': { active: 'Checking the explanation against the source', name: 'Accuracy check', structured: true },
   'explain-fix': { active: 'Correcting the explanation', name: 'Correction', structured: true },
 }
+
+// Roles of a literature review (pipeline literature-review-v2). Several names are also
+// roles of other jobs (scope, check, write…), so a review's calls are looked up here first.
+// Sections and the introduction are prose; the other calls answer in JSON.
+const REVIEW_ROLES: Record<string, RoleInfo> = {
+  scope: { active: 'Defining the scope of the review', name: 'Scope', structured: true },
+  screen: { active: 'Screening records', name: 'Screen', structured: true },
+  card: { active: 'Extracting results from source passages', name: 'Source passages', structured: true },
+  outline: { active: 'Planning the review', name: 'Outline', structured: true },
+  write: { active: 'Writing a section', name: 'Section' },
+  intro: { active: 'Writing the introduction', name: 'Introduction' },
+  check: { active: 'Checking a section against the evidence', name: 'Check', structured: true },
+  'recover-write': { active: 'Reconstructing missing results from their sources', name: 'Missing results', structured: true },
+  'recover-check': { active: 'Verifying the recovered results', name: 'Verification', structured: true },
+  editorial: { active: 'Checking scope and repetition across sections', name: 'Final review', structured: true },
+  revise: { active: 'Revising a section', name: 'Revision' },
+  condense: { active: 'Shortening a section', name: 'Shortened section' },
+  condense_revision: { active: 'Shortening a revised section', name: 'Shortened revision' },
+}
+
+/** How a model call is labelled and shown, for the job's pipeline. */
+export const roleInfo = (role: string, pipeline?: string | null): RoleInfo | undefined =>
+  (pipeline === REVIEW_PIPELINE ? REVIEW_ROLES[role] : undefined) || ROLES[role]
 
 export type LiveText = { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; loaded: boolean }
 
@@ -278,8 +303,8 @@ function reviewResponse(value: unknown): ReviewDisplayResponse | null {
 }
 
 /** Model output as text: prose is typeset; structured roles show their JSON. */
-export function StreamBody({ stream, role, live }: { stream: LiveText | NonNullable<Artifact['stream']>; role: string; live?: boolean }) {
-  const structured = ROLES[role]?.structured
+export function StreamBody({ stream, role, live, pipeline }: { stream: LiveText | NonNullable<Artifact['stream']>; role: string; live?: boolean; pipeline?: string | null }) {
+  const structured = roleInfo(role, pipeline)?.structured
   const pretty = structured ? prettyJson(stream.text) : null
   const review = role === 'verifier' && pretty ? reviewResponse(JSON.parse(stream.text)) : null
   return (
@@ -350,7 +375,7 @@ function RequestView({ payload }: { payload: Record<string, unknown> }) {
   )
 }
 
-export function ArtifactViewer({ job, id, name, onClose }: { job: 'proof' | 'research'; id: string; name: string; onClose: () => void }) {
+export function ArtifactViewer({ job, id, name, pipeline, onClose }: { job: 'proof' | 'research'; id: string; name: string; pipeline?: string | null; onClose: () => void }) {
   const [artifact, setArtifact] = useState<Artifact | null>(null)
   const [error, setError] = useState('')
   const [raw, setRaw] = useState(false)
@@ -371,7 +396,7 @@ export function ArtifactViewer({ job, id, name, onClose }: { job: 'proof' | 'res
             <button type="button" className="btn btn-small btn-quiet" onClick={() => setRaw(!raw)}>{raw ? 'Formatted view' : 'Raw file'}</button>
           </div>
           {raw ? <pre className="plain">{artifact.text}</pre>
-            : artifact.stream ? <StreamBody stream={artifact.stream} role={role} />
+            : artifact.stream ? <StreamBody stream={artifact.stream} role={role} pipeline={pipeline} />
             : role === 'proof-candidate' ? <Markdown>{artifact.text}</Markdown>
             : json && Array.isArray(json.messages) ? <RequestView payload={json} />
             : json && typeof json.text === 'string' ? <StreamBody stream={{ text: json.text as string, thinking: (json.thinking as string) || '', tool_calls: (json.calls as ToolCall[]) || [], done: true, stats: {} }} role="solver" />

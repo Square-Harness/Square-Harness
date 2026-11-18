@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Upgrade Literature review for research mathematicians. Resolve citation leads
+  in primary bibliographies, reconsider records linked by later papers, and use
+  the original mathematical question throughout. A compact plan selects the
+  results needed to answer it, with one checked opening and an optional
+  comparison table. Check conclusions and theorem locators against attributed
+  source passages, correct or withhold unsupported passages, and disclose partial
+  coverage. Reuse abstracts directly and avoid full-section rewrite passes.
+  The CLI and GUI share bounded effort presets and respect explicit job limits.
+  The conversation offers the review as Markdown and its references as BibTeX.
+- Retry transient source failures, back off on rate limits and mark a provider
+  down only after repeated failures, for four minutes. Verify certificates the
+  default store cannot verify against the platform's other CA bundles (zbMATH).
+  Add controller retrieval for arXiv categories and ID batches, zbMATH reference
+  lists, Semantic Scholar citations and references by DOI or arXiv ID, and
+  OpenCitations references.
 - Redesign the interface for consistency. The sidebar lists projects above all
   conversations and opens a project as its own view, with its notes and a way
   back; conversations show their project. The footer shows the model's status

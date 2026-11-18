@@ -11,7 +11,7 @@ export const coverOf = (mode: RouteMode): Cover =>
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
   { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },
-  { mode: 'literature', label: 'Literature', summary: 'Build a verified reading list on a topic.' },
+  { mode: 'literature', label: 'Literature', summary: 'Survey a mathematical question through its main results, methods and sources.' },
   { mode: 'quick_review', label: 'Quick Review', summary: 'Check whether a given proof is correct: verdict and located issues.' },
   { mode: 'referee', label: 'Review', summary: 'Review a manuscript: overview of the paper, typos and presentation.' },
   { mode: 'detailed_review', label: 'Detailed Review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },

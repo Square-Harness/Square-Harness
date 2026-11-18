@@ -41,8 +41,8 @@ export const MODES: Record<Mode, ModeInfo> = {
   },
   literature: {
     mode: 'literature', label: 'Literature', historyLabel: 'Literature history', glyph: '⌕', kind: 'research',
-    summary: 'A verified reading list: entry points, then the core literature by theme.',
-    newLabel: 'New reading list', empty: 'No reading lists yet.',
+    summary: 'A research survey comparing the main theorems, their hypotheses and methods, with links to the papers.',
+    newLabel: 'New literature review', empty: 'No literature reviews yet.',
   },
   referee: {
     mode: 'referee', label: 'Review', historyLabel: 'Review history', glyph: '¶', kind: 'research',

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import type { WorkProgress } from './api'
+import { REVIEW_PIPELINE, type WorkProgress } from './api.ts'
 import { count } from './format.ts'
 
 export const PHASES: Record<string, string> = {
@@ -17,12 +17,23 @@ export const PHASES: Record<string, string> = {
   review: 'Reviewing the draft', revise: 'Revising the draft', section: 'Writing sections',
   assemble: 'Assembling the document', compile: 'Compiling', repair: 'Repairing',
   export: 'Saving the document', done: 'Work saved',
+  search: 'Searching zbMATH, arXiv, Semantic Scholar and Crossref', expand: 'Following citations',
+  rank: 'Selecting the works', outline: 'Planning the review',
 }
 
+// A literature review shares some phase names with reviews and write-ups (scope, read, check…).
+const REVIEW_PHASES: Record<string, string> = {
+  scope: 'Defining the scope', read: 'Reading the key papers', write: 'Writing the review',
+  check: 'Checking the review', assemble: 'Assembling the bibliography',
+}
+
+const phaseLabel = (phase: string, pipeline?: string | null) =>
+  (pipeline === REVIEW_PIPELINE ? REVIEW_PHASES[phase] : undefined) || PHASES[phase] || 'Working'
+
 /** Operational coverage is not mathematical verification. */
-export function workProgressText(progress: WorkProgress, status: string, running = false) {
+export function workProgressText(progress: WorkProgress, status: string, running = false, pipeline?: string | null) {
   if (progress.total <= 0) {
-    if (running) return `${PHASES[progress.phase] || 'Working'}…`
+    if (running) return `${phaseLabel(progress.phase, pipeline)}…`
     if (status === 'failed' || status === 'error') return 'Work stopped. Any available results are saved.'
     if (status === 'paused' || status === 'running') return 'Paused. Work is saved.'
     return progress.partial ? 'Partial result. Unresolved points are listed in the result.' : 'Work saved.'
@@ -30,7 +41,7 @@ export function workProgressText(progress: WorkProgress, status: string, running
   const completed = Math.max(0, Math.min(progress.completed, progress.total))
   const pending = Math.max(0, progress.total - completed)
   const coverage = `${count(completed)} of ${count(progress.total)} ${progress.unit} finished`
-  if (running) return `${PHASES[progress.phase] || 'Working'} · ${coverage}.`
+  if (running) return `${phaseLabel(progress.phase, pipeline)} · ${coverage}.`
   if (status === 'failed' || status === 'error') return `Work stopped. ${coverage}${pending ? `; ${count(pending)} pending` : ''}.`
   if (status === 'paused' || status === 'running') return `Paused. ${coverage}${pending ? `; ${count(pending)} pending` : ''}.`
   if (pending) return `Partial result. ${coverage}; ${count(pending)} pending.`

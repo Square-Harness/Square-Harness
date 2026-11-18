@@ -56,10 +56,10 @@ export function UsageMeters({ budget }: { budget: { tokens: Budget; input_tokens
   </>
 }
 
-export function WorkProgressNote({ progress, status, running = false }: { progress?: WorkProgress | null; status: string; running?: boolean }) {
+export function WorkProgressNote({ progress, status, running = false, pipeline }: { progress?: WorkProgress | null; status: string; running?: boolean; pipeline?: string | null }) {
   if (!progress) return null
   return <div className="work-progress" role="status" title={progress.scope || undefined}>
-    <p className="muted small">{workProgressText(progress, status, running)}</p>
+    <p className="muted small">{workProgressText(progress, status, running, pipeline)}</p>
   </div>
 }
 

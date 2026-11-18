@@ -201,13 +201,13 @@ def parser():
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise)')
+    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Literature/Quick review/Explain, 6 otherwise)')
     p.add_argument('--research-tokens', type=int, help='Optional cumulative generated-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')
     p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
-    p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: sized to reading-list breadth, otherwise 12)')
-    p.add_argument('--research-chars', type=int, default=30000, help='Maximum literature-tool response characters per job')
+    p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: sized to survey breadth, otherwise 12)')
+    p.add_argument('--research-chars', type=int, default=30000, help='Maximum response characters for model-invoked literature tools (survey synthesis uses the input-token budget)')
     p.add_argument('--output', metavar='PATH', help='Export the research/referee Markdown report inside the workspace')
     p.add_argument('--mode', choices=MODES, default='prove')
     p.add_argument('--no-think', action='store_true')
@@ -311,7 +311,8 @@ def main():
         p.error('--proof-verify-temperature must be between 0 and 2')
     if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= 86400:
         p.error('Use resume-add-seconds between 0 and 86400')
-    research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
+    args.research_seconds_explicit = any(value.split('=')[0] == '--research-seconds' for value in sys.argv[1:])
+    args.research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens is not None and args.research_tokens < 1024
             or args.research_input_tokens is not None and args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
             or args.research_seconds <= 0 or args.research_requests is not None and not 0 <= args.research_requests <= 1000
@@ -505,14 +506,15 @@ def main():
             research_running = True
             last_research_id = ''
             if agent.mode == 'literature':
-                runner, kind = ReviewRunner(agent, ui.emit), 'literature'
+                runner, kind = ReviewRunner(agent, ui.emit, concurrency=review_concurrency()), 'literature'
             else:
                 variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
             result = runner.start(query, kind=kind,
-                source_files=args.research_file, max_rounds=(args.research_rounds if research_rounds_explicit or agent.mode not in ('quick_review', 'explain') else 3),
+                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('literature', 'quick_review', 'explain') else 3),
                 max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
-                max_seconds=args.research_seconds, max_requests=args.research_requests if args.research_requests is not None or agent.mode == 'literature' else 12,
+                max_seconds=args.research_seconds if agent.mode != 'literature' or args.research_seconds_explicit else None,
+                max_requests=args.research_requests if args.research_requests is not None or agent.mode == 'literature' else 12,
                 max_chars=args.research_chars)
             research_running = False
             research_result(result)
@@ -603,9 +605,11 @@ def main():
                         runner = CheckRunner(agent, ui.emit)
                     elif variant:
                         runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
+                    elif saved.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE):
+                        # An old reading list stays readable; the runner refuses to resume it.
+                        runner = ReviewRunner(agent, ui.emit, concurrency=review_concurrency())
                     else:
-                        runner = (WriteupRunner if writeup else ReviewRunner if saved.get('pipeline') == ReviewRunner.PIPELINE
-                                  else ResearchRunner)(agent, ui.emit)
+                        runner = (WriteupRunner if writeup else ResearchRunner)(agent, ui.emit)
                     result = runner.resume(job_id, additional_seconds=args.resume_add_seconds) if args.resume_add_seconds else runner.resume(job_id)
                     research_running = False
                     model_checked = False

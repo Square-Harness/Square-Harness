@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useCallback, useMemo, useState, type ReactElement } from 'react'
-import { api, type Evidence, type ResearchDetail } from '../api'
+import { api, LIST_PIPELINE, REVIEW_PIPELINE, type Evidence, type ResearchDetail, type ReviewCoverage } from '../api'
 import { Collapse, ErrorNote, Loading, Meter, SourceLines, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
@@ -13,15 +13,23 @@ import { go, href, useRoute } from '../router'
 import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
-import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, roleInfo, useJobClass, useLiveStream } from './shared'
 import { VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
-// A literature review builds a reading list: code searches and follows citations, the model screens and organises.
+// A literature review: code searches and follows citations; the model screens the records,
+// reads the key papers, plans and writes the review, and checks each section.
+const REVIEW_STEPS = ['scope', 'search', 'screen', 'expand', 'rank', 'read', 'outline', 'write', 'check', 'assemble', 'done']
+// Older literature jobs built a reading list: code searched and followed citations, the model screened and organised.
 const LIST_STEPS = ['scope', 'sweep', 'graph', 'screen', 'organise', 'annotate', 'write', 'done']
 const STEP_NAMES: Record<string, string> = {
   plan: 'Plan', investigate: 'Investigate', draft: 'Draft', review: 'Review', revise: 'Revise', done: 'Done',
   scope: 'Scope', sweep: 'Search', graph: 'Citations', screen: 'Screen', organise: 'Organise', annotate: 'Annotate', write: 'Write',
+  search: 'Search', expand: 'Citations', rank: 'Select', read: 'Read', outline: 'Outline', check: 'Check', assemble: 'Bibliography',
+}
+// Coverage names the sources by key; show them as they write themselves.
+const SOURCE_NAMES: Record<string, string> = {
+  zbmath: 'zbMATH', arxiv: 'arXiv', crossref: 'Crossref', s2: 'Semantic Scholar', semantic_scholar: 'Semantic Scholar', semanticscholar: 'Semantic Scholar',
 }
 type Sources = { id: string; path: string; sha256: string; content: string }[]
 
@@ -58,7 +66,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
             { id: 'checks', label: 'Checks', badge: issues.length || undefined, narrowOnly: true },
             { id: 'review', label: 'Model review', hidden: !data.review },
             { id: 'notes', label: 'Plan and notes', hidden: !!data.variant },
-            { id: 'evidence', label: 'Evidence', badge: data.evidence.length || undefined },
+            { id: 'evidence', label: 'Evidence', badge: (data.review_evidence_count ?? data.evidence.length) || undefined },
             { id: 'sources', label: 'Sources', badge: data.sources.length || undefined },
             { id: 'files', label: 'Files', badge: data.artifacts.length || undefined },
           ]} />
@@ -66,7 +74,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'checks' && <div className="ledger-tab"><Checks data={data} sources={sources.data?.sources || null} issues={issues} cite={cite} onCite={setCite} /></div>}
           {active === 'review' && <Markdown>{data.review}</Markdown>}
           {active === 'notes' && <Notes data={data} />}
-          {active === 'evidence' && <EvidenceList evidence={data.evidence} />}
+          {active === 'evidence' && (data.pipeline === REVIEW_PIPELINE ? <ReviewEvidenceList key={data.id} data={data} /> : <EvidenceList evidence={data.evidence} />)}
           {active === 'sources' && <>{sources.error ? <><ErrorNote>{sources.error}</ErrorNote><button type="button" className="btn" onClick={sources.reload}>Retry loading sources</button></> : <SourcesTab data={data} sources={sources.data?.sources || null} />}</>}
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
@@ -74,7 +82,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
       <JobAside label="Checks">
         <Checks data={data} sources={sources.data?.sources || null} issues={issues} cite={cite} onCite={setCite} />
       </JobAside>
-      {artifact && <ArtifactViewer job="research" id={id} name={artifact} onClose={() => setArtifact(null)} />}
+      {artifact && <ArtifactViewer job="research" id={id} name={artifact} pipeline={data.pipeline} onClose={() => setArtifact(null)} />}
     </div>
   )
 }
@@ -89,7 +97,7 @@ export function flaggedCitations(data: ResearchDetail): Set<string> {
 }
 
 function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; pausing: boolean }) {
-  const look = researchLook(data.status, data.running)
+  const look = researchLook(data.status, data.running, data.kind)
   const app = useApp()
   const [error, setError] = useState('')
   const busy = capacityFull(app.snapshot, app.status)
@@ -101,7 +109,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const extensionLabel = Number.isInteger(additionalMinutes) ? additionalMinutes : additionalMinutes.toFixed(1)
   const resumable = (data.progress?.resumable ?? researchResumable(data.status)) || (data.status === 'budget_exhausted' && additionalSeconds > 0)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const steps = data.variant ? VARIANT_STEPS[data.variant] : data.pipeline ? LIST_STEPS : STEPS
+  const steps = data.variant ? VARIANT_STEPS[data.variant] : data.pipeline === REVIEW_PIPELINE ? REVIEW_STEPS : data.pipeline ? LIST_STEPS : STEPS
   const names = data.variant ? VARIANT_STEP_NAMES : STEP_NAMES
   const current = steps.indexOf(data.phase === 'plan' && data.pipeline && !data.variant ? 'scope' : data.phase)
   return (
@@ -109,7 +117,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">{data.variant ? VARIANT_NAMES[data.variant] : data.kind === 'referee' ? 'Review' : data.pipeline ? 'Reading list' : 'Literature report'}</span>
+        <span className="job-stop">{data.variant ? VARIANT_NAMES[data.variant] : data.kind === 'referee' ? 'Review' : data.pipeline === REVIEW_PIPELINE ? 'Literature review' : data.pipeline ? 'Reading list' : 'Literature report'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
@@ -118,7 +126,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
         })}
       </ol>
-      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} />
+      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} />
       <div className="job-facts">
         {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
         {data.unit && <span>{data.unit}</span>}
@@ -147,7 +155,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
 
 function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
   return (
-    <div className="report">
+    <div className={data.pipeline === REVIEW_PIPELINE ? 'report literature-review' : 'report'}>
       {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}
       {issues.length > 0 && (
         <div className="checks-note">
@@ -163,16 +171,38 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
       )}
       {(data.draft || data.report) ? (
         <>
-          <p className="caveat">{data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline
+          <p className="caveat">{data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline === REVIEW_PIPELINE
+            ? 'Every reference comes from a returned bibliographic record. Statements of results come from abstracts and, where marked, from full texts; this is a model-written survey to check against the papers.'
+            : data.pipeline
             ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
             : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
+          {(data.outputs?.review || data.outputs?.bib) && (
+            <div className="outputs">
+              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(data.id)} download>Download review (.md)</a>}
+              {data.outputs.bib && <a className={'btn btn-small' + (data.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(data.id)} download>References (.bib)</a>}
+            </div>
+          )}
+          {data.coverage && <p className="caveat">{coverageText(data.coverage)}</p>}
           <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft || data.report}</Markdown>
         </>
       ) : (
-        <p className="empty-note">No draft yet. {data.running ? (data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.') : 'The plan and working notes are under Plan and notes.'}</p>
+        <p className="empty-note">No draft yet. {data.running
+          ? (data.pipeline === REVIEW_PIPELINE ? 'The review is written once the key papers are read and the sections planned.' : data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.')
+          : 'The plan and working notes are under Plan and notes.'}</p>
       )}
     </div>
   )
+}
+
+/** One line on what a literature review searched and kept, and which sources failed. */
+function coverageText(coverage: ReviewCoverage) {
+  const kept = `Coverage: ${count(coverage.candidates ?? 0)} candidate records, ${count(coverage.screened ?? 0)} screened, ${count(coverage.selected ?? 0)} selected, ${count(coverage.cited ?? 0)} cited, ${count(coverage.full_text ?? 0)} with full-text passages consulted.`
+  const failed = Object.entries(coverage.sources || {})
+    .filter(([, source]) => source.answered < source.asked || source.errors?.length)
+    .map(([key, source]) => `${SOURCE_NAMES[key.toLowerCase()] || key} (${source.answered < source.asked
+      ? `${count(source.asked - source.answered)} of ${count(source.asked)} queries unanswered`
+      : source.errors.length === 1 ? 'one error' : `${count(source.errors.length)} errors`})`)
+  return failed.length ? `${kept} Sources that failed: ${failed.join(', ')}.` : kept
 }
 
 function LiveResearch({ id, role, file, pipeline, owner }: { id: string; role: string; file: string; pipeline?: string | null; owner?: ResearchDetail['owner_task'] }) {
@@ -182,9 +212,9 @@ function LiveResearch({ id, role, file, pipeline, owner }: { id: string; role: s
   const ours = !!task
   return (
     <div className="live" id="live">
-      <p className="live-head"><Square variant="running" size={14} /> {role === 'scope' && pipeline === 'reading-list-v1' ? 'Defining the scope of the reading list' : ROLES[role]?.active || role}</p>
+      <p className="live-head"><Square variant="running" size={14} /> {role === 'scope' && pipeline === LIST_PIPELINE ? 'Defining the scope of the reading list' : roleInfo(role, pipeline)?.active || role}</p>
       {ours && <ActivityLog items={activeTasks(app.snapshot).find((entry) => entry.task.id === task?.id)?.activity || []} />}
-      <StreamBody stream={stream} role={role} live />
+      <StreamBody stream={stream} role={role} pipeline={pipeline} live />
     </div>
   )
 }
@@ -201,7 +231,8 @@ function Checks({ data, sources, issues, cite, onCite }: {
         {issues.length ? (
           <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
         ) : (
-          <p className="muted small">{data.pipeline === 'reading-list-v1' ? 'Entries are checked against returned bibliographic records. This does not verify their mathematical claims or full text.' : data.draft ? 'No invalid source locators were detected. This checks locations, not mathematical correctness.' : 'Checks run when the draft is written.'}</p>
+          <p className="muted small">{data.pipeline === REVIEW_PIPELINE ? 'Every reference comes from a returned bibliographic record. Statements of results come from abstracts and, where marked, from full texts; this is a model-written survey to check against the papers.'
+            : data.pipeline === LIST_PIPELINE ? 'Entries are checked against returned bibliographic records. This does not verify their mathematical claims or full text.' : data.draft ? 'No invalid source locators were detected. This checks locations, not mathematical correctness.' : 'Checks run when the draft is written.'}</p>
         )}
       </section>
       {data.sources.length > 0 && (
@@ -218,7 +249,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
         <UsageMeters budget={b} />
         {!data.variant && <Meter label={data.pipeline ? "Model calls" : "Rounds"} used={b.rounds.used} limit={b.rounds.limit} />}
         {(!data.variant || data.variant === 'journal') && <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />}
-        {(!data.variant || data.variant === 'journal') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
+        {data.pipeline !== REVIEW_PIPELINE && (!data.variant || data.variant === 'journal') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
       </section>
     </div>
   )
@@ -313,6 +344,37 @@ function Notes({ data }: { data: ResearchDetail }) {
         </section>
       ))}
       {!data.notes.some((note) => note.text.trim()) && <p className="muted small">The investigation rounds left no written notes; their tool calls are under Evidence.</p>}
+    </div>
+  )
+}
+
+function ReviewEvidenceList({ data }: { data: ResearchDetail }) {
+  const evidence = useLoad(() => api.reviewEvidence(data.id), [data.id, data.updated_at])
+  if (evidence.error) return <ErrorNote>{evidence.error}</ErrorNote>
+  if (!evidence.data) return <Loading />
+  if (!evidence.data.items.length) return <p className="empty-note">{data.phase === 'done' ? 'This review contains no cited source.' : 'Source passages and abstracts appear as the review reads papers.'}</p>
+  return (
+    <div className="evidence">
+      {evidence.data.items.map((item) => {
+        const kind = item.passages.length ? 'Paper passage' + (item.passages.length === 1 ? '' : 's') : item.abstract ? 'Abstract' : 'Bibliographic record'
+        const links = [
+          item.doi && ['DOI', 'https://doi.org/' + encodeURIComponent(item.doi).replace(/%2F/gi, '/')],
+          item.arxiv && ['arXiv', 'https://arxiv.org/abs/' + encodeURIComponent(item.arxiv).replace(/%2F/gi, '/')],
+          item.zbl && ['zbMATH', 'https://zbmath.org/?q=an:' + encodeURIComponent(item.zbl)],
+          item.s2 && !item.doi && !item.arxiv && !item.zbl && ['Semantic Scholar', 'https://www.semanticscholar.org/paper/' + encodeURIComponent(item.s2)],
+        ].filter((link): link is string[] => Array.isArray(link))
+        return (
+          <Collapse key={item.n} summary={<><strong>{item.k ? `[${item.k}] ` : ''}{item.title}</strong> <span className="muted small">{kind}</span></>}>
+            {item.passages.map((passage) => <div className="passage-quote" key={passage.lines + passage.locator}>
+              <span className="muted small">{passage.locator && passage.locator.replace(/\.$/, '') + ' · '}{passage.lines.replace(/^L(\d+)-L(\d+)$/, 'Lines $1–$2')}</span>
+              <pre className="source">{passage.text}</pre>
+            </div>)}
+            {item.abstract && <div className="passage-quote"><span className="muted small">Abstract excerpt from the source record</span><pre className="source">{item.abstract}</pre></div>}
+            {!item.passages.length && !item.abstract && <p className="muted small">No source passage or abstract was saved.</p>}
+            {links.length > 0 && <p className="small">{links.map(([label, url], i) => <span key={label}>{i > 0 && ' · '}<a href={url} target="_blank" rel="noreferrer">{label}</a></span>)}</p>}
+          </Collapse>
+        )
+      })}
     </div>
   )
 }

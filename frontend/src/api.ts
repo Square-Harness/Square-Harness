@@ -25,6 +25,7 @@ export type AssistantBudget = {
 
 export type Defaults = {
   api_profile?: string
+  literature_presets?: Partial<Record<EffortLevel, { seconds: number; requests: number }>>
   budget_profile?: string
   effort_presets?: Partial<Record<EffortLevel, {
     tries: number; minutes: number; tokens: number; research_tokens: number; input: number
@@ -361,6 +362,43 @@ export type CompileResult = {
   pdf: boolean
 }
 
+/** Literature jobs by pipeline: reviews, and the reading lists that older jobs built. */
+export const REVIEW_PIPELINE = 'literature-review-v2'
+export const LIST_PIPELINE = 'reading-list-v1'
+
+/** Reference [k] of a literature review: pool record n, and how far the review read it. */
+export type ReviewReference = {
+  k: number
+  n: number
+  title: string
+  authors: string[]
+  year?: number | string | null
+  venue?: string | null
+  doi?: string | null
+  arxiv?: string | null
+  zbl?: string | null
+  url?: string | null
+  preprint: boolean
+  read: 'full_text' | 'abstract' | 'metadata'
+}
+
+export type ReviewEvidence = Pick<ReviewReference, 'n' | 'title' | 'doi' | 'arxiv' | 'zbl'> & {
+  k: number | null
+  s2?: string | null
+  abstract: string
+  passages: { lines: string; locator: string; text: string }[]
+}
+
+/** What a literature review searched (queries asked and answered per source) and kept. */
+export type ReviewCoverage = {
+  sources: Record<string, { asked: number; answered: number; errors: string[] }>
+  candidates: number
+  screened: number
+  selected: number
+  cited: number
+  full_text: number
+}
+
 export type ResearchDetail = {
   owner_task?: TaskSummary | null
   id: string
@@ -401,7 +439,7 @@ export type ResearchDetail = {
   document?: string
   section_lines?: [number, number][]
   compile?: CompileResult | null
-  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string }
+  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string; review?: string; bib?: string }
   // Write-ups: the controller's gate, the outline's needs and the review rounds.
   readiness?: 'ready' | 'draft' | null
   gates?: { gate: string; message: string }[]
@@ -409,6 +447,10 @@ export type ResearchDetail = {
   reviews?: { round: number; issues: { severity: string }[]; dropped: number; complete: boolean }[]
   review_round?: number
   candidates?: { round: number; score: number[]; readiness: string | null; compile_ok: boolean; selected: boolean }[]
+  // Literature reviews (pipeline literature-review-v2) only.
+  references?: ReviewReference[]
+  review_evidence_count?: number
+  coverage?: ReviewCoverage | null
   macros?: string[]
   theorems?: string[]
   output_name?: string
@@ -458,7 +500,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
-  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string }
+  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string; review?: string; bib?: string }
   task?: string
   error?: string | null
   missing?: string[]
@@ -595,6 +637,7 @@ export const api = {
 
   researches: () => get<{ jobs: ResearchListItem[] }>('/api/research'),
   research: (id: string) => get<ResearchDetail>(`/api/research/${id}`),
+  reviewEvidence: (id: string) => get<{ items: ReviewEvidence[] }>(`/api/research/${id}/review-evidence`),
   researchSources: (id: string) => get<{ sources: { id: string; path: string; sha256: string; content: string }[] }>(`/api/research/${id}/sources`),
   researchArtifact: (id: string, name: string) => get<Artifact>(`/api/research/${id}/artifacts/${name}`),
   researchStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/research/${id}/stream/${name}?from=${from}`),
@@ -635,6 +678,8 @@ export const api = {
   researchSourceUrl: (id: string) => `/api/research/${id}/source`,
   researchBodyUrl: (id: string) => `/api/research/${id}/body`,
   writeupNeeds: (id: string, action: 'waive' | 'stop') => post<{ task: TaskSummary | null; id: string }>(`/api/research/${id}/needs`, { action }),
+  researchReviewDownloadUrl: (id: string) => `/api/research/${id}/review?download=1`,
+  researchBibDownloadUrl: (id: string) => `/api/research/${id}/bib?download=1`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),

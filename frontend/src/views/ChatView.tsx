@@ -58,7 +58,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   answer: { noun: 'an answer', label: 'Answer', cover: 'free' },
   check: { noun: 'a literature check', label: 'Literature Check', cover: 'check' },
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
-  literature: { noun: 'a literature report', label: 'Literature Report', cover: 'literature' },
+  literature: { noun: 'a literature review', label: 'Literature Review', cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
   detailed_review: { noun: 'a detailed review', label: 'Detailed Review', cover: 'referee' },
   quick_review: { noun: 'a quick review', label: 'Quick Review', cover: 'referee' },
@@ -70,7 +70,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
 }
 const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
-  mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
+  mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
@@ -518,7 +518,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
     if (job) ({ variant, label: status } = proofLook(job.status, job.running && (!item.orchestrated || running)))
   } else if (item.job_id) {
     const job = app.research?.find((report) => report.id === item.job_id)
-    if (job) ({ variant, label: status } = researchLook(job.status, job.running && (!item.orchestrated || running)))
+    if (job) ({ variant, label: status } = researchLook(job.status, job.running && (!item.orchestrated || running), job.kind))
   }
   let headline: string
   if (mode === 'critic' && item.status !== 'done' && !queued && !running) { headline = 'Critique retired'; status = ''; variant = 'spent' }
@@ -557,6 +557,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
             {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
             {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
+            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>Download review (.md)</a>}
+            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(item.job_id)} download>References (.bib)</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (

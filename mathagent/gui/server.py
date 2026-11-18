@@ -38,7 +38,7 @@ from ..agent import AgentError
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
 from .. import images
-from . import personalization, projects, store
+from . import effort, personalization, projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
 
@@ -225,6 +225,7 @@ def status(h, body):
                         'api_profile': api_profile,
                         'budget_profile': PROFILE if api_profile == 'deepinfra' else 'default',
                         'effort_presets': effort_presets(args) if api_profile == 'deepinfra' else None,
+                        'literature_presets': {name: effort.limits('literature', name, args) for name in effort.EFFORTS},
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
                         'proof_call_seconds': getattr(args, 'proof_call_seconds', None),
@@ -449,6 +450,11 @@ def research(h, body, id):
 @route('POST', '/api/research/' + UUID + '/resume')
 def research_resume(h, body, id):
     return {'task': h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue')), additional_seconds=_seconds(body, 'additional_seconds') or 0).summary(), 'id': id}
+
+
+@route('GET', '/api/research/' + UUID + '/review-evidence')
+def review_evidence(h, body, id):
+    return {'items': store.review_evidence(h.server.hub.root, id)}
 
 
 @route('GET', '/api/research/' + UUID + '/sources')
@@ -785,6 +791,25 @@ def research_source(h, body, id):
     name, data = store.research_source(h.server.hub.root, id)
     h.send_bytes(200, data, 'application/zip', [('Content-Disposition', f'attachment; filename="{name}"'),
                                              ('Cache-Control', 'no-store')])
+    return Streamed
+
+
+@route('GET', '/api/research/' + UUID + '/review')
+def research_review(h, body, id):
+    return _review_file(h, id, 'review', 'text/markdown; charset=utf-8')
+
+
+@route('GET', '/api/research/' + UUID + '/bib')
+def research_bib(h, body, id):
+    return _review_file(h, id, 'bib', 'application/x-bibtex; charset=utf-8')
+
+
+def _review_file(h, id, output, content_type):
+    """A literature review's Markdown or BibTeX file, shown or (with ?download=1) saved."""
+    name, data = store.research_review_file(h.server.hub.root, id, output)
+    download = (h.query.get('download') or [''])[0] == '1'
+    h.send_bytes(200, data, content_type, [('Content-Disposition', f'{"attachment" if download else "inline"}; filename="{name}"'),
+                                           ('Cache-Control', 'no-store')])
     return Streamed
 
 
