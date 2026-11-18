@@ -147,7 +147,10 @@ export type StyleDescription = {
   typesetting?: { habit: string; example: string }[]
   habits?: string[]
   phrases: string[]
+  /** Write-up rules the author does not follow: one article's (with its example), or a domain's (counted over its articles). */
+  departures?: StyleDeparture[]
 }
+export type StyleDeparture = { rule: string; habit: string; example?: string; examples?: string[]; sheet?: string; rule_text?: string; articles?: number; of?: number }
 export type DomainStyle = StyleDescription & { name: string; description: string; articles: string[] }
 export type StyleProfile = {
   format: 'square-style'

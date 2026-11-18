@@ -185,7 +185,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
   request, then the template's, then the saved style's, then the model's
   (`writeup._request_preamble`). A saved style's macro brings the macros its
   definition uses and the packages it needs, unless the preamble already loads
-  them or TeX lacks them (`writeup._style_preamble`). A written document is always assembled,
+  them or TeX lacks them (`writeup._style_preamble`). Beyond notation, the order
+  is the request, then the active style, then the guideline sheets
+  (`writeup._set_aside`): a rule the request breaks in its own words (the
+  outline's `rules`, quote checked against the message), or the style departs
+  from (unless the request keeps it, and only while the rule's text is the one
+  the style was learnt against), is set aside. Every reader of the rules goes
+  through `_rules()`; code findings of a set-aside rule are dropped by
+  `_in_force`, prose only (blockers, references and layout stay); the writer and
+  every reviewer, reviser and judge get `_priorities()`. Fidelity, references
+  and output are never set aside. A written document is always assembled,
   compiled and offered, even when time ran out while writing
   (`WriteupRunner._check_time`). `tidy_numbering` never touches labels or
   displays that come from the material: the rest of the author's paper may refer
@@ -692,10 +701,17 @@ Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
 answering `QUESTIONS` about how the author explains; the whole body when it fits
 `style_packet`) → `condense` (one call per domain of several articles) →
 `macros` (one call: what each macro is used for, and its packages) → `save`.
-Names and phrasings must occur in the articles, typesetting examples in their
-LaTeX, and a macro's packages among those its files load (or `KNOWN_PACKAGES`);
-the rest is dropped and counted in the warnings. Profiles are version 2; version
-1 files, with `habits` and no packages, stay readable and usable.
+Each `observe` call also lists the article's departures from the write-up
+rules (`style.guideline_rules`: the paper, introduction, abstract and numerics
+sheets), each with an example; `condense` keeps, by counting, those seen in at
+least half of a domain's articles, with the rule's text at that time.
+Names and phrasings must occur in the articles, typesetting and departure
+examples in their LaTeX, and a macro's packages among those its files load (or
+`KNOWN_PACKAGES`); the rest is dropped and counted in the warnings. Profiles are
+version 2; version 1 files, with `habits` and no packages, and version 2 files
+without departures stay readable and usable. The active style is
+`style-choice.json`: mode `none` is the default style (the guidelines alone),
+always offered.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of

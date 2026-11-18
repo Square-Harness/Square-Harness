@@ -723,7 +723,12 @@ How it works:
    a paper's style rules for articles, notes and parts of papers; an
    introduction's required parts (motivation, literature, positioning, main
    result, method, organisation); an exam's header, points and recalled
-   notation; rules for exercise sheets and lecture notes.
+   notation; rules for exercise sheets and lecture notes. Your request comes
+   before these rules, and your active style comes between them (see
+   [Writing styles](#writing-styles)): when the request asks in so many words
+   for what a rule forbids, the plan notes it with your words, and that rule is
+   neither applied nor checked. The report's **Rules set aside** says which
+   rules your request or your style set aside.
    For an article, a part of a paper, notes or lecture notes of a section or
    more, a second short call then fixes the **skeleton** of the document: its
    sections, its results, the formulas cited at a distance and the figures,
@@ -920,9 +925,13 @@ do:
 It also keeps your names for things that have several names (Cauchy–Lipschitz or
 Picard–Lindelöf), your typesetting habits (such as `\left(\!`), your phrasings,
 the packages your articles load and the macros you use, with what each is used
-for when the definition does not say it and the packages it needs. Names,
-typesetting examples and phrasings are kept only when they occur in your
-articles. With the DS4 profile each article is read whole (any `.tex` the
+for when the definition does not say it and the packages it needs. Each article
+is also compared with the write-up guidelines: a rule your papers deliberately
+do not follow (contributions as a bulleted list, sections that open by saying
+what they do, all definitions in a preliminaries section) is a departure, kept
+for a kind of paper when at least half of its articles show it. Names,
+typesetting examples, phrasings and departure examples are kept only when they
+occur in your articles. With the DS4 profile each article is read whole (any `.tex` the
 harness can read, up to 1 MB); smaller models read representative passages, and
 the job's warnings name every article that was not read whole. Choose main
 article files, ideally two or more per kind of paper; `\input` parts are not
@@ -937,14 +946,27 @@ With the DS4.1 vision profile you can also choose screenshots of articles to
 learn visible phrasing and layout. Exact macro and environment definitions
 still require their `.tex` sources; they are not reconstructed from images.
 
-On the same page, **Style used by write-ups** chooses: automatically (a short
-call picks the style that fits the material, or none), none, one style, or one
-of its domains. A write-up follows the chosen style wherever the request and the
-material leave the choice open, uses your macros for what you use them for and
-loads the packages they need; the request still sets the structure of the
-document, and the style never changes its mathematics. Styles learnt with
-earlier versions keep their shorter description and still work; learn them
-again to get the full guide. Styles and this choice are kept in the
+At the top of the same page, **Active style** chooses the style write-ups use:
+
+- **Default style**: no rules of its own; write-ups follow the write-up
+  guidelines as they are. It is always there, for instance when a learnt style
+  turns out to copy habits you do not want.
+- a learnt style, or one of its domains;
+- **Automatic**: a short call picks the learnt style that fits the material, or
+  the default style when none fits.
+
+Write-ups apply an order of priority: what your request says, then your style,
+then the guidelines. A rule your active style departs from is set aside: it is
+not applied and not checked, and the report lists it. Your request comes before
+both: ask in so many words to break a rule ("list the contributions as bullet
+points") or to keep one your style departs from ("no sentence that only
+announces a section"), and the write-up does so. Neither the request nor the
+style changes the mathematics, its fidelity to your material, or the citations.
+A write-up also uses your macros for what you use them for and loads the
+packages they need. Styles learnt with earlier versions keep their shorter
+description, have no departures and still work; learn them again to get the
+full guide. A departure learnt against a rule that has changed since is not
+applied, and the write-up says so. Styles and the active style are kept in the
 `.mathagent/` folder of `--gui-root` and shared by every folder.
 
 ### Python Lab and Sanity check

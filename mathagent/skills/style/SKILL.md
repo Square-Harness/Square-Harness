@@ -22,7 +22,11 @@ Answer each from what the articles actually do. A good answer is a rule another 
 - **Typesetting.** Habits of the LaTeX source that make the text readable and should carry over, each with an example copied exactly from the source: spacing or sizing of delimiters (`\left(\!`), `\displaystyle` in fractions that contain integrals, how differentials, sets, norms, expectations and conditional expectations are written, the choice of equation environments, labelling conventions.
 - **Phrasings.** Short connectives and signposts the author really uses ("We now turn to", "The key observation is that"), copied exactly. Never invent or paraphrase a quotation.
 
-Quotations are checked: names, typesetting examples and phrasings that are not found in the articles are discarded.
+## Departures from the write-up rules
+
+The task lists the rules a write-up follows by default. Say which of them the article does not follow, deliberately: the same way more than once, or as a convention of the whole paper (contributions as a bulleted list, sections that open by saying what they do, all definitions gathered in a preliminaries section). Give the author's habit instead, and an example copied exactly from the article's source. A single slip is not a departure, and neither is something the rule does not cover. A write-up in the author's style sets these rules aside, so name only real ones.
+
+Quotations are checked: names, typesetting examples, phrasings and departure examples that are not found in the articles are discarded.
 
 ## Macros
 

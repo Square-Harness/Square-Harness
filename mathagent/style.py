@@ -11,10 +11,17 @@ motivation, proof strategy, proof organisation, what is left out, the contributi
 tone), which names the author uses for objects with several names, their typesetting
 habits, and what a macro is used for when its definition does not say it.
 
+Each article is also compared with the write-up rules (`guideline_rules`: the paper,
+introduction, abstract and numerics sheets of skills/writeup/guidelines). A rule the
+article does not follow, deliberately, is a departure: the rule, the author's habit
+instead and an example. A domain keeps the departures seen in at least half of its
+articles; a write-up in that style sets those rules aside (writeup._set_aside), because
+the author's style comes before the guidelines and the user's request before both.
+
 Model output is checked against the articles: phrasings and names are kept only when
-they occur in the text, typesetting habits only when their example occurs in the LaTeX
-source, and a macro's packages only when its files load them (or a known package
-provides a command of its definition).
+they occur in the text, typesetting habits and departures only when their example occurs
+in the LaTeX source, and a macro's packages only when its files load them (or a known
+package provides a command of its definition).
 
 A profile is one JSON file:
 
@@ -26,11 +33,14 @@ A profile is one JSON file:
      "domains": [{"name", "description", "articles": [path], "audience", "aim", "structure": [str],
                   "definitions", "motivation", "proof_motivation", "proof_organisation",
                   "omissions", "contribution", "tone": [str],
-                  "names": [{"term", "note"}], "typesetting": [{"habit", "example"}], "phrases": [str]}],
+                  "names": [{"term", "note"}], "typesetting": [{"habit", "example"}], "phrases": [str],
+                  "departures": [{"rule", "sheet", "rule_text", "habit", "examples": [str], "articles", "of"}]}],
      "template": [{"name", "content"}]}   (optional: the LaTeX template write-ups in this style build on)
 
-Version 1 files, learnt before these questions, have `habits` instead of the explanation
-fields, and no packages or macro notes; they are read as they are.
+`rule_text` is the rule as it read when the style was learnt: a write-up sets a rule aside
+only while its text is the same. Version 1 files, learnt before these questions, have
+`habits` instead of the explanation fields, and no packages, macro notes or departures;
+version 2 files learnt before departures have none. Both are read as they are.
 
 A write-up reads one domain through `style_digest` and the macros through `annotated`.
 """
@@ -50,7 +60,7 @@ FORMAT = 'square-style'
 VERSION = 2
 NAME = re.compile(r'[\w][\w .-]{0,59}')
 LIMITS = {'aim': 400, 'audience': 400, 'item': 300, 'structure': 12, 'question': 5, 'names': 12, 'typesetting': 12,
-          'phrases': 10, 'usage': 200, 'macros': 100, 'environments': 30, 'packages': 60}
+          'phrases': 10, 'departures': 12, 'usage': 200, 'macros': 100, 'environments': 30, 'packages': 60}
 REPORT_CHARS = 40_000  # the whole style, in the job's report
 TEMPLATE_FILES = ('.tex', '.sty', '.cls', '.bib')
 
@@ -138,6 +148,12 @@ STYLE_SCHEMA = {
         'phrases': _strings(LIMITS['phrases']),
     },
 }
+
+# One article's description also says which write-up rules it does not follow; a domain's merged style does not
+# (its departures are counted over its articles by the controller).
+DEPARTURE_FIELDS = (('rule', 10, ' '), ('habit', LIMITS['item'], ' '), ('example', 300, ' `'))
+OBSERVE_SCHEMA = {**STYLE_SCHEMA, 'required': [*STYLE_SCHEMA['required'], 'departures'],
+                  'properties': {**STYLE_SCHEMA['properties'], 'departures': _records(LIMITS['departures'], DEPARTURE_FIELDS)}}
 
 MACROS_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['macros'],
@@ -380,15 +396,23 @@ def _records_of(values, fields, count):
 
 def blank_style():
     return {'audience': '', 'aim': '', 'structure': [], **{key: [] for key, _, _ in QUESTIONS},
-            'names': [], 'typesetting': [], 'phrases': []}
+            'names': [], 'typesetting': [], 'phrases': [], 'departures': []}
 
 
-def clean_style(value, sources, typeset=None):
+def guideline_rules():
+    """The write-up rules a paper is held to, [{id, type, text, sheet}]: the paper, introduction, abstract and
+    numerics sheets, at the size of a whole paper. A learnt style is compared with them."""
+    from .writeup import load_guidelines  # writeup imports this module
+    return load_guidelines('paper_part', ('introduction', 'abstract'), 'paper', numerics=True)
+
+
+def clean_style(value, sources, typeset=None, rules=None):
     """Bound a model's style description and check its quotations against the articles.
 
     Phrasings and names are kept only when they occur in `sources`; a typesetting habit only when its
     example occurs in `typeset`, the LaTeX the author wrote (by default the sources; none for
-    screenshots). Returns the style and the number of quotations dropped.
+    screenshots). With `rules` (guideline rules), a departure is kept only for one of those rules and when
+    its example occurs in `typeset`. Returns the style and the number of quotations dropped.
     """
     value = value if isinstance(value, dict) else {}
     texts = [_flat(strip_comments(t)) for t in sources]
@@ -403,10 +427,19 @@ def clean_style(value, sources, typeset=None):
     found_examples = [t for t in examples if len(t['example']) >= 3 and any(t['example'] in s for s in source)]
     phrases = [p.strip(' "\'“”') for p in _items(value.get('phrases'), LIMITS['phrases'] * 2)]
     found_phrases = [p for p in phrases if verbatim(p, texts)]
+    known = {r['id'] for r in rules or []}
+    departures = []  # one per rule, the first given
+    for d in _records_of(value.get('departures'), DEPARTURE_FIELDS, LIMITS['departures'] * 2) if known and source else []:
+        if not any(d['rule'] == e['rule'] for e in departures):
+            departures.append(d)
+    found_departures = [d for d in departures if d['rule'] in known and len(d['example']) >= 10
+                        and any(d['example'] in s for s in source)]
     style['names'] = found_names[:LIMITS['names']]
     style['typesetting'] = found_examples[:LIMITS['typesetting']]
     style['phrases'] = found_phrases[:LIMITS['phrases']]
-    dropped = len(names) + len(examples) + len(phrases) - len(found_names) - len(found_examples) - len(found_phrases)
+    style['departures'] = found_departures[:LIMITS['departures']]
+    dropped = (len(names) + len(examples) + len(phrases) + len(departures)
+               - len(found_names) - len(found_examples) - len(found_phrases) - len(found_departures))
     return style, dropped
 
 
@@ -538,6 +571,14 @@ def _guide(style):
     return blocks
 
 
+def departure_line(departure):
+    """One departure from the write-up rules, as the report and the write-up's priorities say it."""
+    seen = (f'in {departure["articles"]} of {departure["of"]} articles; ' if departure.get('of', 1) > 1 else '')
+    example = (departure.get('examples') or [''])[0]
+    return (f'- {departure["rule"]}: {departure["habit"]}'
+            + (f' ({seen}as in "{example}")' if example else f' ({seen.rstrip("; ")})' if seen else ''))
+
+
 def _fitted(blocks, limit):
     """The blocks within `limit` characters: whole lines only, a heading only above a line it heads."""
     out, size = [], 0
@@ -583,6 +624,8 @@ def style_prompt(profile, domain=None, limit=REPORT_CHARS):
         blocks.append(('', ['Aim of these papers: ' + item['aim']] if item.get('aim') else []))
         blocks.append(('Usual order of a paper:', [f'{i}. {s}' for i, s in enumerate(item.get('structure') or [], 1)]))
         blocks += _guide(item)
+        blocks.append(('Write-up rules this style sets aside (the author departs from them):',
+                       [departure_line(d) for d in item.get('departures') or []]))
     articles = set(chosen['articles']) if chosen else None
     macros = [m for m in profile['macros'] if articles is None or articles & set(m['articles'])]
     blocks.append(('\nMacros (use them instead of their expansions):',
@@ -729,7 +772,9 @@ class StyleRunner(ResearchRunner):
         article = pending[0]
         source = self._article(article['id'])
         cap = 6000
-        room = self._room(cap)
+        rules = guideline_rules()
+        listing = '\n'.join(f'- {r["id"]} [{r["type"]}] {r["text"]}' for r in rules)
+        room = max(2000, self._room(cap) - len(listing))
         text, whole = excerpts(source['content'], room)
         if not whole:
             self.state['warnings'].append(f'{article["path"]} is longer than one call can read here ({room:,} characters); '
@@ -753,17 +798,23 @@ class StyleRunner(ResearchRunner):
                        'conditional expectations are written, choice of equation environments, labels), each with an '
                        'example copied exactly from the source.\n'
                        '- phrases: short characteristic connectives and signposts copied exactly from the text, not '
-                       'mathematical statements.\n\n' + self._digest(article) +
+                       'mathematical statements.\n'
+                       '- departures: the WRITE-UP RULES below that this article does not follow, deliberately: the same '
+                       'way more than once, or as a convention of the whole paper, never a single slip. For each: rule (its '
+                       'identifier), habit (what the author does instead, in one sentence) and example (one or two lines '
+                       'copied exactly from the article\'s LaTeX source that show it). An empty list when the article '
+                       'follows the rules.\n\nWRITE-UP RULES (what a write-up follows unless the author\'s style or the '
+                       'request says otherwise):\n' + listing + '\n\n' + self._digest(article) +
                        '\n\nARTICLE (LaTeX source, comments removed):\n' + text)
-        result = self._call('observe', instruction, cap=cap, format_schema=STYLE_SCHEMA)
+        result = self._call('observe', instruction, cap=cap, format_schema=OBSERVE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
             value = {}
-        style, dropped = clean_style(value, [source['content']], [] if source.get('derived_from_images') else None)
+        style, dropped = clean_style(value, [source['content']], [] if source.get('derived_from_images') else None, rules)
         if dropped:
-            self.state['warnings'].append(f'{dropped} name(s), typesetting example(s) or phrasing(s) quoted for '
-                                          f'{article["path"]} were not found in it and were dropped.')
+            self.state['warnings'].append(f'{dropped} name(s), typesetting example(s), phrasing(s) or departure(s) quoted '
+                                          f'for {article["path"]} were not found in it and were dropped.')
         if not result['complete'] or not (style['aim'] or style['structure'] or any(style[k] for k, _, _ in QUESTIONS)):
             self.state['warnings'].append(f'The style description of {article["path"]} is incomplete.')
         self.state['observations'][article['id']] = {**style, 'complete': result['complete']}
@@ -773,10 +824,11 @@ class StyleRunner(ResearchRunner):
         if domain is None:
             self.state['phase'] = 'macros'
             return
-        notes = [{k: v for k, v in self.state['observations'][i].items() if k != 'complete'}
+        # Departures are counted over the articles by the controller (_departures), not merged by the model.
+        notes = [{k: v for k, v in self.state['observations'][i].items() if k not in ('complete', 'departures')}
                  for i in domain['articles'] if i in self.state['observations']]
         if len(notes) == 1:  # one article: its description is already the domain's
-            domain['style'] = {**blank_style(), **notes[0]}
+            domain['style'] = {**blank_style(), **notes[0], 'departures': self._departures(domain)}
             domain['complete'] = True
             return
         articles = [self._article(i) for i in domain['articles']]
@@ -798,7 +850,23 @@ class StyleRunner(ResearchRunner):
         if not domain['merged']:
             self.state['warnings'].append(f'Merging the "{domain["name"]}" articles failed; the first article\'s description is used.')
             style = {**blank_style(), **notes[0]}
-        domain['style'], domain['complete'] = style, True
+        domain['style'], domain['complete'] = {**style, 'departures': self._departures(domain)}, True
+
+    def _departures(self, domain):
+        """The write-up rules a domain's style departs from (exact counting, no model): those its articles'
+        descriptions name, each with an example found in its article, kept when at least half of the domain's
+        described articles do. Each keeps the rule's text as it reads now, so that a write-up can tell when the
+        guidelines changed since."""
+        rules = {r['id']: r for r in guideline_rules()}
+        notes = [self.state['observations'][i] for i in domain['articles'] if i in self.state['observations']]
+        seen = {}
+        for note in notes:
+            for departure in note.get('departures') or []:
+                seen.setdefault(departure['rule'], []).append(departure)
+        return [{'rule': rid, 'sheet': rule['sheet'], 'rule_text': rule['text'], 'habit': seen[rid][0]['habit'],
+                 'examples': list(dict.fromkeys(d['example'] for d in seen[rid]))[:2],
+                 'articles': len(seen[rid]), 'of': len(notes)}
+                for rid, rule in rules.items() if rid in seen and 2 * len(seen[rid]) >= len(notes)]
 
     def _macros(self):
         """The macros the files define and the texts use, most widely used first (exact, no model).

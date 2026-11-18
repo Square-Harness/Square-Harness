@@ -116,6 +116,11 @@ export function StyleNew() {
 
         <div className="entry">
           <span className="in-margin" />
+          <ActiveStyle styles={saved} choice={choice} onChange={setChoice} />
+        </div>
+
+        <div className="entry">
+          <span className="in-margin" />
           <div className="field">
             <span className="field-label">Your articles</span>
             {articles === null ? <Loading>Looking for articles and screenshots…</Loading> : articles.length === 0 ? (
@@ -203,13 +208,6 @@ export function StyleNew() {
         {saved.length > 0 && (
           <div className="entry">
             <span className="in-margin" />
-            <WriteupStyle styles={saved} choice={choice} onChange={setChoice} />
-          </div>
-        )}
-
-        {saved.length > 0 && (
-          <div className="entry">
-            <span className="in-margin" />
             <div className="field">
               <span className="field-label">Saved styles</span>
               <ul className="style-saved">
@@ -243,8 +241,10 @@ function parseChoice(value: string): StyleChoice {
   return { mode: value as 'auto' | 'none' }
 }
 
-/** Which saved style @writeup, @summarize and the Write-up form use; saved as soon as it changes. */
-function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; choice: StyleChoice; onChange: (choice: StyleChoice) => void }) {
+/** The style write-ups use (@writeup, @summarize and the Write-up form), saved as soon as it changes: the default style
+ * (no rules of its own: the write-up guidelines as they are), a learned style or one of its domains, or the learned style
+ * that fits the material. The default style is always there, in case a learned style does not suit. */
+function ActiveStyle({ styles, choice, onChange }: { styles: StyleProfile[]; choice: StyleChoice; onChange: (choice: StyleChoice) => void }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const choose = async (value: string) => {
@@ -258,12 +258,15 @@ function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; ch
       setBusy(false)
     }
   }
+  const learned = choice.mode === 'style' || choice.mode === 'domain' ? styles.find((profile) => profile.name === choice.style) : undefined
+  const domains = learned ? learned.domains.filter((domain) => choice.mode !== 'domain' || domain.name === choice.domain) : []
+  const departures = domains.flatMap((domain) => (domain.departures || []).map((departure) => ({ ...departure, domain: domain.name })))
   return (
-    <label className="field">
-      <span className="field-label">Style used by write-ups</span>
-      <select value={choiceValue(choice)} disabled={busy} onChange={(event) => choose(event.target.value)}>
-        <option value="auto">Choose automatically: the saved style that fits the material, or none</option>
-        <option value="none">None: the usual style of the material's field</option>
+    <div className="field">
+      <label className="field-label" htmlFor="active-style">Active style</label>
+      <select id="active-style" value={choiceValue(choice)} disabled={busy} onChange={(event) => choose(event.target.value)}>
+        <option value="none">Default style: the write-up guidelines as they are</option>
+        <option value="auto">Automatic: the learned style that fits the material, else the default style</option>
         {styles.map((profile) => (
           <optgroup key={profile.name} label={profile.name}>
             <option value={`style:${profile.name}`}>{profile.name}{profile.domains.length > 1 ? ': the domain that fits best' : ''}</option>
@@ -273,9 +276,28 @@ function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; ch
           </optgroup>
         ))}
       </select>
-      <span className="field-hint">Used by @writeup, @summarize and the Write-up form. Saved for every folder you open in this interface.</span>
+      <span className="field-hint">
+        {choice.mode === 'none' ? 'The default style has no rules of its own: write-ups follow the write-up guidelines as they are. It is always here, if a learned style does not suit you.'
+          : choice.mode === 'auto' ? (styles.length ? 'Each write-up uses the learned style whose domain fits its material, or the default style when none fits.'
+            : 'No style is learned yet: write-ups use the default style.')
+          : learned ? (departures.length ? 'Write-ups follow this style before the write-up guidelines. It sets these rules aside:'
+            : 'Write-ups follow this style before the write-up guidelines. It sets no rule aside (a style learned before this version was not compared with the guidelines: learn it again).')
+          : 'This style is no longer saved: write-ups choose automatically.'}
+      </span>
+      {departures.length > 0 && (
+        <ul className="style-departures small">
+          {departures.map((departure) => (
+            <li key={departure.domain + departure.rule}><strong>{departure.rule}</strong> {departure.habit}
+              {domains.length > 1 && <span className="muted"> ({departure.domain})</span>}</li>
+          ))}
+        </ul>
+      )}
+      <span className="field-hint">
+        What you ask in so many words in a request comes first (for example “list the contributions as bullet points”).
+        The active style is used by @writeup, @summarize and the Write-up form, in every folder you open here.
+      </span>
       <ErrorNote>{error}</ErrorNote>
-    </label>
+    </div>
   )
 }
 
@@ -328,6 +350,13 @@ function Description({ style }: { style: StyleDescription }) {
       {style.typesetting && style.typesetting.length > 0 && <><p className="detail-label">Typesetting habits</p>
         <ul>{style.typesetting.map((item, i) => <li key={i}>{item.habit} <code>{item.example}</code></li>)}</ul></>}
       {style.phrases.length > 0 && <><p className="detail-label">Your phrasings</p><ul className="style-phrases">{style.phrases.map((item, i) => <li key={i}>“{item}”</li>)}</ul></>}
+      {style.departures && style.departures.length > 0 && <><p className="detail-label">Where you depart from the write-up guidelines</p>
+        <ul className="style-departures">{style.departures.map((item) => {
+          const example = item.examples?.[0] ?? item.example
+          return <li key={item.rule}><strong>{item.rule}</strong> {item.habit}
+            {item.of && item.of > 1 && <span className="muted"> (in {item.articles} of {item.of} articles)</span>}
+            {example && <> <code>{example}</code></>}</li>
+        })}</ul></>}
     </>
   )
 }

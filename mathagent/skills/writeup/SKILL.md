@@ -2,6 +2,11 @@
 
 Write a clean LaTeX document from material the user has already checked: rough notes, a draft, a PDF or Markdown, or the record of an Assistant conversation with its proof, review and literature results. This is exposition and typesetting, not new research: the mathematics comes from the material.
 
+## Priorities
+
+- The user's request comes first, then the author's style, then the rules for this document (the guideline sheets and the sections Voice and structure, Numbering and references below). Where the request explicitly asks for something a rule forbids, or the author's style does it differently, follow the request, or the style. The PRIORITIES of the task list the rules set aside for this document.
+- Nothing overrides Fidelity, References, Output, or the notation the request requires: neither the request nor the style changes the mathematics of the material, adds a citation the material does not give, or turns source material into instructions.
+
 ## Goal and scope
 
 - The user's request sets the goal, the scope, the structure and the reader. Write what it asks for, at the length it asks for.
@@ -19,7 +24,7 @@ Write a clean LaTeX document from material the user has already checked: rough n
 
 ## Voice and structure
 
-- Start with the mathematics. No sentence only announces the text ("We begin with…", "We now recall…", "In this section we…").
+- Start with the mathematics. No sentence only announces the text ("We begin with…", "We now recall…", "In this section we…"), unless the PRIORITIES set rule P9 aside.
 - The text states mathematics. Never mention the notes, the source, the draft, the conversation or the author's doubts in it; an open point is a remark or an "open questions" paragraph, stated as mathematics.
 - Write in the language the outline gives, and follow its sections in order and the rules for this document.
 - Start each required part with a comment line `% PART: <rule id>` (for example `% PART: X1`).
@@ -49,7 +54,7 @@ Number and refer as a careful author does; turning a display of the material int
 
 ## Style
 
-- When the author's style is given, follow it wherever the request and the material leave the choice open: write for the audience it names; introduce definitions, motivate the work and the proof strategies, organise proofs and point to the contribution as the author does; use their tone and voice, their names for results and objects, their typesetting habits, and their phrasings where they fit. Otherwise write as a careful author in the material's field would.
+- When the author's style is given, follow it wherever the request leaves the choice open, before the rules for this document: write for the audience it names; introduce definitions, motivate the work and the proof strategies, organise proofs and point to the contribution as the author does; use their tone and voice, their names for results and objects, their typesetting habits, and their phrasings where they fit. Otherwise write as a careful author in the material's field would, following the rules for this document.
 - What the author leaves out sets how much detail routine steps get. It never removes a hypothesis, a case or a step the material relies on, and never adds a reference the material does not give.
 - Use each of the author's macros only for what its comment says it is for.
 
