@@ -929,9 +929,10 @@ for when the definition does not say it and the packages it needs. Each article
 is also compared with the write-up guidelines: a rule your papers deliberately
 do not follow (contributions as a bulleted list, sections that open by saying
 what they do, all definitions in a preliminaries section) is a departure, kept
-for a kind of paper when at least half of its articles show it. Names,
-typesetting examples, phrasings and departure examples are kept only when they
-occur in your articles. With the DS4 profile each article is read whole (any `.tex` the
+for a kind of paper when most of its articles show it (both of two, two of
+three). Names, typesetting examples, phrasings and departure examples are kept
+only when they occur in your articles; a LaTeX quotation is kept as your article
+writes it, even when the model dropped its backslashes. With the DS4 profile each article is read whole (any `.tex` the
 harness can read, up to 1 MB); smaller models read representative passages, and
 the job's warnings name every article that was not read whole. Choose main
 article files, ideally two or more per kind of paper; `\input` parts are not
@@ -960,8 +961,11 @@ then the guidelines. A rule your active style departs from is set aside: it is
 not applied and not checked, and the report lists it. Your request comes before
 both: ask in so many words to break a rule ("list the contributions as bullet
 points") or to keep one your style departs from ("no sentence that only
-announces a section"), and the write-up does so. Neither the request nor the
-style changes the mathematics, its fidelity to your material, or the citations.
+announces a section"), and the write-up does so. Some rules are never set
+aside: a statement always keeps all its hypotheses (P4). Whether a proof says how
+it goes (P5) depends on the topic, so only your request sets that rule aside,
+never a style. Neither the request nor the style changes the mathematics, its
+fidelity to your material, or the citations.
 A write-up also uses your macros for what you use them for and loads the
 packages they need. Styles learnt with earlier versions keep their shorter
 description, have no departures and still work; learn them again to get the

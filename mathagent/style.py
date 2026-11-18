@@ -14,9 +14,10 @@ habits, and what a macro is used for when its definition does not say it.
 Each article is also compared with the write-up rules (`guideline_rules`: the paper,
 introduction, abstract and numerics sheets of skills/writeup/guidelines). A rule the
 article does not follow, deliberately, is a departure: the rule, the author's habit
-instead and an example. A domain keeps the departures seen in at least half of its
+instead and an example. A domain keeps the departures seen in a strict majority of its
 articles; a write-up in that style sets those rules aside (writeup._set_aside), because
-the author's style comes before the guidelines and the user's request before both.
+the author's style comes before the guidelines and the user's request before both. Some
+rules no style sets aside (writeup.FIXED_RULES, REQUEST_ONLY_RULES).
 
 Model output is checked against the articles: phrasings and names are kept only when
 they occur in the text, typesetting habits and departures only when their example occurs
@@ -48,6 +49,7 @@ from collections import Counter
 import json
 from pathlib import Path
 import re
+import unicodedata
 
 from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
@@ -148,6 +150,12 @@ STYLE_SCHEMA = {
         'phrases': _strings(LIMITS['phrases']),
     },
 }
+
+# Merging a domain's articles is about the prose answers only: the model never quotes again, so a verified quotation
+# cannot be lost or retyped (the controller merges names, typesetting and phrasings: StyleRunner._quotations).
+PROSE_FIELDS = ('audience', 'aim', 'structure', *(key for key, _, _ in QUESTIONS))
+CONDENSE_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': list(PROSE_FIELDS),
+                   'properties': {key: STYLE_SCHEMA['properties'][key] for key in PROSE_FIELDS}}
 
 # One article's description also says which write-up rules it does not follow; a domain's merged style does not
 # (its departures are counted over its articles by the controller).
@@ -363,16 +371,60 @@ def _flat(text):
     return ' '.join(text.split())
 
 
-def _term(text):
-    """A name as compared with the articles: case, braces, ties and dash styles ignored."""
-    text = re.sub(r'---?|[–—]', '-', text.replace('~', ' ')).replace('{', '').replace('}', '')
-    return _flat(text.lower())
+def _letters(text):
+    """The letters and digits of `text`, lowercased and without accents, with the index in `text` of each."""
+    letters, where = [], []
+    for index, char in enumerate(text):
+        for part in unicodedata.normalize('NFKD', char):
+            if part.isalnum():
+                letters.append(part.casefold())
+                where.append(index)
+    return ''.join(letters), where
 
 
-def verbatim(phrase, texts):
-    """Whether a quoted phrasing occurs in one of the texts (comments removed, spaces normalised)."""
-    needle = _flat(phrase.strip(' "\'“”'))
-    return len(needle) >= 8 and any(needle in text for text in texts)
+class Quoted:
+    """An article's LaTeX, for checking what the model quotes from it: flat (comments removed, spaces collapsed),
+    and as its letters and digits alone."""
+
+    def __init__(self, tex):
+        self.flat = _flat(strip_comments(tex))
+        self.letters, self.where = _letters(self.flat)
+
+    def find(self, quote, least):
+        """The article's own text for a quotation, or None. A quotation found as it is (spaces aside) is kept as
+        given. Otherwise: models drop backslashes and spacing commands when they quote LaTeX inside JSON ("intX
+        varphi, dnuw" for "\\intX \\varphi \\, d\\nuw"), so a quotation whose letters and digits, at least `least` of
+        them, occur in that order in the article gets the article's text for that span, with the marks around it
+        (a command's backslash, an opening brace, a closing comma). A span much longer than the quotation is refused."""
+        quote = _flat(quote)
+        if quote and quote in self.flat:
+            return quote
+        letters, _ = _letters(quote)
+        at = self.letters.find(letters) if len(letters) >= least else -1
+        if at < 0:
+            return None
+        start, end = self.where[at], self.where[at + len(letters) - 1] + 1
+        mark = lambda char: not char.isalnum() and not char.isspace()
+        if start and self.flat[start - 1] == '\\':
+            start -= 1
+        for _ in range(len(re.match(r'[^\w\s\\]*', quote).group(0))):
+            if start and mark(self.flat[start - 1]):
+                start -= 1
+                if start and self.flat[start - 1] == '\\':  # an escaped mark, such as \| or \{
+                    start -= 1
+        for _ in range(len(re.search(r'[^\w\s]*$', quote).group(0))):
+            if end < len(self.flat) and mark(self.flat[end]):
+                end += 1
+        return self.flat[start:end] if end - start <= 3 * len(quote) + 20 else None
+
+
+def _unique(items, key):
+    seen, out = set(), []
+    for item in items:
+        if item[key] not in seen:
+            seen.add(item[key])
+            out.append(item)
+    return out
 
 
 def _text(value, length):
@@ -400,43 +452,67 @@ def blank_style():
 
 
 def guideline_rules():
-    """The write-up rules a paper is held to, [{id, type, text, sheet}]: the paper, introduction, abstract and
-    numerics sheets, at the size of a whole paper. A learnt style is compared with them."""
-    from .writeup import load_guidelines  # writeup imports this module
-    return load_guidelines('paper_part', ('introduction', 'abstract'), 'paper', numerics=True)
+    """The write-up rules a paper is held to that a style may set aside, [{id, type, text, sheet}]: the paper,
+    introduction, abstract and numerics sheets, at the size of a whole paper, without the rules write-ups always
+    follow or that only a request sets aside (see settable). A learnt style is compared with them."""
+    from .writeup import FIXED_RULES, REQUEST_ONLY_RULES, load_guidelines  # writeup imports this module
+    return [r for r in load_guidelines('paper_part', ('introduction', 'abstract'), 'paper', numerics=True)
+            if r['id'] not in FIXED_RULES | REQUEST_ONLY_RULES]
+
+
+def settable(departures):
+    """The departures a style may act on: none from a rule write-ups always follow (writeup.FIXED_RULES) or that
+    only a request sets aside (writeup.REQUEST_ONLY_RULES). Styles learnt before these sets keep their others."""
+    from .writeup import FIXED_RULES, REQUEST_ONLY_RULES
+    return [d for d in departures or [] if d.get('rule') not in FIXED_RULES | REQUEST_ONLY_RULES]
 
 
 def clean_style(value, sources, typeset=None, rules=None):
-    """Bound a model's style description and check its quotations against the articles.
+    """Bound a model's style description and check its quotations against the articles (see Quoted.find).
 
     Phrasings and names are kept only when they occur in `sources`; a typesetting habit only when its
     example occurs in `typeset`, the LaTeX the author wrote (by default the sources; none for
     screenshots). With `rules` (guideline rules), a departure is kept only for one of those rules and when
-    its example occurs in `typeset`. Returns the style and the number of quotations dropped.
+    its example occurs in `typeset`. Examples and phrasings are kept as the article writes them. Returns the
+    style and the number of quotations not found.
     """
     value = value if isinstance(value, dict) else {}
-    texts = [_flat(strip_comments(t)) for t in sources]
-    terms = [_term(t) for t in texts]
-    source = texts if typeset is None else [_flat(strip_comments(t)) for t in typeset]
+    texts = [Quoted(t) for t in sources]
+    latex = texts if typeset is None else [Quoted(t) for t in typeset]
+
+    def found(quote, where, least):
+        return next((text for text in (q.find(quote, least) for q in where) if text), None)
+
     style = {'audience': _text(value.get('audience'), LIMITS['audience']), 'aim': _text(value.get('aim'), LIMITS['aim']),
              'structure': _items(value.get('structure'), LIMITS['structure']),
              **{key: _items(value.get(key), LIMITS['question']) for key, _, _ in QUESTIONS}}
     names = _records_of(value.get('names'), NAME_FIELDS, LIMITS['names'] * 2)
-    found_names = [n for n in names if len(_term(n['term'])) >= 3 and any(_term(n['term']) in t for t in terms)]
-    examples = _records_of(value.get('typesetting'), TYPESETTING_FIELDS, LIMITS['typesetting'] * 2) if source else []
-    found_examples = [t for t in examples if len(t['example']) >= 3 and any(t['example'] in s for s in source)]
+    found_names = [n for n in names if found(n['term'], texts, 5)]
+    examples = _records_of(value.get('typesetting'), TYPESETTING_FIELDS, LIMITS['typesetting'] * 2) if latex else []
+    found_examples = []
+    for item in examples:
+        text = found(item['example'], latex, 8)
+        if text and len(text) >= 3:
+            found_examples.append({**item, 'example': text[:TYPESETTING_FIELDS[1][1]]})
     phrases = [p.strip(' "\'“”') for p in _items(value.get('phrases'), LIMITS['phrases'] * 2)]
-    found_phrases = [p for p in phrases if verbatim(p, texts)]
+    found_phrases = []
+    for phrase in phrases:
+        text = found(phrase, texts, 10) if len(phrase) >= 8 else None
+        if text:
+            found_phrases.append(text[:LIMITS['item']])
     known = {r['id'] for r in rules or []}
     departures = []  # one per rule, the first given
-    for d in _records_of(value.get('departures'), DEPARTURE_FIELDS, LIMITS['departures'] * 2) if known and source else []:
-        if not any(d['rule'] == e['rule'] for e in departures):
-            departures.append(d)
-    found_departures = [d for d in departures if d['rule'] in known and len(d['example']) >= 10
-                        and any(d['example'] in s for s in source)]
+    for item in _records_of(value.get('departures'), DEPARTURE_FIELDS, LIMITS['departures'] * 2) if known and latex else []:
+        if not any(item['rule'] == other['rule'] for other in departures):
+            departures.append(item)
+    found_departures = []
+    for item in departures:
+        text = found(item['example'], latex, 8) if item['rule'] in known else None
+        if text and len(text) >= 10:
+            found_departures.append({**item, 'example': text[:DEPARTURE_FIELDS[2][1]]})
     style['names'] = found_names[:LIMITS['names']]
-    style['typesetting'] = found_examples[:LIMITS['typesetting']]
-    style['phrases'] = found_phrases[:LIMITS['phrases']]
+    style['typesetting'] = _unique(found_examples, 'example')[:LIMITS['typesetting']]
+    style['phrases'] = list(dict.fromkeys(found_phrases))[:LIMITS['phrases']]
     style['departures'] = found_departures[:LIMITS['departures']]
     dropped = (len(names) + len(examples) + len(phrases) + len(departures)
                - len(found_names) - len(found_examples) - len(found_phrases) - len(found_departures))
@@ -500,7 +576,7 @@ def set_template(root, name, files):
 
 def public_profile(profile):
     """A style as the interface lists it: its template's file names and sizes, not their contents."""
-    value = dict(profile)
+    value = dict(profile, domains=[dict(d, departures=settable(d.get('departures'))) for d in profile['domains']])
     if profile.get('template'):
         value['template'] = [{'name': f['name'], 'size': len(f['content'])} for f in profile['template']]
     return value
@@ -625,7 +701,7 @@ def style_prompt(profile, domain=None, limit=REPORT_CHARS):
         blocks.append(('Usual order of a paper:', [f'{i}. {s}' for i, s in enumerate(item.get('structure') or [], 1)]))
         blocks += _guide(item)
         blocks.append(('Write-up rules this style sets aside (the author departs from them):',
-                       [departure_line(d) for d in item.get('departures') or []]))
+                       [departure_line(d) for d in settable(item.get('departures'))]))
     articles = set(chosen['articles']) if chosen else None
     macros = [m for m in profile['macros'] if articles is None or articles & set(m['articles'])]
     blocks.append(('\nMacros (use them instead of their expansions):',
@@ -824,39 +900,55 @@ class StyleRunner(ResearchRunner):
         if domain is None:
             self.state['phase'] = 'macros'
             return
-        # Departures are counted over the articles by the controller (_departures), not merged by the model.
-        notes = [{k: v for k, v in self.state['observations'][i].items() if k not in ('complete', 'departures')}
+        # The model merges the prose answers; quotations and departures are merged by counting (_quotations, _departures).
+        notes = [{k: v for k, v in self.state['observations'][i].items() if k in PROSE_FIELDS}
                  for i in domain['articles'] if i in self.state['observations']]
+        counted = {**self._quotations(domain), 'departures': self._departures(domain)}
         if len(notes) == 1:  # one article: its description is already the domain's
-            domain['style'] = {**blank_style(), **notes[0], 'departures': self._departures(domain)}
+            domain['style'] = {**blank_style(), **notes[0], **counted}
             domain['complete'] = True
             return
-        articles = [self._article(i) for i in domain['articles']]
         instruction = (f'Merge these style descriptions of {len(notes)} articles from the domain "{domain["name"]}" '
                        f'({domain["description"]}) into one style guide for writing new papers of this kind, with the '
                        'same fields. Keep what recurs across articles and what is distinctive of this author; where the '
                        'articles differ, say on what it depends (for example the length of the paper or its readers). '
                        'Drop what is specific to one paper\'s mathematics and anything generic. The structure is the '
-                       'author\'s usual order of parts. Keep names, typesetting examples and phrasings exactly as '
-                       'quoted.\n\nDESCRIPTIONS:\n' + json.dumps(notes, ensure_ascii=False, indent=1))
-        result = self._call('condense', instruction, cap=6000, format_schema=STYLE_SCHEMA)
+                       'author\'s usual order of parts.\n\nDESCRIPTIONS:\n' + json.dumps(notes, ensure_ascii=False, indent=1))
+        result = self._call('condense', instruction, cap=6000, format_schema=CONDENSE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
             value = {}
-        style, _ = clean_style(value, [a['content'] for a in articles],
-                               [a['content'] for a in articles if not a.get('derived_from_images')])
+        style = {key: value[key] for key in PROSE_FIELDS} if isinstance(value, dict) and all(key in value for key in PROSE_FIELDS) else {}
+        style, _ = clean_style(style, [])
         domain['merged'] = result['complete'] and bool(style['aim'] or style['structure'])
         if not domain['merged']:
             self.state['warnings'].append(f'Merging the "{domain["name"]}" articles failed; the first article\'s description is used.')
             style = {**blank_style(), **notes[0]}
-        domain['style'], domain['complete'] = {**style, 'departures': self._departures(domain)}, True
+        domain['style'], domain['complete'] = {**style, **counted}, True
+
+    def _quotations(self, domain):
+        """A domain's names, typesetting habits and phrasings: its articles' own, each already found in its article,
+        merged by counting (the most frequent first, then in order of appearance), never retyped by a model."""
+        notes = [self.state['observations'][i] for i in domain['articles'] if i in self.state['observations']]
+
+        def merged(key, field, limit):
+            count, first = Counter(), {}
+            for note in notes:
+                for item in note.get(key) or []:
+                    name = item[field] if field else item
+                    count[name] += 1
+                    first.setdefault(name, item)
+            return [first[name] for name, _ in sorted(count.items(), key=lambda kv: -kv[1])][:limit]
+        return {'names': merged('names', 'term', LIMITS['names']),
+                'typesetting': merged('typesetting', 'example', LIMITS['typesetting']),
+                'phrases': merged('phrases', None, LIMITS['phrases'])}
 
     def _departures(self, domain):
         """The write-up rules a domain's style departs from (exact counting, no model): those its articles'
-        descriptions name, each with an example found in its article, kept when at least half of the domain's
-        described articles do. Each keeps the rule's text as it reads now, so that a write-up can tell when the
-        guidelines changed since."""
+        descriptions name, each with an example found in its article, kept when a strict majority of the domain's
+        described articles do (both of two, two of three). Each keeps the rule's text as it reads now, so that a
+        write-up can tell when the guidelines changed since."""
         rules = {r['id']: r for r in guideline_rules()}
         notes = [self.state['observations'][i] for i in domain['articles'] if i in self.state['observations']]
         seen = {}
@@ -866,7 +958,7 @@ class StyleRunner(ResearchRunner):
         return [{'rule': rid, 'sheet': rule['sheet'], 'rule_text': rule['text'], 'habit': seen[rid][0]['habit'],
                  'examples': list(dict.fromkeys(d['example'] for d in seen[rid]))[:2],
                  'articles': len(seen[rid]), 'of': len(notes)}
-                for rid, rule in rules.items() if rid in seen and 2 * len(seen[rid]) >= len(notes)]
+                for rid, rule in rules.items() if rid in seen and 2 * len(seen[rid]) > len(notes)]
 
     def _macros(self):
         """The macros the files define and the texts use, most widely used first (exact, no model).

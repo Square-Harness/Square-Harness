@@ -15,10 +15,13 @@
 - Give write-ups an order of priority: the request, then the active style, then
   the guidelines. A request that asks in so many words to break a rule, or to
   keep one, is recorded by the plan with its words (checked against the
-  message); a learnt style records the rules its articles deliberately depart
-  from, with examples. Rules set aside are neither applied nor checked, by the
-  writer, the reviewers, the code checks or the gates, and the report lists
-  them; fidelity, references and output never are. Put an Active style
+  message); a learnt style records the rules most of its articles deliberately
+  depart from, with examples. Rules set aside are neither applied nor checked,
+  by the writer, the reviewers, the code checks or the gates, and the report
+  lists them; fidelity, references and output never are, nor P4 (statements
+  keep their hypotheses); P5 (proofs say how they go) only by the request.
+  Quotations of LaTeX that the model gave without backslashes are matched by
+  their letters and kept as the article writes them. Put an Active style
   selector at the top of Learn my writing style, with a Default style (the
   guidelines unchanged) that is always available.
 - Upgrade Literature review for research mathematicians. Resolve citation leads

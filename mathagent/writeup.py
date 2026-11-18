@@ -41,7 +41,7 @@ from . import texcheck
 from .texcheck import POSITIONAL as _POSITIONAL
 from .research import ResearchBudget, ResearchRunner, _job_directory, _read_state, remaining_limit
 from .style import (_group, annotated, definition_body, departure_line, environment_definitions, grouped,
-                    list_profiles, macro_definitions, needed_macros, style_digest, uses)
+                    list_profiles, macro_definitions, needed_macros, settable, style_digest, uses)
 from .worker_errors import WorkerInputError
 from .model_limits import output_limit, input_limit, sampling, is_ds4
 
@@ -607,6 +607,11 @@ CODE_RULES = {'P22': ('section-length',), 'P1': ('positional', 'hand-number', 's
               'P20': ('title-length',), 'I6': ('frame-links',), 'I12': ('frame-links',), 'I7': ('intro-statements',),
               'I8': ('intro-sections',), 'I11': ('intro-list',), 'A2': ('abstract-length',), 'A3': ('abstract-cite', 'abstract-ref')}
 CODE_CHECKED = set(CODE_RULES)
+# Rules that neither the request nor a style sets aside. P4 keeps each statement whole (all its hypotheses, what its
+# constants depend on): a human author may choose otherwise for their own text, generated mathematics may not.
+FIXED_RULES = frozenset({'P4'})
+# Rules only the request sets aside, never a style: how much a proof explains depends on the topic, not on the author.
+REQUEST_ONLY_RULES = frozenset({'P5'})
 _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| should)|Let me|First,? I|Before (?:writing|fixing)|"
                        r"To (?:fix|write|verify)|I'm going to)\b", re.I)
 
@@ -1040,10 +1045,12 @@ instruction: the user's request without any notes pasted into it.
 requirements: each thing the request asks for explicitly, one per entry ("a line for the date", "no solutions",
 "points out of 20"). They are numbered R1, R2... in this order.
 rules: the GUIDELINE RULES (listed in the task) that the request explicitly speaks about, one entry each: rule (its
-identifier), stance break when the request asks for what the rule forbids or to leave out what it requires ("list the
-contributions as bullet points" breaks I11), keep when it insists on what the rule says (also against the author's
-style, when the task lists the rules that style sets aside), and quote: the request's own words, copied exactly. Only
-what the request itself says in so many words, never the material or the notes; an empty list otherwise.
+identifier: read each rule in full to find the one the request is about), stance break when the request asks for what
+the rule forbids or to leave out what it requires ("list the contributions as bullet points" breaks I11), keep when
+the request asks for what the rule asks ("number only the formulas the text cites" keeps P1), also against the
+author's style when the task lists the rules that style sets aside, and quote: the request's own words, copied
+exactly. Only what the request itself says in so many words,
+never the material or the notes; an empty list otherwise.
 code: true when the request asks for the code of the conversation's computations (listings, the script, the
 implementation) in the document. keep_latex: true only when the
 request asks to leave the LaTeX source as it is (its references, labels or warnings), false otherwise. assemble: true
@@ -1220,10 +1227,9 @@ def all_rules():
 
 
 def rule_index():
-    """Every rule as one line with its identifier and its first sentence: what the outline call is told, so that it
-    can say which rules the request explicitly sets aside or insists on."""
-    return '\n'.join(f'- {r["id"]} [{r["type"]}] ' + re.split(r'(?<=\.)\s', r['text'], maxsplit=1)[0][:100]
-                     for r in all_rules().values())
+    """Every rule with its identifier, in full as its sheet writes it: what the outline call is told, so that it can
+    say which rules the request explicitly sets aside or insists on (a rule's first sentence is often only its name)."""
+    return '\n'.join(f'- {r["id"]} [{r["type"]}] {r["text"]}' for r in all_rules().values())
 
 
 def required_parts():
@@ -2858,7 +2864,7 @@ class WriteupRunner(ResearchRunner):
         return {'label': label, 'profile': profile['name'], 'domain': domain['name'],
                 'digest': style_digest(profile, domain['name'], limit=input_limit(self.agent, 'style_guidelines', 1500)),
                 'macros': macros, 'packages': {p['name']: p['options'] for p in profile.get('packages') or []},
-                'departures': domain.get('departures') or [],
+                'departures': settable(domain.get('departures')),
                 'template': [f['name'] for f in profile.get('template') or []]}
 
     def _notation(self):
@@ -3609,7 +3615,8 @@ class WriteupRunner(ResearchRunner):
         A statement of the outline counts only when its rule exists and its quote occurs in the user's message, in its
         own words (case and spacing aside): 'break' sets the rule aside, 'keep' holds it against the style. The active
         style sets aside the rules it departs from (style._departures), unless the request keeps them, and only while
-        the rule reads as it did when the style was learnt."""
+        the rule reads as it did when the style was learnt. FIXED_RULES are never set aside; REQUEST_ONLY_RULES only
+        by the request."""
         known = all_rules()
         message = ' '.join(self.state['goal'].split()).casefold()
         requests = []
@@ -3626,7 +3633,7 @@ class WriteupRunner(ResearchRunner):
         set_aside, stale = {}, []
         for departure in style.get('departures') or []:
             rule = known.get(departure.get('rule'))
-            if rule is None or rule['id'] in kept:
+            if rule is None or rule['id'] in kept | FIXED_RULES | REQUEST_ONLY_RULES:
                 continue
             if ' '.join(str(departure.get('rule_text') or '').split()) != rule['text']:
                 stale.append(rule['id'])
@@ -3634,8 +3641,14 @@ class WriteupRunner(ResearchRunner):
             set_aside[rule['id']] = {'by': 'style', 'reason': departure.get('habit', ''),
                                      'example': (departure.get('examples') or [''])[0]}
         for item in requests:
-            if item['stance'] == 'break':
+            if item['stance'] == 'break' and item['rule'] not in FIXED_RULES:
                 set_aside[item['rule']] = {'by': 'request', 'reason': item['quote']}
+        refused = [item['rule'] for item in requests if item['stance'] == 'break' and item['rule'] in FIXED_RULES]
+        if refused:
+            note = (f'Write-ups always follow {", ".join(refused)}, which keeps each statement whole, even when the request '
+                    'asks otherwise.')
+            if note not in self.state['warnings']:
+                self.state['warnings'].append(note)
         note = (f'The style "{style.get("profile")}" departs from {", ".join(stale)}, but '
                 f'{"these rules have" if len(stale) > 1 else "this rule has"} changed since it was learnt, so the '
                 'guidelines apply there. Learn the style again to update it.')

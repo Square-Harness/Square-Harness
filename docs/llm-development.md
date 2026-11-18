@@ -190,7 +190,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   (`writeup._set_aside`): a rule the request breaks in its own words (the
   outline's `rules`, quote checked against the message), or the style departs
   from (unless the request keeps it, and only while the rule's text is the one
-  the style was learnt against), is set aside. Every reader of the rules goes
+  the style was learnt against), is set aside. `FIXED_RULES` (P4) are never set
+  aside; `REQUEST_ONLY_RULES` (P5) only by the request. The outline call reads
+  every rule in full (`rule_index`). Every reader of the rules goes
   through `_rules()`; code findings of a set-aside rule are dropped by
   `_in_force`, prose only (blockers, references and layout stay); the writer and
   every reviewer, reviser and judge get `_priorities()`. Fidelity, references
@@ -699,15 +701,20 @@ Only an explicit request for a full new review follows the complete-review path.
 Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
 `classify` (domains by field and readership) → `observe` (one call per article,
 answering `QUESTIONS` about how the author explains; the whole body when it fits
-`style_packet`) → `condense` (one call per domain of several articles) →
+`style_packet`) → `condense` (one call per domain of several articles, on the
+prose answers only: names, typesetting and phrasings are merged by counting) →
 `macros` (one call: what each macro is used for, and its packages) → `save`.
 Each `observe` call also lists the article's departures from the write-up
 rules (`style.guideline_rules`: the paper, introduction, abstract and numerics
-sheets), each with an example; `condense` keeps, by counting, those seen in at
-least half of a domain's articles, with the rule's text at that time.
+sheets, without `FIXED_RULES` and `REQUEST_ONLY_RULES`), each with an example;
+`condense` keeps, by counting, those seen in a strict majority of a domain's
+articles, with the rule's text at that time.
 Names and phrasings must occur in the articles, typesetting and departure
 examples in their LaTeX, and a macro's packages among those its files load (or
-`KNOWN_PACKAGES`); the rest is dropped and counted in the warnings. Profiles are
+`KNOWN_PACKAGES`); the rest is dropped and counted in the warnings. Models drop
+backslashes when they quote LaTeX inside JSON, so a quotation not found as it is
+counts when its letters and digits occur in order (`style.Quoted`), and the
+article's own text for that span is kept. Profiles are
 version 2; version 1 files, with `habits` and no packages, and version 2 files
 without departures stay readable and usable. The active style is
 `style-choice.json`: mode `none` is the default style (the guidelines alone),
