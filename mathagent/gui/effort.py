@@ -6,6 +6,7 @@
 The interface's forms use the same legacy table (frontend/src/effort.ts).
 DS4 presets come from model_limits and are sent to the interface by the server.
 """
+from ..litreview import breadth
 from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits
 
 # Token estimates remain for older integrations. New jobs have no cumulative
@@ -23,7 +24,7 @@ LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high
 
 
 def level(mode, name, args=None):
-    """Legacy workload estimates; detailed reviews allow twice the working time."""
+    """Legacy workload estimates; detailed reviews allow twice the working time, literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
     value = dict(table.get(name, legacy.get(name, table['medium'])))
@@ -34,8 +35,13 @@ def level(mode, name, args=None):
         else:
             value['tokens'] = value['research_tokens']
     if mode == 'literature':
-        value['minutes'] = max(4, value['minutes'])
-        value['requests'] = max(40, value['requests'])
+        review = breadth(value['tries'])
+        value.update(minutes=review['seconds'] / 60, requests=review['requests'])
+        if getattr(args, 'research_seconds_explicit', False):
+            value['minutes'] = min(value['minutes'], args.research_seconds / 60)
+        cap = getattr(args, 'research_requests', None)
+        if cap is not None:
+            value['requests'] = min(cap, value['requests'])
     if mode == 'detailed_review':
         value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
     return value
@@ -82,7 +88,12 @@ def limits(mode, level, args):
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=2 * seconds,
                     requests=effort['requests'], chars=effort['chars'])
-    if mode in ('literature', 'referee', 'quick_review', 'explain'):
+    if mode == 'literature':
+        review = breadth(effort['tries'])
+        seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
+        return dict(rounds=effort['tries'], tokens=output, input_tokens=input_tokens, seconds=seconds,
+                    requests=ceiling('research_requests', review['requests']), chars=effort['chars'])
+    if mode in ('referee', 'quick_review', 'explain'):
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds,
                     requests=effort['requests'], chars=effort['chars'])

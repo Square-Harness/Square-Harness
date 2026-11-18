@@ -18,11 +18,11 @@ type Kind = 'literature' | 'referee'
 type Copy = { title: string; lede: string; placeholder: string; pinHint: string; field: string; files: string; noun: string }
 
 const LITERATURE: Copy = {
-  title: 'Build a reading list',
-  lede: 'The harness searches Crossref, arXiv, zbMATH and Semantic Scholar, follows the citations of the key works, and lets the model screen the candidates, group them into entry points and themes, and say why each one is there. Every entry is a real record with its identifier; nothing is recalled from memory.',
-  placeholder: 'Observability and control of the heat equation: what should a graduate student read, from the classical results to recent work?',
-  pinHint: 'Optional. A pinned manuscript helps scope the topic; it is read locally and never uploaded.',
-  field: 'Scope and request', files: 'Pinned sources', noun: 'literature report',
+  title: 'Write a literature review',
+  lede: 'Trace a mathematical question through its main results, proofs and remaining questions. The review links each cited work and indicates where it could consult the paper itself.',
+  placeholder: 'Observability and null controllability of the heat equation: the main results, from the classical Carleman estimates to recent work.',
+  pinHint: 'Optional. A pinned manuscript helps define the topic. Public searches use mathematical terms.',
+  field: 'Scope and request', files: 'Pinned sources', noun: 'literature review',
 }
 
 // The Review notebook holds four kinds of review; the engine kind stays 'referee'.
@@ -95,7 +95,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
 
   const scaled = (next: EffortLevel, kind: ReviewVariant = variant) => {
-    const limits = effortLimits('research', d!, next)
+    const limits = effortLimits(review ? 'research' : 'literature', d!, next)
     const scale = review ? VARIANT_SCALE[kind] : 1
     return { ...limits, seconds: limits.seconds * scale }
   }
@@ -104,7 +104,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     const limits = scaled(next, kind)
     setRounds(limits.rounds!)
     setTokens(limits.tokens)
-    setMinutes(Math.max(1, Math.round(limits.seconds / 60)))
+    setMinutes(limits.seconds / 60)
     setInputTokens(limits.input_tokens!)
     setRequests(limits.requests!)
     setChars(limits.chars!)
@@ -119,7 +119,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   useEffect(() => { setOnline(!!status?.online) }, [status?.online])
 
   const preset = d ? scaled(level) : null
-  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60))
+  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== preset.seconds / 60
     || inputTokens !== preset.input_tokens || requests !== preset.requests || chars !== preset.chars)
   const chooseLevel = (next: EffortLevel) => {
     setLevel(next)
@@ -228,20 +228,20 @@ export function ResearchNew({ kind }: { kind: Kind }) {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {d && <EffortSlider kind="research" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
+            {d && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
             {review && VARIANT_SCALE[variant] > 1 && <p className="field-hint">A detailed review allows twice this working time for proof checks.</p>}
             {!pasted && (
               <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
-                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'Crossref, arXiv, zbMATH and Semantic Scholar.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />
+                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />
             )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
                 <NumberField label={review ? 'Tries (sets passes and depth)' : 'Investigation rounds'} value={rounds} onChange={setRounds} min={1} max={100} />
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
-                <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
+                <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />
                 {!pasted && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
-                {!pasted && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
+                {review && !pasted && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
               </div>
             </Collapse>
           </div>

@@ -53,7 +53,7 @@ RUNNING = ('starting', 'running', 'pausing')
 # Tool rounds for user-selected sandbox workers: write, run, fix and rerun; three checks.
 USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Task labels shown in the interface; the engine's kind stays 'referee'.
-LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
+LABELS = {'literature': 'Literature review', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
           'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
 # Assistant and router modes that run as review variants of the referee kind.
 REVIEW_MODES = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}
@@ -1013,6 +1013,15 @@ class Hub:
         if kind not in ('literature', 'referee'):
             raise ValueError('Research kind must be literature or referee')
         budgets = self._research_budgets(**limits)
+        if kind == 'literature':
+            if limits.get('rounds') is None and not getattr(self.args, 'research_rounds_explicit', False):
+                budgets['max_rounds'] = 3
+            if getattr(self.args, 'research_seconds_explicit', False):
+                budgets['max_seconds'] = min(self.args.research_seconds, budgets['max_seconds'])
+            elif limits.get('seconds') is None:
+                budgets['max_seconds'] = None
+            if self.args.research_requests is not None:
+                budgets['max_requests'] = min(self.args.research_requests, budgets['max_requests'])
         online = self.online(online)
         variant = (variant or 'review') if kind == 'referee' else None
         if budgets['max_requests'] is None and kind != 'literature':
@@ -1023,8 +1032,8 @@ class Hub:
             agent, _ = self._engine(task, mode=kind, online=online)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
-            if kind == 'literature':  # a verified, themed reading list
-                runner = ReviewRunner(agent)
+            if kind == 'literature':  # a literature review written from verified records
+                runner = ReviewRunner(agent, concurrency=self.review_concurrency())
                 runner.cancel = task.cancel
                 runner.emit = self._job_emit(task, runner, 'research')
                 return runner.start(goal, source_files=list(source_files), **budgets)
@@ -1078,14 +1087,17 @@ class Hub:
 
     def resume_research(self, job_id, queue=False, additional_seconds=0):
         state = store.research_state(self.root, job_id)
+        # Old reading lists go to ReviewRunner too: it keeps them readable and refuses to resume them.
         runner_class = (WriteupRunner if state['kind'] == 'writeup' else StyleRunner if state['kind'] == 'style' else
-                        ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else runner_for_state(state))
+                        ReviewRunner if state.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE)
+                        else runner_for_state(state))
         # A job keeps the network choice it started with (never more, per the runner).
         online = bool(state['settings'].get('online')) and not self.online_locked
 
         def work(task):
             agent, _ = self._engine(task, mode=state['kind'], online=online)
-            runner = (runner_class(agent, concurrency=self.review_concurrency()) if issubclass(runner_class, ReviewBase)
+            runner = (runner_class(agent, concurrency=self.review_concurrency())
+                      if runner_class is ReviewRunner or issubclass(runner_class, ReviewBase)
                       else runner_class(agent, styles_root=self.base) if runner_class in (StyleRunner, WriteupRunner)
                       else runner_class(agent))
             runner.cancel = task.cancel
@@ -1571,8 +1583,9 @@ class Hub:
             if action['effort'] == 'low':
                 agent.think = False
         level = effort.level(mode, action['effort'], self.args)
-        if mode == 'prove' and child.get('job_id'):
-            saved = ProofStore.load(root, child['job_id']).state
+        if mode in ('prove', 'literature') and child.get('job_id'):
+            saved = (ProofStore.load(root, child['job_id']).state if mode == 'prove'
+                     else store.research_state(root, child['job_id']))
             # New selectable profiles must not shorten a paused worker's saved
             # time allowance (including the retired seven/ten-pass profiles).
             level['minutes'] = max(0, saved['settings']['max_seconds'] - saved['seconds_used']) / 60
@@ -1684,10 +1697,10 @@ class Hub:
                 if references.get('lookup') == 'standard':
                     result['disposition'] = 'answer_with_qualification'
             elif mode in ('literature', 'writeup', 'summarize') or mode in REVIEW_MODES:
-                # Literature is the verified reading-list pipeline; the exact conversation sets its scope.
+                # Literature writes a review from verified records; the exact conversation sets its scope.
                 # Independent review calls use the same bounded global inference pool.
                 runner = (WriteupRunner(agent, emit, styles_root=self.base) if mode in ('writeup', 'summarize')
-                          else ReviewRunner(agent, emit) if mode == 'literature'
+                          else ReviewRunner(agent, emit, concurrency=self.review_concurrency()) if mode == 'literature'
                           else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=self.review_concurrency()))
                 runner.cancel = task.cancel
                 if child.get('job_id'):
@@ -1726,7 +1739,9 @@ class Hub:
                             'images': copy.deepcopy(context.get('images', [])),
                             **({key: copy.deepcopy(context[key]) for key in ('project_snapshot', 'project_note_status')}
                                if context.get('project_snapshot') is not None else {})}
-                    request = context['query'] if mode in ('writeup', 'summarize') else action['request']
+                    use_original = mode in ('writeup', 'summarize') or (
+                        mode == 'literature' and parent.state.get('required_mode') == 'literature')
+                    request = context['query'] if use_original else action['request']
                     result = runner.start(request, **kwargs)
                 verdict = (runner.state or {}).get('verdict')
                 outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
@@ -1734,12 +1749,18 @@ class Hub:
                 if result.get('stop_reason') and result['status'] in ('error', 'budget_violation'):
                     outcome = result['stop_reason']
                 worker_error = result.get('worker_error')
-                if mode in ('writeup', 'summarize'):
-                    outcome = runner.ready_message() if runner.state else outcome
-                result = {'status': result['status'],
-                          'answer': runner.ready_message() if mode in ('writeup', 'summarize') and runner.state else result['report'],
-                          'job_id': result['id'],
+                answer = result['report']
+                if mode in ('writeup', 'summarize') and runner.state:
+                    outcome = answer = runner.ready_message()
+                elif mode == 'literature':
+                    # The review itself is the answer the user sees verbatim; the card gets one short line.
+                    outcome = _review_outcome(runner.state) or outcome
+                    draft = runner.state.get('draft')
+                    answer = draft if isinstance(draft, str) and draft.strip() else answer
+                result = {'status': result['status'], 'answer': answer, 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root))}
+                if mode == 'literature' and runner.state.get('outputs'):
+                    result['outputs'] = copy.deepcopy(runner.state['outputs'])
                 if runner.state.get('progress'):
                     result['progress'] = copy.deepcopy(runner.state['progress'])
                 if worker_error:
@@ -1795,7 +1816,8 @@ class Hub:
             store.update_item(root, chat_id, index, status='stopped' if result['status'] == 'paused' else 'done', outcome=outcome,
                               error=(result.get('error') or {}).get('message'),
                               job_id=result['job_id'] if mode not in ('critic', 'explore') + USER_MODES else None,
-                              **({'outputs': runner.state.get('outputs') or {}} if mode in ('writeup', 'summarize') and runner and runner.state else {}))
+                              **({'outputs': runner.state.get('outputs') or {}}
+                                 if mode in ('writeup', 'summarize', 'literature') and runner and runner.state else {}))
             self.bus.publish('chat_saved', chat=chat_id)
             return result
         except KeyboardInterrupt:
@@ -1847,6 +1869,8 @@ class Hub:
                 return detail['status'] + (f'; {one_line(detail["stop_reason"], 300)}' if detail.get('stop_reason') else '')
             if item['mode'] in ('literature', 'writeup', 'summarize') or item['mode'] in REVIEW_MODES:
                 state = store.research_state(root, job)
+                if item['mode'] == 'literature' and (line := _review_outcome(state)):
+                    return line
                 text = state.get('document') or state.get('draft') or ''
                 verdict = f' ({state["verdict"].replace("_", " ")})' if state.get('verdict') else ''
                 return f'{state["status"]}{verdict}' + (': ' + one_line(text, 600) if text else '')
@@ -1883,7 +1907,7 @@ class Hub:
                 fields['status'] = 'stopped'  # kept: a job resumes from its own page
             elif task.state == 'error' and not task.target:
                 fields.update(status='failed', error=task.error)
-            if task.state == 'done' and mode in ('writeup', 'summarize') and task.target:
+            if task.state == 'done' and mode in ('writeup', 'summarize', 'literature') and task.target:
                 try:
                     fields['outputs'] = store.research_state(root, task.target).get('outputs') or {}
                 except (store.NotFound, OSError, ValueError):
@@ -1949,6 +1973,21 @@ class Hub:
         item = store.update_item(self.root, chat_id, index, status='dismissed')
         self.bus.publish('chat_saved', chat=chat_id)
         return item
+
+
+def _review_outcome(state):
+    """A literature review's card line: short, since the review itself is shown in full.
+
+    None before a review is written, and for old reading lists (which have no bibliography).
+    """
+    if state.get('pipeline') != ReviewRunner.PIPELINE:
+        return None
+    if state.get('status') == 'complete':
+        count = len(state.get('bibliography') or [])
+        return f'Review written: {count} reference{"" if count == 1 else "s"}.'
+    if state.get('status') == 'partial':
+        return one_line(state.get('stop_reason') or 'Review written with gaps. See the saved report.', 300)
+    return None
 
 
 def _check_ctx(ctx, predict):

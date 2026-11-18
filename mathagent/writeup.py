@@ -232,7 +232,8 @@ def entry_identifiers(text):
         return match.group(0) if re.search(r'[\s<>{}"]', value) else value
     text = re.sub(r'https?://[^\s<>{}"]+', decode_url, text, flags=re.I)
     found = set()
-    for identifier in re.findall(r'\b10\.\d{4,9}/[^\s<>{}"]+', text, re.I):
+    # Wiley SICI DOIs hold balanced angle brackets: 10.1002/(SICI)1097-0312(199601)49:1<1::AID-CPA1>3.0.CO;2-Q.
+    for identifier in re.findall(r'\b10\.\d{4,9}/(?:[^\s<>{}"]|<[^\s<>{}"]*>)+', text, re.I):
         identifier = re.sub(r'\\([_%&#])', r'\1', identifier)
         identifier = identifier.lower().rstrip('.,;:')
         while identifier.endswith((')', ']')):
@@ -252,7 +253,67 @@ def entry_identifiers(text):
     return found
 
 
-def record_bibliography(records):
+# Commands accepted inside math spans of bibliographic titles obtained from external providers.
+_TITLE_MATH_COMMANDS = frozenset((
+    'alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi varpi rho varrho '
+    'sigma varsigma tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega '
+    'mathbb mathcal mathfrak mathrm mathbf mathit mathsf mathtt operatorname text frac sqrt overline underline '
+    'hat widehat tilde widetilde bar dot ddot vec subset subseteq supset supseteq in notin ni le leq ge geq ne neq '
+    'approx sim simeq equiv cong to mapsto rightarrow leftarrow leftrightarrow implies iff times otimes oplus '
+    'cdot cdots ldots ast star circ pm mp partial nabla infty ell hbar Re Im sum prod int iint lim sup inf '
+    'max min det ker dim exp log sin cos tan cap cup bigcap bigcup wedge vee emptyset varnothing '
+    'langle rangle lvert rvert lVert rVert vert Vert quad qquad'
+).split()) | set('{}|,;:! %_&#')
+
+
+def _bibtex_title(text):
+    """Preserve balanced, common math in review titles; typeset all remaining metadata as plain text."""
+    # BibTeX also counts literal \{ and \} while scanning a field. Make stray braces inert there.
+    def plain_text(value):
+        return latex_text(value).replace(r'\{', r'\textbraceleft{}').replace(r'\}', r'\textbraceright{}')
+
+    delimiters = {'$': '$', '$$': '$$', r'\(': r'\)', r'\[': r'\]'}
+    parts, end, closing = [], 0, None
+    for marker in re.finditer(r'(?<!\\)(?:\$\$?|\\[()[\]])', text):
+        token = marker[0]
+        if closing is None:
+            if token not in delimiters:
+                return plain_text(text)
+            parts.append(plain_text(text[end:marker.start()]))
+            closing, start = delimiters[token], marker.start()
+        elif token == closing:
+            body = text[end:marker.start()]
+            plain = re.sub(r'\\(?:[A-Za-z]+|.)', '', body)
+            depth, balanced = 0, True
+            for ch in plain:
+                depth += (ch == '{') - (ch == '}')
+                if depth < 0:
+                    balanced = False
+                    break
+            commands = re.findall(r'\\([A-Za-z]+|.)', body)
+            needs_argument = (r'\\(?:mathbb|mathcal|mathfrak|mathrm|mathbf|mathit|mathsf|mathtt|operatorname|text|'
+                              r'overline|underline|hat|widehat|tilde|widetilde|bar|dot|ddot|vec|sqrt)\s*(?:[}_^]|$)')
+            # Check the two arguments of a fraction as tokens or braced groups.
+            atom = r'(?:[A-Za-z0-9]|\\[A-Za-z]+|\{(?:[^{}]|\{[^{}]*\})*\})'
+            fractions = all(re.match(r'\s*' + atom + r'\s*' + atom, body[m.end():])
+                            for m in re.finditer(r'\\frac\b', body))
+            safe = (body.strip() and balanced and fractions and not re.search(needs_argument, body) and depth == 0 and '^^' not in body
+                    and re.fullmatch(r"""[A-Za-z0-9\s{}()[\]^_+*/|=<>.,:;!'"-]*""", plain)
+                    and all(command in _TITLE_MATH_COMMANDS for command in commands)
+                    and not re.search(r'[_^]\s*(?:[}_^]|$)', body))
+            if safe:
+                math = body.strip().replace(r'\{', r'\lbrace{}').replace(r'\}', r'\rbrace{}')
+                parts.append('{$' + math + '$}')
+            else:
+                parts.append(plain_text(text[start:marker.end()]))
+            closing = None
+        else:
+            return plain_text(text)
+        end = marker.end()
+    return ''.join(parts) + plain_text(text[end:]) if closing is None else plain_text(text)
+
+
+def record_bibliography(records, *, math_titles=False):
     """A deterministic BibTeX catalog of source-bound records, never model-recalled works."""
     prepared = []
     for record in records or ():
@@ -281,7 +342,15 @@ def record_bibliography(records):
         kind = 'book' if kind in ('book', 'monograph', 'reference-book', 'edited-book', 'book / book article') else 'article' if 'article' in kind else 'misc'
         fields = [('author', ' and '.join(a.strip() for a in authors)), ('title', title)]
         fields += [('year', year)] if year else []
-        fields += [('journal', str(record.get('venue') or ''))] if record.get('venue') and kind == 'article' else []
+        if kind == 'article' and record.get('venue'):
+            fields.append(('journal', str(record.get('journal') or record['venue'])))
+            fields.extend((k, str(record[k])) for k in ('volume', 'number', 'pages') if record.get(k))
+        elif kind == 'misc' and record.get('venue') and 'year_from' in record:
+            fields.append(('howpublished', str(record['venue'])))
+        if not year and record.get('preprint_year'):
+            fields.append(('note', 'arXiv version ' + str(record['preprint_year'])))
+        elif math_titles and arxiv and doi and record.get('year_from') == 'arxiv' and not record.get('venue'):
+            fields.append(('note', 'Year of the arXiv version'))
         fields += [('publisher', str(record['publisher']))] if record.get('publisher') and kind == 'book' else []
         fields += [('doi', doi)] if doi else []
         fields += [('eprint', arxiv), ('archivePrefix', 'arXiv')] if arxiv else []
@@ -297,7 +366,8 @@ def record_bibliography(records):
     entries = []
     for identity, base, kind, fields in unique.values():
         key = base if counts[base.casefold()] == 1 else base + '_' + hashlib.sha256(identity.encode()).hexdigest()[:12]
-        values = '\n'.join('  ' + name + ' = {' + latex_text(unescape(value)) + '},' for name, value in fields)
+        values = '\n'.join('  ' + name + ' = {' + (_bibtex_title if math_titles and name == 'title' else latex_text)(
+            unescape(value)) + '},' for name, value in fields)
         entries.append('@' + kind + '{' + key + ',\n' + values + '\n}')
     return '\n\n'.join(entries) + ('\n' if entries else '')
 

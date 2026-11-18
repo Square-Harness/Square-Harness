@@ -4,7 +4,7 @@
 // Effort levels: one control instead of budget fields (no React; testable with node).
 import type { Defaults } from './api'
 
-export type EffortKind = 'proof' | 'research' | 'writeup' | 'style'
+export type EffortKind = 'proof' | 'literature' | 'research' | 'writeup' | 'style'
 export type EffortLevel = 'low' | 'medium' | 'high'
 
 // Effort sets checking depth, attempts, and time. Token estimates remain in this
@@ -59,10 +59,12 @@ export function effortLimits(kind: EffortKind, defaults: Defaults, level: Effort
   const base: Limits = { tokens: preset ? cap(defaults.research_tokens, preset.research_tokens) : defaults.research_tokens,
     input_tokens: preset ? cap(defaults.research_input_tokens, preset.input) : defaults.research_input_tokens, seconds }
   if (kind === 'writeup' || kind === 'style') return base
-  return { ...base, rounds: effort.tries, requests: effort.requests, chars: effort.chars }
+  const survey = kind === 'literature' ? defaults.literature_presets?.[level] : undefined
+  return { ...base, rounds: effort.tries, seconds: survey?.seconds ?? seconds, requests: survey?.requests ?? effort.requests, chars: effort.chars }
 }
 
 export function minutesLabel(seconds: number) {
+  if (seconds < 60) return `${Number(seconds.toFixed(2))} s`
   if (seconds < 3600) return `${Math.round(seconds / 60)} min`
   const hours = seconds / 3600
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} h`
@@ -74,6 +76,7 @@ export function describeLimits(kind: EffortKind, limits: Limits) {
   if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${count(limits.solve_tokens!)} tokens per solve and ${count(limits.verify_tokens!)} per review; time limit ${minutesLabel(limits.seconds)}${tokenCap}`
   if (kind === 'writeup') return `One writing call (in parts if the material is long), then compiled; ${minutesLabel(limits.seconds)} working time${tokenCap}`
   if (kind === 'style') return `Each article read once, then each domain merged; ${minutesLabel(limits.seconds)} working time${tokenCap}`
+  if (kind === 'literature') return `Up to ${minutesLabel(limits.seconds)} working time and ${count(limits.requests!)} source requests${tokenCap}`
   const depth = EFFORTS.find((effort) => effort.tries === limits.rounds)?.label || 'Custom'
   return `Checking depth: ${depth}; ${minutesLabel(limits.seconds)} working time${tokenCap}`
 }

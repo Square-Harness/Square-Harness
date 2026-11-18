@@ -52,8 +52,10 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   Do not add exact section/theorem/page requirements the human did not ask for.
   Examples: "find a reference for elliptic regularity
   with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
-- literature: a reading list or map of the literature on a topic (what to read, surveys, core papers by
-  theme, recent developments), e.g. "what should I read on…", "survey the literature on…".
+- literature: a written mathematical survey answering the user's question, with its central results,
+  hypotheses, competing examples and sources. Preserve the topic and scope the user requested.
+  Treat any proposed theorem or status as a question to investigate. Select low for a brief focused
+  review, medium for an ordinary survey and high for broad or explicitly in-depth coverage.
 - referee: a referee review of a whole manuscript file the user names or attaches: an overview of the paper and
   its typos and presentation problems, without checking the proofs.
 - detailed_review: the same review plus a check of the proofs (costs more); only when the user asks for a
@@ -67,7 +69,7 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   conversation, into a clean LaTeX document in the user's saved style.
 - summarize: a LaTeX summary of the important results obtained so far in the conversation.
 A question (why, what, how, is it true that) is answered with critic or explore. A request for a
-reference or citation to a known result is a check, not a literature report. A given proof to verify is
+reference or citation to a known result is a check, not a literature review. A given proof to verify is
 a quick_review; a whole manuscript to referee is a referee report (detailed_review when its proofs should be
 checked too). Choose prove, literature, referee, detailed_review, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
@@ -86,7 +88,7 @@ When the message is too ambiguous to choose, return no tasks and ask one short `
 otherwise `question` is empty. Return only JSON matching the schema."""
 
 FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a result, explore an idea, find a reference, '
-                     'write a literature report or a review of a manuscript, or write up notes in LaTeX?')
+                     'write a literature review or a review of a manuscript, or write up notes in LaTeX?')
 
 
 

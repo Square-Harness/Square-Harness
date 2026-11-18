@@ -51,11 +51,12 @@ equivalence or guidance has been justified. Flag conflicts in worker restatement
 Do not describe a model's review as a formal proof certificate.
 
 You can delegate a precise objective to an existing worker when sustained proof
-search, independent criticism, exploration, a precise reference, literature,
+search, independent criticism, exploration, a precise reference, a literature review,
 manuscript review or a write-up will help. The available modes are prove, critic,
 explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
-least effort suitable for the objective: low, medium or high. High is the maximum effort. State the complete objective and its hypotheses. Children cannot
+least effort suitable for the objective: low, medium or high. For literature, use medium for an ordinary survey and high for broad or expressly in-depth coverage.
+High is the maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, critic, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. writeup and summarize
@@ -94,12 +95,19 @@ a recalled title, year or coverage claim as a supplement. A failed scholarly sea
 does not make Wikipedia or model recall an adequate substitute. Preserve uncertainty
 about relevance and hypotheses even when the work exists.
 Precise checking uses sources and grades them read, cited, located, contradicted
-or not found. Use literature only for a reading list or survey of a
-topic. Check and literature workers receive your objective and the exact reference
+or not found. Use literature only for a literature review (survey) of a topic: the
+question, the hypotheses of its main results, how the arguments work, and their primary
+sources. Include dated open problems when supported by the literature. It is a written survey, not a reading list. A finished review is
+shown to the user as written: never rewrite, re-list or extend it, and never add recalled
+works to it. When it is the only work of the turn, it ends the turn: delegate any other
+needed work in the same response.
+Check and literature workers receive your objective and the exact reference
 conversation to preserve the requested subject and hypotheses. Do not add boundary
-regularity, solution concepts or theorem hypotheses that the user did not supply. State the result itself with its
-hypotheses, add any guessed sources, and use public mathematical words in queries,
-never private manuscript text. A theorem number you recall is a guess:
+regularity, solution concepts or theorem hypotheses that the user did not supply. For check,
+state the result itself with its hypotheses and add any guessed sources. For literature, state
+only the user's question and requested scope. Leave mathematical answers, proposed equivalences,
+expected theorems and suggested open problems to the source investigation. Use public
+mathematical words in queries, never private manuscript text. A theorem number you recall is a guess:
 verify it with check before giving it as fact, or say it is unverified. When you
 cite a checked reference, keep its evidence level; located means the exact place
 was not confirmed. This includes chapter numbers and titles, section and theorem
@@ -577,6 +585,11 @@ class Orchestrator:
                 'as a possible unconfirmed lead. Say explicitly that you did not verify the precise '
                 'reference. A bibliographic record confirms the work exists, not that the theorem is in a '
                 'particular chapter. Do not search again or promise another lookup.'})
+        if self._reviews():
+            payload['messages'].append({'role': 'user', 'content':
+                'CONTROLLER LITERATURE REVIEW: the finished literature review is shown to the user as is, '
+                'right after your answer. Do not rewrite, re-list, summarize at length or extend it, and never '
+                'add works recalled from memory. Answer the rest of the request; refer to the review briefly if useful.'})
         if self.state.get('tool_call_recovery_pending'):
             # Greedy decoding can reproduce the same malformed repetition.
             # Keep the exact premises and give one explicit correction request.
@@ -1154,12 +1167,42 @@ class Orchestrator:
         # failure. A second model pass can invent references or coverage claims.
         return self._worker_reply(child, answer)
 
+    def _reviews(self):
+        """This turn's finished literature reviews, as (child, review), in delegation order."""
+        return [(child, child['result']['answer']) for child in self.state['children']
+                if child['action']['mode'] == 'literature' and child['status'] == 'complete'
+                and isinstance(child.get('result'), dict) and child['result'].get('status') in ('complete', 'partial')
+                and isinstance(child['result'].get('answer'), str) and child['result']['answer'].strip()]
+
+    def _show_reviews(self, answer):
+        """Show each finished review verbatim, once, as its own assistant message.
+
+        A review already in ``answer`` or in an assistant message of this turn
+        is not repeated (a resumed turn may have saved it already).
+        """
+        start = self.state.get('history_prefix_count', 0)
+        shown = [answer] + [message.get('content', '') for message in self.state['messages'][start:]
+                            if message.get('role') == 'assistant']
+        for _, review in self._reviews():
+            if any(review in text for text in shown):
+                continue
+            self.state['messages'].append({'role': 'assistant', 'content': review})
+            self.agent.last_stats = {}
+            self.emit('start', '')
+            self.emit('text', review)
+            self.emit('end', '')
+
     def _document_answer(self):
         """An explicit @writeup or @summarize: the worker's short ready message is the reply.
 
         The user writes up results they have checked; a second model pass would
-        only assess or restate the document.
+        only assess or restate the document. Likewise, when literature is the
+        only work of the turn and every review was written, the reviews are the
+        reply verbatim: a second pass could re-list them or add recalled works.
         """
+        reviews = self._reviews()
+        if reviews and len(reviews) == len(self.state['children']):
+            return self._worker_reply(reviews[-1][0], '\n\n---\n\n'.join(review for _, review in reviews))
         mode = self.state.get('required_mode')
         if mode is None and self.state['children'] and self.state['children'][-1]['action']['mode'] in ('writeup', 'summarize'):
             mode = self.state['children'][-1]['action']['mode']  # the Assistant chose to write one up itself
@@ -1182,6 +1225,7 @@ class Orchestrator:
         rendered = (self.state.get('answer_source') == provenance
                     and self.state['messages'][-1] == {'role': 'assistant', 'content': answer})
         if not rendered:
+            self._show_reviews(answer)  # before the reply, which stays the turn's last message
             self.state['messages'].append({'role': 'assistant', 'content': answer})
         self.state['answer_source'] = provenance
         self.agent.history = self.conversation_history()
@@ -1284,8 +1328,10 @@ class Orchestrator:
                         self._save()
                         continue
                     # A second promise is kept as the answer: resuming would only repeat it and lock the turn.
+                    self._show_reviews(assistant['content'])
                     return self._finish('complete', assistant['content'],
                         'The reply announces further work it did not do. Ask for that work explicitly in a new message.')
+                self._show_reviews(assistant['content'])
                 self.agent.history = self.conversation_history()
                 for item in self.agent.history:
                     item.pop('thinking', None)

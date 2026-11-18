@@ -57,11 +57,12 @@ export function proofLook(status: string, running = false, version = 2): Look {
   }
 }
 
-export function researchLook(status: string, running = false): Look {
+/** `kind` tells a finished literature review from a finished write-up; older literature jobs end 'listed'. */
+export function researchLook(status: string, running = false, kind?: string): Look {
   if (running) return { variant: 'running', label: 'Running' }
   switch (status) {
     case 'reviewed': return { variant: 'reviewed', label: 'Reviewed by the model' }
-    case 'complete': return { variant: 'complete', label: 'Written and compiled' }
+    case 'complete': return { variant: 'complete', label: kind === 'literature' ? 'Review written' : 'Written and compiled' }
     case 'listed': return { variant: 'complete', label: 'Reading list checked' }
     case 'saved': return { variant: 'complete', label: 'Style saved' }
     case 'partial': return { variant: 'partial', label: 'Partial result: see what is missing' }

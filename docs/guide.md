@@ -368,7 +368,7 @@ one with a message.
   saved files. **Pause** saves at the next checkpoint and **Resume** continues with
   the remaining budget. A paused conversation shows **Resume** while the text box
   is empty; type a new message instead to set the paused turn aside. "Back to
-  conversation" returns to the chat that started the job. The standalone forms (New proof, New reading list, New review, New
+  conversation" returns to the chat that started the job. The standalone forms (New proof, New literature review, New review, New
   write-up) start a job without a conversation.
 - **The sidebar footer** shows:
   - the model and its status, the theme, and phone pairing;
@@ -401,7 +401,7 @@ a statement, or `/prove <statement>`. Other commands:
 | --- | --- |
 | `/critic`, `/explore` | Switch to critique or exploration chat |
 | `/check <result>` | Find or verify a reference (needs `--online`) |
-| `/literature <topic>` | Build a verified reading list |
+| `/literature <topic>` | Write a literature review of a topic |
 | `/quick_review`, `/referee`, `/detailed_review`, `/explain` | The four review kinds (the manuscript comes from `--research-file`) |
 | `/writeup <instructions>` | LaTeX write-up of `--research-file` notes in the `--template-file` style |
 | `/python-lab`, `/sanity-check` | Python in the sandbox |
@@ -429,7 +429,7 @@ app and the other way round: both use the same saved files.
 | Prove | A proof, its review and every attempt | `@prove`, New proof | `/prove` (default) |
 | Critique, Explore | Objections; approaches with heuristics labelled | `@critic`, `@explore` | `/critic`, `/explore` |
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
-| Reading list | A themed, verified reading list | `@literature`, New reading list | `/literature` |
+| Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
 | Review | Referee report: overview, typos, presentation | `@referee`, New review | `/referee` |
 | Detailed review | The review, plus checks of the proofs | `@detailed_review` | `/detailed_review` |
@@ -444,7 +444,7 @@ Use it for anything: a question, a doubt about a step, a request mixing several
 tasks. It exists in the web app only; in the terminal, `/critic` and `/explore`
 are ordinary chats without workers. The Assistant answers short questions itself. Otherwise it gives a precise
 objective to a worker: a proof, a critique, an exploration, a reference check, a
-reading list, a review, an explanation or a write-up. It then reads the result,
+literature review, a review, an explanation or a write-up. It then reads the result,
 its status and what remains open, and decides what to do next. Independent
 workers can run at the same time on an OpenAI-compatible server
 (`--assistant-concurrency`: 1–4 for the original profiles, 1–5 for DS4). All
@@ -592,21 +592,15 @@ Each reference gets an evidence level:
 The code lowers any level that the passages read do not support. A theorem
 number the model remembers stays labelled as a guess. Needs online search.
 
-### Reading list
+### Literature review
 
-Use it to get oriented in a topic. The output is an orientation, 1–4 entry points
-(surveys, textbooks, lecture notes), 2–5 themes with a core and an optional "go
-deeper" part, a reading order and the gaps.
+Ask the mathematical question you want to investigate. You can specify an audience, a length, or a particular setting. Literature review opens with the problem and what the sources establish. It organises the remaining results around the differences that matter for the answer, such as competing hypotheses, a counterexample or a later improvement. A focused question normally calls for 600–1,500 words. A broad survey can use 3,000–4,000. A comparison table is optional. The chat shows the review itself and offers Markdown and BibTeX downloads.
 
-The code searches Crossref, arXiv, zbMATH and Semantic Scholar and follows
-citations: what the key works cite, what cites them, what the pool keeps
-citing. The model only screens, organises and annotates the works that were
-found, and refers to them by number. It cannot invent a reference: works it
-remembers are kept only if a source returns them. A reading list needs at least
-4 minutes and 40 source requests, so Low is raised to that and says so; a list
-cut short by time is saved as far as it got and resumes with more time.
-Unfinished source queries and seed checks are retried on resume rather than
-marked complete by a timeout. An arXiv record and its arXiv DOI count as one work.
+The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper available by DOI, it can use OpenAIRE to locate a deposited manuscript. It follows references from relevant works, including papers with different terminology. Search terms, claims in a supplied brief and works recalled by the model are leads to investigate. Each citation in the review points to a retrieved record. A dagger in the references identifies works for which the review used only an abstract or a bibliographic record. The other entries used passages from the paper. A bibliography entry establishes the identity of a work but a precise theorem still depends on its hypotheses and on the passage supporting it.
+
+Sections are checked against the available evidence. A checker can correct a local error or withhold a passage it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
+
+Low, Medium and High normally allow 6, 12 and 20 minutes respectively, with up to 55, 110 and 165 public source requests. All three check the written sections. Higher effort broadens discovery and allows more source passages. Explicit time and request limits are respected. Reading lists created by the earlier mode remain available to read.
 
 ### Quick review, Review, Detailed review, Explain
 
@@ -842,7 +836,7 @@ Everything is saved in your folder under `.mathagent/`:
 | Folder | Contents |
 | --- | --- |
 | `proofs/` | Proof jobs |
-| `research/` | Reports, reviews, reading lists, write-ups (those made in a conversation are deleted with it) |
+| `research/` | Reports, reviews, literature reviews, write-ups (those made in a conversation are deleted with it) |
 | `checks/` | Literature checks |
 | `chats/` | Conversations |
 | `experiments/` | Sandbox runs |

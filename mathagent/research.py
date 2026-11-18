@@ -212,6 +212,7 @@ class ResearchRunner:
     TERMINAL = ('reviewed', 'partial', 'budget_exhausted', 'budget_violation')
     FOLDER = 'research'  # below .mathagent/
     POLICY = BASE_POLICY  # the system text before the skill
+    UNTIMED_PHASES = ()  # phases that call no model and must finish after the deadline (writing the report)
 
     def __init__(self, agent, emit=lambda kind, value: None):
         self.agent, self.emit = agent, emit
@@ -492,7 +493,7 @@ class ResearchRunner:
                 self._prepare_images()
                 while self.state['phase'] != 'done':
                     phase = self.state['phase']
-                    if not (self.state.get('pipeline') == 'reading-list-v1' and phase == 'write'):
+                    if phase not in self.UNTIMED_PHASES:
                         self._check_time()
                     self.emit('notice', 'Research phase: ' + phase)
                     self._step(phase)

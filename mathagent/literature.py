@@ -45,6 +45,8 @@ _RATE_LOCK = threading.Lock()
 _LAST_REQUEST = {}
 _HOST_LOCKS = {}
 MAX_BYTES = 10_000_000
+STRIKES = 2  # failed requests in a row (each retried once) before a provider is marked down
+DOWN_COOLDOWN = 240  # seconds before a provider marked down is probed again (never for TLS failures)
 MAX_TEXT = 4_000_000
 DOCUMENT_META_BYTES = 1_000_000
 ARXIV_HOSTS = frozenset({'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'})
@@ -67,6 +69,36 @@ class LiteratureError(ValueError):
 @lru_cache(maxsize=1)
 def _tls_context():
     return ssl.create_default_context()
+
+
+# Mozilla-derived CA bundles that some Python builds do not read by default: a
+# standalone Python on macOS reads /etc/ssl/cert.pem, which can lag behind the
+# roots a source has moved to (zbMATH's HARICA chain, in November 2026).
+EXTRA_CA_FILES = ('/opt/homebrew/etc/ca-certificates/cert.pem', '/usr/local/etc/ca-certificates/cert.pem',
+                  '/opt/homebrew/etc/openssl@3/cert.pem', '/usr/local/etc/openssl@3/cert.pem',
+                  '/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt')
+
+
+@lru_cache(maxsize=1)
+def _wider_tls_context():
+    """The default trust plus the platform's other Mozilla-derived CA bundles, or None if there are none.
+
+    Used only after the default store failed to verify a chain; hostname checks stay on."""
+    context, loaded = ssl.create_default_context(), 0
+    candidates = list(EXTRA_CA_FILES)
+    try:
+        import certifi  # optional: present in many environments, never required
+        candidates.insert(0, certifi.where())
+    except ImportError:
+        pass
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                context.load_verify_locations(cafile=path)
+                loaded += 1
+        except (OSError, ssl.SSLError):
+            continue
+    return context if loaded else None
 
 
 def decode_page(body, content_type=''):
@@ -147,6 +179,23 @@ def _digest(value):
 
 def _plain(value, size=1000):
     return ' '.join(str(value or '').split())[:size]
+
+
+def _crossref_title(raw):
+    """Some records carry equivalent TeX and MathML presentations of the same inline formula."""
+    title = str(raw or '')
+    def choose_formula(match):
+        tex = re.search(r'<(?:[\w-]+:)?tex-math\b[^>]*>(.*?)</(?:[\w-]+:)?tex-math\s*>', match[1], re.I | re.S)
+        return tex[1] if tex else match[1]
+    title = re.sub(r'<(?:[\w-]+:)?alternatives\b[^>]*>(.*?)</(?:[\w-]+:)?alternatives\s*>',
+                   choose_formula, title, flags=re.I | re.S)
+    tags = (r'</?(?:[\w-]+:)?(?:title|p|inline-formula|disp-formula|tex-math|math|semantics|annotation|'
+            r'm[a-z]+|i|b|em|strong|italic|bold|sub|sup|span|scp|sc)\b[^<>]*>')
+    title = _plain(unescape(re.sub(tags, '', title.replace('<![CDATA[', '').replace(']]>', ''), flags=re.I)), 1200)
+    # Some feeds (and older cached records) have already flattened the two alternatives.
+    title = re.sub(r'\$\$(\\math(?:bb|bf|rm)\s*\{([A-Za-z])\}\s*\^\s*\{?([A-Za-z0-9]+)\}?)\$\$'
+                   r'\s+\2\s+\3(?!\w)', r'$\1$', title)
+    return re.sub(r'\$\$(.+?)\$\$', r'$\1$', title)
 
 
 def _schema(name, description, properties, required):
@@ -393,7 +442,8 @@ class LiteratureTools:
         self.online = bool(online)
         self.timeout = min(30, max(1, float(timeout)))
         self._last_request = {}
-        self.down = set()  # sources out of quota: not asked again by this instance
+        self.down = set()  # sources that kept failing: not asked again until DOWN_COOLDOWN has passed
+        self._down_at, self._strikes = {}, {}
         self.on_budget_change = None
         self.deadline = None
         self._robots = {}
@@ -677,26 +727,7 @@ class LiteratureTools:
             expression = arxiv_query(query)
             params = {'search_query': expression,
                       'start': 0, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
-            body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=1_000_000)
-            atom = {'a': 'http://www.w3.org/2005/Atom'}
-            feed = ET.fromstring(body)
-            total = feed.findtext('{http://a9.com/-/spec/opensearch/1.1/}totalResults')
-            if not feed.findall('a:entry', atom) and total and total.isdigit() and int(total) > 0:
-                raise LiteratureError('arXiv returned an incomplete search feed; try later or another provider.', code='source_unavailable')
-            results = []
-            for entry in feed.findall('a:entry', atom)[:limit]:
-                identifier = (entry.findtext('a:id', '', atom)).rsplit('/abs/', 1)[-1]
-                if not ARXIV_ID.fullmatch(identifier):
-                    continue
-                results.append({'identifier': 'arxiv:' + identifier,
-                    'title': _plain(entry.findtext('a:title', '', atom), 300),
-                    'authors': [_plain(e.text, 80) for e in entry.findall('a:author/a:name', atom)][:15],
-                    'published': entry.findtext('a:published', '', atom),
-                    'updated': entry.findtext('a:updated', '', atom),
-                    'abstract': _plain(entry.findtext('a:summary', '', atom), 900),
-                    'url': 'https://arxiv.org/abs/' + identifier,
-                    'open_access_url': 'https://arxiv.org/pdf/' + identifier})
-            return results
+            return self._arxiv_feed(params, limit)
         if provider == 'semantic_scholar':
             headers = {}
             if os.environ.get('SEMANTIC_SCHOLAR_API_KEY'):
@@ -719,6 +750,138 @@ class LiteratureTools:
     def arxiv_recent(self, query, limit=6):
         """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
         return self.search_papers(query, 'arxiv', limit, sort='newest')['results']
+
+    def _arxiv_feed(self, params, limit, *, abstract=900):
+        body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=4_000_000)
+        atom = {'a': 'http://www.w3.org/2005/Atom', 'x': 'http://arxiv.org/schemas/atom'}
+        feed = ET.fromstring(body)
+        total = feed.findtext('{http://a9.com/-/spec/opensearch/1.1/}totalResults')
+        if not feed.findall('a:entry', atom) and total and total.isdigit() and int(total) > 0 and not params.get('id_list'):
+            raise LiteratureError('arXiv returned an incomplete search feed; try later or another provider.', code='source_unavailable')
+        results = []
+        for entry in feed.findall('a:entry', atom)[:limit]:
+            identifier = (entry.findtext('a:id', '', atom)).rsplit('/abs/', 1)[-1]
+            if not ARXIV_ID.fullmatch(identifier):
+                continue
+            doi = entry.findtext('x:doi', '', atom).strip().lower() or None
+            results.append({'identifier': 'arxiv:' + identifier,
+                'title': _plain(entry.findtext('a:title', '', atom), 300),
+                'authors': [_plain(e.text, 80) for e in entry.findall('a:author/a:name', atom)][:15],
+                'published': entry.findtext('a:published', '', atom),
+                'updated': entry.findtext('a:updated', '', atom),
+                'abstract': _plain(entry.findtext('a:summary', '', atom), abstract),
+                'categories': [c.get('term') for c in entry.findall('a:category', atom) if c.get('term')][:8],
+                'journal_ref': _plain(entry.findtext('x:journal_ref', '', atom), 200) or None,
+                **({'doi': doi} if doi and re.fullmatch(r'10\.\d{4,9}/\S+', doi) else {}),
+                'url': 'https://arxiv.org/abs/' + identifier,
+                'open_access_url': 'https://arxiv.org/pdf/' + identifier})
+        return results
+
+    def arxiv_search(self, query, *, limit=25, newest=False, categories=()):
+        """An arXiv search for controller code: up to 50 records, optionally limited to categories (math.AP, ...)."""
+        query = ' '.join(str(query or '').split())[:300]
+        if not query or type(limit) is not int or not 1 <= limit <= 50:
+            raise LiteratureError('Give a query and a limit from 1 to 50')
+        cats = [c for c in categories if isinstance(c, str) and re.fullmatch(r'[a-z\-]+(?:\.[A-Za-z\-]+)?', c)][:6]
+        expression = arxiv_query(query)
+        if cats:
+            expression = f'({expression}) AND (' + ' OR '.join('cat:' + c for c in cats) + ')'
+        params = {'search_query': expression, 'start': 0, 'max_results': limit,
+                  'sortBy': 'submittedDate' if newest else 'relevance', 'sortOrder': 'descending'}
+        return self._cache_search('arxiv-recent' if newest else 'arxiv', expression, limit,
+                                  lambda: self._arxiv_feed(params, limit))['results']
+
+    def arxiv_records(self, identifiers):
+        """arXiv metadata and full abstracts for up to 100 identifiers in one request."""
+        ids = list(dict.fromkeys(re.sub(r'v\d+$', '', str(i).strip()) for i in identifiers
+                                 if isinstance(i, str) and ARXIV_ID.fullmatch(i.strip())))[:100]
+        if not ids:
+            return []
+        params = {'id_list': ','.join(ids), 'start': 0, 'max_results': len(ids)}
+        return self._cache_search('arxiv-ids', ','.join(sorted(ids)), len(ids),
+                                  lambda: self._arxiv_feed(params, len(ids), abstract=2500))['results']
+
+    def zbmath_search(self, query, *, limit=25):
+        """A zbMATH Open search for controller code: up to 50 records, with their open reference lists."""
+        query = ' '.join(str(query or '').split())[:300]
+        if not query or type(limit) is not int or not 1 <= limit <= 50:
+            raise LiteratureError('Give a query and a limit from 1 to 50')
+
+        def fetch():
+            params = {'search_string': query, 'page': 0, 'results_per_page': limit}
+            try:
+                body, _, _ = self._fetch('https://api.zbmath.org/v1/document/_search?' + urlencode(params), max_bytes=8_000_000)
+            except LiteratureError as exc:
+                if 'HTTP 404' in str(exc):
+                    return []  # zbMATH answers an empty search with 404
+                raise
+            out = []
+            for r in (json.loads(body).get('result') or [])[:limit]:
+                if not isinstance(r, dict):
+                    continue
+                record = _zbmath_record(r)
+                record['zbmath_document'] = r.get('id') if type(r.get('id')) is int else None
+                # Open reference lists: the cited work's internal zbMATH document number, DOI and citation text.
+                record['cited_works'] = [{'zbmath_document': (x.get('zbmath') or {}).get('document_id'),
+                                          'doi': str(x.get('doi') or '').lower() or None,
+                                          'text': _plain(x.get('text'), 300)}
+                                         for x in r.get('references') or [] if isinstance(x, dict)][:200]
+                out.append(record)
+            return out
+        return self._cache_search('zbmath-full', query, limit, fetch)['results']
+
+    def s2_links(self, identifier, direction='citations', *, limit=500):
+        """Works citing (direction='citations') or cited by ('references') a paper, from Semantic Scholar.
+
+        The identifier is a DOI, an arXiv ID or a Semantic Scholar paper ID. Without a key the shared
+        quota refuses in bursts; the transport backs off and marks the source down after repeated refusals."""
+        if direction not in ('citations', 'references') or type(limit) is not int or not 1 <= limit <= 1000:
+            raise LiteratureError('Give a direction (citations or references) and a limit from 1 to 1000')
+        ident = str(identifier or '').strip()
+        if re.fullmatch(r'10\.\d{4,9}/\S+', ident, re.I):
+            key = 'DOI:' + ident.lower()
+        elif ARXIV_ID.fullmatch(ident):
+            key = 'ARXIV:' + re.sub(r'v\d+$', '', ident)
+        elif re.fullmatch(r'[0-9a-f]{40}', ident):
+            key = ident
+        else:
+            raise LiteratureError('Give a DOI, an arXiv ID or a Semantic Scholar paper ID')
+
+        def fetch():
+            headers = {}
+            if os.environ.get('SEMANTIC_SCHOLAR_API_KEY'):
+                headers['x-api-key'] = os.environ['SEMANTIC_SCHOLAR_API_KEY']
+            params = {'fields': 'title,authors,year,abstract,url,externalIds,venue,publicationTypes,citationCount',
+                      'limit': limit}
+            body, _, _ = self._fetch(f'https://api.semanticscholar.org/graph/v1/paper/{quote(key, safe="/().-_;:")}/{direction}?'
+                                     + urlencode(params), headers=headers, max_bytes=8_000_000)
+            side = 'citingPaper' if direction == 'citations' else 'citedPaper'
+            out = []
+            for item in json.loads(body).get('data') or []:
+                paper = item.get(side) if isinstance(item, dict) else None
+                if isinstance(paper, dict) and paper.get('title'):
+                    record = _s2_record(paper)
+                    record['venue'] = _plain(paper.get('venue'), 120) or None
+                    out.append(record)
+            return out
+        return self._cache_search('s2-' + direction, key, limit, fetch)['results']
+
+    def references_of(self, doi):
+        """DOIs a DOI cites, from the OpenCitations index (open, no key)."""
+        if not isinstance(doi, str) or not re.fullmatch(r'10\.\d{4,9}/\S+', doi.strip()):
+            raise LiteratureError('Give a DOI')
+        doi = doi.strip().lower()
+
+        def fetch():
+            body, _, _ = self._fetch('https://api.opencitations.net/index/v2/references/doi:' + quote(doi, safe='/().-_;:'),
+                                     max_bytes=10_000_000)
+            found = []
+            for item in json.loads(body):
+                match = re.search(r'(?:^|\s)doi:(\S+)', str(item.get('cited') or '')) if isinstance(item, dict) else None
+                if match:
+                    found.append(match.group(1).lower())
+            return list(dict.fromkeys(found))[:5000]
+        return self._cache_search('opencitations-references', doi, 1, fetch)['results']
 
     def citing(self, doi, limit=10):
         """Works citing a DOI, from Semantic Scholar, for controller code ("cited by"). Without a key its
@@ -743,7 +906,7 @@ class LiteratureTools:
         uncapped; records carry open reference lists (DOIs), used to follow citations backwards."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise LiteratureError('Crossref batches hold 1 to 100 works')
-        params = {'rows': limit, 'select': 'DOI,title,author,issued,type,container-title,is-referenced-by-count,reference,abstract'}
+        params = {'rows': limit, 'select': 'DOI,title,author,issued,type,container-title,is-referenced-by-count,reference,abstract,link'}
         if type(offset) is int and 0 < offset <= 900:
             params['offset'] = offset
         if dois:
@@ -763,10 +926,13 @@ class LiteratureTools:
                 year = ((r.get('issued') or {}).get('date-parts') or [[None]])[0][0]
                 refs = [str(x['DOI']).lower() for x in r.get('reference') or [] if isinstance(x, dict) and x.get('DOI')]
                 out.append({'identifier': 'doi:' + str(r.get('DOI', '')).lower(), 'doi': str(r.get('DOI', '')).lower() or None,
-                            'title': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('title') or [''])[0])), 300), 'type': r.get('type'), 'year': year,
+                            'title': _crossref_title((r.get('title') or [''])[0])[:300], 'type': r.get('type'), 'year': year,
                             'authors': [_plain(' '.join(x for x in (a.get('given'), a.get('family')) if x), 80)
                                         for a in r.get('author') or [] if isinstance(a, dict)][:15],
                             'venue': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('container-title') or [''])[0])), 120) or None,
+                            'full_text_url': next((link['URL'] for link in r.get('link') or [] if isinstance(link, dict)
+                                                   and link.get('content-type') == 'application/pdf'
+                                                   and isinstance(link.get('URL'), str) and link['URL'].startswith('https://')), None),
                             'cited_by': r.get('is-referenced-by-count'), 'references': ['doi:' + d for d in refs][:150],
                             **({'reference_texts': [_plain(' '.join(str(x.get(k) or '') for k in (
                                 'unstructured', 'author', 'volume-title', 'article-title', 'year')), 300)
@@ -776,6 +942,44 @@ class LiteratureTools:
             return out
         key = json.dumps([params.get('query.bibliographic'), params.get('filter'), params.get('offset', 0)] + (['texts'] if texts else []))
         return self._cache_search('crossref', key, limit, fetch)['results']
+
+    def repository_versions(self, doi):
+        """OpenAIRE's links to OpenDOAR deposits for an exact DOI. Read a deposit's own
+        abstract and file fields, rather than the aggregator's merged description."""
+        if not isinstance(doi, str) or len(doi) > 200 or not re.fullmatch(r'10\.\d{4,9}/\S+', doi):
+            return []
+        doi = doi.lower()
+        def objects(value):
+            return [x for x in (value if isinstance(value, list) else [value]) if isinstance(x, dict)]
+        def first(value, key='$'):
+            return next((x[key] for x in objects(value) if isinstance(x.get(key), str)), '')
+        def fetch():
+            params = urlencode({'doi': doi, 'format': 'json', 'size': 1})
+            body, _, _ = self._fetch('https://api.openaire.eu/search/publications?' + params, max_bytes=1000000)
+            result_set = json.loads(body).get('response', {}).get('results') or {}
+            versions = []
+            for row in objects(result_set.get('result')):
+                parent = row.get('metadata', {}).get('oaf:entity', {}).get('oaf:result') or {}
+                if not any(x.get('@classid') == 'doi' and str(x.get('$', '')).lower() == doi for x in objects(parent.get('pid'))):
+                    continue
+                for item in objects((parent.get('children') or {}).get('result')):
+                    if not any(str(x.get('@id', '')).startswith('opendoar____::') for x in objects(item.get('collectedfrom'))):
+                        continue
+                    for inst in objects(item.get('instance')):
+                        if first(inst.get('accessright'), '@classid') != 'OPEN':
+                            continue
+                        url = first(inst.get('fulltext'))
+                        abstract = _plain(first(item.get('description')), 2500)
+                        # OpenAIRE's legacy index clips some descriptions at 500 characters.
+                        # Only complete sentences from those deposits are admissible evidence.
+                        if len(abstract) >= 500 and not re.search(r'[.!?][”")]*$', abstract):
+                            abstract = re.sub(r'[^.!?]*$', '', abstract)
+                        versions.append({'title': first(item.get('title')),
+                                         'authors': [x['$'] for x in objects(item.get('creator')) if x.get('$')],
+                                         'abstract': abstract, 'url': first(inst.get('url')),
+                                         'full_text_url': url if url.startswith('https://') else ''})
+            return sorted(versions, key=lambda v: (bool(v['full_text_url']), bool(v['abstract'])), reverse=True)[:8]
+        return self._cache_search('openaire-version', doi, 8, fetch)['results']
 
     def citations_of(self, doi):
         """DOIs of the works citing a DOI, from the OpenCitations index (open, no key)."""
@@ -993,7 +1197,7 @@ class LiteratureTools:
         canonical = urlunsplit(('https', host, split.path or '/', split.query, ''))
         return canonical, canonical, None
 
-    def open_paper(self, identifier_or_url):
+    def open_paper(self, identifier_or_url, *, cache_only=False):
         canonical, url, arxiv_id = self._canonical(identifier_or_url)
         source_request = canonical.startswith('arxiv-source:')
         canonical_id = document_id = 'doc-' + _digest(canonical)[:24]
@@ -1006,18 +1210,20 @@ class LiteratureTools:
         raw = self._read(('documents', document_id + '.json'), DOCUMENT_META_BYTES)
         if raw is not None:
             metadata = json.loads(raw)
+            if cache_only and metadata.get('canonical_identifier') != canonical:
+                raise LiteratureError('Cached document does not match the requested identifier')
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(metadata['retrieved_at'])).total_seconds()
             except (KeyError, ValueError, TypeError):
                 age = float('inf')
             immutable = bool(arxiv_id and re.search(r'v\d+$', arxiv_id))
             stale = not immutable and age >= 86400
-            if not stale or not self.online:
+            if not stale or not self.online or cache_only:
                 metadata['cached'] = True
                 if stale:
                     metadata['stale_cache'] = True
                 return self._document_summary(metadata)
-        if not self.online:
+        if cache_only or not self.online:
             raise LiteratureError('Offline mode: paper is not cached. Online retrieval must be enabled explicitly.')
         try:
             if source_request:
@@ -1305,7 +1511,17 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 try:
                     remaining = timeout if index == 0 else max(.1, deadline - time.monotonic())
                     raw = socket.create_connection((address, 443), timeout=remaining)
-                    conn.sock = context.wrap_socket(raw, server_hostname=parts.hostname)
+                    try:
+                        conn.sock = context.wrap_socket(raw, server_hostname=parts.hostname)
+                    except ssl.SSLCertVerificationError:
+                        wider = _wider_tls_context()
+                        if wider is None or context is wider:
+                            raise
+                        # The default store may lack a newer root; try the platform's other bundles once.
+                        raw.close()
+                        context = wider
+                        raw = socket.create_connection((address, 443), timeout=max(.1, deadline - time.monotonic()))
+                        conn.sock = context.wrap_socket(raw, server_hostname=parts.hostname)
                     break
                 except ssl.SSLCertVerificationError:
                     if raw is not None:
@@ -1420,11 +1636,16 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             raise LiteratureError('Source download host is outside the permitted arXiv origins')
         provider = QUOTA_HOSTS.get(original_host)
         if provider in self.down:
-            raise LiteratureError(f'{provider} unavailable earlier in this session; use cached evidence or another provider', code='source_unavailable')
+            since = self._down_at.get(provider)
+            if since is None or time.monotonic() - since < DOWN_COOLDOWN:
+                raise LiteratureError(f'{provider} unavailable earlier in this session; use cached evidence or another provider', code='source_unavailable')
+            # A rate limit or an outage may have passed: one probe, and one more failure marks it down again.
+            self.down.discard(provider)
+            self._strikes[provider] = STRIKES - 1
         auth_headers = {'authorization', 'x-api-key', 'x-subscription-token'}
         if any(k.casefold() in auth_headers for k in headers) and original_host not in ('api.semanticscholar.org', 'api.search.brave.com'):
             raise LiteratureError('API credentials may only be sent to their fixed provider host')
-        retries, redirects = 0, 0
+        retries, redirects, failures = 0, 0, 0
         while True:
             host = self._url(url).hostname
             if allowed_hosts is not None and host not in allowed_hosts:
@@ -1459,8 +1680,13 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             try:
                 status, response_headers, body = self._request_once(url, headers, max_bytes)
             except LiteratureError as exc:
+                untrusted = 'certificate' in str(exc)
+                if exc.code == 'source_unavailable' and not untrusted and failures < 1:
+                    failures += 1  # one transient network failure is retried after a short pause
+                    self._pause(1.5)
+                    continue
                 if provider and exc.code == 'source_unavailable':
-                    self.down.add(provider)
+                    self._strike(provider, permanent=untrusted)
                 raise
             if status in (301, 302, 303, 307, 308):
                 if redirects >= 3 or not response_headers.get('location'):
@@ -1471,19 +1697,30 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                     headers = {k: v for k, v in headers.items() if k.casefold() not in auth_headers}
                 url, redirects = target, redirects + 1
                 continue
-            if status == 429 and retries < 1:
+            if status == 429 and retries < 2:
+                # Shared key-less quotas (Semantic Scholar) refuse in bursts: back off twice before giving up.
                 retry = response_headers.get('retry-after', '')
-                delay = float(retry) if retry.isdigit() else 2.0
-                if delay > 5:
-                    if provider:
-                        self.down.add(provider)
-                    raise LiteratureError('Source returned HTTP 429 (rate limited); try later or use a different provider')
-                self._pause(max(1, delay))
-                retries += 1
+                delay = float(retry) if retry.isdigit() else (2.0, 6.0)[retries]
+                if delay <= 15:
+                    self._pause(max(1, delay))
+                    retries += 1
+                    continue
+            if status >= 500 and failures < 1:
+                failures += 1
+                self._pause(2.0)
                 continue
             if not 200 <= status < 300:
                 if (status == 429 or status >= 500) and provider:
-                    self.down.add(provider)
+                    self._strike(provider)
                 raise LiteratureError(f'Source returned HTTP {status}; check provider access or use another public source',
                                       code='source_unavailable' if status == 429 or status >= 500 else 'source_error')
+            if provider:
+                self._strikes.pop(provider, None)
             return body, response_headers.get('content-type', '').lower(), url
+
+    def _strike(self, provider, *, permanent=False):
+        """Count a failed request; a provider is marked down after STRIKES failures in a row (each already retried)."""
+        self._strikes[provider] = self._strikes.get(provider, 0) + 1
+        if permanent or self._strikes[provider] >= STRIKES:
+            self.down.add(provider)
+            self._down_at[provider] = None if permanent else time.monotonic()

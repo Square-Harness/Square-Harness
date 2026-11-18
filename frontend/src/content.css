@@ -67,6 +67,11 @@
 .prose table { display: block; max-width: 100%; overflow-x: auto; margin: 0 0 1em; border-collapse: collapse; font-size: 15.5px; }
 .prose th, .prose td { padding: 6px 10px; text-align: left; vertical-align: top; border: 1px solid var(--line); }
 .prose th { background: var(--paper-2); }
+/* On a phone, a wide table scrolls sideways rather than squeezing each column to its longest word. */
+@media (max-width: 760px) {
+  .prose table { font-size: 14.5px; }
+  .prose th, .prose td { min-width: 8em; padding: 5px 8px; }
+}
 .prose hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--line); }
 .prose .img-alt { color: var(--text-3); font-style: italic; }
 .katex { font-size: 1.07em; }
@@ -403,6 +408,7 @@
 .template-slot .field-hint { margin: 0 0 6px; }
 .template-slot > .field { margin-top: 10px; }
 .outputs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 12px; padding: 8px 12px; background: var(--green-soft); border-left: 2px solid var(--green); border-radius: 0 6px 6px 0; font-size: 14px; }
+.report > .outputs { margin: 0 0 14px; }
 .tex .source-text { white-space: pre-wrap; }
 .tex-command { color: var(--ink); }
 .tex-comment { color: var(--text-3); }
@@ -433,8 +439,8 @@
 .effort { margin: 6px 0 10px; }
 .effort-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .effort-now { position: relative; font: 700 16px/1.2 var(--font-text); color: var(--ink); padding: 0 4px; }
-.effort-track { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding-top: 2px; }
-.effort-line { position: absolute; left: 10%; right: 10%; top: 9px; height: 2px; background: var(--track-strong); border-radius: 1px; pointer-events: none; }
+.effort-track { position: relative; display: grid; grid-template-columns: repeat(var(--effort-stops), minmax(0, 1fr)); padding-top: 2px; }
+.effort-line { position: absolute; inset-inline: calc(50% / var(--effort-stops)); top: 9px; height: 2px; background: var(--track-strong); border-radius: 1px; pointer-events: none; }
 .effort-fill { position: absolute; inset: 0 auto 0 0; background: var(--ink); border-radius: 1px; transition: width 0.18s ease; }
 .effort-stop { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0 2px 2px; border: 0; background: none; color: var(--text-2); cursor: pointer; font-size: 12.5px; font-weight: 700; }
 .effort-stop:focus-visible { outline: none; }

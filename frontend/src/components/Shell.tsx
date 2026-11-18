@@ -163,7 +163,7 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
   return (
     <>
       {jobs.map((job) => {
-        const look = researchLook(job.status, job.running)
+        const look = researchLook(job.status, job.running, job.kind)
         return (
           <a key={job.id} href={href(info.mode, job.id)} className={'side-item' + (route.id === job.id ? ' side-item-active' : '')}>
             <Square variant={look.variant} label={look.label} />

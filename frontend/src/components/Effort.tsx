@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 // Effort: one control instead of budget fields. The levels and their budgets are in effort.ts.
-import { useEffect, useRef, type KeyboardEvent } from 'react'
+import { useEffect, useRef, type CSSProperties, type KeyboardEvent } from 'react'
 import type { Defaults } from '../api'
 import { describeLimits, EFFORTS, effortLimits, type EffortKind, type EffortLevel } from '../effort'
 
@@ -37,7 +37,8 @@ export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, 
           {custom ? 'Custom limits' : EFFORTS[index].label}
         </span>
       </div>
-      <div className="effort-track" role="radiogroup" aria-label="Effort" onKeyDown={keys}>
+      <div className="effort-track" role="radiogroup" aria-label="Effort" onKeyDown={keys}
+        style={{ '--effort-stops': EFFORTS.length } as CSSProperties}>
         <span className="effort-line" aria-hidden="true"><span className="effort-fill" style={{ width: `${(index / (EFFORTS.length - 1)) * 100}%` }} /></span>
         {EFFORTS.map((effort, i) => (
           <button key={effort.id} ref={(node) => { refs.current[i] = node }} type="button" role="radio"
