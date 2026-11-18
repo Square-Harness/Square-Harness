@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { api, type ResearchDetail } from '../api'
+import { api, type ResearchDetail, type WriteupPlan } from '../api'
 import { ErrorNote, Loading, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
@@ -16,9 +16,9 @@ import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, Thinking, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['style', 'draft', 'compile', 'export'] as const
+const STEPS = ['style', 'outline', 'draft', 'compile', 'review', 'export'] as const
 const STEP_NAMES: Record<string, string> = {
-  style: 'Style', draft: 'Writing', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
+  style: 'Style', outline: 'Outline', draft: 'Writing', review: 'Review', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
 }
 
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
@@ -81,7 +81,8 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile' : data.phase
+  const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile'
+    : data.phase === 'check' || data.phase === 'revise' || data.phase === 'select' ? 'review' : data.phase
   const current = STEPS.indexOf(phase as typeof STEPS[number])
   return (
     <header className="job-head">
@@ -105,10 +106,11 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       </div>
       {(data.outputs?.tex || data.outputs?.download || data.outputs?.source || data.compile?.pdf) && (
         <div className="outputs">
-          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <> and <code>{data.outputs.pdf}</code></>} in your folder</span>}
+          {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <>, <code>{data.outputs.pdf}</code></>}{data.outputs.body && <> and the body alone, <code>{data.outputs.body}</code>,</>} in your folder</span>}
           {data.compile?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(data.id)} download>Download PDF</a>}
           {data.outputs?.source && <a className={'btn btn-small' + (data.compile?.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(data.id)} download={data.outputs.source}>Sources (.zip)</a>}
           {data.outputs?.download && <a className={'btn btn-small' + (data.compile?.pdf || data.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(data.id)} download={data.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
+          {data.outputs?.download && data.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(data.id)} download={data.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
           {data.compile?.pdf && <a className="btn btn-small btn-quiet" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a>}
         </div>
       )}
@@ -242,6 +244,7 @@ function CompileTab({ data, onArtifact }: { data: ResearchDetail; onArtifact: (n
 
 function OutlineTab({ data }: { data: ResearchDetail }) {
   if (!data.outline) return <p className="empty-note">No outline yet.</p>
+  if ('kind' in data.outline) return <PlanTab plan={data.outline} />
   return (
     <div className="outline">
       <h3 className="section-title">{data.outline.title}</h3>
@@ -257,7 +260,83 @@ function OutlineTab({ data }: { data: ResearchDetail }) {
   )
 }
 
+function PlanTab({ plan }: { plan: WriteupPlan }) {
+  const language = plan.language.charAt(0).toUpperCase() + plan.language.slice(1)
+  return (
+    <div className="outline">
+      <h3 className="section-title">{plan.title}</h3>
+      <p className="muted small">{plan.kind.replace('_', ' ')}, {plan.scope === 'part' ? 'a part to paste into a paper' : 'a whole document'}, in {language}.</p>
+      {plan.requirements.length > 0 && <>
+        <p className="detail-label">Asked for</p>
+        <ul className="muted small">{plan.requirements.map((item, index) => <li key={index}>R{index + 1}: {item}</li>)}</ul>
+      </>}
+      <p className="detail-label">Sections</p>
+      <ol className="outline-list">
+        {plan.sections.map((section, index) => (
+          <li key={index}>
+            <strong>{section.heading}</strong>
+            <p className="muted small">{section.source === 'composed' ? 'Composed' : 'From the material'}{section.covers.length > 0 && ` (${section.covers.join(', ')})`}{section.parts.length > 0 && `; required parts ${section.parts.join(', ')}`}. {section.purpose}</p>
+          </li>
+        ))}
+      </ol>
+      {plan.problems.length > 0 && <>
+        <p className="detail-label">Problems in the material</p>
+        <ul className="muted small">{plan.problems.map((problem, index) => <li key={index}>{problem.inventory_id}: {problem.what}</li>)}</ul>
+      </>}
+      {plan.needs.length > 0 && <>
+        <p className="detail-label">Missing from the material</p>
+        <ul className="muted small">{plan.needs.map((need, index) => (
+          <li key={index}>{need.blocking && <span className="objection-label">Needed: </span>}{need.type}{need.concerns.length > 0 && ` (${need.concerns.join(', ')})`}: {need.what}</li>
+        ))}</ul>
+      </>}
+      {plan.notation.length > 0 && <>
+        <p className="detail-label">Notation</p>
+        <ul className="muted small">{plan.notation.map((item, index) => <li key={index}>{item.object}: {item.symbol}{item.also_written && ` (also written ${item.also_written})`}</li>)}</ul>
+      </>}
+    </div>
+  )
+}
+
 type Sources = { id: string; path: string; sha256: string; content: string }[]
+
+/** Ready or draft (the controller's gate), the review rounds, or the material a write-up waits for. */
+function Readiness({ data }: { data: ResearchDetail }) {
+  const [error, setError] = useState('')
+  const [acting, setActing] = useState(false)
+  const decide = (action: 'waive' | 'stop') => {
+    setActing(true)
+    setError('')
+    api.writeupNeeds(data.id, action).catch((reason: Error) => setError(reason.message)).finally(() => setActing(false))
+  }
+  const needs = (data.needs || []).filter((need) => need.blocking)
+  if (data.status === 'needs_input') {
+    return (
+      <section className="aside-section">
+        <h3 className="aside-title">Waiting for material</h3>
+        <p className="small">Nothing was written: the material lacks what the document needs.</p>
+        <ul className="issue-list">{needs.map((need, index) => <li key={index}>{need.type}{need.concerns.length > 0 && ` (${need.concerns.join(', ')})`}: {need.what}</li>)}</ul>
+        <p className="muted small">Provide it in the conversation and ask again, or write it anyway: what is missing becomes points to check.</p>
+        <div className="job-actions">
+          <button type="button" className="btn btn-small btn-primary" disabled={acting} onClick={() => decide('waive')}>Write anyway</button>
+          <button type="button" className="btn btn-small" disabled={acting} onClick={() => decide('stop')}>Stop</button>
+        </div>
+        {error && <ErrorNote>{error}</ErrorNote>}
+      </section>
+    )
+  }
+  if (!data.readiness) return null
+  const reviews = data.reviews || []
+  const candidates = data.candidates || []
+  const kept = candidates.findIndex((candidate) => candidate.selected)
+  return (
+    <section className="aside-section">
+      <h3 className="aside-title">{data.readiness === 'ready' ? 'Ready' : 'Draft'}</h3>
+      <p className="small">{data.readiness === 'ready' ? 'Every check passed. Read it before using it.' : 'Not ready to go into a paper:'}</p>
+      {(data.gates || []).length > 0 && <ul className="issue-list">{(data.gates || []).map((gate, index) => <li key={index}>{gate.message}</li>)}</ul>}
+      {reviews.length > 0 && <p className="muted small">Review: {reviews.length} check{reviews.length === 1 ? '' : 's'}, {data.review_round || 0} revision round{data.review_round === 1 ? '' : 's'}{kept >= 0 && candidates.length > 1 ? `; version ${kept + 1} of ${candidates.length} kept` : ''}.</p>}
+    </section>
+  )
+}
 
 function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; issues: string[]; cite: string | null; onCite: (ref: string | null) => void; sources: Sources | null }) {
   const b = data.budget
@@ -266,6 +345,7 @@ function Aside({ data, issues, cite, onCite, sources }: { data: ResearchDetail; 
   return (
     <div className="ledger">
       {cite && <Passage refText={cite} data={data} sources={sources} onClose={() => onCite(null)} />}
+      <Readiness data={data} />
       <section className="aside-section">
         <h3 className="aside-title">Checks</h3>
         <p className="small">{todo ? `${todo} TODO comment${todo === 1 ? '' : 's'} left for you to settle.` : data.document ? 'No TODO comments.' : 'Checks run once the document is assembled.'}</p>

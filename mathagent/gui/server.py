@@ -749,6 +749,23 @@ def research_tex(h, body, id):
     return Streamed
 
 
+@route('POST', '/api/research/' + UUID + '/needs')
+def research_needs(h, body, id):
+    action = body.get('action')
+    if action not in ('waive', 'stop'):
+        raise ValueError('action must be waive or stop')
+    task = h.server.hub.writeup_needs(id, action)
+    return {'task': task.summary() if task else None, 'id': id}
+
+
+@route('GET', '/api/research/' + UUID + '/body')
+def research_body(h, body, id):
+    name, data = store.research_body(h.server.hub.root, id)
+    h.send_bytes(200, data, 'application/x-tex; charset=utf-8', [('Content-Disposition', f'attachment; filename="{name}"'),
+                                                                 ('Cache-Control', 'no-store')])
+    return Streamed
+
+
 @route('GET', '/api/research/' + UUID + '/source')
 def research_source(h, body, id):
     name, data = store.research_source(h.server.hub.root, id)

@@ -199,9 +199,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   An author-provided `.bib` takes precedence. Exact identifier matches can map
   model citation aliases to supplied keys; unrelated or ambiguous works stay
   unresolved. Parse Markdown DOI links without consuming their link syntax.
-  Compilation success means a PDF was built; completion additionally requires
-  the final LaTeX log to have no unresolved citations/references or duplicate
-  labels. Keep the PDF downloadable when those checks leave the draft partial.
+  Compilation success means a PDF was built; completion requires
+  `readiness == 'ready'`, which the controller derives in the `check` phase
+  (`_check`, `_gates`) from the compile state, the final log (unresolved
+  citations/references, duplicate labels, overfull lines, class and float
+  warnings: G8) and the deterministic
+  `texcheck` findings; no model verdict is used, and the field is not called
+  `verdict` (the hub reads that name for reviews). Keep the PDF downloadable when
+  the gate leaves the draft partial. A ready document prints no "Points to
+  check" block; a draft's block only counts, in the document's language
+  (`LANGUAGES`), the TODO comments and the other points, which the report lists
+  (`_points_to_check`): no model-written or English text goes into the PDF.
 - **Workflow status.** Operational failures (timeout, budget, context, malformed
   output) retain their own stop reasons. Partial work stays labelled partial.
   Retryable child failures keep their pending native transaction and saved job;
@@ -256,6 +264,56 @@ Version 1.1.0. The source of truth for the machine-readable version is
   its metadata and limits instead of inviting unverified bibliographic additions.
 - **Compile retries.** Missing-command retries require a new inferred definition
   and share one compile deadline. Cancellation stops the compiler process group.
+  latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
+  which the repair call and the reference checks read.
+- **Write-up review.** Modelled on Proof: candidates and reviews are kept
+  (`state['candidates']`, `state['reviews']`, keyed by the body's digest), the
+  controller derives readiness from issue severities and never uses a model
+  verdict or category, drops issues whose quote is not in the body, and treats
+  a fix that changes a formula as the author's. Revisions pass
+  `_revision_guard` or are discarded. Findings live in `state['ledger']` across
+  rounds with a status (open, fixed, refuted, disputed, gone); the writer
+  answers each with an edit or a rebuttal and the role `judge` rules on both.
+  Each round has one focus (`_focus`). Flow findings (reader, `skeleton-*`,
+  `frame-links`) and second attempts go to `_rewrite_section`: the section is
+  `freeze`d (displays, statements, floats, generated passages, headings and
+  inline formulas become tokens), the answer must pass `frozen_guard`, is
+  `thaw`ed, and `judge_section` rules on the section and each finding (accept,
+  partial, reject). Findings whose fix changes mathematics keep the line edits
+  under `_revision_guard`. `CODE_RULES` lists the rules checked by code, kept
+  out of the review prompts; `state['rule_checks']` keeps the reviewers'
+  per-rule verdicts for the report's table. Calls use the roles `fidelity`,
+  `style_check`, `part_check`, `revise_section`, `rewrite_section`, `judge`,
+  `judge_section`, `abstract_check` and `resolve_refs`; `review` would trigger the
+  research runner's citation checks. Review and revision stop with less than a
+  minute or 2,048 output tokens left; the best candidate is still exported.
+- **Long write-ups.** After the outline, `_outline_parts` re-cuts the parts at
+  the sections' first located inventory item (character cuts of
+  `split_material` stay when the sections cannot be located in order); `_task`
+  gives later parts their sections, the labels and the model's definitions so
+  far, and `_definition_findings` blocks two different definitions of one
+  command.
+- **Write-up hand-back.** A conversation write-up (`state['scoped']`) with a
+  blocking need stops after its outline with status `needs_input` (in
+  `WriteupRunner.TERMINAL`), writes nothing, and the hub adds `needs` and
+  `kind` to the child's result. The orchestrator does not force a final answer
+  on it and `_document_answer` gives no reply, so the main agent obtains the
+  material and delegates again; the duplicate-child test skips `needs_input`
+  children, and a second `needs_input` in the turn is the reply.
+  `WriteupRunner.decide_needs` (POST `/api/research/<id>/needs`, waive or stop)
+  is the author's answer on the page; waiving resumes at `skeleton` (then
+  `draft`) with `needs_waived`.
+- **Write-up outline.** The controller, not the model, decides what blocks: a
+  need blocks only when the model says so and a section depends on it (a
+  decision: when it settles a problem of the material), with at most three
+  decisions. A composed section is kept only when a requirement or a required
+  part asks for it. The writer receives the needs without their text, and a name
+  that only a literature need mentions is a blocking finding if it reaches the
+  document. The outline's kind of document is `state['document_kind']`:
+  `state['kind']` is the job's type (`writeup`), which the store and the runners
+  read. Guideline sheets are model prompts in
+  `mathagent/skills/writeup/guidelines/` (no licence header), one rule per item:
+  `- <ID> [required|style] <text>`.
 
 ### Security posture
 
@@ -456,6 +514,7 @@ documented together when releasing these features.
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
 | Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
+| | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; providers that refused (`down`) |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
@@ -584,15 +643,58 @@ budgets and pipeline identity, and ordinary Review's exclusion of proof checking
 Only an explicit request for a full new review follows the complete-review path.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
-call) → `draft` (one writing call, or consecutive parts for long material; the
+call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of
+document, language, requirements, inventory of the material with statuses,
+problems, notation, sections with role/source/required parts, needs; the
+controller settles it in `_settle_outline`, saves it as an artifact and in
+`state['outline']`, and pins the applicable guideline rules in
+`state['guidelines']` so that a resumed job keeps them; summaries skip it) →
+`skeleton` (one structured call, role `skeleton`, for `SKELETON_KINDS` of size
+section or paper with outline sections; `settle_skeleton` fixes labels, `uses`
+without cycles and aliases; saved in `state['skeleton']`; `_skeleton_text`
+renders it for the writer, the reviewers, the reviser and the judge;
+`place_skeleton_labels` in `_join_parts` and `skeleton_findings` in `_check`) →
+`draft` and `frame` for a whole paper (`_units`: parts are units of the
+outline in document order, the introduction a frame part written last, by the
+writing call or, when a `.tex` source has it, kept and edited by
+`_frame_edits`; then `_frame_abstract`; `state['framed']`; the material is read
+through `_whole_material()`, stored once in `state['material']`); with the
+outline's `assemble` and two `.tex` texts, the texts are spliced inside the
+`skeleton` phase (`_splice_plan` maps sections to texts by heading,
+`splice_texts` by code, `demote_headings` makes each text one section unless the
+outline's `files` says `flat`, changes in `state['splice']`), the skeleton is read from
+them (`skeleton_from_texts`) and the model only annotates it
+(`annotate_skeleton`); then `stitch`
+(after the frame: `_stitch_notation`, one `notation` call whose rows
+`settle_notation` checks and turns towards `_main_text`, applied by
+`replace_symbol`; duplicates by `_frozen_edits` that may remove their one
+token; and
+bridges under `frozen_guard`; fidelity then reads `state['splice']['hunks']`) → `draft` (one writing call, or consecutive parts for long material; the
 controller then takes the model's BibTeX out and keeps equation numbers only
-where they are referred to) → `assemble` (the preamble, the made bibliography
-and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
+where they are referred to) → `assemble` (the preamble with `hyperref`, the made bibliography,
+`state['abstract']` as front matter and the "Points to check" block) → `compile` (latexmk in a temporary folder with the template
 files and the figures the text includes; commands and environments the text
-uses without defining are supplied) → `repair` (one call on the whole body) →
-`export` (the folder, or kept for download when started from a conversation).
+uses without defining are supplied) → `repair` (one call on the whole body, or
+one per error passage when the body is too long, each refused by `_repair_guard`
+when it changes labels, citations, figures, listings, theorem-like environments
+or displays) →
+`tidy` (after a successful compile: `texcheck.log_warnings` classifies every
+log warning as fix, hold or list; fixes by code, at most one `resolve_refs` call
+and one passage repair per step, three passes per text, recorded in
+`state['tidy']`; `keep_latex` in the outline turns it off) →
+`check` (`texcheck.check`, then the review of the candidate: fidelity, style
+per section batch, required parts, one call per step saved in
+`review_progress`; then the gate; when the block must change, assemble and
+compile once more) → `revise` (one guarded call per section with rewordable
+issues, then a new candidate: assemble, compile, check) → `select` (the best
+candidate by `(not compile_ok, blockers, majors, minors)`, latest on a tie) →
+`export` (the folder, or kept for download when started
+from a conversation; the body alone is exported too, as `-body.tex` and
+`document-body.tex` in the ZIP).
 `@writeup` and `@summarize` reach it through the Assistant's worker adapter
-with the conversation as material (`store.conversation_record`).
+with the conversation as material (`store.conversation_record`). With no other
+material, notes pasted under the request are pinned as `request-notes.md`
+(`state['inline_material']`) and printed once in the writing call.
 
 ### Saved state
 

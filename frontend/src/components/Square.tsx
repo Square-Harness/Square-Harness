@@ -65,6 +65,7 @@ export function researchLook(status: string, running = false): Look {
     case 'listed': return { variant: 'complete', label: 'Reading list checked' }
     case 'saved': return { variant: 'complete', label: 'Style saved' }
     case 'partial': return { variant: 'partial', label: 'Partial result: see what is missing' }
+    case 'needs_input': return { variant: 'paused', label: 'Waiting for material: see what is missing' }
     case 'failed': return { variant: 'error', label: 'Work stopped' }
     case 'budget_exhausted': return { variant: 'spent', label: 'Budget used up' }
     case 'budget_violation': return { variant: 'error', label: 'Stopped: the model server exceeded the token cap' }

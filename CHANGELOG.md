@@ -2,6 +2,273 @@
 
 ## Unreleased
 
+- Write-up: fewer, longer sections. A section runs two to five pages (new rule
+  P22): the plan gives each section a level (a step of an argument is a
+  subsection or plain text) and the document's length in pages, and is asked
+  once more when its number of sections does not fit. After the compile, the
+  pages of the sections' labels show how long each runs, and a section outside
+  two to five pages is listed for you (the introduction and a closing
+  discussion may be shorter). In a merge, each text becomes one section: its
+  sections become subsections and its subsections subsubsections, labels
+  unchanged, unless you ask to keep a text's sections. The main theorem stated
+  again in your introduction is turned into its statement in words citing it.
+  A repair no longer takes the heading above the failing paragraph with it.
+
+- Write-up: a statement that two merged texts both give is removed by an edit
+  of the few lines around it, not by writing the whole text again: the edit may
+  remove that statement and nothing else, and a theorem repeated in the
+  introduction becomes its statement in words with a reference.
+
+- Write-up: when merged texts write the same object differently, one call
+  answers with a table of symbols (no text) and code applies it inside the
+  mathematics only, on whole tokens. The text that holds the main result and
+  its proof keeps its notation (a table that says otherwise is turned round),
+  unless your request names the symbol to use. A change that would clash with a
+  symbol a text already uses is not made and is put to you; the report lists
+  each replacement and how often it was made.
+
+- Write-up: in a merge, the text whose notation is kept is the one that
+  proves the main result; an introduction that only states the theorem no
+  longer counts as that text. The abstract of a merged document is written
+  after its notation is made one, with the symbols of the introduction.
+
+- Write-up: an introduction you wrote is no longer asked for `% PART:`
+  markers. One review call reads it against the required parts (motivation,
+  literature, positioning, main result, method) and quotes each; a missing part
+  is put to you and does not keep the document a draft.
+
+- Write-up: the skeleton lists results only (theorems, lemmas, propositions,
+  corollaries, and definitions the text cites), never remarks or examples, and
+  the abstract is not one of its sections. When texts are merged, it is read
+  from them by code (their sections, labelled results, cited formulas, tables
+  and figures) and the model only annotates it; it can neither add a result nor
+  move one. A missing label is reported only when something refers to it, or
+  for the main result, and the links the skeleton expects no longer hold the
+  document as a draft: they go to the reviser, then to you.
+
+- Write-up: a generated passage no longer hides its sentences from the reader
+  and the rewrite: its `% BEGIN COMPOSED` and `% END COMPOSED` lines are frozen
+  apart, and what stands between them is frozen like any text. The writer puts
+  the markers around new mathematics only, not around a whole section.
+
+- Write-up: a revision that breaks the compile is undone, section by section,
+  instead of being repaired by the model; its findings are open again, with the
+  error as the reason, and the next round of the review runs. A rewrite that
+  opens or closes an environment (a proof) is refused, and so is a repair that
+  puts two labels on one equation. When an earlier version is delivered, the
+  report's findings are those of that version, and it says why the later one
+  was dropped.
+
+- Write-up: asked to merge finished LaTeX texts, the write-up assembles them
+  instead of rewriting them. The skeleton says which text each section comes
+  from; the texts are spliced by code (a label used twice is renamed in the
+  later text with its references, a command defined differently is renamed,
+  BibTeX entries are united) and every change is listed in the report. The
+  model then writes only what is new: one notation (refused unless undoing it
+  gives back the same mathematics, and then put to you), a sentence citing a
+  statement that another text already states, the first paragraph of each
+  section, and the introduction's links and abstract. The fidelity check reads
+  only the passages that changed.
+
+- Write-up: findings about how the text reads (the reader's, the skeleton's
+  links, the introduction's) and findings a first edit did not fix are now
+  answered by a rewrite of their section with its mathematics frozen: every
+  display, statement and formula is a token the rewrite must keep, so it can
+  reorder and rephrase but not change the mathematics; a judge compares the
+  section before and after and keeps the old one if the new one is worse. The
+  judge can also rule an edit "partial": it is kept and the finding stays open
+  with what remains. A finding the writer answers with nothing is asked again,
+  alone; still nothing is recorded as unanswered.
+- Write-up: rules that code checks exactly (formula and result references,
+  margins, the title, the introduction's plan, links, lists and statements,
+  the abstract) are no longer put to the reviewers; the style reviewer gets
+  the lines the code flags for P6 and P9. The reader sees the whole document
+  with its displays and statements as one-line tokens, so a paper of some
+  pages fits in one call. The report has a table of every rule (followed, open
+  and for whom, not applicable, or not checked and why) and groups the
+  findings by what became of them.
+
+- Write-up: a whole paper is written section by section. Each call writes a
+  group of consecutive body sections with the skeleton, the text already
+  written (in full, or the statements and the first and last paragraph of each
+  section when long) and the rules of its role only. The introduction is
+  written last, from the finished body, and must cite the main result, every
+  section when there are three or more (rule I6, new I12) and the experiments;
+  an introduction you supply is kept, and one call only adds those links and
+  repairs its references. The abstract is written after it and checked once
+  against the main result; it is written again once when it fails.
+
+- Write-up: after the outline, one call fixes the skeleton of an article, a part
+  of a paper, notes or lecture notes (a section or longer): its sections,
+  results, cited formulas and figures with their labels, and what uses what.
+  Every writing call and every reviewer reads it, so labels are no longer
+  invented call by call; the controller puts its labels in the text where their
+  place is certain and checks the rest (a label missing or defined twice, a
+  result whose proof does not cite what it uses, a lemma cited nowhere, a result
+  cited before it is stated, a listed formula never cited). Linking sentences
+  come from the skeleton's connections only: the writer is no longer asked for
+  a sentence before every result. Rule P11 is rewritten and P21 (every sentence
+  earns its place) is new.
+
+- Write-up: references are clickable. When the harness builds the preamble it
+  loads `hyperref` (blue links) and `cleveref` before the theorem declarations;
+  your own template gets a bare `hyperref` unless it loads it already, and is
+  compiled without it (the report says so) if it does not compile with it.
+- Write-up: the abstract is front matter, printed in the title block of an AMS
+  class (no more "Abstract should precede \maketitle"); its citations,
+  references and length (100 to 200 words) are checked.
+- Write-up: every warning of the compile log is classified and listed in the
+  report. A new `tidy` phase fixes what code can fix: a reference to a label
+  written slightly differently, a citation key one letter off the
+  bibliography's, a label defined twice, mathematics in a section title,
+  floats placed `[h]` or too large, a line running into the margin; one model
+  call may point a remaining reference at an existing label of the right kind.
+  What is left keeps the draft (class and float warnings now too, gate G8) and
+  the report asks which target is meant. Ask to keep your LaTeX as it is and
+  nothing is changed; the report lists what would have been.
+
+- Write-up: the review keeps a ledger of its findings across rounds, each with
+  a status (open, fixed, set aside, for the author, gone). The writer answers
+  each finding with an edit or a rebuttal; an independent judge rules on every
+  edit (before and after) and every rebuttal. An upheld rebuttal closes the
+  finding, a rejected one goes to the author. Each round has one focus: first
+  fidelity and required parts, then the reading of the whole, then the
+  sentences; a finding already raised is not raised again.
+
+- Write-up: the review's fixes are applied as small edits of a few lines, each
+  checked alone, so one refused edit no longer cancels the others; reviewers cite
+  line numbers, so a finding is no longer lost when its quote is retyped.
+- Write-up: a standard notation (`\R`, `\N`, `\Z`, `\E`, `\P`, `\ind`, `\dd`,
+  `\abs{}`, `\norm{}`...) is defined in the preamble and used unless your
+  template, request or saved style has its own; `\mathbb{R}` becomes `\R`.
+- Write-up: the plan gives the size of the document (short, section, paper), a
+  storyline and the links between results, the questions of an exam with their
+  points, and the experiments of a numerical section. A short write-up follows
+  the core rules only and has no sections of its own.
+- Write-up: a reader of the whole document checks that results are linked and
+  ordered, and that exam questions are real tasks; new rule sheets for notes,
+  numerical commentary and abstracts; the paper, introduction and exam sheets
+  are rewritten.
+- Write-up: a literature check finished in the same turn now reaches the
+  write-up, and the second write-up of a turn writes with what there is.
+- Write-up: repair goes on passage by passage, a text accent used as notation
+  gets a definition, and a character pdfLaTeX cannot print in a retrieved
+  reference no longer stops the document.
+
+- Write-up: when your notes contradict themselves (the `1+k` constant whose
+  derivation gives `1-k`), the reply asks you which version to keep, with both
+  versions; the document keeps yours, marked TODO, until you answer, and the
+  report lists every problem the plan found.
+- Write-up: exam and exercise-sheet questions are numbered by a list, not typed
+  by hand; the source checker reports a hand-typed `\textbf{Question 1.}` (and
+  Part, Partie, Aufgabe, Frage...) so the review can fix it.
+- Write-up: generated mathematics counts as checked once the fidelity check has
+  run on the version; what is wrong in it is a fidelity issue. Exams and
+  exercise sheets can now be ready.
+- Write-up: an issue the review finds inside generated mathematics (an exercise,
+  a solution, exam questions) is revised, even when the fix changes a formula
+  or a statement there; the next check looks at it again. Formulas of your own
+  material stay protected.
+- Write-up: a draft's "Points to check" block only counts, in the document's
+  language, the TODO comments and the other points to settle; the points
+  themselves are listed in the report on the write-up's page. No raw LaTeX and
+  no English sentence appear any more in the PDF of a French exam.
+- Write-up: the style check reads the text without comments, so `% TODO`
+  comments are no longer reported as text that talks about its source.
+- Write-up: a generated section is kept only when a requirement it cites names
+  that kind of section (or a required part asks for it): "a short article-style
+  note" no longer brings an Introduction. The fidelity check compares each
+  formula of the document with the material's and treats an uncertain or
+  merely stated claim written as a result as a change; the writer keeps each
+  claim's status. A rewording that keeps the formulas can be revised.
+- Write-up: the body alone never contains the review's `% PART:` and
+  `% BEGIN/END COMPOSED` comments; when it still holds `% TODO` comments, its
+  first lines and the reply say it is a draft.
+- Write-up: documents built without a template, class or style file are set on
+  A4 with 2.5 cm margins (`geometry`), instead of the classes' wide margins.
+- Write-up fixes from live trials: an exam or exercise sheet keeps the
+  preamble's `exercise`, `solution` and `\points` when the writer also defines
+  them; `\\[2pt]` is no longer read as a display by the checker and the review;
+  after a write-up stopped for missing material, a forced final answer reports
+  what is missing instead of letting the Assistant write the document itself.
+  A review answer cut short by its output limit keeps its complete issues (and
+  that check counts as not fully run); the fidelity check asks for one-sentence
+  problems and fixes. An issue whose revision was refused because it changed a
+  formula is put to you with both versions.
+- Write-up: material too long for one writing call is written in parts that
+  follow the plan's sections, each later part told its sections, the labels and
+  the commands already defined; two different definitions of one command are a
+  blocker. The LaTeX repair is refused when it changes more than LaTeX (labels,
+  citations, figures, listings, theorem-like environments, displays), and a
+  body too long for one repair call is repaired passage by passage around the
+  errors. The plan decides whether the executed code of the conversation goes
+  into the document. Underscores in your messages are shown as typed in the
+  conversation, not as emphasis.
+- Write-up: hand missing material back to the main agent. In a conversation, a
+  write-up whose plan finds that a section depends on something the material
+  lacks (literature, a proof, a definition, data, or a decision on a problem of
+  the material) writes nothing and returns `needs_input` with the list. The
+  Assistant obtains it (literature, check, prove, or a question to you) and asks
+  for the write-up once more; a second stop in the same turn ends it with the
+  list. The write-up's page shows what is missing, with **Write anyway** (the
+  missing pieces become points to check) and **Stop**, and shows Ready or Draft
+  with the failed checks and the review rounds. Notes pasted without a question
+  are no longer taken as a request to prove them.
+- Write-up: review and revise before delivering, as Proof does. After a
+  successful compile each candidate is checked in three layers: the source
+  checker; a fidelity check against the material and the request (changed or
+  missing results, added mathematics, wrong generated exercises or solutions,
+  unmet requirements); and a style check, section by section, against the
+  guideline sheets, with one focused question per required part. Issues whose
+  quote is not in the text are dropped; the controller recomputes what can be
+  fixed by rewording and derives readiness from severities (G5 fidelity, G6
+  style and required parts), never from a model verdict. Rewordable issues are
+  revised one section per call under deterministic guards (same formulas, no
+  label lost, no new citation, theorem statements unchanged, length bounded);
+  a fix that changes a formula is put to the author with both versions. Up to
+  three rounds (one fewer than the job's rounds), stopping on stagnation or
+  when time or budget runs short; the best candidate is exported. Each step
+  is saved, so a paused job resumes inside the review. Ready documents are
+  exported without the review's `% PART:` and `% BEGIN/END COMPOSED` comments.
+- Write-up: plan before writing. One structured call works out the kind of
+  document (article, notes, lecture notes, exercise sheet, exam, part of a
+  paper, summary), its language, what the request asks for, the material's
+  results with their status, its problems and notation, the sections, and what
+  is missing; the controller keeps a generated section only when something asks
+  for it and decides which needs block. The plan is in the job's Outline tab and
+  its report. Each kind follows written guideline sheets
+  (`skills/writeup/guidelines/`). The writer follows the plan, marks new
+  mathematics between `% BEGIN COMPOSED` and `% END COMPOSED` (a draft until it
+  is checked), starts required parts with `% PART:`, and never talks about its
+  notes. Without a template, exams and exercise sheets use `article` with
+  `exercise`, `solution` and `\points{n}`; French, German, Spanish and Italian
+  documents get babel and theorem names in their language; long titles get a
+  short running title. The checker adds an exam's points against the requested
+  total and blocks a name that only the plan mentions.
+- Write-up: say whether a document is ready to go into a paper. A new source
+  checker (`mathagent/texcheck.py`, no model call) reads the body and the
+  compile log for TODOs, draft notices, hand-typed equation numbers, text about
+  its notes, badly typeset mathematics, rough-note and Markdown leftovers and
+  lines in the margin; numbers absent from the material are reported, never
+  blocking. The controller derives `readiness`: Ready only when it compiles,
+  references resolve, no blocking or mathematical finding, nothing left to
+  settle and no overfull line; the job is complete only then. Replies start
+  with `Ready:` or `Draft:` and say what keeps a draft one. A ready document has
+  no "Points to check" block; a draft's block lists the findings and typesets
+  its TODO comments. The body alone is exported as `-body.tex` (folder, ZIP and
+  a Body .tex download), with the definitions it needs listed as comments. For a
+  part of a paper (its complete `.tex` attached), labels it already uses,
+  citations outside its bibliography and undefined commands block. A `% TODO`
+  that cites a formula keeps its label.
+- Write-up: accept rough notes pasted under the request in an `@writeup`
+  message of a new conversation; the message is pinned as the material and the
+  writer sees it once. Run latexmk with `-norc`, so a personal latexmkrc that
+  moves the log no longer hides compile errors from the repair call. Write
+  typographic punctuation (dashes, curly quotes, ellipsis, non-breaking space)
+  as LaTeX input in the body and the title, where amsart's upper-casing broke
+  compilation. Supply undefined `exercise`, `problem` and `question`
+  environments (numbered, definition style) and `solution` (proof-like, with an
+  optional title).
 - Ask Proof's reviewer to challenge its weakest nonroutine premise and verify
   counterexample admissibility before checking the failed conclusion. Replace
   two model-written status labels with one assessment and derive the operational

@@ -336,6 +336,15 @@ export type ResearchListItem = {
 export type ReviewVariant = 'quick' | 'review' | 'journal' | 'explain'
 
 export type WriteupSection = { title: string; sources: string[]; goal: string; latex: string; complete: boolean; truncated: boolean }
+// The outline call's plan, as the controller settled it (writeup.WriteupRunner._settle_outline).
+export type WriteupPlan = {
+  kind: string; scope: 'document' | 'part'; language: string; title: string; short_title: string; instruction: string
+  requirements: string[]; inventory: { id: string; type: string; text: string; status: string }[]
+  problems: { inventory_id: string; what: string }[]; notation: { object: string; symbol: string; also_written: string }[]
+  sections: { heading: string; role: string; source: 'material' | 'composed'; covers: string[]; parts: string[]; requested_by: string; purpose: string }[]
+  needs: { type: string; what: string; concerns: string[]; blocking: boolean }[]
+  dropped_sections?: string[]; unassigned_parts?: string[]
+}
 
 export type CompileResult = {
   available: boolean
@@ -381,12 +390,19 @@ export type ResearchDetail = {
   running: boolean
   live: Live
   artifacts: { name: string; size: number }[]
-  outline?: { title: string; sections: { title: string; sources: string[]; goal: string }[] } | null
+  outline?: { title: string; sections: { title: string; sources: string[]; goal: string }[] } | WriteupPlan | null
   sections?: WriteupSection[]
   document?: string
   section_lines?: [number, number][]
   compile?: CompileResult | null
-  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string }
+  outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string }
+  // Write-ups: the controller's gate, the outline's needs and the review rounds.
+  readiness?: 'ready' | 'draft' | null
+  gates?: { gate: string; message: string }[]
+  needs?: { type: string; what: string; concerns: string[]; blocking: boolean }[]
+  reviews?: { round: number; issues: { severity: string }[]; dropped: number; complete: boolean }[]
+  review_round?: number
+  candidates?: { round: number; score: number[]; readiness: string | null; compile_ok: boolean; selected: boolean }[]
   macros?: string[]
   theorems?: string[]
   output_name?: string
@@ -436,7 +452,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
-  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string }
+  outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string }
   task?: string
   error?: string | null
   missing?: string[]
@@ -609,6 +625,8 @@ export const api = {
   researchPdfDownloadUrl: (id: string) => `/api/research/${id}/pdf?download=1`,
   researchTexUrl: (id: string) => `/api/research/${id}/tex`,
   researchSourceUrl: (id: string) => `/api/research/${id}/source`,
+  researchBodyUrl: (id: string) => `/api/research/${id}/body`,
+  writeupNeeds: (id: string, action: 'waive' | 'stop') => post<{ task: TaskSummary | null; id: string }>(`/api/research/${id}/needs`, { action }),
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),

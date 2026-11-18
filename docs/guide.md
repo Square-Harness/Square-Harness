@@ -646,9 +646,14 @@ is ambiguous, the interface asks which manuscript to use.
 ### Write-up
 
 Turns rough notes, a draft, a PDF or the results of a conversation into a LaTeX
-document in your own style. It is exposition, not research: every statement,
-hypothesis and constant comes from your material, and nothing reviews the
-mathematics, so write up results you have checked.
+document in your own style: an article, cleaned-up notes, lecture notes, an
+exercise sheet, an exam, or one part of a paper (an introduction, a section). It
+is exposition, not research: every statement, hypothesis and constant of the
+material is kept as it is, and nothing reviews the mathematics, so write up
+results you have checked. What the request asks for beyond the material (an
+introduction, exercises, solutions, exam questions) is written in sections of
+its own, and any new mathematics in them is marked as generated: a document
+that contains some is a draft until it has been checked.
 
 Use it for:
 
@@ -665,7 +670,10 @@ What it uses:
 
 - **Material**: the conversation so far (messages, answers and the full results
   of finished jobs, including those of the current turn) and the files you
-  attach. A complete `.tex` file (with `\begin{document}`) is used as a
+  attach. With nothing else to work from, notes pasted in the message under the
+  request (after a blank line, or a message longer than 400 characters) are the
+  material: `@writeup a short note from these notes:`, a blank line, then the
+  notes. A complete `.tex` file (with `\begin{document}`) is used as a
   **template**: its preamble and layout, not its text, and the reply says so. To
   write from a draft, attach it without `\begin{document}`, or as `.md` or `.pdf`.
   `.sty`, `.cls` and `.bib` files are templates too.
@@ -684,33 +692,200 @@ What it uses:
 
 How it works:
 
-1. One writing call reads all the material, your request, your notation and your
-   style, and writes the document. Long material is written in consecutive parts.
+1. A first, short call plans the document: what kind it is and its language,
+   what the request asks for, what the material contains (each result with its
+   status: proved, sketched, only stated, uncertain, withdrawn), where it is
+   wrong or inconsistent, the sections, and what is missing (earlier work, a
+   proof, a definition, data, a decision only you can make). The controller
+   keeps a generated section only when the request, or a required part of that
+   kind of document, asks for it. The plan is shown in the **Outline** tab.
+   When your notes contradict themselves (a constant whose own derivation gives
+   another one), the document keeps your version, marked TODO, and the reply
+   asks you which one to keep, with both versions.
+   In a conversation, when a section depends on something the material does
+   not contain (earlier work to cite, a proof, a definition, data, or a choice
+   only you can make about a problem in your notes), nothing is written: the
+   Assistant gets the list, obtains what it can (a literature search, a check,
+   a proof) or asks you, then asks for the write-up again. If it still lacks
+   something, it tells you what. On the write-up's page, **Write anyway**
+   writes it with those pieces marked as points to check, and **Stop** leaves
+   it.
+   Each kind follows written guidelines (`mathagent/skills/writeup/guidelines`):
+   a paper's style rules for articles, notes and parts of papers; an
+   introduction's required parts (motivation, literature, positioning, main
+   result, method, organisation); an exam's header, points and recalled
+   notation; rules for exercise sheets and lecture notes.
+   For an article, a part of a paper, notes or lecture notes of a section or
+   more, a second short call then fixes the **skeleton** of the document: its
+   sections, its results, the formulas cited at a distance and the figures,
+   each with its label, and which result uses which. The labels your material
+   already has are kept. Every later call reads the skeleton: the writer uses
+   its labels and writes the linking sentences its connections call for, and
+   no others; the reviewers check the text against it. The report prints it.
+2. A whole paper (an article, or a part of a paper with its introduction) is
+   written section by section: each call writes a few consecutive sections of
+   the body, with the skeleton, the text already written and the guidelines of
+   the body only. The introduction comes last, written from the finished body:
+   it cites the main result, the experiments and, when the body has three
+   sections or more, each section in a closing plan. When your material has its
+   own introduction in LaTeX, it is kept: one call only adds those links and
+   repairs its references. The abstract is written after the introduction,
+   checked once against the main result, and written again once if it fails.
+   A section runs two to five pages: the plan says how long the document is and
+   makes a step of an argument a subsection or plain text, and is asked again
+   when it has too many or too few sections; after the compile, a section
+   outside two to five pages is listed for you (the introduction and a closing
+   discussion may be shorter).
+   When you ask to merge finished LaTeX texts (attached without
+   `\begin{document}`), they are assembled, not rewritten: the skeleton says
+   which text each section comes from (each text is one section: its sections
+   become subsections, unless you ask to keep them; read by code from the
+   texts' headings;
+   the skeleton is then read from the texts and the model only annotates it),
+   the texts are put together by code (a
+   label or a command two texts both define is renamed in the later one,
+   bibliographies are united) and the report lists each change. The model
+   writes only what is new: one notation where the texts differ (a table of
+   symbols that code applies inside the formulas; the text that proves the
+   main result keeps its own notation, unless your request names another; the
+   abstract is written after this, with the same symbols; a
+   replacement that would clash with a symbol already used is put to you), an
+   edit of a few lines that replaces a statement another text already gives
+   by a sentence citing it, the opening of each section,
+   the introduction's links and the abstract. The fidelity check then reads
+   only the passages that changed.
+   Any other document is written as follows.
+   One writing call reads all the material, the plan, the guidelines, your
+   request, your notation and your style, and writes the document in the
+   requested language. Material too long for one call is written in parts that
+   follow the plan's sections; each part knows the labels and commands the
+   earlier parts defined. Long material is written in consecutive parts.
    With at most a minute left, it writes directly without a hidden reasoning
    prelude. If time runs out, the text already written is compiled and offered
    as a partial draft. A conversation's sandbox results supply the executed
    Python code and their recorded figures, even if the answer did not repeat them.
-2. Equations the text uses again are numbered and cited with `\eqref`; displays
+   Without a template, the page is A4 with 2.5 cm margins; an exam or an
+   exercise sheet uses the `article` class with `exercise`, `solution` and
+   `\points{n}` defined; another language than
+   English gets babel and theorem names in that language (French, German,
+   Spanish, Italian); a long title gets a short running title.
+3. Equations the text uses again are numbered and cited with `\eqref`; displays
    nothing refers to stay unnumbered. Labels from your own material are kept.
-3. The document is compiled with `latexmk` when it is installed, in a temporary
-   folder, without shell escape and with restricted file access. If it does not
-   compile, one repair call fixes the reported errors.
-   A PDF with undefined citations, unresolved references or duplicate labels is
-   offered as a partial draft, with the remaining keys listed. Producing a PDF
-   alone does not make the document complete.
+   Typographic punctuation is written as LaTeX input (`---`, `--`, ``` ``…'' ```,
+   `\dots`, `~`), outside code listings.
+4. The document is compiled with `latexmk` when it is installed, in a temporary
+   folder, without shell escape and with restricted file access; your own
+   `latexmkrc` is not read. If it does not
+   compile, one repair call fixes the reported errors (passage by passage for a
+   long document). A repair that changes more than LaTeX (a label, a citation,
+   a figure, a listing, a theorem or a display) is refused, and the errors are
+   left on the document's page.
    Missing supported commands are supplied within one bounded compile allowance;
-   pausing also stops compilation promptly.
-4. The document opens with **Points to check**: its `% TODO` comments, citations
-   and figures it could not resolve, and references to undefined labels. Delete
-   that block once they are settled.
+   pausing also stops compilation promptly. So are undefined theorem-like
+   environments, including `exercise`, `problem` and `question` (numbered on
+   their own) and `solution` (set like a proof).
+   References are clickable: the harness's preamble loads `hyperref` (blue
+   links) and, when the text uses `\cref`, `cleveref`; your own template gets a
+   bare `hyperref` unless it loads it, and if it then fails to compile it is
+   compiled without and the report says links are not clickable. The abstract is
+   printed as front matter, in the title block for the AMS classes.
+   Once the PDF is built, every warning of the log is read and classified. What
+   code can fix is fixed (the report lists each fix under "Fixed
+   automatically"): a reference to a label written slightly differently
+   (`sec:numerical` for `sec:numerics`), a citation key one letter off your
+   `.bib`'s, a label defined twice (the second gets a new name and the
+   references after it follow), mathematics in a section title, figures and
+   tables placed `[h]`, a figure too tall for the page, a line running into
+   the margin (its passage is set again, symbols unchanged). A reference with
+   no close label goes to one short call that may only pick an existing label
+   whose kind fits ("Theorem~\ref" needs a theorem); what stays unresolved is
+   put to you as a question ("`\ref{sec:numerics}` in the section
+   Introduction has no target: which section is meant?"). This applies to an
+   introduction you supply too. Ask to keep your LaTeX as it is and nothing is
+   changed; the report lists what would have been fixed.
+5. A source checker reads the LaTeX and the compile log, with no model call. It
+   reports what keeps the text from going into a paper as it is: `% TODO`
+   comments, a draft notice, equation numbers typed by hand ("by (3)"), text that
+   talks about its notes ("the notes record…"), mathematics typeset wrongly
+   (`$$`, Unicode symbols such as `≤`, `<=`, `sin` without a backslash,
+   `\mathrm{Z}`, words without `\text`, `...`), leftovers of rough notes or
+   Markdown (`wlog`, `**bold**`, `\textbf{Theorem}`, straight quotes), and lines
+   more than 5pt into the margin. Numbers in the mathematics that your material
+   does not contain are listed in the report as points to look at; they never
+   block. These are heuristics, not a proofreading.
+6. Then the document is reviewed, as Proof reviews a proof, unless the effort
+   is Low. A fresh check compares it with your material and request: a result,
+   hypothesis or constant that changed, something left out, mathematics added
+   where the text restates your notes, a generated exercise or solution that is
+   wrong, a requirement not met. A style check reads it section by section
+   against the guidelines, and each required part (an exam's header, an
+   introduction's motivation…) is asked about on its own. Issues that can be
+   fixed by rewording are revised one section at a time; a revision that
+   changes a formula, loses a label, adds a citation or alters a statement is
+   refused. A correction that would change a formula of your material is never
+   made for you: it is put to you with both versions. Generated mathematics (an
+   exercise, a solution, exam questions) is corrected when the check finds it
+   wrong, and checked again; once a check has passed over it, it no longer
+   counts as unchecked. Up to three rounds, each with its own focus: first
+   fidelity and the required parts, then how the whole reads, then the
+   sentences. Every finding is kept with what became of it (fixed, set aside,
+   for you, its passage gone) and is not raised again. The writer answers each
+   one with an edit or a rebuttal, and a separate judge rules on both: an edit
+   is kept only if the passage is better (partly better: kept, and the finding
+   stays open with what remains), an upheld rebuttal closes the finding, and a
+   rejected one is put to you in the report. A finding left without an answer
+   is asked again, alone. Findings about how the text reads, and those a first
+   edit did not fix, are answered by a rewrite of their section in which every
+   display, statement and formula is frozen as a token (a generated passage's
+   sentences stay visible; only its markers are frozen): the rewrite can reorder
+   and rephrase, never change the mathematics, and the judge keeps the old
+   section when the new one is worse. A revision that does not compile is
+   undone, its findings reopened, and the review goes on; the model repairs only
+   a first draft. Rules that code checks exactly are not
+   asked of the reviewers. The report has a table of every rule of the
+   guidelines (followed, open and for whom, not applicable, or not checked and
+   why) and groups the findings by outcome. The best version is kept.
+7. The result is **Ready** only when it compiles, every reference and citation
+   resolves, no label is defined twice, the checker found no blocking or
+   mathematical problem, nothing is left to settle (no `% TODO`, no missing
+   figure, no text cut short by time, no generated mathematics left unchecked,
+   nothing missing that a section depends on), no line runs into the margin,
+   and the log has no class warning and no float problem. Other warnings
+   (packages, underfull boxes, fonts) are listed in the report.
+   The review must have found nothing serious against your material or the
+   guidelines, and every required part must be there (in an introduction you
+   wrote, a missing part is put to you instead: the text is yours).
+   When the document has a skeleton, each of its labels that something refers
+   to (and the main result's) must be defined once. A result whose proof does
+   not cite a result it uses, or a result cited before it is stated, is sent to
+   the reviser and, if it stays, listed for you; it does not keep the document
+   a draft (nor does a lemma cited nowhere or a listed formula never cited).
+   For an exam, the points must add up to the total the request asks for. A
+   name of a person or work that only the plan mentions, with no source, keeps
+   the document a draft.
+   Otherwise it is a **Draft**: the reply starts with `Draft:` and says why, and
+   the document opens with a short **Points to check** notice, in its language,
+   counting the `% TODO` comments and the other points to settle; the report on
+   the write-up's page lists them. Delete the notice once they are settled. A
+   ready document has no such block. "Ready" means these checks passed: read it before using it.
+   When you attach a complete `.tex` of your paper, three more checks apply,
+   because the text is meant to be pasted into it: a label your paper already
+   uses, a citation outside your bibliography, and a command or environment your
+   paper does not define each keep it a draft.
 
 From a conversation, the card offers **Download PDF** when compilation succeeds
 and **Sources (.zip)** containing the LaTeX and the exact code, figures and
 template files it needs. Extract that ZIP into a folder to compile it yourself.
 **Main .tex only** gives only the main file, without those dependencies.
+**Body .tex** gives the text alone, without preamble, title, block,
+bibliography commands or the review's comments, to paste into your paper or
+`\input`; definitions it uses that your preamble may lack are listed at its
+top, as comments, and a draft says there how many `% TODO` comments it still
+holds.
 The saved copy is deleted with the conversation. From the New write-up
-form or the terminal, the `.tex` and the PDF are written in your folder, and an
-existing file is never replaced. A sources ZIP is saved alongside them. Code
+form or the terminal, the `.tex`, the PDF and the body alone (`-body.tex`) are
+written in your folder, and an existing file is never replaced. A sources ZIP,
+which also holds the body as `document-body.tex`, is saved alongside them. Code
 listings use the executed sandbox source rather than a model's reconstruction.
 Compilation failures are reported as unfinished drafts, with the compiler error.
 In the web app, a template can be saved under a

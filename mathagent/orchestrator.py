@@ -62,8 +62,14 @@ your objective must identify its relationship to that request. writeup and summa
 also receive the conversation's results (proofs, reports) as their source and write
 a .tex file; summarize recaps the important results obtained so far. Delegate a
 write-up only when the user asks for one, with the user's own words as its request
-(do not restate or correct the mathematics), and never critique, review or redo a
-write-up: it is for results the user has already checked, and it ends the turn.
+(do not restate or correct the mathematics). A write-up that returns status
+needs_input has written nothing: obtain what its needs list (literature or check for
+earlier work; prove only when a main result of the document has no proof at all, at
+the lowest effort, never for a routine step; or ask the user a question), then
+delegate the write-up once more with the same request: it then writes with what
+there is and marks what is still missing; never write the document yourself in the reply. A delivered
+document ends the turn: never critique, review or redo it. Notes pasted without a question are not a request to prove them: ask what
+the user wants, or offer a write-up.
 Recorded sandbox code and figures are supplied automatically to write-up workers;
 do not read hidden storage paths or put generated figures in the files argument.
 
@@ -182,6 +188,11 @@ def _ends_with_work_plan(text):
     if ':' in last and len(last.split(':', 1)[1].split()) > 3:
         return False  # a colon followed by the content itself
     return _PROMISE.match(last) is not None
+
+
+def _needs_input(value):
+    """A write-up worker's result that stopped for missing material (nothing was written)."""
+    return isinstance(value, dict) and value.get('status') == 'needs_input'
 
 
 def _delegate_schema():
@@ -799,6 +810,7 @@ class Orchestrator:
         source_key = self._source_key(list(dict.fromkeys(self.state['files'] + args['files'])))
         request = ' '.join(args['request'].split()).casefold()
         duplicate = next((item for item in self.state['children'] if item['status'] == 'complete'
+                          and not _needs_input(item.get('result'))  # a write-up waiting for material is asked again
                           and item['action']['mode'] == args['mode']
                           and ' '.join(item['action']['request'].split()).casefold() == request
                           and item.get('source_key', [] if not item['action']['files'] else None) == source_key), None)
@@ -1092,16 +1104,22 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
+        # A write-up that stopped for missing material goes back to the main agent once in a turn; the second time,
+        # its needs are the reply (see _document_answer).
+        handed_back = _needs_input(value) and self._hand_backs() < 2
         if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup',
                                                 'summarize', 'python_lab', 'sanity_check')
-                and result.get('mode') == self.state['required_mode'] and isinstance(value, dict)):
+                and result.get('mode') == self.state['required_mode'] and isinstance(value, dict) and not handed_back):
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead
             # of starting another whole-manuscript scan in the parent.
             self.state['force_final'] = True
             if value.get('status') in ('failed', 'error', 'incomplete') or value.get('error'):
                 self.state['required_failed'] = self.state['required_mode']
-        if result.get('mode') in ('writeup', 'summarize') and isinstance(value, dict) and value.get('answer'):
+        if handed_back:
+            self._warning('The write-up stopped before writing: its material lacks what it needs. Obtain it (or ask the '
+                          'user), then delegate the write-up once more; or report the needs.')
+        if result.get('mode') in ('writeup', 'summarize') and isinstance(value, dict) and value.get('answer') and not handed_back:
             # A delivered document ends the turn: the user writes up results they checked, so no
             # critique of it and no second version; its ready message is the reply.
             self.state['force_final'] = True
@@ -1163,6 +1181,12 @@ class Orchestrator:
         mode = self.state.get('required_mode')
         if mode is None and self.state['children'] and self.state['children'][-1]['action']['mode'] in ('writeup', 'summarize'):
             mode = self.state['children'][-1]['action']['mode']  # the Assistant chose to write one up itself
+        if mode is None and self.state.get('force_final'):
+            # A forced final answer after a write-up stopped for material reports its needs: the main agent
+            # must not write the document itself.
+            latest = next((c for c in reversed(self.state['children']) if c['action']['mode'] in ('writeup', 'summarize')), None)
+            if latest is not None and _needs_input(latest.get('result')):
+                mode = latest['action']['mode']
         if mode not in ('writeup', 'summarize'):
             return None
         child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
@@ -1170,12 +1194,18 @@ class Orchestrator:
                                                                and not (child.get('result') or {}).get('answer')):
             return None
         value = child.get('result') or {}
+        if _needs_input(value) and self._hand_backs() < 2 and not self.state.get('force_final'):
+            return None  # the main agent obtains what is missing, then asks again
         answer = value.get('answer') if isinstance(value.get('answer'), str) else ''
         if not answer.strip():
             error = value.get('error')
             answer = 'The ' + ('summary' if mode == 'summarize' else 'write-up') + ' could not be made: ' + str(
                 (error.get('message') if isinstance(error, dict) else error) or value.get('status') or 'unknown error')
         return self._worker_reply(child, answer)
+
+    def _hand_backs(self):
+        """Write-ups of this turn that stopped for missing material."""
+        return sum(_needs_input(c.get('result')) for c in self.state['children'] if c['action']['mode'] in ('writeup', 'summarize'))
 
     def _worker_reply(self, child, answer):
         provenance = {'kind': 'worker_result', 'job_id': child['job_id']}

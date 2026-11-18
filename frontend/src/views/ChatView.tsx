@@ -18,6 +18,7 @@ import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../comp
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
+import { literalUnderscores } from '../mathtext'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
@@ -390,7 +391,7 @@ function UserMessage({ item }: { item: TranscriptItem }) {
     <div className={'entry message message-user' + (item.discarded ? ' message-discarded' : '')}>
       <span className="in-margin speaker speaker-user">You</span>
       <div className="message-body">
-        <Markdown>{item.content}</Markdown>
+        <Markdown>{literalUnderscores(item.content)}</Markdown>
         {item.files && item.files.length > 0 && (
           <div className="attachments">{item.files.filter((path) => !item.images?.length || !isImagePath(path)).map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
         )}
@@ -552,6 +553,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
             {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
             {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
+            {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (

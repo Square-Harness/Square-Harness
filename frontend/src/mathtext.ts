@@ -96,6 +96,12 @@ function walk(node: MdNode) {
 export const remarkCitations = () => (tree: MdNode) => walk(tree)
 
 /** Split streaming text into stable blocks so only the growing tail re-renders. */
+/** A user's message as typed: underscores outside mathematics and code are letters (a_n, b_{n+1}), never Markdown emphasis. */
+export function literalUnderscores(text: string): string {
+  return text.split(/(```[\s\S]*?```|`[^`\n]*`|\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/)
+    .map((part, index) => (index % 2 ? part : part.replace(/(?<!\\)_/g, '\\_'))).join('')
+}
+
 export function splitBlocks(text: string): string[] {
   const blocks: string[] = []
   let current: string[] = []
