@@ -651,13 +651,19 @@ class DeepInfraWorkflowTests(GuiCase):
             {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]},
             {'choices': [], 'usage': {'prompt_tokens': 200, 'completion_tokens': 17}},
         ]}, (final, 'The requested file is listed.', 19)]
-        chat = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False})['id']
+        self.assertEqual(self.request('POST', '/api/chats', {'mode': 'critic', 'online': False})[0], 400)
+        chat = self.ok('POST', '/api/chats', {'mode': 'explore', 'online': False})['id']
+        legacy = store.load_chat(self.root, chat)
+        legacy['mode'] = 'critic'
+        store._save_chat(self.root, legacy)
         self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'List the available source files.'})
         conversation_task = self.wait_task(timeout=20)
         self.assertEqual(conversation_task['state'], 'done', conversation_task)
         conversation = self.ok('GET', f'/api/chats/{chat}')
+        self.assertEqual(conversation['mode'], 'critic')
         self.assertEqual(next(item['content'] for item in reversed(conversation['transcript'])
                               if item['role'] == 'assistant'), final)
+        self.assertEqual(conversation['transcript'][-1]['mode'], 'free')
         followup = self.fake.completions[3]['messages']
         sent_call = next(message for message in followup if message.get('tool_calls'))['tool_calls'][0]
         self.assertEqual(sent_call['id'], 'list-files-call')
@@ -749,7 +755,7 @@ class ProjectTests(GuiCase):
             self.assertIn('ORIGINAL_PROJECT_NOTES', material)
             self.assertNotIn('CHANGED_PROJECT_NOTES', material)
             self.assertNotIn('OTHER_PROJECT_NOTES', material)
-        other = self.ok('POST', '/api/chats', {'mode': 'critic', 'online': False, 'project_id': b['id']})['id']
+        other = self.ok('POST', '/api/chats', {'mode': 'explore', 'online': False, 'project_id': b['id']})['id']
         self.fake.replies = [text('The requested notation is recorded.')]
         self.ok('POST', f'/api/chats/{other}/messages', {'content': 'Explain the project notation briefly.'})
         self.assertEqual(self.wait_task()['state'], 'done')

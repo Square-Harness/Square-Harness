@@ -165,11 +165,13 @@ def _trace(root, chat_id):
     if not isinstance(chat, dict) or chat.get('id') != chat_id or not isinstance(chat.get('transcript'), list):
         raise ValueError('Cannot export an invalid saved conversation')
     remaining = MAX_TRACE_BYTES - len(raw)
-    files = {'conversation.json': _json(chat)}
     omissions = []
     related = set()
     entries = list(chat['transcript'])
     state = chat.get('assistant_state') or {}
+    if isinstance(state, dict):
+        state.pop('personal_context', None)
+    files = {'conversation.json': _json(chat)}
     entries += state.get('children', []) if isinstance(state, dict) else []
     for entry in entries:
         if not isinstance(entry, dict) or not entry.get('job_id'):

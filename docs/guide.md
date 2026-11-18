@@ -346,7 +346,7 @@ one with a message.
   everything it did.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
   `@literature`, `@quick_review`, `@referee`, `@detailed_review`, `@explain`,
-  `@writeup`, `@summarize`, `@critic`, `@explore`, `@python_lab`, `@sanity_check`.
+  `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
   Hover over the chip above the text box to read what the skill does and to
   choose its effort. **Auto** means Medium, or High for a detailed review.
 - **Your folder** is shown above the text box. Click it to open another folder
@@ -374,9 +374,14 @@ one with a message.
   - the model and its status, the theme, and phone pairing;
   - which files the model may open by itself in this folder ("Reads all file
     types", untick a type to hide it);
-  - **Parallel work**: how many conversations or jobs, and how many model
-    requests, run at once (1–8 each; 2 and 2 by default). Extra work waits in a
-    queue.
+  - **Personalization** saves standing chat instructions and LaTeX commands
+    across folders under the same GUI root. New chat turns apply these
+    preferences alongside the current request and any project notes.
+  - **Parallel work** shows running and queued jobs, with controls to pause or
+    cancel them. Set how many jobs and model requests may run at once there
+    (1–8 each; 2 and 2 by default). An animated square marks active conversations
+    in the sidebar.
+  - **About** explains the skills and which ones the Assistant can call itself.
 - **On a phone**: launch with `--gui-host 0.0.0.0` and open the printed address
   once; the phone stays paired. This is plain HTTP on your network: use it only
   on a trusted network, or through an SSH tunnel or a VPN.
@@ -385,9 +390,13 @@ Explicitly attached files stay available to their conversation and its fresh
 review even when that file type is hidden from general discovery. When approving
 a file edit, SH refuses the write if the file changed since the displayed diff.
 Chat mathematics and sidebar previews use supported macros from your requests,
-attachments, selected writing style and an unambiguous saved template. Request
-notation takes precedence, and one conversation's definitions do not leak into
-another. KaTeX's restrictions on unsafe commands still apply.
+attachments, Personalization, selected writing style and an unambiguous saved
+template. Request and attachment notation outrank personal defaults. Use
+`\newcommand{\RR}{\mathbb{R}}` or a command with a declared number of arguments
+in Personalization. KaTeX's rendering and expansion limits still apply.
+You can reuse a PDF from an earlier turn in a review or write-up by referring to
+it as the earlier PDF or by giving its filename. If several uploads could match,
+give the filename you want to use.
 
 Temporary model or source outages leave saved work resumable. Resuming retries
 the same child job; cancelled queued turns leave a clear notice in the chat.
@@ -399,7 +408,7 @@ a statement, or `/prove <statement>`. Other commands:
 
 | Command | Purpose |
 | --- | --- |
-| `/critic`, `/explore` | Switch to critique or exploration chat |
+| `/explore` | Switch to exploration chat |
 | `/check <result>` | Find or verify a reference (needs `--online`) |
 | `/literature <topic>` | Build a verified reading list |
 | `/quick_review`, `/referee`, `/detailed_review`, `/explain` | The four review kinds (the manuscript comes from `--research-file`) |
@@ -427,7 +436,7 @@ app and the other way round: both use the same saved files.
 | --- | --- | --- | --- |
 | Conversation | Answers, with focused jobs when needed | type a message | web app only |
 | Prove | A proof, its review and every attempt | `@prove`, New proof | `/prove` (default) |
-| Critique, Explore | Objections; approaches with heuristics labelled | `@critic`, `@explore` | `/critic`, `/explore` |
+| Explore | Approaches and useful first steps with heuristics labelled | `@explore` | `/explore` |
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Reading list | A themed, verified reading list | `@literature`, New reading list | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
@@ -441,9 +450,9 @@ app and the other way round: both use the same saved files.
 ### Conversation (the Assistant)
 
 Use it for anything: a question, a doubt about a step, a request mixing several
-tasks. It exists in the web app only; in the terminal, `/critic` and `/explore`
-are ordinary chats without workers. The Assistant answers short questions itself. Otherwise it gives a precise
-objective to a worker: a proof, a critique, an exploration, a reference check, a
+tasks. It exists in the web app. In the terminal, `/explore` is ordinary chat
+without workers. The Assistant answers short questions itself. Otherwise it gives a precise
+objective to a worker: a proof, an exploration, a reference check, a
 reading list, a review, an explanation or a write-up. It then reads the result,
 its status and what remains open, and decides what to do next. Independent
 workers can run at the same time on an OpenAI-compatible server
@@ -547,13 +556,14 @@ on resume. The report records the old and new policy hashes; completed calls,
 candidate versions and saved allowances are retained. Completed old jobs remain
 readable without an upgrade.
 
-### Critique and Explore
+### Explore
 
 Ordinary mathematical chat with read access to your folder (`.tex`, `.bib`, PDF
-text, …). **Critique** looks for unjustified steps and counterexamples. **Explore**
-proposes approaches and labels heuristics as heuristics. Both may run a quick
-numerical sanity check (see below). To write a file, the model must ask, and you
-see the change before approving it.
+text, …). **Explore** gives promising approaches early, with the first useful
+step and the main obstacle for each. It labels heuristic steps and may run a
+quick numerical sanity check. Use **Quick Review** to check a proof or **Fresh
+review** to audit a previous answer. Saved Critique conversations can still be
+read and continued as ordinary mathematical chats.
 
 ### Literature check
 
@@ -661,8 +671,8 @@ Use it for:
   `@writeup a short note with Lemma 2 and the reviewed proof, for my students`;
 - a summary of a conversation: `@summarize` (or `@writeup` with nothing after it
   and no attachment) gives each
-  result's statement, its recorded status, the proof idea, the references found
-  and the open questions;
+  result's statement, recorded status, proof idea and open questions, with each
+  source's role and recorded verification status;
 - a missing part of a paper: attach its sections (without `\begin{document}`),
   your `.sty` and your `.bib`, and say what to write.
 
@@ -928,7 +938,7 @@ conversation. Install the sandbox once (see the install guide).
 - **Sanity check** tries to falsify a claim with cheap experiments: small cases,
   boundaries, random sampling, minimising the margin. When the sandbox is
   installed and the model context is at least 32,768 tokens, it is offered
-  automatically in Critique, Explore and the Assistant (5 s, 2 GB, 1 CPU, 3 runs
+  automatically in Explore and the Assistant (5 s, 2 GB, 1 CPU, 3 runs
   per turn; `--no-numerical-checks` turns this off). The result is exactly one of *exact
   counterexample*, *numerically verified candidate*, *no counterexample detected*
   or *inconclusive*. Passing tests never count as a proof.

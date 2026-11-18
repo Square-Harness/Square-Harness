@@ -7,11 +7,12 @@ export type Mode = 'free' | 'prove' | 'critic' | 'explore' | 'literature' | 'ref
 export const MODE_ORDER: Mode[] = ['free', 'prove', 'critic', 'explore', 'literature', 'referee', 'writeup', 'style']
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 
-export type Route = { mode: Mode; id: string | null; tab: string | null; from: string | null }
+export type Route = { mode: Mode | 'about'; id: string | null; tab: string | null; from: string | null }
 
 export function parse(hash: string): Route {
   const [path, search = ''] = hash.replace(/^#\/?/, '').split('?')
   const [first, second, third] = path.split('/')
+  if (first === 'about') return { mode: 'about', id: null, tab: null, from: null }
   const requestedMode = (MODE_ORDER as string[]).includes(first) ? (first as Mode) : 'free'
   const id = second && UUID.test(second) ? second : null
   // Other notebooks open from conversations, cards and links; the Style page is opened directly.
@@ -31,7 +32,7 @@ export function useRoute(): Route {
   return parse(hash)
 }
 
-export function href(mode: Mode, id?: string | null, tab?: string | null, from?: string | null) {
+export function href(mode: Route['mode'], id?: string | null, tab?: string | null, from?: string | null) {
   const path = '#/' + [mode, id, id ? tab : null].filter(Boolean).join('/')
   return path + (id && from && UUID.test(from) ? '?from=' + from : '')
 }
@@ -42,7 +43,7 @@ export function go(mode: Mode, id?: string | null, tab?: string | null, from?: s
   window.location.hash = href(mode, id, tab, origin)
 }
 
-/** The notebook that holds a mode's pages: older critic and explore chats live in Default. */
-export function notebook(mode: Mode): Mode {
-  return mode === 'critic' || mode === 'explore' ? 'free' : mode
+/** Older chats and About share the conversation sidebar. */
+export function notebook(mode: Route['mode']): Mode {
+  return mode === 'critic' || mode === 'explore' || mode === 'about' ? 'free' : mode
 }

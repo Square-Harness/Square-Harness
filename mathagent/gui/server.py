@@ -38,7 +38,7 @@ from ..agent import AgentError
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
 from .. import images
-from . import projects, store
+from . import personalization, projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
 
@@ -609,6 +609,20 @@ def settings_save(h, body):
     return store.save_settings(h.server.hub.root, body.get('read'))
 
 
+@route('GET', '/api/personalization')
+def preferences(h, body):
+    return personalization.load(h.server.hub.base)
+
+
+@route('POST', '/api/personalization')
+def preferences_save(h, body):
+    hub = h.server.hub
+    value = personalization.save(hub.base, instructions=body.get('instructions'),
+                                 macros=body.get('macros'), revision=body.get('revision'))
+    hub.bus.publish('personalization')
+    return value
+
+
 @route('POST', '/api/files/upload', raw=True)
 def upload(h, body):
     name = (h.query.get('name') or [''])[0]
@@ -908,7 +922,7 @@ class Handler(BaseHTTPRequestHandler):
             result = function(self, body, **match.groupdict())
         except Busy as exc:
             return self.error(409, str(exc))
-        except projects.StaleProject as exc:
+        except (projects.StaleProject, personalization.StalePersonalization) as exc:
             return self.error(409, str(exc))
         except store.NotFound as exc:
             return self.error(404, str(exc))

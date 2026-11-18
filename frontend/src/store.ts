@@ -43,6 +43,7 @@ type ServerEvent =
   | { type: 'workspace'; seq: number; path: string }
   | { type: 'files'; seq: number; path: string }
   | { type: 'projects'; seq: number }
+  | { type: 'personalization'; seq: number }
 
 const EMPTY: TaskSnapshot = { seq: 0, task: null, activity: [], live: null, approvals: [], queue: [], routing: [], tasks: [] }
 
@@ -241,6 +242,10 @@ function handle(event: ServerEvent) {
     case 'chat_saved':
       refreshLists(100)
       bump(event.chat)
+      break
+    case 'personalization':
+      refreshLists(100)
+      bump('personalization')
       break
     case 'chat_deleted':
       forgetChat(event.chat, event.seq)

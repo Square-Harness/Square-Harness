@@ -12,6 +12,7 @@ import { MODES } from './modes'
 import { usePanelHidden } from './panels'
 import { useRoute, type Route } from './router'
 import { useApp } from './store'
+import { AboutView } from './views/AboutView'
 import { ChatView } from './views/ChatView'
 import { ProofNew } from './views/ProofNew'
 import { ProofView } from './views/ProofView'
@@ -22,6 +23,7 @@ import { WriteupView } from './views/WriteupView'
 import { StyleNew, StyleView } from './views/Style'
 
 function View({ route }: { route: Route }) {
+  if (route.mode === 'about') return <AboutView />
   const info = MODES[route.mode]
   if (info.kind === 'proof') return route.id ? <ProofView key={route.id} id={route.id} tab={route.tab} /> : <ProofNew />
   if (info.kind === 'chat' || info.kind === 'free') {

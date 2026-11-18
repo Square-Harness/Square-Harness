@@ -65,6 +65,12 @@ export type Account = {
   logout_url: string
 }
 
+export type Personalization = {
+  instructions: string
+  macros: string
+  revision: string
+}
+
 export type Project = {
   id: string
   name: string
@@ -169,7 +175,7 @@ export type LiveStep =
   | { type: 'tool' | 'result' | 'notice'; text: string; progress?: boolean }
   | { type: 'experiment'; item: TranscriptItem }  // a sandbox run's files, shown as soon as they exist
 
-export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' | 'free' | 'check' }
+export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'explore' | 'free' | 'check' }
 
 export type Activity = { kind: 'notice' | 'tool' | 'result'; text: string; time: number }
 
@@ -432,7 +438,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
+export type RouteMode = 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 
 export type TranscriptItem = {
@@ -446,7 +452,7 @@ export type TranscriptItem = {
   discarded?: boolean
   files?: string[]
   images?: ImageRef[]
-  mode?: RouteMode | 'clarify' | 'free'
+  mode?: RouteMode | 'critic' | 'clarify' | 'free'
   request?: string
   reason?: string
   question?: string
@@ -599,6 +605,8 @@ export const api = {
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
   openFolder: (path: string) => post<{ workspace: string }>('/api/workspace', { path }),
   saveSettings: (read: Partial<ReadSettings>) => post<{ read: ReadSettings }>('/api/settings', { read }),
+  personalization: () => get<Personalization>('/api/personalization'),
+  savePersonalization: (value: Personalization) => post<Personalization>('/api/personalization', value),
   upload: async (file: File, project_id?: string | null) => {
     let response: Response
     try {

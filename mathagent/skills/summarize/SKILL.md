@@ -5,9 +5,11 @@ Summarize, as a short LaTeX document, the important results obtained so far: usu
 ## What to keep
 
 - Each result that was established or seriously attempted: its exact statement with all hypotheses, quantifiers and constants, as the material gives it.
-- Its status exactly as recorded: proved and found without issue by the model review, proved with an objection still open, only sketched, conjectured, refuted. A model review is not a certificate; say "the model review found no issue", never "verified".
+- Its status exactly as recorded, such as proved, sketched, conjectured or refuted. Attribute a proof-review verdict only when the supplied material contains that review. Reading a mathematical statement in a source does not constitute a proof review.
 - The key idea of each proof in a few sentences. Copy a full proof only when it is short.
-- References found, with the bibliographic data the material gives and whether they were checked.
+- Each distinct source that mattered, with its recorded bibliographic details, what it was used for or proposed to support, and the scope of the evidence. Put this information where the source is discussed or in a short source section. If the material gives no use, say so.
+- Refer to a source by its recorded name in prose when it has no supplied bibliography key. Use only supplied keys in `\cite` commands.
+- Keep each source's recorded evidence level and limits. A bibliographic record confirms the work's identity only. A secondary citation or an abstract supports only the recorded claim from that source. Say that a result was read in the primary text only if the material records that reading, and preserve the locator when given. Mark recalled, inaccessible, contradictory or unchecked sources accordingly, without turning them into recommendations. The absence of a recorded check means verification is unknown.
 - Open questions, gaps and objections that were not resolved.
 
 ## What to leave out

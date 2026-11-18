@@ -97,7 +97,7 @@ class Agent:
         from . import images
         images.bind(self, copy.deepcopy(getattr(client, 'image_refs', [])))
 
-    def run(self, query, emit=lambda kind, value: None, fresh=False):
+    def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None):
         # Only commit history when a full turn completes; interruptions cannot
         # leave a dangling assistant tool call in the next API request.
         messages = copy.deepcopy([] if fresh else self.history)
@@ -111,9 +111,10 @@ class Agent:
         if hasattr(self, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.turn_image_refs)
         messages.append(message)
-        system = {'role': 'system', 'content': SYSTEM + '\nMODE: ' + MODES[self.mode]}
-        context = ([{'role': 'user', 'content': self.project_context}]
-                   if getattr(self, 'project_context', '') else [])
+        instruction = MODES[self.mode] if instruction is None else instruction
+        system = {'role': 'system', 'content': SYSTEM + ('\nMODE: ' + instruction if instruction else '')}
+        context = [{'role': 'user', 'content': value} for value in
+                   (getattr(self, 'personal_context', ''), getattr(self, 'project_context', '')) if value]
         schemas = self.workspace.schemas()
         round_no, answer_now = -1, False
         while True:

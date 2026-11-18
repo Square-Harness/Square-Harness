@@ -17,7 +17,7 @@ from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
 from .api_profiles import create_profile_client, resolve_api_profile
 from .model_limits import apply_defaults
-from .prompts import MODES, SANDBOX_MODES
+from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import PythonSandbox, SandboxUnavailable
 from .numerics.session import MIN_AUTOMATIC_CONTEXT
 from . import skill_catalog
@@ -108,7 +108,7 @@ class UI:
 
 HELP = '''Commands
   /prove [goal]                      Solve, verify, then repair if needed (default mode)
-  /critic, /explore [query]            Ordinary conversational modes
+  /explore [query]                     Explore approaches and connections
   /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
   /referee [task]                     Review of the --research-file manuscript: overview, typos, presentation
@@ -137,7 +137,7 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in critic/explore.
+Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in Explore and /review.
 Unsandboxed Python is opt-in (--allow-python) and approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
@@ -455,7 +455,7 @@ def main():
                 return sandbox.bind(skill, workspace.root, explicit=True, approve=ui.approve)
             except SandboxUnavailable as exc:
                 raise ValueError(f'{skill} needs the Python sandbox. {exc}') from None
-        if mode not in ('critic', 'explore'):
+        if mode != 'explore':
             return None
         session = sandbox.automatic_session(workspace.root, ctx=agent.ctx)
         if session is None and sandbox.enabled and sandbox.automatic and not sandbox_noted:
@@ -464,10 +464,10 @@ def main():
             ui.say(f'Note: automatic numerical checks are off: {reason}')
         return session
 
-    def chat(target, query):
+    def chat(target, query, *, instruction=None):
         workspace.numerics = bind_numerics(target.mode)
         try:
-            return target.run(query, ui.emit)
+            return target.run(query, ui.emit, instruction=instruction)
         finally:
             workspace.numerics = None
 
@@ -569,7 +569,7 @@ def main():
                     for name in ('check', 'literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
-                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in critic/explore, or /sanity-check'
+                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore and /review, or /sanity-check'
                         ui.say(f'{skill.name} ({how}): {Path(__file__).parent / "skills" / skill.name / "SKILL.md"}')
                 elif command == '/experiments':
                     from .numerics.artifacts import ExperimentStore
@@ -686,11 +686,11 @@ def main():
                     last_user = next(m['content'] for m in reversed(agent.history) if m['role'] == 'user')
                     last_answer = agent.history[-1]['content']
                     reviewer = copy.copy(agent)
-                    reviewer.mode, reviewer.history = 'critic', []
+                    reviewer.mode, reviewer.history = 'explore', []
                     ensure_model()
                     ui.say('Fresh-context model critique; this is not formal verification.')
                     result = chat(reviewer, 'Audit this proposed answer. Re-read relevant files if needed.\n'
-                                          f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}')
+                                          f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}', instruction=FRESH_REVIEW)
                     agent.history.extend([{'role': 'user', 'content': 'Critique the preceding answer.'},
                                           {'role': 'assistant', 'content': result}])
                     agent.last_stats = reviewer.last_stats

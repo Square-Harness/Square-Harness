@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Put job controls in Parallel work and keep animated running indicators in the
+  sidebar. Add an About page for skills and update their notebook colors.
+- Add standing chat instructions and LaTeX macros under Personalization. Save
+  them per GUI root and preserve the captured preferences on Assistant resume.
+- Retire Critique as a mode while retaining saved conversations and the
+  separate fresh-context review. Give Explore shorter, actionable approaches.
+- Resolve earlier attachments by the type and name the user requests. Preserve
+  each source's use and recorded verification status in conversation summaries.
+- Give reference checks their own time allowance within the Assistant's shared
+  budget.
+
 - Write-up: fewer, longer sections. A section runs two to five pages (new rule
   P22): the plan gives each section a level (a step of an argument is a
   subsection or plain text) and the document's length in pages, and is asked

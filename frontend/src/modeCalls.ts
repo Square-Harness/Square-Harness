@@ -18,7 +18,6 @@ export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] =
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
   { mode: 'writeup', label: 'Write-Up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
   { mode: 'summarize', label: 'Summarize', summary: 'Summarize the important results obtained so far as a .tex file.' },
-  { mode: 'critic', label: 'Critique', summary: 'Check an argument for unjustified steps and counterexamples.' },
   { mode: 'explore', label: 'Explore', summary: 'Explore approaches, with heuristics labelled.' },
   // User-only: the Assistant cannot start these itself.
   { mode: 'python_lab', label: 'Python Lab', summary: 'Run Python in an isolated sandbox: computations, simulations and plots.' },

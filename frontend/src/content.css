@@ -46,6 +46,21 @@
 .verdict { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; font: 700 17px/1.3 var(--font-ui); }
 .section-title { margin: 22px 0 8px; font: 700 18px/1.3 var(--font-text); }
 
+/* The skill catalog shares the covers used in the composer. */
+.about-skills {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  gap: 8px; margin: 0; padding: 0; list-style: none;
+}
+.about-skills li {
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+  background: var(--sheet); border: 1px solid var(--line); border-radius: 8px;
+}
+.about-skills li > div { min-width: 0; }
+.about-skills .route-cover { flex: none; }
+.about-skills code { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
+.about-skills p { margin: 3px 0 0; font-size: 13px; color: var(--text-2); }
+.about-style { margin: 18px 0 0; color: var(--text-2); }
+
 /* Typeset writing */
 .prose { font-family: var(--font-text); font-size: 17px; line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
 .prose > :first-child { margin-top: 0; }
@@ -467,3 +482,10 @@
 .route-details > summary { font-size: 12.5px; }
 .route-details .route-summary { font-size: 14px; color: var(--text-2); }
 .route-clarify .route-card { border-color: var(--ink-soft-strong); }
+.personalization-form { display: grid; gap: 16px; }
+.personalization-form label { display: grid; gap: 4px; }
+.personalization-form textarea {
+  width: 100%; padding: 8px 10px; resize: vertical;
+  background: var(--paper); border: 1px solid var(--line-strong); border-radius: 6px;
+}
+.personalization-form label:last-of-type textarea { font-family: var(--font-mono); }

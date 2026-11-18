@@ -5,7 +5,7 @@
 """Opt-in live check of the numerical skills with a real model and the real sandbox.
 
 Each case runs in its own temporary workspace through the same path as a terminal
-critic chat (automatic numerical-sanity-check binding), or as /python-lab for the
+Explore chat (automatic numerical-sanity-check binding), or as /python-lab for the
 lab case. It records whether the model ran experiments, their statuses and its
 answer, and applies light expectations (a check for false claims, none for the
 trivial identity, no "proved" wording for numerical evidence). Model behaviour
@@ -30,16 +30,16 @@ from mathagent.numerics import PythonSandbox
 from mathagent.tools import Workspace
 
 CASES = {
-    'A': ('critic', 'Is it true that x^4 - 3x^2 + 1 >= 0 for every real x?', 'counterexample'),
-    'B': ('critic', 'Claim: for all symmetric positive definite matrices A and B, the matrix AB + BA is positive '
+    'A': ('explore', 'Is it true that x^4 - 3x^2 + 1 >= 0 for every real x?', 'counterexample'),
+    'B': ('explore', 'Claim: for all symmetric positive definite matrices A and B, the matrix AB + BA is positive '
                     'semidefinite. Is this correct?', 'counterexample'),
-    'C': ('critic', 'Is the volume of the unit ball in R^n an increasing function of the dimension n?',
+    'C': ('explore', 'Is the volume of the unit ball in R^n an increasing function of the dimension n?',
           'counterexample'),
-    'D': ('critic', 'In a proof I use that g(x) = (1 - cos x)/x^2 - 1/2 + x^2/24 is strictly positive for '
+    'D': ('explore', 'In a proof I use that g(x) = (1 - cos x)/x^2 - 1/2 + x^2/24 is strictly positive for '
                     '0 < x <= 0.01. My float64 evaluation gives negative values near x = 1e-4. Is the claim false?',
           'holds'),
-    'F': ('critic', 'Is (x - y)^2 >= 0 for all real x and y?', 'skip'),
-    'G': ('critic', 'Is (a + b + c)/3 >= (abc)^(1/3) for all positive reals a, b, c?', 'holds'),
+    'F': ('explore', 'Is (x - y)^2 >= 0 for all real x and y?', 'skip'),
+    'G': ('explore', 'Is (a + b + c)/3 >= (abc)^(1/3) for all positive reals a, b, c?', 'holds'),
     'LAB': ('python_lab', 'Simulate geometric Brownian motion dX = 0.5 X dt + 0.3 X dW with X0 = 1 up to T = 1 using '
                           'Euler-Maruyama with 10000 paths and seed 1, report the mean of X_T with its standard '
                           'error against exp(0.5), and plot five sample paths.', 'lab'),

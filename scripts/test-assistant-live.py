@@ -6,7 +6,7 @@
 
 Every case uses its own temporary offline workspace. This script does not
 restart or write to an existing GUI, model server, or user workspace. Pass
---parallel to compare two explicitly requested short critic workers with one
+--parallel to compare two explicitly requested short Explore workers with one
 and two available inference slots. These timings are smoke evidence, not a
 quality benchmark or a general performance estimate.
 """
@@ -123,7 +123,7 @@ def main():
     ]
     cases = [run_case(args.host, args.model, query, seconds=args.seconds) for query in queries]
     if args.parallel:
-        query = ('Use exactly two critic workers with distinct objectives to check a^2 >= 0 for real a. '
+        query = ('Use exactly two Explore workers with distinct objectives to check a^2 >= 0 for real a. '
                  'The first must check a=0 and the equality case. The second must check a<0 by the signs '
                  'of the two factors. Request both delegate calls in the same model turn, with low effort. '
                  'Each worker must answer in at most three sentences. After both return, summarize briefly.')
@@ -139,7 +139,7 @@ def main():
                    for case in cases)
     direct = all(not case['children'] and case['peak_inference_calls'] == 1 for case in cases[:3])
     parallel = (not args.parallel or all(
-        len(case['children']) == 2 and all(child['mode'] == 'critic' for child in case['children'])
+        len(case['children']) == 2 and all(child['mode'] == 'explore' for child in case['children'])
         and case['peak_inference_calls'] == case['concurrency'] for case in cases[3:]))
     return 0 if complete and direct and parallel else 1
 

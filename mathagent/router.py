@@ -13,7 +13,7 @@ import json
 import re
 from .model_limits import output_limit
 
-JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
+JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high')
 LEGACY_EFFORTS = ('xhigh', 'poincare')  # Read saved jobs without offering these levels for new work.
@@ -42,9 +42,7 @@ ROUTE_SCHEMA = {
 }
 
 ROUTER_POLICY = """You route a mathematician's message to the workflows of a local research harness.
-- critic: answer a precise mathematical question that needs a justified answer, or check a
-  given argument, proof or claim for gaps and counterexamples.
-- explore: open discussion of approaches, ideas, background or connections.
+- explore: answer a mathematical question or discuss approaches, ideas, background or connections.
 - prove: a bounded proof search for one precise mathematical statement to be proved.
 - check: find a useful standard book/paper reference for a known result, optionally a chapter,
   or verify a given citation or an explicitly requested exact locator. Ordinary reference requests
@@ -66,7 +64,7 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
 - writeup: turn notes, a draft or a PDF the user names or attaches, or results obtained earlier in the
   conversation, into a clean LaTeX document in the user's saved style.
 - summarize: a LaTeX summary of the important results obtained so far in the conversation.
-A question (why, what, how, is it true that) is answered with critic or explore. A request for a
+A question (why, what, how, is it true that) is answered with explore. A request for a
 reference or citation to a known result is a check, not a literature report. A given proof to verify is
 a quick_review; a whole manuscript to referee is a referee report (detailed_review when its proofs should be
 checked too). Choose prove, literature, referee, detailed_review, quick_review, explain, writeup or summarize only when the message asks for that kind of work;

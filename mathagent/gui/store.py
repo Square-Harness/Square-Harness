@@ -28,11 +28,11 @@ from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, sourc
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
-from . import projects
+from . import personalization, projects
 
-CHAT_MODES = ('critic', 'explore', 'free')
-# How the interface names a suggestion in chat previews: critic and explore answers
-# are both answers in the conversation, and the referee workflow is called Review.
+CHAT_MODES = ('explore', 'free')
+SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
+# How the interface names a suggestion in chat previews, including saved suggestions.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
                'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
                'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
@@ -103,10 +103,10 @@ def one_line(text, limit=80):
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
-def _cached(path, load):
+def _cached(path, load, revision=None):
     """Parse a state file once per (mtime, size); listings run on every job event."""
     info = path.lstat()
-    key = (str(path), info.st_mtime_ns, info.st_size)
+    key = (str(path), info.st_mtime_ns, info.st_size, revision)
     with _cache_lock:
         if key in _cache:
             return _cache[key]
@@ -593,7 +593,7 @@ def _save_chat(root, chat):
 
 def create_chat(root, mode, think=True, model='', online=False, project_id=None):
     if mode not in CHAT_MODES:
-        raise ValueError('Chat mode must be critic, explore or free')
+        raise ValueError('Chat mode must be explore or free')
     if project_id is not None:
         projects.read_project(root, project_id)
     now = _now()
@@ -695,7 +695,7 @@ def load_chat(root, chat_id):
         raise NotFound('Unknown chat')
     chat = _read_chat(base / (chat_id + '.json'))
     if (not isinstance(chat, dict) or chat.get('version') != 1 or chat.get('id') != chat_id
-            or chat.get('mode') not in CHAT_MODES or not isinstance(chat.get('history'), list)
+            or chat.get('mode') not in SAVED_CHAT_MODES or not isinstance(chat.get('history'), list)
             or not isinstance(chat.get('transcript'), list) or not isinstance(chat.get('settings'), dict)):
         raise ValueError('Invalid or unsupported chat file')
     # Preserve the maximum budget of route cards saved before the effort rename.
@@ -754,15 +754,16 @@ def list_chats(root, templates_root=None):
     if base is None:
         return []
     chats = []
+    preferences = personalization.load(templates_root or root)
     def load(path):
         chat = load_chat(root, path.name[:-5])
-        chat['_display_macros'] = chat_macros(root, chat, templates_root)
+        chat['_display_macros'] = chat_macros(root, chat, templates_root, preferences=preferences)
         return chat
     for path in base.iterdir():
         if not path.name.endswith('.json') or not _ID.fullmatch(path.name[:-5]) or path.is_symlink():
             continue
         try:
-            chat = _cached(path, lambda: load(path))
+            chat = _cached(path, lambda: load(path), preferences['revision'])
         except (OSError, ValueError, NotFound):
             continue
         last = next((item['content'] if item.get('role') != 'route' else
@@ -1316,7 +1317,7 @@ def style_choice(root):
     return load_choice(root)
 
 
-def chat_macros(root, chat, base=None):
+def chat_macros(root, chat, base=None, *, preferences=None):
     """Display notation from the selected style, templates, attachments and user requests."""
     base = base or root
     profiles, choice = list_profiles(base), load_choice(base)
@@ -1333,6 +1334,12 @@ def chat_macros(root, chat, base=None):
     templates = list_templates(base)
     if len(templates) == 1:
         texts.extend(content for _, content in load_template(base, templates[0]['name']))
+    defaults = personalization.definitions((preferences or personalization.load(base))['macros'])
+    definitions = {}
+    for text in texts:
+        definitions.update(macro_definitions(text))
+    definitions.update(defaults)
+    texts.clear()
     workspace = Workspace(root)
     files = list(dict.fromkeys(name for item in chat['transcript'] if item.get('role') in ('user', 'route')
                                for name in item.get('files') or []))
@@ -1344,7 +1351,6 @@ def chat_macros(root, chat, base=None):
         except (OSError, ValueError, UnicodeError):
             continue
     texts.extend(item.get('content', '') for item in chat['transcript'] if item.get('role') == 'user')
-    definitions = {}
     for text in texts:
         definitions.update(macro_definitions(text))
     return dict(list(definitions.items())[-200:])

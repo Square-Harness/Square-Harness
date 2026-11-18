@@ -5,17 +5,18 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, type Account, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
-import { ago, count, duration } from '../format'
+import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
 import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus, useApp, type AppState, type Theme } from '../store'
 import { ProjectList } from './Projects'
 import { ErrorNote, Meter, Modal, NumberField } from './common'
+import { PersonalizationSettings } from './Personalization'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlayIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
 
@@ -36,7 +37,7 @@ export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
-    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Writing style') ? 'style' : task.label.startsWith('Write') ? 'writeup' : 'literature'
+    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Writing style') ? 'style' : /^(Write-up|Summary)/.test(task.label) ? 'writeup' : 'literature'
   }
   const chat = app.chats?.find((item) => item.id === task.target)
   return chat ? chat.kind : null
@@ -103,8 +104,7 @@ export function Sidebar({ route }: { route: Route }) {
           {info.kind === 'free' && <ProjectList />}
           <SideList route={route} app={app} />
         </div>
-        <TaskPanel />
-        <WorkspacePanel />
+        <WorkspacePanel about={route.mode === 'about'} />
       </div>
     </aside>
   )
@@ -311,68 +311,6 @@ function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; 
   )
 }
 
-export function Elapsed({ since }: { since: number }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
-  return <>{duration(Math.max(0, now / 1000 - since))}</>
-}
-
-export function TaskPanel() {
-  const app = useApp()
-  const tasks = activeTasks(app.snapshot)
-  return (
-    <>
-      {tasks.map(({ task }) => <ActiveTaskPanel key={task.id} task={task} app={app} />)}
-      <QueuePanel />
-    </>
-  )
-}
-
-function ActiveTaskPanel({ task, app }: { task: TaskSummary; app: AppState }) {
-  const [error, setError] = useState('')
-  const pausing = task.state === 'pausing'
-  return (
-    <div className="task-panel" role="status">
-      <Square variant="running" size={16} label="Running" />
-      <a className="task-text" href={taskHref(task, app)}>
-        <span className="task-label">{task.label}</span>
-        <span className="task-title"><Inline limit={70}>{task.title}</Inline></span>
-        <span className="task-state">{pausing ? 'Pausing at the next checkpoint…' : <>Active for <Elapsed since={task.started} /></>}</span>
-        {error && <span className="task-error">{error}</span>}
-      </a>
-      <button type="button" className="btn btn-small" disabled={pausing}
-        aria-label={`Pause ${task.label}: ${task.title}`}
-        onClick={() => api.pause(task.id).catch((reason: Error) => setError(reason.message))}>
-        {pausing ? <PlayIcon size={15} /> : <PauseIcon size={15} />} {pausing ? 'Pausing…' : 'Pause'}
-      </button>
-    </div>
-  )
-}
-
-function QueuePanel() {
-  const app = useApp()
-  const [error, setError] = useState('')
-  if (!app.snapshot.queue.length) return null
-  return (
-    <div className="queue-panel">
-      <p className="detail-label">Waiting for a chat slot</p>
-      {app.snapshot.queue.map((item) => (
-        <div key={item.id} className="queue-item">
-          <a className="queue-text" href={taskHref(item, app)}><strong>{item.label}</strong> <Inline limit={50}>{item.title}</Inline></a>
-          <button type="button" className="icon-btn" aria-label={`Cancel queued ${item.label}: ${item.title}`} title="Cancel"
-            onClick={() => api.cancelQueued(item.id).catch((reason: Error) => setError(reason.message))}>
-            <CloseIcon size={14} />
-          </button>
-        </div>
-      ))}
-      {error && <p className="task-error">{error}</p>}
-    </div>
-  )
-}
-
 /** The folder the harness works in, shown above the text window; click to open another. */
 export function WorkspaceSwitch() {
   const { status } = useApp()
@@ -461,13 +399,14 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
   )
 }
 
-function WorkspacePanel() {
+function WorkspacePanel({ about }: { about: boolean }) {
   const app = useApp()
   const { status } = app
   const limits = concurrencyLimits(app.snapshot, status)
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
   const [access, setAccess] = useState(false)
+  const [personalization, setPersonalization] = useState(false)
   const [account, setAccount] = useState<Account | null>(null)
   const accountEmail = useRef<string | null>(null)
   useEffect(() => {
@@ -524,13 +463,17 @@ function WorkspacePanel() {
       <button type="button" className="workspace-access" onClick={() => setAccess(true)}>
         <FileIcon size={13} /> {readLabel}
       </button>
+      <button type="button" className="workspace-access" onClick={() => setPersonalization(true)}>Personalization</button>
       <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
-        Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
+        Parallel work · {activeTasks(app.snapshot).length}/{limits.chats} active
+        {app.snapshot.queue.length > 0 && ` · ${app.snapshot.queue.length} queued`}
       </button>
+      <a className="workspace-access" href={href('about')} aria-current={about ? 'page' : undefined}>About</a>
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
+      {personalization && <PersonalizationSettings onClose={() => setPersonalization(false)} />}
       {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}
       {pairing && (
         <Modal title="Connect a phone" onClose={() => setPairing(false)}>
@@ -543,6 +486,39 @@ function WorkspacePanel() {
   )
 }
 
+function WorkRow({ task, app, queued, onOpen }: { task: TaskSummary; app: AppState; queued: boolean; onOpen: () => void }) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const pausing = task.state === 'pausing'
+  const label = queued ? 'Cancel queued work' : pausing ? 'Pausing…' : 'Pause'
+  async function act() {
+    setPending(true)
+    setError('')
+    try {
+      await (queued ? api.cancelQueued(task.id) : api.pause(task.id))
+    } catch (reason) {
+      setError((reason as Error).message)
+      setPending(false)
+    }
+  }
+  return (
+    <li className="work-row">
+      <Square variant={queued ? 'ready' : 'running'} size={16} />
+      <div className="work-name">
+        <strong>{task.label}</strong>
+        {task.target
+          ? <a href={taskHref(task, app)} onClick={onOpen}><Inline limit={90}>{task.title}</Inline></a>
+          : <span><Inline limit={90}>{task.title}</Inline></span>}
+        <ErrorNote>{error}</ErrorNote>
+      </div>
+      <button type="button" className="btn btn-small" disabled={pending || pausing}
+        aria-label={`${label}: ${task.label} ${task.title}`} onClick={() => void act()}>
+        {!queued && <PauseIcon size={15} />} {label}
+      </button>
+    </li>
+  )
+}
+
 function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const app = useApp()
   const limits = concurrencyLimits(app.snapshot, app.status)
@@ -550,6 +526,8 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const [requests, setRequests] = useState(limits.requests)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const active = activeTasks(app.snapshot)
+  const queue = app.snapshot.queue
   const valid = [chats, requests].every((value) => Number.isInteger(value) && value >= 1 && value <= 8)
   const save = async () => {
     if (!valid || saving) return
@@ -561,6 +539,18 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Parallel work" onClose={saving ? undefined : onClose}>
       <p>Each conversation or job keeps its full token budget. Work beyond the active limit waits in the queue.</p>
+      {active.length > 0 && <section aria-labelledby="parallel-active">
+        <h3 className="work-heading" id="parallel-active">Active work</h3>
+        <ul className="work-list" role="list">
+          {active.map(({ task }) => <WorkRow key={task.id} task={task} app={app} queued={false} onOpen={onClose} />)}
+        </ul>
+      </section>}
+      {queue.length > 0 && <section aria-labelledby="parallel-queue">
+        <h3 className="work-heading" id="parallel-queue">Queue</h3>
+        <ul className="work-list" role="list">
+          {queue.map((task) => <WorkRow key={task.id} task={task} app={app} queued onOpen={onClose} />)}
+        </ul>
+      </section>}
       <NumberField label="Active conversations and jobs" value={chats} onChange={setChats} min={1} max={8}
         hint="One turn at a time in each conversation." />
       <NumberField label="Simultaneous model requests" value={requests} onChange={setRequests} min={1} max={8}

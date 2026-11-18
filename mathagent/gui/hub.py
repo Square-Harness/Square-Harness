@@ -25,7 +25,7 @@ import uuid
 from ..agent import Agent, AgentError, Ollama
 from ..assistant_budget import AssistantBudget, BudgetClient
 from ..call_policy import CallContextError
-from ..conversation_sources import conversation_sources
+from ..conversation_sources import conversation_sources, references_previous_pdf
 from ..source_tasks import automatic_source_action, source_overview
 from ..backends import LlamaCpp, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
@@ -33,6 +33,7 @@ from ..model_limits import input_limit as model_input_limit, output_limit
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
+from ..prompts import FRESH_REVIEW
 from ..litreview import ReviewRunner
 from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state, full_review_requested
@@ -46,7 +47,7 @@ from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from .. import images
-from . import effort, projects, store
+from . import effort, personalization, projects, store
 from .inference import InferencePool
 from .store import one_line
 
@@ -377,7 +378,7 @@ class ChatCapture:
 class Hub:
     def __init__(self, args, bus=None):
         self.args = args
-        # Shared Docker sandbox: automatic numerical sanity checks in critic/explore engines.
+        # Shared Docker sandbox for automatic numerical sanity checks.
         self.sandbox = PythonSandbox.from_args(args)
         self.root = Path(args.workspace).resolve(strict=True)
         # Folders can be browsed and opened at or below this root only.
@@ -835,10 +836,10 @@ class Hub:
         args = self.args
         library = LiteratureTools(self.root, online=self.online(online),
                                   max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
-        # Conversational engines (chats, the Assistant and its critic/explore workers) may run
+        # Conversational engines (chats, the Assistant and its Explore workers) may run
         # automatic sanity checks; the @python_lab and @sanity_check workers bind explicitly.
         numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
-                    if mode in ('critic', 'explore') else None)
+                    if mode == 'explore' else None)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root),
                               numerics=numerics)
@@ -860,7 +861,7 @@ class Hub:
         """Show each sandbox run's files in the conversation as soon as the run is saved.
 
         With ``persist`` (Assistant turns, reviews) the item is saved in the transcript at once.
-        Otherwise (critique and exploration turns, which save it with the turn) it joins the live turn.
+        Otherwise (chat sessions that save it with the turn) it joins the live turn.
         """
         numerics = getattr(workspace, 'numerics', None)
         if numerics is None:
@@ -1117,8 +1118,10 @@ class Hub:
         if len(content) > 60000:
             raise ValueError('Messages are limited to 60000 characters; pin long material as a file instead')
         mode = mode or session['mode']
-        if mode not in ('critic', 'explore'):
-            raise ValueError('Conversation turns use the critic or explore mode')
+        legacy = mode == 'critic' and session['mode'] == 'critic'
+        if mode != 'explore' and not legacy:
+            raise ValueError('Use Explore for a direct conversation turn')
+        turn_mode = 'free' if legacy else mode
         selected = conversation_sources(content, list(files), session['transcript'])
         if not files:
             selected = [name for name in selected if (self.root / name).is_file()]
@@ -1127,16 +1130,18 @@ class Hub:
         files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         text_files = [name for name in files if not images.is_image(name)]
         project_snapshot = projects.snapshot(self.root, session.get('project_id'))
+        personal_context = personalization.context(personalization.load(self.base))
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(text_files)) if text_files else '')
 
         def work(task):
             # The previous turn may have just been saved before this slot opened.
             fresh = store.load_chat(self.root, chat_id)
             store.save_chat_images(self.root, chat_id, image_refs)
-            agent, _ = self._engine(task, mode=mode, think=fresh['settings'].get('think'),
+            agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
                                     online=self.online(fresh['settings'].get('online', False)) if not self.online_locked else False)
             agent.history = store.image_history(fresh)
             agent.turn_image_refs = attached_images
+            agent.personal_context = personal_context
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
             agent.workspace.pin_files(text_files)
@@ -1146,17 +1151,17 @@ class Hub:
             if agent.workspace.literature.online:
                 agent.workspace.checker = nested_checker(agent, capture.emit)
             try:
-                answer = agent.run(prompt, capture.emit)
+                answer = agent.run(prompt, capture.emit, instruction='' if legacy else None)
             except BaseException as exc:
                 self._discarded(chat_id, content if echo_user else '', exc, files=files, image_refs=attached_images)
                 raise
             store.commit_turn(self.root, chat_id, agent.history, capture.calls, capture.notices,
-                              echo_user=echo_user, mode=mode, files=files, user_content=content,
+                              echo_user=echo_user, mode=turn_mode, files=files, user_content=content,
                               project_snapshot=project_snapshot, image_refs=attached_images)
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': answer}
-        live = {'chat': chat_id, 'kind': 'message', 'user': content if echo_user else '', 'steps': [], 'mode': mode}
-        label = 'Critique' if mode == 'critic' else 'Exploration'
+        live = {'chat': chat_id, 'kind': 'message', 'user': content if echo_user else '', 'steps': [], 'mode': turn_mode}
+        label = 'Conversation' if legacy else 'Exploration'
         return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
 
     def check(self, chat_id, question, *, effort='medium', on_update=None, queue=False):
@@ -1215,10 +1220,10 @@ class Hub:
         image_refs = store.chat_images(session)
 
         def work(task):
-            # A fresh critic context, as /review does in the terminal.
+            # A fresh review context, as /review does in the terminal.
             fresh = store.load_chat(self.root, chat_id)
             last_user, last_answer = last_exchange(fresh)
-            agent, _ = self._engine(task, mode='critic', think=fresh['settings'].get('think'),
+            agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
                                     online=fresh['settings'].get('online', False) and not self.online_locked)
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
@@ -1233,14 +1238,15 @@ class Hub:
             self._show_experiments(agent.workspace, self.root, chat_id, task)
             try:
                 result = agent.run('Audit this proposed answer. Re-read relevant files if needed.\n'
-                                   f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}', capture.emit)
+                                   f'QUESTION:\n{last_user}\n\nANSWER:\n{last_answer}', capture.emit,
+                                   instruction=FRESH_REVIEW)
             except BaseException as exc:
                 self._discarded(chat_id, '', exc)
                 raise
             store.commit_review(self.root, chat_id, result, capture.calls, capture.notices)
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': result}
-        live = {'chat': chat_id, 'kind': 'review', 'user': '', 'steps': [], 'mode': 'critic'}
+        live = {'chat': chat_id, 'kind': 'review', 'user': '', 'steps': [], 'mode': 'free'}
         return self._begin('chat', chat_id, 'Fresh review', last_user, work, live, queue=queue)
 
     def _discarded(self, chat_id, content, exc, *, files=(), image_refs=()):
@@ -1269,7 +1275,7 @@ class Hub:
     def _review_reference(self, chat, content, files):
         # Only a conversation's own review cards can select a saved manuscript.
         # An explicit source starts from that source instead of an older snapshot.
-        if files or conversation_sources(content, [], []):
+        if files or conversation_sources(content, [], chat['transcript'], inherit=False):
             return None
         reviews = []
         for item in reversed(chat['transcript']):
@@ -1283,6 +1289,10 @@ class Hub:
         if not reviews:
             return None
         targets = {(s['sources'][0]['path'], s['sources'][0]['sha256']) for s in reviews if s.get('sources')}
+        if references_previous_pdf(content):
+            selected = conversation_sources(content, [], chat['transcript'])
+            if selected and set(selected) != {path for path, _ in targets}:
+                return None
         if len(targets) != 1:
             raise WorkerInputError('Which reviewed manuscript should I use? Name it or attach it to this message.',
                                    code='ambiguous_source', details={'sources': sorted(p for p, _ in targets)})
@@ -1297,6 +1307,8 @@ class Hub:
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters.')
         saved = chat.get('assistant_state') or {}
+        personal_context = (saved.get('personal_context', '') if resume else
+                            personalization.context(personalization.load(self.base)))
         review_reference = (copy.deepcopy(saved.get('review_reference')) if resume else
                             self._review_reference(chat, content, files) if required_mode == 'referee' else None)
         selected = (list(files) if resume else [] if review_reference else
@@ -1365,6 +1377,7 @@ class Hub:
             main, _ = self._engine(task, mode='explore', think=False, online=online)
             main.review_reference = review_reference
             main.project_snapshot = project_snapshot
+            main.personal_context = personal_context
             main.project_context = projects.context(project_snapshot)
             images.bind(main, image_refs)
             main.turn_image_refs = attached_images
@@ -1386,6 +1399,8 @@ class Hub:
                         state['budget'] = budget.snapshot()
                         state['online'] = online
                         state['web_budget'] = main.workspace.literature.snapshot()
+                        if personal_context:
+                            state['personal_context'] = personal_context
                         store.save_assistant(root, chat_id, state)
                     self.bus.publish('chat_saved', chat=chat_id)
 
@@ -1558,6 +1573,8 @@ class Hub:
                 store.update_item(root, chat_id, index, status='started', task=task.id, outcome='')
             save()
         agent, _ = self._engine(task, mode=mode, online=online)
+        if mode == 'explore':
+            agent.personal_context = parent.agent.personal_context
         images.bind(agent, image_refs)
         agent.workspace.pin_files(files)
         sandbox_error = None
@@ -1574,7 +1591,7 @@ class Hub:
                 except SandboxUnavailable as exc:
                     sandbox_error = f'@{mode} needs the Python sandbox on this computer. {exc}'
         self._show_experiments(agent.workspace, root, chat_id, task)
-        if mode in ('critic', 'explore') + USER_MODES:
+        if mode in ('explore',) + USER_MODES:
             # These workers return analysis; file mutation belongs to Write-up,
             # whose durable runner already checkpoints approved tool actions.
             schemas = agent.workspace.schemas
@@ -1587,10 +1604,12 @@ class Hub:
             # New selectable profiles must not shorten a paused worker's saved
             # time allowance (including the retired seven/ten-pass profiles).
             level['minutes'] = max(0, saved['settings']['max_seconds'] - saved['seconds_used']) / 60
-        if mode in ('critic', 'explore') and agent.client.backend == 'openai' and getattr(agent.client, 'profile', 'default') == 'default':
+        if mode == 'explore' and agent.client.backend == 'openai' and getattr(agent.client, 'profile', 'default') == 'default':
             agent.client.thinking_budget_policy.setdefault('ordinary', 0.6)
         reserve = min(300, 0.1 * budget.pool.state['max_seconds'])
-        seconds = max(0.1, min(level['minutes'] * 60, budget.remaining_seconds - reserve))
+        worker_seconds = (REFCHECK_EFFORTS.get(action['effort'], REFCHECK_EFFORTS['high'])['seconds']
+                          if mode == 'check' else level['minutes'] * 60)
+        seconds = max(0.1, min(worker_seconds, budget.remaining_seconds - reserve))
         agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds)
         input_limit = budget.pool.state['max_input_tokens']
         configured_input = getattr(self.args, 'research_input_tokens', None)
@@ -1619,8 +1638,8 @@ class Hub:
                 self.bus.publish('activity', mutate=lambda: task.activity.append(item),
                                  task=task.id, job=mode, id=child.get('job_id'), **item)
 
-        if mode in ('critic', 'explore') and online:
-            # As in a critique or exploration chat: check_reference, charged to this worker's share.
+        if mode == 'explore' and online:
+            # As in an Explore chat: check_reference, charged to this worker's share.
             agent.workspace.checker = nested_checker(agent, emit)
         try:
             if sandbox_error:
@@ -1673,12 +1692,11 @@ class Hub:
                 else:
                     if allocation is not None and allocation < 256:
                         raise AssistantBudget('No budget remains for a literature check.')
-                    check = REFCHECK_EFFORTS.get(action['effort'], REFCHECK_EFFORTS['high'])
                     result = runner.start(action['request'], effort=action['effort'], reference_context=child['context'],
                         lookup='precise' if precise_reference_request(parent.state['query']) else 'standard',
                         max_tokens=allocation,
                         max_input_tokens=input_limit,
-                        max_seconds=max(0.1, min(check['seconds'], seconds)))
+                        max_seconds=seconds)
                 status = result['status']
                 references = json.loads(runner.result_for_agent())
                 outcome = {'answered': 'Reference confirmed; see the answer.',
@@ -1820,7 +1838,7 @@ class Hub:
                 save()
             store.update_item(root, chat_id, index, status='stopped' if result['status'] == 'paused' else 'done', outcome=outcome,
                               error=(result.get('error') or {}).get('message'),
-                              job_id=result['job_id'] if mode not in ('critic', 'explore') + USER_MODES else None,
+                              job_id=result['job_id'] if mode not in ('explore',) + USER_MODES else None,
                               **({'outputs': runner.state.get('outputs') or {}} if mode in ('writeup', 'summarize') and runner and runner.state else {}))
             self.bus.publish('chat_saved', chat=chat_id)
             return result
@@ -1915,7 +1933,7 @@ class Hub:
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
             raise ValueError('This suggestion has already started')
         if mode not in JOB_MODES:
-            raise ValueError('Choose prove, critic, explore, check, literature, referee, detailed_review, quick_review, explain, writeup or summarize')
+            raise ValueError('Choose one of these modes: ' + ', '.join(JOB_MODES))
         if not isinstance(request, str) or not request.strip():
             raise ValueError('The request cannot be empty')
         files = self.check_files(list(files))

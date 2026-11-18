@@ -143,8 +143,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   and extra-field deviations can be normalized without weakening verdict checks.
 - **Saved jobs stay readable.**
   - Old proof jobs (v0.4) remain inspectable but cannot resume.
-  - Old chat kinds (`critic`, `explore`, Default route cards) are still listed
-    and continued.
+  - Old Critique chats continue as ordinary mathematical chats. Saved Critique
+    cards and completed child results stay readable. An unfinished legacy
+    child returns an explicit retirement result without running the old skill.
   - Saved budgets and caps are kept on resume. Never grant a new allowance
     silently: extra time is explicit (`--resume-add-seconds`, the interface's
     "Resume (+N min)").
@@ -217,9 +218,13 @@ Version 1.1.0. The source of truth for the machine-readable version is
   checks. Progress falls back only to the latest child, never an earlier one.
 
 - **Chat notation.** The server extracts bounded macro definitions from explicit
-  sources, requests, a selected style and a sole saved template. The browser
-  loads them into a fresh KaTeX scope per conversation, including sidebar
-  previews; `trust` stays false and expansion limits stay in force.
+  sources, requests, personal defaults, a selected style and a sole saved
+  template. The browser loads them into a fresh KaTeX scope per conversation,
+  including sidebar previews; `trust` stays false and expansion limits stay in
+  force. `gui/personalization.py` stores preferences at the authenticated GUI
+  root using a private atomic write and revision check. The Assistant captures
+  the preferences at turn admission and keeps that context on resume. The
+  personalization event refreshes conversation math definitions in the GUI.
 - **File tools.** Inferred source names must exist locally and obey read-type
   settings; a URL or a missing filename is not an implicit attachment. File and
   directory responses expose pagination, including columns within long lines.
@@ -486,7 +491,7 @@ documented together when releasing these features.
    ┌───────────── controllers ("runners"), one per skill ─────────────────────────┐
    │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (reading list)
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
-   │ agent.Agent (critic/explore chat)             ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
+   │ agent.Agent (Explore and ordinary chat)      ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
    │ numerics.session (sandbox skills)             │   / JournalRunner (Detailed review) / ExplainRunner
    │                                               ├ writeup.WriteupRunner (write-up, summary)
    │                                               └ style.StyleRunner (writing styles)
@@ -505,7 +510,7 @@ documented together when releasing these features.
 | Area | Module | Responsibility |
 | --- | --- | --- |
 | Entry | `__main__.py`, `cli.py` | Flags and their validation, terminal REPL and slash commands, one-shot runs (`--prompt`, `--resume`, `--research-resume`), `--gui` → `gui.serve` |
-| Transport | `agent.py` | Ollama client; `Agent`, the bounded tool loop of ordinary chat (`critic`, `explore`) |
+| Transport | `agent.py` | Ollama client; `Agent`, the bounded tool loop of ordinary chat and Explore |
 | | `backends.py` | `create_client`: Ollama, OpenAI-compatible (vLLM, optional `thinking_token_budget` from `SQUARE_OPENAI_*THINKING_FRACTION`), llama.cpp (exact token counts) |
 | | `api_profiles.py` | MLX profile: prompted JSON, validated afterwards |
 | | `deepinfra.py`, `model_limits.py` | Opt-in DS4 API authentication/dialect, explicit model-dependent call limits and GUI effort presets |

@@ -2831,6 +2831,10 @@ class WriteupRunner(ResearchRunner):
         return EQUATION_RULES
 
     def _citation_rules(self):
+        if self.state.get('variant') == 'summary':
+            return ('Give sources by their recorded names and locators in the prose. Use \\cite only with exact keys '
+                    'from a supplied bibliography. If none is supplied, cite in prose throughout. Do not invent '
+                    'citation keys or write BibTeX entries or bibliography-loading commands.')
         if any(s.get('catalog') for s in self._templates_in(('.bib',))):
             return (CITATION_RULES.replace("the author's bibliography", 'the supplied bibliography')
                     + ' Use the supplied keys exactly. The controller provides every bibliography entry and prints '
@@ -3537,8 +3541,12 @@ class WriteupRunner(ResearchRunner):
     def _task(self, index, count):
         if self.state.get('variant') == 'summary':
             task = ('Write a LaTeX summary of the important results in the material below, as the summary rules say: '
-                    'each result with its exact statement, its status as recorded, the key idea of its proof, the '
-                    'references found, then the open questions.')
+                    'give each result with its exact statement, its recorded status and its main proof idea. For each '
+                    'source retained, state what it was used for and exactly what was verified or remains unverified. '
+                    'A bibliography entry alone supplies no evidence about the mathematics. Report a model review '
+                    'only if it is recorded in the supplied material. Describe a source proposed for further work '
+                    'as a lead, with its recorded purpose. Do not turn that purpose into a new claim or open '
+                    'question. Report only the mathematical results and open questions the material actually states.')
         elif self.state.get('scoped'):
             task = ('Write the LaTeX document the USER REQUEST asks for, from the material below, a conversation the '
                     'user had. Use the final version of each result (the proof the review accepted, the repaired '

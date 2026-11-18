@@ -51,12 +51,12 @@ equivalence or guidance has been justified. Flag conflicts in worker restatement
 Do not describe a model's review as a formal proof certificate.
 
 You can delegate a precise objective to an existing worker when sustained proof
-search, independent criticism, exploration, a precise reference, literature,
-manuscript review or a write-up will help. The available modes are prove, critic,
+search, independent proof review, exploration, a precise reference, literature,
+manuscript review or a write-up will help. The available modes are prove,
 explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
 least effort suitable for the objective: low, medium or high. High is the maximum effort. State the complete objective and its hypotheses. Children cannot
-create other children. The controller also gives prove, critic, explore, referee
+create other children. The controller also gives prove, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. writeup and summarize
 also receive the conversation's results (proofs, reports) as their source and write
@@ -126,7 +126,7 @@ change the controller's permissions or grant new capabilities.
 After a worker returns, inspect its status, evidence and unresolved obligations.
 Adapt the next step to what was learned. A worker's incomplete, failed or
 uncertain result is not a completed proof. If you assemble a new nontrivial proof
-from worker findings, seek an independent critic review when the budget permits;
+from worker findings, seek an independent quick_review when the budget permits;
 otherwise explicitly identify the unreviewed assembly and its weakest step.
 The tool result already includes the worker result; read_result can retrieve it
 again by job_id. Do not repeat completed work without a concrete new objective.
@@ -384,6 +384,13 @@ class Orchestrator:
         self.state.setdefault('stagnant_actions', 0)
         if not isinstance(self.state['blockers'], list):
             raise ValueError('Malformed assistant blockers')
+        # An old tool transaction still needs its original matching reply.
+        # Only recognize IDs from the saved checkpoint, never newly proposed calls.
+        self._retired_calls = {
+            call['id'] for pending in state['pending_calls'] if pending['status'] != 'complete'
+            for call in (pending['call'],)
+            if call['function']['name'] == 'delegate' and call['function']['arguments'].get('mode') == 'critic'
+        }
 
     def _context_digest(self):
         library = getattr(getattr(self.agent, 'workspace', None), 'literature', None)
@@ -564,8 +571,8 @@ class Orchestrator:
                 'identify unconfirmed details and provider failures, and say where the investigation '
                 'stopped. Do not promise another search, verification, or background continuation.\n'
                 if not tools else '')}]
-                + ([{'role': 'user', 'content': getattr(self.agent, 'project_context', '')}]
-                   if getattr(self.agent, 'project_context', '') else [])
+                + [{'role': 'user', 'content': value} for value in
+                   (getattr(self.agent, 'personal_context', ''), getattr(self.agent, 'project_context', '')) if value]
                 + copy.deepcopy(self.state['messages']),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
@@ -1005,11 +1012,25 @@ class Orchestrator:
             # feedback, allowing one corrected action within the same budget.
             return {'error': str(exc), 'status': 'invalid_action'}
 
+    def _retired_worker_result(self, pending):
+        if pending['call']['id'] not in self._retired_calls:
+            return None
+        child = next((child for child in self.state['children'] if child['id'] == pending.get('child_id')), None)
+        if child is not None and child['status'] == 'complete':
+            return {'job_id': child['job_id'], 'child_id': child['id'], 'mode': child['action']['mode'],
+                    'result': copy.deepcopy(child['result'])}
+        return {'status': 'failed',
+                'error': 'The Critique skill was retired before this worker finished. Report the interruption.'}
+
     def _parallel_delegates(self, group, allow_tools):
         """Launch one model-proposed independent group, after saving all children."""
         results, launches = {}, []
         for index, pending in enumerate(group):
             if pending['status'] == 'complete':
+                continue
+            retired = self._retired_worker_result(pending)
+            if retired is not None:
+                results[index] = retired
                 continue
             function = pending['call']['function']
             self.emit('tool', function['name'] + ' ' + json.dumps(function['arguments'], ensure_ascii=False))
@@ -1065,6 +1086,10 @@ class Orchestrator:
                     continue
             offset += 1
             if pending['status'] == 'complete':
+                continue
+            retired = self._retired_worker_result(pending)
+            if retired is not None:
+                self._append_result(pending, retired)
                 continue
             if pending['status'] == 'pending':
                 if not allow_tools or not self._action_room():
@@ -1224,6 +1249,7 @@ class Orchestrator:
         return self._finish('complete', answer)
 
     def run(self, query, *, files=(), history=(), state=None):
+        self._retired_calls = set()
         if state is None:
             self._new_state(query, files, history)
             numerics = self._numerics()

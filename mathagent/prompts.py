@@ -28,10 +28,21 @@ If a tool fails or a budget is exhausted, explain what remains unverified.
 Respond in the user's language, using readable Markdown and LaTeX.
 """
 
+FRESH_REVIEW = ("Independently audit the proposed answer against the original question. "
+                "Find the first false or unjustified step and try counterexamples before suggesting repairs.")
+
 MODES = {
     "prove": "Try to prove the claim. Check each nontrivial implication; report gaps honestly.",
-    "critic": "Audit adversarially. Find the first false or unjustified step and try counterexamples before repairs.",
-    "explore": "Explore approaches and connections. Explicitly label heuristic steps and conjectures.",
+    "explore": (
+        "Explore approaches and connections. Give a concise account of the promising ideas even when no full proof "
+        "is available. For each approach, give the first useful step and the main obstacle. If key data such as "
+        "the domain, function space, or target topology are missing, begin by asking for them. Give examples as "
+        "explicit if-then statements with a complete sufficient setting. Use a named theorem only if you can "
+        "state how the example meets its hypotheses. Avoid claims of necessity or impossibility in an "
+        "unspecified setting. Separate established facts, heuristic steps and conjectures. Only include a complete "
+        "argument if it is short and already justified. For source-based questions, answer from the available "
+        "evidence and identify what still needs checking."
+    ),
     "referee": "Audit assumptions, definitions, lemma dependencies and proof completeness. Rank objections by severity.",
     "detailed_review": "Referee the whole manuscript: understand it, list typos, then check its proofs.",
     "quick_review": "Check whether the given proof is correct. Locate each issue in the proof lines; do not rewrite the proof.",

@@ -35,12 +35,9 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
     examples: [],
   },
   critic: {
-    title: 'Critique an argument',
-    text: 'Paste a statement with its proof, or name a file in the workspace. The critic looks for the first false or unjustified step and tries counterexamples before suggesting repairs.',
-    examples: [
-      'Is every bounded sequence in $L^2(0,1)$ strongly precompact? Justify your answer.',
-      'Read manuscript.tex and identify the first unsupported implication.',
-    ],
+    title: 'Continue this conversation',
+    text: 'This conversation started in the former Critique mode.',
+    examples: [],
   },
   explore: {
     title: 'Explore a question',
@@ -52,7 +49,7 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
   },
 }
 
-// How a card names what the model started. Critic and explore are both an answer here;
+// How a card names what the model started. Explore and saved Critique are both answers here;
 // a literature check also answers here, with its evidence.
 type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
@@ -71,22 +68,24 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
   sanity_check: { noun: 'a numerical sanity check', label: 'Numerical Sanity Check', cover: 'sanity_check' },
 }
-const kindOf = (mode: RouteMode | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
+const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
-const paged = (mode: RouteMode): mode is Paged => mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
+const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
+  mode !== 'critic' && mode !== 'free' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
 const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
   const tick = useTick(id)
+  const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
   const [ended, setEnded] = useState(0)
-  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended])
+  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended, personalizationTick])
   const work = chatWork(app.snapshot, id)
   const task = work.active?.task
   const ours = !!task
@@ -290,7 +289,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             onSend={() => { send() }} disabled={blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
-              : mode === 'critic' ? 'Ask the critic to check a statement, a proof, or a file…' : 'Ask about an approach, a reformulation or a connection…'}
+              : mode === 'critic' ? 'Continue the conversation…' : 'Ask about an approach, a reformulation or a connection…'}
             aria-label="Message" />}
           {ours ? (
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
@@ -419,7 +418,8 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
     )
     blocks = []
   }
-  const markFor = (item: TranscriptItem): ChatMode | 'check' => (item.mode === 'check' ? 'check' : mode)
+  const markFor = (item: TranscriptItem): ChatMode | 'check' =>
+    item.mode === 'check' ? 'check' : item.mode === 'free' ? 'free' : mode
   for (let i = 0; i < steps.length; i++) {
     const { item, index } = steps[i]
     if (item.role === 'route') {
@@ -449,7 +449,7 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
       blocks.push(
         <div key={index} className="review-note">
           <p className="review-label">Fresh-context review</p>
-          <p className="muted small">A separate critic context audited the previous answer. It is another model opinion, not verification.</p>
+          <p className="muted small">A separate model context audited the previous answer. The review is a model judgment.</p>
           <Thinking text={item.thinking || ''} />
           <Markdown>{item.content}</Markdown>
         </div>,
@@ -487,9 +487,9 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
       </div>
     )
   }
-  const mode = item.mode as RouteMode
+  const mode = item.mode
   const kind = kindOf(mode)
-  const info = item.orchestrated && mode === 'critic'
+  const info = mode === 'critic'
     ? { noun: 'a critique', label: 'Critique', cover: 'critic' as const }
     : item.orchestrated && mode === 'explore'
       ? { noun: 'an exploration', label: 'Exploration', cover: 'explore' as const }
@@ -502,9 +502,10 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   }
   // Suggestions saved before jobs started on their own, and jobs that failed or were
   // cancelled before running, can be started (again) as the model chose them.
-  const start = () => act(() => {
-    const limits = effortKind(mode) && app.status ? effortLimits(effortKind(mode)!, app.status.defaults, isLevel(item.effort) ? item.effort : 'medium') : undefined
-    return api.startRoute(chatId, index, { mode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
+  const start = (activeMode: RouteMode) => act(() => {
+    const effort = effortKind(activeMode)
+    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, isLevel(item.effort) ? item.effort : 'medium') : undefined
+    return api.startRoute(chatId, index, { mode: activeMode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
   })
 
   const task = taskById(app.snapshot, item.task)?.task
@@ -519,7 +520,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
     if (job) ({ variant, label: status } = researchLook(job.status, job.running && (!item.orchestrated || running)))
   }
   let headline: string
-  if (item.status === 'proposed') { headline = `${info.label} suggested`; status = 'Not started'; variant = 'ready' }
+  if (mode === 'critic' && item.status !== 'done' && !queued && !running) { headline = 'Critique retired'; status = ''; variant = 'spent' }
+  else if (item.status === 'proposed') { headline = `${info.label} suggested`; status = 'Not started'; variant = 'ready' }
   else if (item.status === 'failed') { headline = item.orchestrated ? `${info.label} did not finish` : `Could not start ${info.noun}`; variant = 'error' }
   else if (item.status === 'cancelled') { headline = `${info.label} cancelled`; status = 'Removed from the queue'; variant = 'spent' }
   else if (queued) { headline = `${info.label} queued`; status = 'Starts when a chat slot opens'; variant = 'ready' }
@@ -556,8 +558,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
-          {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
-            <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
+          {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
+            <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}
             </button>
           )}
@@ -627,7 +629,7 @@ function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: str
 }
 
 function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
-  const glyph: ChatMode | 'check' = live.mode === 'check' ? 'check' : mode
+  const glyph: ChatMode | 'check' = live.mode ?? mode
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}

@@ -32,7 +32,7 @@ export function BusyNote({ queue = false }: { queue?: boolean }) {
 const withoutStop = (title: string) => title.trim().replace(/[.。]+$/, '')
 
 export function queuedMessage(title: string) {
-  return `Added to the queue: “${firstLine(withoutStop(title), 80)}”. It starts when a chat slot opens. The queue is listed in the sidebar, where you can cancel it.`
+  return `Added to the queue: “${firstLine(withoutStop(title), 80)}”. It starts when a chat slot opens. Open Parallel work in the sidebar to cancel it.`
 }
 
 /** The job's overview column (budget, candidates, checks); it slides away to a spine. */

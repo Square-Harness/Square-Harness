@@ -14,15 +14,18 @@
 .brand-margin { stroke: #ff8a93; stroke-width: 2; }
 .brand-square { fill: #f6f7fb; }
 
+/* Notebook covers share white glyphs and the same palette across themes. */
+.mode-free { background: #3b4256; }
 .mode-prove { background: #2f3eb5; }
-.mode-critic { background: #c22f3d; }
-.mode-explore { background: #1b7f5a; }
-.mode-literature { background: #a0660f; }
-.mode-check { background: #7c4a0a; } /* a literature check in Default: the Literature family, deeper */
-.mode-referee { background: #6c43a8; }
-.mode-python_lab { background: #0e6e86; } /* the sandbox: a laboratory teal */
-.mode-sanity_check { background: #b4461c; } /* falsification: Critique's red, warmer */
-/* Worker colours are shared by message marks and the @ picker. */
+.mode-critic { background: #a63348; } /* saved Critique conversations */
+.mode-explore { background: #24684c; }
+.mode-literature { background: #8b5912; }
+.mode-check { background: #694813; }
+.mode-referee { background: #694394; }
+.mode-writeup { background: #255e87; }
+.mode-style { background: #85446f; }
+.mode-python_lab { background: #176c6f; }
+.mode-sanity_check { background: #9e4731; }
 .speaker-model svg, .route-cover svg { display: block; }
 .margin-glyph svg { display: inline-block; vertical-align: -0.12em; }
 .icon-btn {
@@ -76,16 +79,6 @@
 .side-preview { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tally { display: inline-flex; gap: 7px; }
 .tally-item { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
-
-/* The running task, like a voice-connected panel. */
-.task-panel {
-  display: flex; align-items: center; gap: 10px; margin: 0 8px 8px; padding: 10px 10px 10px 12px;
-  background: var(--sheet); border: 1px solid var(--ink-soft-strong); border-radius: 9px; box-shadow: var(--shadow-sm);
-}
-.task-text { flex: 1; min-width: 0; display: flex; flex-direction: column; text-decoration: none; color: var(--text); }
-.task-label { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.task-state { font-size: 12px; color: var(--text-3); }
-.task-error { font-size: 12px; color: var(--red); }
 
 .workspace {
   position: relative;
@@ -356,11 +349,7 @@
 .modal { min-width: 0; max-width: 100%; }
 .modal-body code { overflow-wrap: anywhere; }
 
-/* New notebooks: Free (any task) and Write-up */
-.mode-free { background: #3b4256; }
-.mode-writeup { background: #0f7482; }
 .mode-writeup .mode-glyph { font-family: var(--font-text); font-weight: 700; font-size: 21px; }
-.mode-style { background: #6a4f8c; }
 .btn .history-mark { width: 22px; height: 22px; border-radius: 4px; font-size: 16px; }
 
 /* Writing style: a saved profile, one block per domain */
@@ -386,11 +375,15 @@
 .folder-glyph { position: relative; flex: none; width: 15px; height: 11px; border: 1.5px solid currentColor; border-radius: 1px 2px 2px 2px; opacity: 0.75; margin-top: 2px; }
 .folder-glyph::before { content: ''; position: absolute; left: -1.5px; top: -4px; width: 7px; height: 3px; border: 1.5px solid currentColor; border-bottom: 0; border-radius: 2px 2px 0 0; }
 
-.queue-panel { margin: -2px 8px 8px; padding: 8px 10px; background: var(--sheet); border: 1px dashed var(--line-strong); border-radius: 9px; }
-.queue-panel .detail-label { margin-bottom: 4px; }
-.queue-item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
-.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-item .icon-btn { width: 26px; height: 26px; }
+/* Task controls opened from Parallel work. */
+.workspace a.workspace-access { width: fit-content; text-decoration: none; }
+.workspace a.workspace-access:hover, .workspace a.workspace-access[aria-current='page'] { color: var(--ink); text-decoration: underline; }
+.work-heading { margin: 0 0 6px; font-size: 14px; }
+.work-list { margin: 0 0 16px; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; background: var(--sheet); }
+.work-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; }
+.work-row + .work-row { border-top: 1px solid var(--line); }
+.work-name { display: grid; flex: 1; min-width: 110px; overflow-wrap: anywhere; font-size: 13px; }
+.work-name .error-note { margin: 4px 0 0; }
 
 /* Folder browser */
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 12px; font-size: 14px; }
