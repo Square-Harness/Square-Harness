@@ -91,7 +91,13 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - Keep the visual identity, "cahier à petits carreaux":
   - grid paper with a red margin rule;
   - statuses drawn as squares (the ∎ family);
-  - each skill drawn as a coloured notebook cover;
+  - each skill drawn as a coloured notebook cover (Explain has its own, a
+    lightbulb; the other review kinds share the Review cover);
+  - every dialog is the shared `Modal`: a small page with its mark in the
+    margin, the red rule, a serif title and its actions (`.modal-actions`) on
+    the bottom edge. Pass an `icon`; do not style a dialog on its own;
+  - form controls come from `shell.css` (`.field`, `.text-input`, `select`,
+    `Toggle`, `CellScale` for a small whole number), icons from `Icons.tsx`;
   - Square Concrete (CMU Concrete, OFL) with KaTeX for prose, Atkinson
     Hyperlegible Next for the interface.
 

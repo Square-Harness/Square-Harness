@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { activeTasks, concurrencyLimits } from '../concurrency'
 import { api, type Artifact, type Review, type ToolCall } from '../api'
 import { Collapse, ErrorNote, Loading, Modal } from '../components/common'
-import { BackIcon, PanelRightIcon } from '../components/Icons'
+import { BackIcon, FileIcon, PanelRightIcon } from '../components/Icons'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { taskHref } from '../components/Shell'
 import { issueLook, Square } from '../components/Square'
@@ -361,7 +361,7 @@ export function ArtifactViewer({ job, id, name, onClose }: { job: 'proof' | 'res
   const role = name.replace(/^\d+-/, '').replace(/(-request|-stream)?(?:-[a-f0-9]{8})?\.(md|jsonl)$/, '')
   const json = artifact?.json as Record<string, unknown> | undefined
   return (
-    <Modal title={name} onClose={onClose} wide>
+    <Modal title={name} icon={<FileIcon />} onClose={onClose} wide>
       <ErrorNote>{error}</ErrorNote>
       {!artifact && !error && <Loading />}
       {artifact && (

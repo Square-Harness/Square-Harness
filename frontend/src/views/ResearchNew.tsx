@@ -174,7 +174,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
         <div className="entry"><span className="in-margin" /><WorkspaceSwitch /></div>
         <div className="entry">
-          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={kind} /></span>
+          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={review && variant === 'explain' ? 'explain' : kind} /></span>
           <div>
             {review && (
               <div className="segmented" role="group" aria-label="Kind of review">

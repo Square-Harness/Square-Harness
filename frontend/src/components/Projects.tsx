@@ -7,31 +7,60 @@ import { refreshLists, setProjectFilter, useApp } from '../store'
 import { go } from '../router'
 import { ErrorNote, Modal } from './common'
 import { Markdown } from './Markdown'
-import { PlusIcon } from './Icons'
+import { BackIcon, FolderIcon, MoreIcon, NotesIcon, PlusIcon } from './Icons'
+import { plural } from '../format'
 
-export function ProjectList() {
+const SHOWN = 6
+
+/** Projects are folders of conversations. At the top level they are listed above every
+    conversation; opening one shows only its conversations, under a card with its notes. */
+export function ProjectNav() {
   const app = useApp()
   const [editing, setEditing] = useState<Project | 'new' | null>(null)
+  const [all, setAll] = useState(false)
   const selectProject = (id: string) => {
     // The open composer can ask before leaving an unsent message behind.
     if (!window.dispatchEvent(new Event('square-new-project-chat', { cancelable: true }))) return
     setProjectFilter(id); go('free')
   }
-  return <section className="projects" aria-label="Projects">
-    <div className="project-list-heading"><strong>Projects</strong>
-      <button type="button" className="icon-btn" title="New project" aria-label="New project" onClick={() => setEditing('new')}><PlusIcon size={15} /></button>
+  const editor = editing && <ProjectEditor project={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={(project) => {
+    refreshLists(); if (editing === 'new') selectProject(project.id); setEditing(null)
+  }} />
+  const count = (id: string) => app.chats?.filter((chat) => chat.project_id === id).length ?? 0
+  const current = app.projects?.find((project) => project.id === app.projectFilter)
+  if (current) {
+    return <section className="project-current" aria-label={`Project: ${current.name}`}>
+      <button type="button" className="side-back" onClick={() => setProjectFilter('all')}><BackIcon size={15} /> All conversations</button>
+      <div className="project-card">
+        <span className="project-card-mark" aria-hidden="true"><FolderIcon size={17} /></span>
+        <div className="project-card-text">
+          <strong>{current.name}</strong>
+          <span>{plural(count(current.id), 'conversation')}{current.notes.trim() ? '' : ' · no notes yet'}</span>
+        </div>
+        <button type="button" className="btn btn-small btn-block" onClick={() => setEditing(current)}><NotesIcon size={15} /> Project notes</button>
+      </div>
+      {editor}
+    </section>
+  }
+  const projects = app.projects || []
+  const shown = all ? projects : projects.slice(0, SHOWN)
+  return <section className="side-section" aria-label="Projects">
+    <div className="side-label"><span>Projects</span>
+      <button type="button" className="icon-btn side-label-action" title="New project" aria-label="New project" onClick={() => setEditing('new')}><PlusIcon size={15} /></button>
     </div>
-    <button type="button" className={'project-filter' + (app.projectFilter === 'all' ? ' project-selected' : '')}
-      aria-pressed={app.projectFilter === 'all'} onClick={() => setProjectFilter('all')}>All conversations</button>
-    {app.projects?.map((project) => <div key={project.id} className={'project-row' + (app.projectFilter === project.id ? ' project-selected' : '')}>
-      <button type="button" className="project-filter" aria-pressed={app.projectFilter === project.id} onClick={() => selectProject(project.id)}>
-        <span className="folder-glyph" aria-hidden="true" /><span>{project.name}</span>
+    {app.projects && !projects.length && <button type="button" className="project-empty" onClick={() => setEditing('new')}>
+      <FolderIcon size={16} /><span>Group conversations around one problem, with shared notes.</span>
+    </button>}
+    {shown.map((project) => <div key={project.id} className="project-row">
+      <button type="button" className="project-open" title={`Open ${project.name}`} onClick={() => selectProject(project.id)}>
+        <FolderIcon size={16} /><span className="project-name">{project.name}</span><span className="project-count">{count(project.id)}</span>
       </button>
-      <button type="button" className="icon-btn project-edit" title={`Edit ${project.name}`} aria-label={`Edit project notes: ${project.name}`} onClick={() => setEditing(project)}>···</button>
+      <button type="button" className="icon-btn row-more" title="Project notes" aria-label={`Edit project notes: ${project.name}`} onClick={() => setEditing(project)}><MoreIcon size={17} /></button>
     </div>)}
-    {editing && <ProjectEditor project={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={(project) => {
-      refreshLists(); if (editing === 'new') selectProject(project.id); setEditing(null)
-    }} />}
+    {projects.length > SHOWN && <button type="button" className="side-more" aria-expanded={all} onClick={() => setAll(!all)}>
+      {all ? 'Show fewer' : `Show ${projects.length - SHOWN} more`}
+    </button>}
+    {editor}
   </section>
 }
 
@@ -40,11 +69,14 @@ export function ProjectSelector({ value, onChange, disabled = false }: { value: 
   const [editing, setEditing] = useState(false)
   const project = projects?.find((item) => item.id === value)
   return <div className="project-selector">
-    <label><span>Project</span><select aria-label="Conversation project" value={value || ''} disabled={disabled} title={disabled ? 'Wait for current work to finish before moving this conversation.' : undefined} onChange={(event) => onChange(event.target.value || null)}>
-      <option value="">Without a project</option>
-      {projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-    </select></label>
-    {project && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing(true)}>Project notes</button>}
+    <label className="composer-chip" title={disabled ? 'Wait for current work to finish before moving this conversation.' : 'The project this conversation belongs to'}>
+      <FolderIcon size={15} /><span className="composer-chip-label">Project</span>
+      <select aria-label="Conversation project" value={value || ''} disabled={disabled} onChange={(event) => onChange(event.target.value || null)}>
+        <option value="">No project</option>
+        {projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select>
+    </label>
+    {project && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing(true)}><NotesIcon size={14} /> Project notes</button>}
     {editing && project && <ProjectEditor project={project} onClose={() => setEditing(false)} onSaved={() => { refreshLists(); setEditing(false) }} />}
   </div>
 }
@@ -96,19 +128,18 @@ function ProjectEditor({ project, onClose, onSaved }: { project: Project | null;
     } catch (reason) { setError((reason as Error).message) }
     finally { setSaving(false) }
   }
-  return <Modal title={baseline ? 'Project notes' : 'New project'} onClose={saving ? undefined : close} wide>
+  return <Modal title={baseline ? 'Project notes' : 'New project'} icon={baseline ? <NotesIcon /> : <FolderIcon />} onClose={saving ? undefined : close} wide>
     <form className="project-editor" onSubmit={(event) => { event.preventDefault(); void save() }}>
       <label className="field"><span className="field-label">Project name</span>
         <input className="text-input" autoComplete="off" maxLength={100} value={draft.name} placeholder="For example, Heat equation observability" onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
       </label>
-      <p className="muted small">Keep the goal, notation, established facts and open steps here. These notes give context to new turns; they do not change work already running.</p>
-      <div className="project-editor-toolbar"><strong className="field-label">Project notes</strong><span className="muted small">{draft.notes.length.toLocaleString()} / 8,000 characters{dirty ? ' · Unsaved changes' : ''}</span></div>
       <div className="project-notes-columns">
-        <label className="project-notes-pane"><span className="field-label">Instructions and context</span><textarea className="project-notes" aria-label="Project notes" rows={18} maxLength={8000} value={draft.notes}
+        <label className="project-notes-pane"><span className="project-notes-label"><span className="field-label">Notes</span><span className="muted small">{draft.notes.length.toLocaleString()} / 8,000 characters{dirty ? ' · unsaved' : ''}</span></span><textarea className="project-notes" aria-label="Project notes" rows={18} maxLength={8000} value={draft.notes}
           placeholder={'# Goal\nWhat are you trying to prove or understand?\n\n## Definitions and notation\n\n## Established facts\n\n## Open steps and possible approaches\nLabel assumptions and conjectures clearly.\n\n## References and files'}
           onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
-        <div className="project-notes-pane"><span className="field-label">Live preview</span><div className="project-notes-preview" aria-label="Project notes preview">{draft.notes ? <Markdown>{draft.notes}</Markdown> : <p className="muted">Your project notes will appear here as you write.</p>}</div></div>
+        <div className="project-notes-pane"><span className="project-notes-label"><span className="field-label">Preview</span></span><div className="project-notes-preview" aria-label="Project notes preview">{draft.notes ? <Markdown>{draft.notes}</Markdown> : <p className="muted">Your project notes will appear here as you write.</p>}</div></div>
       </div>
+      <p className="muted small">Keep the goal, notation, established facts and open steps here, in Markdown. New turns in this project read these notes; work already running is not changed.</p>
       <ErrorNote>{error}</ErrorNote>
       {stale && <div className="warning-note"><p>Reloading the latest version keeps a recoverable copy of your current draft.</p>
         <button type="button" className="btn btn-small" disabled={saving} onClick={() => void loadLatest()}>Load latest version</button>

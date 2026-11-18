@@ -5,8 +5,8 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, type FolderListing, type ReadSettings } from '../api'
 import { workspaceBusy } from '../concurrency'
 import { refreshStatus, useApp } from '../store'
-import { ErrorNote, Loading, Modal } from './common'
-import { FileIcon } from './Icons'
+import { ErrorNote, Loading, Modal, Toggle } from './common'
+import { ChevronIcon, FileIcon, FolderIcon } from './Icons'
 
 function counts(files: { tex: number; pdf: number; py: number }) {
   const parts = [files.tex && `${files.tex} TeX`, files.pdf && `${files.pdf} PDF`, files.py && `${files.py} Python`].filter(Boolean)
@@ -50,7 +50,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const crumbs = path ? path.split('/') : []
   const isCurrent = listing && listing.path === (app.status?.workspace_path || '')
   return (
-    <Modal title="Open a folder" onClose={onClose} wide>
+    <Modal title="Open a folder" icon={<FolderIcon />} onClose={onClose} wide>
       <nav className="crumbs" aria-label="Folder path">
         <button type="button" className="crumb" onClick={() => setPath('')}>{rootName}</button>
         {crumbs.map((part, index) => (
@@ -75,17 +75,18 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
             {listing.folders.map((folder) => (
               <li key={folder.path}>
                 <button type="button" className="folder-row" onClick={() => setPath(folder.path)}>
-                  <span className="folder-glyph" aria-hidden="true" />
+                  <FolderIcon size={17} />
                   <span className="folder-name">{folder.name}</span>
-                  <span className="folder-count">{counts(folder.files)}</span>
                   {folder.jobs && <span className="pill">Saved work</span>}
+                  <span className="folder-count">{counts(folder.files)}</span>
+                  <ChevronIcon size={15} />
                 </button>
               </li>
             ))}
             {!listing.folders.length && <li className="muted small folder-empty">No subfolders here.</li>}
           </ul>
           <form className="folder-new" onSubmit={create}>
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="New folder name" aria-label="New folder name" />
+            <input className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="New folder name" aria-label="New folder name" />
             <button type="submit" className="btn" disabled={!name.trim()}>Create folder here</button>
           </form>
           {listing.recent.length > 0 && (
@@ -124,20 +125,16 @@ export function FileAccess({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <Modal title="Files the model may read" onClose={onClose}>
-      <p>In this folder, the model can list, search and read these kinds of files by itself. Files you pin or drop into a job are always available to that job.</p>
-      <div className="access-list">
+    <Modal title="File access" icon={<FileIcon />} onClose={onClose}>
+      <p className="modal-lede">The kinds of files the model may list, search and read by itself in this folder. Files you attach or drop into a job are always available to that job.</p>
+      <div className="option-list">
         {GROUPS.map((group) => (
-          <label key={group.key} className="access-item">
-            <input type="checkbox" checked={status.read[group.key]} onChange={(event) => toggle(group.key, event.target.checked)} />
-            <FileIcon size={16} />
-            <span className="access-label">{group.label}</span>
-            <span className="muted small">{group.hint}</span>
-          </label>
+          <Toggle key={group.key} label={group.label} hint={group.hint} checked={status.read[group.key]} onChange={(value) => { void toggle(group.key, value) }} />
         ))}
       </div>
       <ErrorNote>{error}</ErrorNote>
-      <p className="muted small">Saved for this folder and applied to new work. Nothing leaves your computer when the model reads a file.</p>
+      <p className="muted small">Saved for this folder as you change it, and applied to new work. Nothing leaves your computer when the model reads a file.</p>
+      <div className="modal-actions"><button type="button" className="btn btn-primary" onClick={onClose}>Done</button></div>
     </Modal>
   )
 }

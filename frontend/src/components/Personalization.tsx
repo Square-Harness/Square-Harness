@@ -4,6 +4,7 @@
 import { useState, type FormEvent } from 'react'
 import { api, type Personalization } from '../api'
 import { ErrorNote, Loading, Modal, useLoad } from './common'
+import { SlidersIcon } from './Icons'
 
 export function PersonalizationSettings({ onClose }: { onClose: () => void }) {
   const { data, error } = useLoad(api.personalization, [])
@@ -25,21 +26,24 @@ export function PersonalizationSettings({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <Modal title="Personalization" onClose={saving ? undefined : onClose} wide>
+    <Modal title="Personalization" icon={<SlidersIcon />} onClose={saving ? undefined : onClose}>
+      <p className="modal-lede">Preferences that every new chat message follows, in all your folders. They add to the request and to any project notes.</p>
       <ErrorNote>{error || saveError}</ErrorNote>
       {!value && !error && <Loading />}
       {value && (
-        <form className="personalization-form" onSubmit={save}>
-          <label>
+        <form onSubmit={save}>
+          <label className="field">
             <span className="field-label">Standing instructions</span>
-            <span className="muted">Preferences for future chat messages across your folders.</span>
-            <textarea rows={5} maxLength={4000} disabled={saving} value={value.instructions}
+            <span className="field-hint">How you like answers: language, level of detail, conventions, what to avoid.</span>
+            <textarea rows={6} maxLength={4000} disabled={saving} value={value.instructions}
+              placeholder={'For example: answer in French; state every hypothesis; prefer short proofs with the key idea first.'}
               onChange={(event) => setDraft({ ...value, instructions: event.target.value })} />
           </label>
-          <label>
+          <label className="field">
             <span className="field-label">LaTeX macros</span>
-            <span className="muted">Use declarations like <code>{String.raw`\newcommand{\RR}{\mathbb{R}}`}</code> for chat and its math display.</span>
-            <textarea rows={5} maxLength={4000} disabled={saving} spellCheck={false} value={value.macros}
+            <span className="field-hint">Declarations such as <code>{String.raw`\newcommand{\RR}{\mathbb{R}}`}</code>, one per line. The model may use them and the chat displays them.</span>
+            <textarea className="mono-input" rows={6} maxLength={4000} disabled={saving} spellCheck={false} value={value.macros}
+              placeholder={String.raw`\newcommand{\RR}{\mathbb{R}}` + '\n' + String.raw`\DeclareMathOperator{\supp}{supp}`}
               onChange={(event) => setDraft({ ...value, macros: event.target.value })} />
           </label>
           <div className="modal-actions">

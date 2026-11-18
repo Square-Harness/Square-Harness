@@ -7,7 +7,7 @@ import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, ErrorNote, Loading, Toggle, WorkProgressNote, useLoad } from '../components/common'
-import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
+import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
@@ -62,7 +62,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
   detailed_review: { noun: 'a detailed review', label: 'Detailed Review', cover: 'referee' },
   quick_review: { noun: 'a quick review', label: 'Quick Review', cover: 'referee' },
-  explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
+  explain: { noun: 'an explanation', label: 'Explanation', cover: 'explain' },
   writeup: { noun: 'a write-up', label: 'Write-Up', cover: 'writeup' },
   summarize: { noun: 'a summary', label: 'Summary', cover: 'writeup' },
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
@@ -244,7 +244,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
-          {!id && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
+          {!id && <Intro mode={mode} project={app.projects?.find((item) => item.id === currentProject)?.name} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
@@ -330,7 +330,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   )
 }
 
-function Intro({ mode, onPick, onSkill }: { mode: ChatMode; onPick: (text: string) => void; onSkill: (mode: RouteMode) => void }) {
+function Intro({ mode, project, onPick, onSkill }: { mode: ChatMode; project?: string; onPick: (text: string) => void; onSkill: (mode: RouteMode) => void }) {
   const intro = INTRO[mode]
   return (
     <div className="entry intro">
@@ -338,6 +338,7 @@ function Intro({ mode, onPick, onSkill }: { mode: ChatMode; onPick: (text: strin
       <div>
         <h1 className="page-title">{intro.title}</h1>
         <p className="lede">{intro.text}</p>
+        {project && <p className="intro-project"><FolderIcon size={15} /><span>This conversation will belong to <strong>{project}</strong> and read its notes.</span></p>}
         {mode === 'free' && <>
           <p className="muted intro-skill-hint">Choose a skill below, or type <code>@</code> in your message, to request one explicitly.</p>
           <div className="intro-skills" aria-label="Available skills">{MODE_CALLS.map((skill) => <span key={skill.mode} className="intro-skill-option">

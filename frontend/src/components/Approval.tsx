@@ -8,6 +8,7 @@ import { useApp } from '../store'
 import { href, type Mode } from '../router'
 import { activeTasks } from '../concurrency'
 import { ErrorNote, Modal } from './common'
+import { CheckIcon, FlaskIcon, PencilIcon } from './Icons'
 
 export function Diff({ text }: { text: string }) {
   return (
@@ -50,7 +51,7 @@ export function ApprovalDialog() {
   }
   const title = approval.kind === 'write' ? 'Approve this file change?' : approval.kind === 'python' ? 'Run this Python code?' : 'Confirm this action?'
   return (
-    <Modal key={approval.id} title={title} onClose={busy ? undefined : () => { void decide(false) }} wide>
+    <Modal key={approval.id} title={title} icon={approval.kind === 'python' ? <FlaskIcon /> : approval.kind === 'write' ? <PencilIcon /> : <CheckIcon />} tone="caution" onClose={busy ? undefined : () => { void decide(false) }} wide>
       <p>Requested by {target ? <a href={href(mode, target)}>{titleText}</a> : titleText}.</p>
       {approval.kind === 'write' && (
         <>

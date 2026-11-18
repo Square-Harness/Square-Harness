@@ -184,9 +184,14 @@ No effort or Proof budgets are increased by adding images.
 
 ## Projects, conversation titles and feedback
 
-Use **New project** in the sidebar to group conversations around one research
-problem. Open **Project notes** to write Markdown in the editor, with a live
-preview beside it (below it on a narrow screen). The placeholder shows `#` and
+Use **New project** (the `+` beside **Projects** in the sidebar) to group
+conversations around one research problem. The sidebar lists your projects
+above all conversations, each with its number of conversations; a conversation
+that belongs to a project shows the project's name. Opening a project shows
+only its conversations, under a card with the project's name and its
+**Project notes**; **All conversations** leads back. Open **Project notes** to
+write Markdown in the editor, with a live preview beside it (below it on a
+narrow screen). The placeholder shows `#` and
 `##` headings. A useful notebook states the goal, definitions,
 notation, assumptions, established results with their sources, conjectures and
 open questions. Saving writes a `PROJECT.md` in the project's file folder.
@@ -201,8 +206,8 @@ automatically from model answers. Only that project's note is added; earlier
 conversations and all project files are not silently imported. You can move an
 idle conversation to a project using the **Project** selector above its message
 box, including conversations that have no project yet. The conversation menu
-also offers this action. **All conversations** includes unassigned chats.
-Selecting a project in the sidebar opens a new conversation in that project;
+also offers this action. The top-level list includes unassigned chats.
+Opening a project in the sidebar also opens a new conversation in that project;
 an unsent draft is not discarded without confirmation. Dropped or pasted files
 are saved in that project's folder. An upload already started stays with its
 original destination if you navigate elsewhere.
@@ -370,17 +375,17 @@ one with a message.
   is empty; type a new message instead to set the paused turn aside. "Back to
   conversation" returns to the chat that started the job. The standalone forms (New proof, New reading list, New review, New
   write-up) start a job without a conversation.
-- **The sidebar footer** shows:
-  - the model and its status, the theme, and phone pairing;
-  - which files the model may open by itself in this folder ("Reads all file
-    types", untick a type to hide it);
+- **The sidebar footer** shows the model and its status, the theme and phone
+  pairing, then four buttons:
+  - **Parallel work** shows running and queued jobs, with controls to pause or
+    cancel them. Set how many jobs and model requests may run at once there
+    (1–8 each; 2 and 2 by default). The button shows the count while work is
+    running, and an animated square marks active conversations in the sidebar.
+  - **File access** sets which kinds of files the model may open by itself in
+    this folder (switch a type off to hide it).
   - **Personalization** saves standing chat instructions and LaTeX commands
     across folders under the same GUI root. New chat turns apply these
     preferences alongside the current request and any project notes.
-  - **Parallel work** shows running and queued jobs, with controls to pause or
-    cancel them. Set how many jobs and model requests may run at once there
-    (1–8 each; 2 and 2 by default). An animated square marks active conversations
-    in the sidebar.
   - **About** explains the skills and which ones the Assistant can call itself.
 - **On a phone**: launch with `--gui-host 0.0.0.0` and open the printed address
   once; the phone stays paired. This is plain HTTP on your network: use it only

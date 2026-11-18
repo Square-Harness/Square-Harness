@@ -5,9 +5,9 @@ import type { RouteMode } from './api'
 import type { Cover } from './components/Glyph'
 import type { EffortLevel } from './effort'
 
-/** The cover a mode call is drawn with: the review kinds are pages of the Review notebook. */
+/** The cover a mode call is drawn with: the review kinds share the Review cover; Explain has its own. */
 export const coverOf = (mode: RouteMode): Cover =>
-  mode === 'quick_review' || mode === 'detailed_review' || mode === 'explain' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
+  mode === 'quick_review' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
   { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { api, type Budget, type WorkProgress, type WorkspaceFile } from '../api'
 import { meterDisplay } from '../usage'
@@ -104,6 +104,36 @@ export function NumberField({ label, value, onChange, min, max, step = 1, hint, 
   )
 }
 
+/** A small whole number chosen on a row of cells, like squares filled on grid paper. */
+export function CellScale({ label, value, onChange, min = 1, max, hint }: {
+  label: string; value: number; onChange: (value: number) => void; min?: number; max: number; hint?: string
+}) {
+  const id = useId()
+  const cells = Array.from({ length: max - min + 1 }, (_, index) => min + index)
+  const row = useRef<HTMLDivElement>(null)
+  const keys = (event: ReactKeyboardEvent) => {
+    const step = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0
+    if (!step) return
+    event.preventDefault()
+    const next = Math.min(max, Math.max(min, value + step))
+    onChange(next)
+    row.current?.querySelectorAll<HTMLButtonElement>('button')[next - min]?.focus()
+  }
+  return (
+    <div className="field">
+      <span className="field-label" id={id}>{label}</span>
+      <div className="cells" role="radiogroup" aria-labelledby={id} ref={row} onKeyDown={keys}>
+        {cells.map((cell) => (
+          <button key={cell} type="button" role="radio" aria-checked={cell === value} tabIndex={cell === value ? 0 : -1}
+            className={'cell' + (cell <= value ? ' cell-on' : '') + (cell === value ? ' cell-current' : '')}
+            onClick={() => onChange(cell)}>{cell}</button>
+        ))}
+      </div>
+      {hint && <span className="field-hint">{hint}</span>}
+    </div>
+  )
+}
+
 export function OptionalNumberField({ label, value, onChange, step = 1000, hint }: {
   label: string; value: number | null; onChange: (value: number | null) => void; step?: number; hint?: string
 }) {
@@ -199,7 +229,12 @@ export function FilePicker({ selected, onChange, allowPdf = false, allowImages =
 let openModalCount = 0
 let backgroundWasInert = false
 
-export function Modal({ title, onClose, children, wide }: { title: ReactNode; onClose?: () => void; children: ReactNode; wide?: boolean }) {
+export type ModalTone = 'ink' | 'danger' | 'caution'
+
+/** A dialog is a small notebook page: its mark in the margin, the red rule, and actions on the bottom edge. */
+export function Modal({ title, onClose, children, wide, icon, tone = 'ink' }: {
+  title: ReactNode; onClose?: () => void; children: ReactNode; wide?: boolean; icon?: ReactNode; tone?: ModalTone
+}) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef(onClose)
@@ -212,7 +247,7 @@ export function Modal({ title, onClose, children, wide }: { title: ReactNode; on
     if (openModalCount++ === 0) backgroundWasInert = !!root?.inert
     if (root) root.inert = true
     const focusable = () => [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
-    ;(focusable()[0] || dialog).focus()
+    ;(focusable().find((element) => !element.classList.contains('modal-close')) || focusable()[0] || dialog).focus()
     const key = (event: KeyboardEvent) => {
       if ([...document.querySelectorAll('[role="dialog"]')].at(-1) !== dialog) return
       if (event.key === 'Escape' && closeRef.current) { event.preventDefault(); closeRef.current() }
@@ -234,11 +269,12 @@ export function Modal({ title, onClose, children, wide }: { title: ReactNode; on
   // A portal: a dialog opened from the mobile drawer must not inherit its transform.
   return createPortal(
     <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose?.()}>
-      <div ref={dialogRef} tabIndex={-1} className={'modal' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div ref={dialogRef} tabIndex={-1} className={'modal paper' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="modal-head">
+          <span className={'modal-mark modal-mark-' + tone} aria-hidden="true">{icon || <span className="modal-mark-square" />}</span>
           <h2 id={titleId}>{title}</h2>
           {onClose && (
-            <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><CloseIcon /></button>
+            <button type="button" className="icon-btn modal-close" aria-label="Close" onClick={onClose}><CloseIcon /></button>
           )}
         </header>
         <div className="modal-body">{children}</div>

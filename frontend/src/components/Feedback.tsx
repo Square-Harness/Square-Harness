@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { api, ApiError, type FeedbackCategory, type FeedbackConfig, type FeedbackImage, type FeedbackPreview, type FeedbackResult } from '../api'
 import { bytes } from '../format'
 import { ErrorNote, Modal } from './common'
-import { CloseIcon, PlusIcon } from './Icons'
+import { CloseIcon, CommentIcon, PlusIcon } from './Icons'
 import { captureScreenshot, ScreenshotCrop } from './ScreenshotCapture'
 
 type Image = FeedbackImage & { preview: string }
@@ -28,8 +28,8 @@ export function FeedbackButton({ chatId, chatTitle }: { chatId: string | null; c
     return () => window.removeEventListener('square-feedback', open)
   }, [chatId, chatTitle])
   return <>
-    <button type="button" className="workspace-access feedback-open" onClick={() => setContext((existing) => existing ?? { id: chatId, title: chatTitle })}>
-      <span aria-hidden="true">◇</span> Feedback
+    <button type="button" className="feedback-open" onClick={() => setContext((existing) => existing ?? { id: chatId, title: chatTitle })}>
+      <CommentIcon size={15} /> Feedback
     </button>
     {context && <FeedbackDialog chatId={context.id} chatTitle={context.title} onClose={() => setContext(null)} />}
   </>
@@ -126,7 +126,7 @@ function FeedbackDialog({ chatId, chatTitle, onClose }: { chatId: string | null;
       setImages((existing) => [...existing, image]); setScreenshot(null)
     }} />
   if (busy === 'capture') return null
-  return <Modal title="Feedback" onClose={busy ? undefined : close} wide>
+  return <Modal title="Feedback" icon={<CommentIcon />} onClose={busy ? undefined : close} wide>
     <div className="feedback-dialog" data-feedback-dialog onDragEnter={stopDrop} onDragLeave={stopDrop} onDragOver={stopDrop}
       onDrop={(event) => { stopDrop(event); void add([...event.dataTransfer.files]) }}
       onPaste={(event) => {

@@ -10,13 +10,13 @@ import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
 import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus, useApp, type AppState, type Theme } from '../store'
-import { ProjectList } from './Projects'
-import { ErrorNote, Meter, Modal, NumberField } from './common'
+import { ProjectNav } from './Projects'
+import { CellScale, ErrorNote, Meter, Modal } from './common'
 import { PersonalizationSettings } from './Personalization'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SlidersIcon, StackIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
 
@@ -76,7 +76,7 @@ function ReviewTally({ reviews }: { reviews: Partial<Record<string, number>> }) 
 }
 
 function HistoryMark({ mode }: { mode: Mode }) {
-  if (mode === 'free') return null
+  if (mode === 'free') return <BrandMark size={30} />
   return <span className={`history-mark mode-${mode}`} aria-hidden="true"><Glyph mode={mode} /></span>
 }
 
@@ -95,13 +95,13 @@ export function Sidebar({ route }: { route: Route }) {
             </button>
           </div>
           <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
-          <a className="btn btn-quiet btn-block" href={href('style')} aria-current={route.mode === 'style' && !route.id ? 'page' : undefined}>
+          <a className="btn btn-block side-style" href={href('style')} aria-current={route.mode === 'style' && !route.id ? 'page' : undefined}>
             <span className="history-mark mode-style" aria-hidden="true"><Glyph mode="style" /></span> {route.mode === 'style' ? MODES.style.newLabel : 'Learn my writing style'}
           </a>
         </header>
         <div className="side-list">
           <ErrorNote>{app.listError}</ErrorNote>
-          {info.kind === 'free' && <ProjectList />}
+          {info.kind === 'free' && <ProjectNav />}
           <SideList route={route} app={app} />
         </div>
         <WorkspacePanel about={route.mode === 'about'} />
@@ -191,16 +191,19 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
   }, [app.chats, selected])
   // Every conversation lives here, including critiques and explorations from earlier versions.
   if (!app.chats) return <p className="side-empty muted">Loading…</p>
-  const chats = app.chats.filter((chat) => app.projectFilter === 'all' || chat.project_id === app.projectFilter)
+  const project = app.projects?.find((item) => item.id === app.projectFilter)
+  const chats = app.chats.filter((chat) => !project || chat.project_id === project.id)
+  const projectName = (id?: string | null) => (!project && id && app.projects?.find((item) => item.id === id)?.name) || ''
   return (
     <>
-      {!chats.length && <p className="side-empty muted">{app.projectFilter === 'all' ? MODES.free.empty : 'No conversations here yet.'}</p>}
+      <div className="side-label"><span>{project ? 'In this project' : 'Conversations'}</span></div>
+      {!chats.length && <p className="side-empty muted">{project ? 'No conversations in this project yet. Start one with New conversation.' : MODES.free.empty}</p>}
       {chats.map((chat) => {
         const work = chatWork(app.snapshot, chat.id)
         return (
           <MathMacrosProvider key={chat.id} definitions={chat.math_macros}>
           <div className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
-            <a href={href(chat.kind, chat.id)} className="side-item side-item-chat" aria-current={route.id === chat.id ? 'page' : undefined}>
+            <a href={href(chat.kind, chat.id)} className="side-item" aria-current={route.id === chat.id ? 'page' : undefined}>
               {work.active && <Square variant="running" size={12} label="Active conversation" />}
               {work.queued && <Square variant="ready" size={12} label="Queued conversation" />}
               <span className="side-body">
@@ -208,14 +211,15 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
                 <span className="side-meta">
                   {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
                   {work.queued && <span>Queued</span>}
+                  {projectName(chat.project_id) && <span className="side-project" title={`Project: ${projectName(chat.project_id)}`}><FolderIcon size={12} /><span>{projectName(chat.project_id)}</span></span>}
                   <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
                   <span className="side-time">{ago(chat.updated_at)}</span>
                 </span>
               </span>
             </a>
-            <button type="button" className="icon-btn side-chat-actions" aria-label={`Conversation options: ${chat.title}`} title="Rename, move or delete conversation"
+            <button type="button" className="icon-btn row-more" aria-label={`Conversation options: ${chat.title}`} title="Rename, move or delete"
               onClick={(event) => { opener.current = event.currentTarget; setActions(chat) }}>
-              <span aria-hidden="true">···</span>
+              <MoreIcon size={17} />
             </button>
           </div>
           </MathMacrosProvider>
@@ -242,17 +246,20 @@ function ChatActionsDialog({ chat, app, onClose, onDelete }: { chat: ChatListIte
       refreshLists(); onClose()
     } catch (reason) { setError((reason as Error).message); setSaving(false); refreshLists() }
   }
-  return <Modal title="Conversation options" onClose={saving ? undefined : onClose}>
+  return <Modal title="Conversation options" icon={<PencilIcon />} onClose={saving ? undefined : onClose}>
     <form onSubmit={(event) => { event.preventDefault(); void save() }}>
-      <label className="field"><span className="field-label">Conversation title</span><input className="text-input" maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+      <label className="field"><span className="field-label">Title</span><input className="text-input" maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
       <label className="field"><span className="field-label">Project</span><select value={project} disabled={blocked || saving} onChange={(event) => setProject(event.target.value)}>
-        <option value="">Without a project</option>{app.projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </select></label>
-      <p className="muted small">{blocked ? 'Wait for current work to finish before moving this conversation. You can still rename it.' : 'Moving changes the project notes used by new turns. Resuming paused work keeps its saved context.'}</p>
+        <option value="">No project</option>{app.projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select>
+        <span className="field-hint">{blocked ? 'Wait for current work to finish before moving or deleting this conversation. You can still rename it.' : 'New turns use the notes of the project the conversation is in. Resuming paused work keeps its saved context.'}</span>
+      </label>
       <ErrorNote>{error}</ErrorNote>
-      <div className="modal-actions"><button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving || !title.trim()}>{saving ? 'Saving…' : 'Save changes'}</button></div>
-      <div className="chat-delete-option"><button type="button" className="btn btn-quiet btn-delete" disabled={blocked || saving} onClick={onDelete}><TrashIcon size={15} /> Delete conversation…</button>
-        {blocked && <p className="muted small">Pause this conversation or cancel its queued work before deleting it.</p>}</div>
+      <div className="modal-actions">
+        <button type="button" className="btn btn-quiet btn-delete action-start" disabled={blocked || saving} onClick={onDelete}><TrashIcon size={15} /> Delete…</button>
+        <button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button>
+        <button type="submit" className="btn btn-primary" disabled={saving || !title.trim()}>{saving ? 'Saving…' : 'Save changes'}</button>
+      </div>
     </form>
   </Modal>
 }
@@ -294,7 +301,7 @@ function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; 
     catch (reason) { setError((reason as Error).message); setDeleting(false) }
   }
   return (
-    <Modal title="Delete conversation?" onClose={deleting ? undefined : onClose}>
+    <Modal title="Delete conversation?" icon={<TrashIcon />} tone="danger" onClose={deleting ? undefined : onClose}>
       <div ref={body}>
         <p className="delete-chat-title"><strong><Inline>{chat.title}</Inline></strong></p>
         <p>The conversation and its messages will be permanently deleted. Saved proofs, reports and files will remain.</p>
@@ -320,7 +327,7 @@ export function WorkspaceSwitch() {
   return (
     <div className="workspace-switch">
       <button type="button" className="workspace-open" title={status.workspace + ' (open another folder)'} onClick={() => setBrowsing(true)}>
-        <span className="folder-glyph" aria-hidden="true" />{folder}
+        <FolderIcon size={15} /><span>{folder}</span>
       </button>
       {!status.online && <span className="pill" title="No external requests; local and cached sources only">Offline</span>}
       {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
@@ -384,7 +391,7 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
       <summary className="account-button" title={account.email} aria-label={`Account for ${account.email}`}>
         <span className="account-avatar" aria-hidden="true">{account.email.slice(0, 1).toUpperCase()}</span>
         <span className="account-email">{account.email}</span>
-        <span className="account-more" aria-hidden="true">···</span>
+        <span className="account-more" aria-hidden="true"><MoreIcon size={17} /></span>
       </summary>
       <div className="account-popover">
         <div className="account-heading"><span className="muted small">Signed in</span><strong>{account.email}</strong></div>
@@ -440,19 +447,25 @@ function WorkspacePanel({ about }: { about: boolean }) {
   if (!status) return null
   const allowance = status.tester_allowance
   const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
-  const readLabel = readable.length === 4 ? 'Reads all file types' : readable.length ? 'Reads ' + readable.join(', ') : 'Reads no files by itself'
+  const readValue = readable.length === 4 ? 'all types' : readable.length ? readable.join(', ') : 'none'
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
   const ollama = status.backend === 'ollama'
+  const ready = reachable && installed
   const modelNote = !reachable ? (ollama ? 'Ollama is not reachable' : 'The model server is not reachable')
     : !installed ? (ollama ? 'Model is not installed' : 'Model is not served') : 'Model ready'
   const modelHint = !reachable ? (ollama ? 'Start ollama serve, then reload.' : 'Start the model server, then reload.')
     : ollama ? `Run ollama pull ${status.model}.` : `Serve ${status.model}, or restart with --model.`
+  const active = activeTasks(app.snapshot).length
+  const queued = app.snapshot.queue.length
   return (
     <footer className="workspace">
-      <div className="workspace-row">
-        <span className={'model-dot' + (reachable && installed ? ' model-ok' : ' model-bad')} aria-hidden="true" />
-        <span className="workspace-model" title={`${status.model} at ${status.host}: ${modelNote}`}>{status.model}</span>
+      <div className="model-card" title={`${status.model} at ${status.host}: ${modelNote}`}>
+        <span className={'model-dot' + (ready ? ' model-ok' : ' model-bad')} aria-hidden="true" />
+        <span className="model-text">
+          <span className="model-name">{status.model.split('/').pop()}</span>
+          <span className={'model-state' + (ready ? '' : ' model-state-bad')}>{modelNote}</span>
+        </span>
         <ThemeButton />
         {status.lan && (
           <button type="button" className="icon-btn" title="Connect a phone" aria-label="Connect a phone" onClick={() => setPairing(true)}>
@@ -460,23 +473,33 @@ function WorkspacePanel({ about }: { about: boolean }) {
           </button>
         )}
       </div>
-      <button type="button" className="workspace-access" onClick={() => setAccess(true)}>
-        <FileIcon size={13} /> {readLabel}
-      </button>
-      <button type="button" className="workspace-access" onClick={() => setPersonalization(true)}>Personalization</button>
-      <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
-        Parallel work · {activeTasks(app.snapshot).length}/{limits.chats} active
-        {app.snapshot.queue.length > 0 && ` · ${app.snapshot.queue.length} queued`}
-      </button>
-      <a className="workspace-access" href={href('about')} aria-current={about ? 'page' : undefined}>About</a>
+      {!ready && <p className="workspace-warning">{modelHint}</p>}
+      <nav className="side-menu" aria-label="Settings and information">
+        <button type="button" className="side-menu-item" title={`See running and queued work, and set how much may run at once. Now: ${active} of ${limits.chats} active${queued ? `, ${queued} queued` : ''}.`} onClick={() => setParallel(true)}>
+          {active ? <Square variant="running" size={16} /> : <StackIcon size={16} />}
+          <span className="side-menu-label">Parallel work</span>
+          {(active > 0 || queued > 0) && <span className="side-menu-value">{active}/{limits.chats}{queued > 0 && ` +${queued}`}</span>}
+        </button>
+        <button type="button" className="side-menu-item" title={`Choose which kinds of files the model may read by itself in this folder. Now: ${readValue}.`} onClick={() => setAccess(true)}>
+          <FileIcon size={16} />
+          <span className="side-menu-label">File access</span>
+        </button>
+        <button type="button" className="side-menu-item" title="Standing instructions and LaTeX macros for every conversation" onClick={() => setPersonalization(true)}>
+          <SlidersIcon size={16} />
+          <span className="side-menu-label">Personalization</span>
+        </button>
+        <a className="side-menu-item" href={href('about')} aria-current={about ? 'page' : undefined} title="What Square Harness does and the skills you can call">
+          <InfoIcon size={16} />
+          <span className="side-menu-label">About</span>
+        </a>
+      </nav>
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {personalization && <PersonalizationSettings onClose={() => setPersonalization(false)} />}
-      {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}
       {pairing && (
-        <Modal title="Connect a phone" onClose={() => setPairing(false)}>
+        <Modal title="Connect a phone" icon={<PhoneIcon />} onClose={() => setPairing(false)}>
           <p>On a phone connected to the same network, open one of these addresses. It contains this workspace's access token, so share it only with your own devices.</p>
           {(status.pair_urls || []).map((url) => <p key={url}><code className="pair-url">{url}</code></p>)}
           <p className="muted">After the first visit the phone stays paired. On iPhone, use Share, then Add to Home Screen; on Android, use the browser menu's Install or Add to Home screen.</p>
@@ -501,11 +524,12 @@ function WorkRow({ task, app, queued, onOpen }: { task: TaskSummary; app: AppSta
       setPending(false)
     }
   }
+  const mode = taskMode(task, app)
   return (
     <li className="work-row">
-      <Square variant={queued ? 'ready' : 'running'} size={16} />
+      {mode ? <span className={`route-cover mode-${mode}`} aria-hidden="true"><Glyph mode={mode} /></span> : <Square variant={queued ? 'ready' : 'running'} size={16} />}
       <div className="work-name">
-        <strong>{task.label}</strong>
+        <span className="work-kind">{!queued && <Square variant="running" size={11} />}{task.label}{queued && ' · queued'}</span>
         {task.target
           ? <a href={taskHref(task, app)} onClick={onOpen}><Inline limit={90}>{task.title}</Inline></a>
           : <span><Inline limit={90}>{task.title}</Inline></span>}
@@ -513,7 +537,7 @@ function WorkRow({ task, app, queued, onOpen }: { task: TaskSummary; app: AppSta
       </div>
       <button type="button" className="btn btn-small" disabled={pending || pausing}
         aria-label={`${label}: ${task.label} ${task.title}`} onClick={() => void act()}>
-        {!queued && <PauseIcon size={15} />} {label}
+        {!queued && <PauseIcon size={15} />} {queued ? 'Cancel' : label}
       </button>
     </li>
   )
@@ -537,25 +561,28 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
     catch (reason) { setError((reason as Error).message); setSaving(false) }
   }
   return (
-    <Modal title="Parallel work" onClose={saving ? undefined : onClose}>
-      <p>Each conversation or job keeps its full token budget. Work beyond the active limit waits in the queue.</p>
-      {active.length > 0 && <section aria-labelledby="parallel-active">
-        <h3 className="work-heading" id="parallel-active">Active work</h3>
-        <ul className="work-list" role="list">
+    <Modal title="Parallel work" icon={<StackIcon />} onClose={saving ? undefined : onClose}>
+      <p className="modal-lede">Several conversations and jobs can run at once. Each keeps its full token budget; work beyond the limit waits in the queue.</p>
+      <section aria-labelledby="parallel-active">
+        <h3 className="work-heading" id="parallel-active">Running now <span className="aside-count">{active.length} of {limits.chats}</span></h3>
+        {active.length > 0 ? <ul className="work-list" role="list">
           {active.map(({ task }) => <WorkRow key={task.id} task={task} app={app} queued={false} onOpen={onClose} />)}
-        </ul>
-      </section>}
+        </ul> : <p className="work-empty">Nothing is running.</p>}
+      </section>
       {queue.length > 0 && <section aria-labelledby="parallel-queue">
-        <h3 className="work-heading" id="parallel-queue">Queue</h3>
+        <h3 className="work-heading" id="parallel-queue">Waiting in the queue <span className="aside-count">{queue.length}</span></h3>
         <ul className="work-list" role="list">
           {queue.map((task) => <WorkRow key={task.id} task={task} app={app} queued onOpen={onClose} />)}
         </ul>
       </section>}
-      <NumberField label="Active conversations and jobs" value={chats} onChange={setChats} min={1} max={8}
-        hint="One turn at a time in each conversation." />
-      <NumberField label="Simultaneous model requests" value={requests} onChange={setRequests} min={1} max={8}
-        hint="Includes requests from all active conversations and their workers." />
-      <p className="muted small">Active requests share the model's throughput. Requests can progress together, but their speeds depend on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>
+      <h3 className="work-heading">Limits</h3>
+      <div className="field-grid">
+        <CellScale label="Conversations and jobs at once" value={chats} onChange={setChats} min={1} max={8}
+          hint="One turn at a time in each conversation." />
+        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={8}
+          hint="Shared by all active conversations and their workers." />
+      </div>
+      <p className="muted small">Active requests share the model's throughput, so their speed depends on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         <button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button>

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Redesign the interface for consistency. The sidebar lists projects above all
+  conversations and opens a project as its own view, with its notes and a way
+  back; conversations show their project. The footer shows the model's status
+  and four labelled buttons (Parallel work, File access, Personalization,
+  About). Every dialog is a small notebook page with its mark in the margin and
+  its actions on the bottom edge; limits in Parallel work are chosen on a row
+  of cells. Explain has its own cover, a lightbulb, distinct from Review.
 - Put job controls in Parallel work and keep animated running indicators in the
   sidebar. Add an About page for skills and update their notebook colors.
 - Add standing chat instructions and LaTeX macros under Personalization. Save
