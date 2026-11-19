@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Title a conversation from the user's own words and, for a LaTeX document
+  pasted or attached, its title and abstract, instead of the first 1,400 bytes
+  of the message: a pasted preamble of packages and macros made the model
+  title conversations in Chinese.
 - Compile mathematical Markdown with the standard symbols and named operators
   supplied by LaTeX and AMS. Write-Up also renders UTF-8 in code listings
   while keeping the downloadable script and figures intact.

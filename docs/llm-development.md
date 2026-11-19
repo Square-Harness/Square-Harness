@@ -469,7 +469,11 @@ changes never grant tool permissions.
 
 Conversation titles run only during idle time, after successful work. Their
 separate budget permits at most 4,096 conservatively counted input tokens,
-64 output tokens and 15 seconds, with thinking disabled and no tools. Title
+64 output tokens and 15 seconds, with thinking disabled and no tools. A title
+reads the first message's own words (1,400 bytes) and, of the LaTeX documents
+it pastes or attaches, only their title and abstract (`store.title_material`):
+a preamble sent alone made DeepSeek write titles in Chinese. The first 1,400
+bytes of the message are sent only when there is nothing else. Title
 updates use the existing chat lock and cannot overwrite a manual rename or
 transcript. Foreground work cancels cosmetic inference. The DeepInfra adapter
 validates a strict internal bounded-title payload before reducing its hosted

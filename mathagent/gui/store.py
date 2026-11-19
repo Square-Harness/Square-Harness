@@ -30,7 +30,7 @@ from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_reco
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, source_suffix
-from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
+from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, scan, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
 from . import personalization, projects
@@ -802,7 +802,55 @@ def claim_auto_title(root, chat_id):
         return None
     # The existing prompt preview is enough for a local file conversion.
     query = first['content'].strip()
-    return None if markdown_conversion_request(query, first.get('files') or []) else query
+    if markdown_conversion_request(query, first.get('files') or []):
+        return None
+    return title_material(root, query, first.get('files') or [])
+
+
+TITLE_WORDS_BYTES, TITLE_DOCUMENTS_BYTES, TITLE_JSON_BYTES = 1400, 900, 2500
+# Where LaTeX source pasted into a message begins: a line that opens with a preamble command.
+_LATEX_SOURCE = re.compile(r'^[ \t]*\\(?:documentclass|usepackage|newcommand|renewcommand|providecommand|def\b|input\b|'
+                           r'title\b|begin\{document\})', re.M)
+
+
+def _prefix(text, size):
+    """The first `size` UTF-8 bytes of `text`, never cutting a character."""
+    return text.encode('utf-8')[:size].decode('utf-8', errors='ignore')
+
+
+def title_material(root, message, files=()):
+    """What the conversation-title call reads: the user's own words (their first 1400 bytes, before any LaTeX source
+    pasted into the message), then the title and abstract of each LaTeX document the message pastes or attaches (about
+    900 bytes in all). A preamble of packages and macros says nothing a title can use, and sent alone it made DeepSeek
+    write titles in Chinese. The message's first 1400 bytes, as before, are sent only when there is nothing else. The
+    whole stays within the DeepInfra title bound: at most 2500 bytes once JSON-escaped."""
+    start = _LATEX_SOURCE.search(message)
+    words = (message[:start.start()] if start else message).strip()
+    sources = [('', message[start.start():])] if start else []
+    workspace = Workspace(root)
+    for name in list(files)[:5]:
+        if source_suffix(name) == '.tex':
+            try:
+                sources.append((Path(name).name, workspace.text(workspace.path(name))))
+            except (OSError, ValueError, UnicodeError):
+                continue  # an unreadable attachment only leaves the title less informed
+    documents = []
+    for name, text in sources:
+        found = scan(text)
+        parts = [f'title: {found["title"]}'] * bool(found['title']) + [f'abstract: {found["abstract"]}'] * bool(found['abstract'])
+        if parts:
+            documents.append('Document' + (f' {name}' if name else '') + ': ' + '. '.join(parts))
+    if not words and not documents:
+        return _prefix(message, TITLE_WORDS_BYTES)
+    material, room = _prefix(words, TITLE_WORDS_BYTES), TITLE_DOCUMENTS_BYTES
+    for line in documents:
+        piece = _prefix(line, room)
+        if piece:
+            material += ('\n\n' if material else '') + piece
+            room -= len(piece.encode('utf-8'))
+    while len(json.dumps(material, ensure_ascii=False).encode('utf-8')) > TITLE_JSON_BYTES:
+        material = _prefix(material, len(material.encode('utf-8')) - 100)  # backslashes count twice once escaped
+    return material
 
 
 def load_chat(root, chat_id):
