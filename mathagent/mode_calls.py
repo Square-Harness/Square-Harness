@@ -333,6 +333,12 @@ class ModeOrchestrator(Orchestrator):
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)
         previous = getattr(self.agent, 'previous_markdown', None)
+        compile_job = getattr(self.agent, 'compile_job', None)
+        experiments = getattr(self.agent, 'previous_experiments', None)
+        if experiments:
+            self.state['previous_experiments'] = experiments
+        if compile_job:
+            self.state['compile_job'] = compile_job
         if previous:
             self.state['previous_markdown'] = previous
         if self.local_markdown_conversion:
@@ -343,6 +349,12 @@ class ModeOrchestrator(Orchestrator):
             action = {'mode': self.required_mode, 'request': query, 'files': list(files),
                       'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'),
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
+        elif compile_job:
+            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'low',
+                      'reason': 'Compile the saved Write-Up with its original sources.'}
+        elif experiments:
+            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'medium',
+                      'reason': 'Write up the previous result with its saved experiment files.'}
         elif self.local_markdown_conversion:
             action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'low',
                       'reason': 'Convert the previous answer to LaTeX.' if previous else 'Convert the supplied Markdown file to LaTeX.'}

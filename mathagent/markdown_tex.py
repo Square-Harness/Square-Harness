@@ -4,6 +4,10 @@
 """Render a supplied Markdown document as LaTeX without rewriting its contents."""
 
 import re
+import shutil
+import subprocess
+from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 from markdown_it import MarkdownIt
@@ -16,22 +20,31 @@ _DISPLAY_ENVS = frozenset('equation align alignat gather multline flalign displa
 _MATH_ENVS = _DISPLAY_ENVS | set('aligned alignedat gathered split cases matrix pmatrix bmatrix Bmatrix '
                                  'vmatrix Vmatrix smallmatrix array'.split())
 _ENV = re.compile(r'\\(begin|end)\s*\{([a-zA-Z]+\*?)\}')
-# Only these math commands may be sent to a host TeX engine. Everything else
-# is still exported verbatim for the author to compile with their own preamble.
-_PREVIEW_COMMANDS = frozenset((
-    'alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa varkappa lambda mu nu xi pi varpi '
-    'rho varrho sigma varsigma tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Upsilon '
-    'Phi Psi Omega mathbb mathcal mathfrak mathrm mathbf mathit mathsf mathtt operatorname text frac dfrac tfrac '
-    'sqrt overline underline hat widehat tilde widetilde bar dot ddot vec subset subseteq supset supseteq in '
-    'notin ni le leq ge geq ll gg ne neq approx sim simeq equiv cong to mapsto rightarrow leftarrow leftrightarrow '
-    'implies iff times otimes oplus cdot cdots ldots vdots ddots dots ast star circ pm mp partial nabla infty '
-    'ell hbar Re Im sum prod int iint iiint oint lim limsup liminf sup inf max min det ker dim exp log ln '
-    'sin cos tan pi cap cup bigcap bigcup wedge vee emptyset varnothing langle rangle lvert rvert lVert rVert '
-    'vert Vert quad qquad forall exists setminus left right big Big bigg Bigg bigl bigr Bigl Bigr biggl biggr '
-    'Biggl Biggr binom overset underset not triangle triangleq perp parallel bullet colon top bot prime '
-    'underbrace overbrace mathop limits nolimits textstyle displaystyle leqslant geqslant boldsymbol '
-    'lbrace rbrace lfloor rfloor lceil rceil substack nonumber notag'
-).split())
+# Portable math vocabulary, including composite symbols and layout macros whose definitions
+# have arbitrary TeX bodies. Installed declarative symbols are added by _preview_commands().
+_PREVIEW_COMMANDS = frozenset("""
+Pr arccos arcsin arctan arg bmod cos cosh cot coth csc deg det dim exp gcd hom inf injlim ker lg lim
+liminf limsup ln log max min mod pmod pod projlim sec sin sinh sup tan tanh varinjlim varliminf varlimsup
+varprojlim
+alpha angle approx ast backslash bar beta Big big bigcap bigcup Bigg bigg Biggl biggl Biggm biggm Biggr
+biggr Bigl bigl Bigm bigm Bigr bigr binom boldsymbol bot bowtie Box boxed bullet cap cdot cdots cfrac chi
+circ colon cong cup dbinom ddot ddots Delta delta dfrac Diamond displaystyle dot Doteq doteq dots dotsb
+dotsc dotsi dotsm dotso ell emptyset epsilon equiv eta exists forall frac Gamma gamma ge geq geqslant gg
+gggtr hat hbar hookleftarrow hookrightarrow iff iiint iint Im impliedby implies in infty int iota kappa
+Lambda lambda langle lbrace lceil ldots le left leftarrow leftrightarrow leq leqslant lfloor limits ll
+llless Longleftarrow longleftarrow Longleftrightarrow longleftrightarrow longmapsto Longrightarrow
+longrightarrow lVert lvert mapsto mathbb mathbf mathbin mathcal mathclose mathfrak mathinner mathit
+mathnormal mathop mathopen mathord mathpunct mathrel mathrm mathsf mathstrut mathtt mid models mp mu
+nabla ne neq ni nmid nolimits nonumber not notag notin nu oint Omega omega operatorname oplus otimes
+overbrace overleftarrow overleftrightarrow overline overrightarrow overset parallel partial perp Phi phi
+Pi pi pm prime prod Psi psi qquad quad rangle rbrace rceil Re restriction rfloor rho right rightarrow
+rVert rvert scriptscriptstyle scriptstyle setminus Sigma sigma sim simeq sqrt star subset subseteq
+substack sum supset supseteq surd tau tbinom text textbf textit textnormal textrm textsf textstyle texttt
+textup tfrac Theta theta tilde times to top triangle triangleq underbrace underleftarrow
+underleftrightarrow underline underrightarrow underset Upsilon upsilon varepsilon varkappa varnothing
+varphi varpi varrho varsigma vartheta vdots vec vee Vert vert wedge widehat widetilde Xi xi xleftarrow
+xrightarrow zeta
+""".split())
 _TEXT_ESCAPES = str.maketrans({**{char: '\\' + char for char in '{}$&#_%'},
                                '\\': r'\textbackslash{}', '^': r'\textasciicircum{}',
                                '~': r'\textasciitilde{}'})
@@ -176,6 +189,36 @@ def _table(state, first, last, silent):
         state.src = src
 
 
+@lru_cache(maxsize=1)
+def _preview_commands():
+    """Add named math operators, glyphs, delimiters and accents from the installed preamble packages."""
+    locator = shutil.which('kpsewhich')
+    if not locator:
+        return _PREVIEW_COMMANDS
+    # Use the distribution tree, never a package in the document or the user's TEXMF tree.
+    # Read only symbol names from declarations, without loading or expanding TeX code.
+    try:
+        dist = subprocess.run([locator, '-var-value=TEXMFDIST'], cwd='/', env={}, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, check=True, timeout=3).stdout.strip()
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return _PREVIEW_COMMANDS
+    if not Path(dist).is_absolute():
+        return _PREVIEW_COMMANDS
+    commands = set(_PREVIEW_COMMANDS)
+    packages = Path(dist) / 'tex' / 'latex'
+    for name in ('base/fontmath.ltx', 'amsfonts/amsfonts.sty', 'amsfonts/amssymb.sty', 'amsmath/amsopn.sty'):
+        try:
+            declarations = (packages / name).read_text(encoding='latin-1')
+        except OSError:
+            continue
+        if name == 'amsmath/amsopn.sty':
+            pattern = r'(?m)^[ \t]*(?:\\protected\s*)?\\def\s*\\([A-Za-z]+)\s*\{\\qopname\b'
+        else:
+            pattern = r'(?m)^[ \t]*\\DeclareMath(?:Symbol|Delimiter|Accent)\s*\{?\\([A-Za-z]+)\}?\s*\{'
+        commands.update(re.findall(pattern, declarations))
+    return frozenset(commands)
+
+
 def _preview_note(formula, delimiter):
     math = formula[len(delimiter):-len(delimiter)] if delimiter else formula
     if '^^' in math:
@@ -189,9 +232,9 @@ def _preview_note(formula, delimiter):
             env = _ENV.match(math, token.start())
             if env and env[2].rstrip('*') in _MATH_ENVS:
                 continue
-        elif name in _PREVIEW_COMMANDS or (len(name) == 1 and name in '{}|,;:! %_&#$\\'):
+        elif name in _preview_commands() or (len(name) == 1 and name in '{}|,;:! %_&#$\\'):
             continue
-        return f'The formula uses {command}, which requires a user-managed TeX build.'
+        return f'The PDF preview does not recognize the math command {command}. The LaTeX source preserves it.'
     return None
 
 

@@ -111,6 +111,8 @@ workspace, model credential and rootless sandbox runtime. Keep backend listeners
 on loopback and their service configuration and credentials outside all served
 workspaces. Use separate backend ports and `--gui-root` fixed to each workspace.
 LaTeX compilation retains paranoid file access and disabled shell escape.
+TeX Live and MacTeX include `kpsewhich`, which Write-Up uses to locate the
+installed base and AMS symbol declarations for Markdown previews.
 
 The optional entry point is a Cloudflare Tunnel to the local tester gateway,
 protected by an Access self-hosted application and an exact email allowlist.

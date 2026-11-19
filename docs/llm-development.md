@@ -189,6 +189,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   a legacy conversation source against the original turn. Preserve its call
   ledger and any previously written parts. Requests for substantive changes
   continue through the writer.
+  Math preview reads named symbol declarations from the installed distribution's
+  base and AMS packages. A portable vocabulary covers common notation when the
+  distribution tree is unavailable. Custom commands are preserved in the source.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
   (`writeup._request_preamble`). A written document is always assembled,
@@ -206,6 +209,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Resolve recorded artifact aliases to portable names and pin the dependency
   bytes under the job's `artifacts/sources/`; compilation and the source ZIP use
   those same hashed files. Preserve literal code during LaTeX transformations.
+  Compile-only chat follow-ups reuse the saved job and its pinned assets.
+  Include UTF-8 listing display rules in the exported document and preserve
+  script bytes in the source ZIP. Use file and line diagnostics from the
+  compiler, including errors in nested files. Resolve reference warnings on
+  the final successful pass.
   Package-backed environments are never invented as theorems. Repair uses the
   actual remaining allowance, without a 60-second minimum. PDF availability
   requires the current compile to succeed; failed drafts are not called ready.

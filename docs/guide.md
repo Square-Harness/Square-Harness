@@ -686,6 +686,13 @@ the saved text directly, including any coverage warnings in a partial review,
 and keeps its equations, headings and references in source order. The card
 provides the LaTeX source and a PDF when compilation succeeds. When the review
 has a matching saved BibTeX file, the source ZIP includes it.
+The PDF preview recognizes standard LaTeX and AMS mathematical notation,
+including probability operators, conditional bars and relation symbols.
+After a Write-Up has returned its sources, ask “compile it” to build the saved
+document and its figures again. The reply reports the compiler result. The
+source ZIP includes the original UTF-8 code used in an illustrated write-up.
+When the preceding answer includes a simulation plot, Write-Up takes the
+experiment files with it so the figure can appear in the document.
 A formula that needs a user-defined command stays in the source for compilation with your
 own preamble. Requests for editing or a selected template use the writing workflow.
 

@@ -27,7 +27,7 @@ from ..assistant_budget import AssistantBudget, BudgetClient
 from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources, references_previous_pdf
 from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, generation_deadline
-from ..format_request import can_recover_previous_markdown, markdown_conversion_request, previous_markdown_request
+from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..source_tasks import automatic_source_action, source_overview
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
@@ -59,7 +59,7 @@ USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Task labels shown in the interface; the engine's kind stays 'referee'.
 # A short request to fix the LaTeX of the write-up just delivered ("fix this error", "it does not compile, can you
 # fix it?", "corrige l'erreur de compilation"). It only counts when the conversation's latest write-up did not compile.
-REPAIR_REQUEST = re.compile(r"\A(?=.{0,300}\Z)(?=.*\b(?:fix|repair|correct|corrige[rz]?|r[ée]pare[rz]?|compil\w*)\b)"
+REPAIR_REQUEST = re.compile(r"\A(?=.{0,300}\Z)(?=.*\b(?:fix|repair|correct|corrige[rz]?|r[ée]pare[rz]?)\b)"
                             r"(?!.*\b(?:proof|preuve|d[ée]monstration|lemma|lemme|theorem|th[ée]or[èe]me|argument)\b)",
                             re.I | re.S)
 LABELS = {'literature': 'Literature review', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
@@ -1391,13 +1391,21 @@ class Hub:
         review_reference = (copy.deepcopy(saved.get('review_reference')) if resume else
                             self._review_reference(chat, content, files) if required_mode == 'referee' else None)
         previous_markdown = saved.get('previous_markdown') if resume else None
+        previous_experiments = saved.get('previous_experiments') if resume else None
         selected_mode = required_mode or (saved.get('required_mode') if resume else None)
+        compile_job = saved.get('compile_job') if resume else None
+        if not resume and not files and selected_mode in (None, 'writeup') and compile_followup_request(content):
+            compile_job = store.previous_writeup_for_compile(self.root, chat)
         initial_style = saved.get('conversion_style_mode') if resume else None
         initial_style = initial_style or load_choice(self.base)['mode']
-        if (not previous_markdown and not files and selected_mode in (None, 'writeup')
+        if (not previous_markdown and not previous_experiments and not files and selected_mode in (None, 'writeup')
                 and previous_markdown_request(content, style_mode='auto' if resume else initial_style)):
             before = self._turn_start(self.root, chat_id) if resume else None
-            snapshot = store.previous_markdown(self.root, chat, before=before)
+            snapshot = store.previous_writeup_source(self.root, chat, before=before)
+            if snapshot and 'experiment_ids' in snapshot:
+                if not resume:
+                    previous_experiments = snapshot['experiment_ids']
+                snapshot = None
             if resume and snapshot:
                 children = saved.get('children') or []
                 child = children[0] if len(children) == 1 else {}
@@ -1405,15 +1413,15 @@ class Hub:
                         or not can_recover_previous_markdown(store.research_state(self.root, child['job_id']), snapshot)):
                     snapshot = None
             previous_markdown = snapshot
-        selected = (list(files) if resume else [] if review_reference or previous_markdown else
+        selected = (list(files) if resume else [] if review_reference or previous_markdown or previous_experiments or compile_job else
                     conversation_sources(content, list(files), chat['transcript'], mode=required_mode))
         if not files and not resume:
             selected = [name for name in selected if (self.root / name).is_file()]
         local_conversion = bool(previous_markdown) or (selected_mode in (None, 'writeup')
                            and markdown_conversion_request(content, selected, style_mode=initial_style))
         try:
-            if local_conversion:
-                image_refs, attached_images = [], []  # The selected Markdown is the complete input for this turn.
+            if local_conversion or compile_job:
+                image_refs, attached_images = [], []  # These local jobs use their own pinned inputs.
             elif resume:
                 if saved.get('images') and not self.image_support():
                     raise ValueError('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
@@ -1454,8 +1462,9 @@ class Hub:
                 if not resume:
                     store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files,
                         **({'local_conversion': True} if local_conversion else {}),
+                        **({'compile_job': compile_job} if compile_job else {}),
                         'images': attached_images, 'project_snapshot': project_snapshot, 'time': store._now()}])
-                    if not local_conversion:
+                    if not local_conversion and not compile_job:
                         store.save_chat_images(self.root, chat_id, image_refs)
             except BaseException:
                 self.routing.pop(chat_id, None)
@@ -1486,8 +1495,10 @@ class Hub:
             if previous is not None and previous_markdown:
                 previous['previous_markdown'] = previous_markdown
             main.previous_markdown = previous_markdown
+            main.previous_experiments = previous_experiments
+            main.compile_job = compile_job
             main.conversion_style_mode = initial_style if local_conversion else None
-            if not local_conversion:
+            if not local_conversion and not compile_job:
                 self._ensure_model(main)
             checkpoint_lock = threading.RLock()
             parent = None
@@ -1838,13 +1849,17 @@ class Hub:
                 previous_markdown = parent.state.get('previous_markdown') if mode == 'writeup' else None
                 if previous_markdown:
                     runner.previous_markdown = previous_markdown
-                if mode == 'writeup' and not child.get('job_id') and REPAIR_REQUEST.search(context['query']):
+                compile_job = parent.state.get('compile_job') if mode == 'writeup' else None
+                if (not compile_job and mode == 'writeup' and not child.get('job_id') and not selected_files
+                        and REPAIR_REQUEST.search(context['query'])):
                     # "Fix this error" after a write-up that did not compile repairs that document; it is not rewritten.
-                    previous = self._uncompiled_writeup(root, chat_id)
+                    previous = self._previous_writeup(root, chat_id)
                     if previous and WriteupRunner.reopen_for_repair(root, previous, hint=context['query']):
                         child['job_id'], extra = previous, max(0.1, seconds)
                         save()
-                if child.get('job_id'):
+                if compile_job:
+                    result = runner.compile_saved(compile_job, parent.state['id'])
+                elif child.get('job_id'):
                     result = runner.resume(child['job_id'], additional_seconds=extra)
                 else:
                     kwargs = dict(source_files=files, max_rounds=level['tries'], max_tokens=allocation,
@@ -1864,7 +1879,8 @@ class Hub:
                         kwargs.update(previous_markdown=previous_markdown,
                                       reference_records=[] if previous_markdown else store.conversation_references(root, chat_id, skip=self._turn_start(root, chat_id)),
                                       conversation='' if previous_markdown else store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
-                                      experiment_ids=[] if previous_markdown else store.conversation_experiments(root, chat_id),
+                                      experiment_ids=([] if previous_markdown else parent.state.get('previous_experiments')
+                                                      or store.conversation_experiments(root, chat_id)),
                                       variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
                                       style_choice={'mode': parent.state['conversion_style_mode']} if parent.state.get('conversion_style_mode') else load_choice(self.base),
                                       # Asked once already in this turn: this time the document is written with what
@@ -1896,7 +1912,7 @@ class Hub:
                 worker_error = result.get('worker_error')
                 answer = result['report']
                 if mode in ('writeup', 'summarize') and runner.state:
-                    outcome = answer = runner.ready_message()
+                    outcome = answer = result.get('compile_answer') or runner.ready_message()
                 elif mode == 'literature':
                     # The review itself is the answer the user sees verbatim; the card gets one short line.
                     outcome = _review_outcome(runner.state) or outcome
@@ -2000,7 +2016,8 @@ class Hub:
             store.update_item(root, chat_id, index, status='stopped' if error['retryable'] else 'failed',
                               outcome=str(exc), error=str(exc))
             self.bus.publish('chat_saved', chat=chat_id)
-            return {'status': 'failed', 'answer': '', 'warnings': [str(exc)], 'error': error,
+            return {'status': 'failed', 'answer': ('The saved Write-Up could not be compiled. ' + str(exc)
+                    if parent.state.get('compile_job') else ''), 'warnings': [str(exc)], 'error': error,
                     'job_id': child.get('job_id') or child['id']}
 
     @staticmethod
@@ -2018,16 +2035,14 @@ class Hub:
         return False
 
     @staticmethod
-    def _uncompiled_writeup(root, chat_id):
-        """The conversation's latest write-up job, when its document did not compile; else None."""
-        for item in reversed(store.load_chat(root, chat_id)['transcript']):
-            if item.get('role') == 'route' and item.get('mode') == 'writeup' and item.get('job_id') and item.get('outputs'):
-                try:
-                    compiled = store.research_state(root, item['job_id']).get('compile') or {}
-                except (ValueError, store.NotFound):
-                    return None
-                return item['job_id'] if compiled.get('available') and not compiled.get('ok') else None
-        return None
+    def _previous_writeup(root, chat_id):
+        chat = store.load_chat(root, chat_id)
+        transcript = chat['transcript']
+        start = next((i for i in range(len(transcript) - 1, -1, -1) if transcript[i].get('role') == 'user'), 0)
+        try:
+            return store.previous_writeup_for_compile(root, chat, before=start)
+        except (ValueError, store.NotFound):
+            return None
 
     @staticmethod
     def _turn_start(root, chat_id):

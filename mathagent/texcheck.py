@@ -61,7 +61,8 @@ _SOURCE_TALK = re.compile(r"\b(?:the|these|those|your|author's|user's|original) 
 _DRAFT_NOTICE = re.compile(r'Points to check before using this draft|\bthis is a draft\b|\b(?:preliminary|rough) draft\b', re.I)
 _OVERFULL = re.compile(r'Overfull \\hbox \(([\d.]+)pt too wide\) (?:(?:in paragraph|in alignment) at lines (\d+)--\d+'
                        r'|detected at line (\d+)|has occurred while \\output is active)')
-_LOG_ERROR = re.compile(r'^(?:\./)?([^\s:/]+\.(?:tex|sty|cls)):(\d+): (.+)$', re.M)
+# -file-line-error also points into listed scripts and nested source files.
+LOG_FILE_ERROR = re.compile(r'^(?:\./)?((?![./])[^:\r\n]+\.[A-Za-z0-9]+):(\d+): (.+)$', re.M)
 _LOG_REFERENCE = re.compile(r"(Reference|Citation) [`'‘]([^'’\n]+)['’] on page \S+ undefined(?: on input line (\d+))?")
 _LOG_LABEL = re.compile(r"Label [`'‘]([^'’\n]+)['’] multiply defined")
 _LOG_GLYPH = re.compile(r'Missing character: There is no (\S+)')
@@ -184,7 +185,7 @@ def check(document, body_line, log='', material='', kind=None, points_total=None
             add('PROSE', 'positional', 'formula referred to by position (label it and use \\eqref)', m.group(0), m.start())
 
     # -- the compile log
-    for name, number, message in _LOG_ERROR.findall(log):
+    for name, number, message in LOG_FILE_ERROR.findall(log):
         if 'Fatal error occurred' not in message:
             add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip(), '' if name == 'document.tex' else name,
                 line=int(number) if name == 'document.tex' else None)

@@ -23,7 +23,7 @@ import time
 import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
-from ..format_request import can_recover_previous_markdown, markdown_conversion_request, previous_markdown_request
+from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
 from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
@@ -797,7 +797,7 @@ def claim_auto_title(root, chat_id):
     _save_chat(root, chat)
     latest = next((item for item in reversed(chat['transcript']) if item.get('role') == 'user'), {})
     saved = chat.get('assistant_state') or {}
-    if latest.get('local_conversion') or ((saved.get('previous_markdown') or saved.get('conversion_style_mode'))
+    if latest.get('compile_job') or latest.get('local_conversion') or ((saved.get('previous_markdown') or saved.get('conversion_style_mode'))
                                          and saved.get('query') == latest.get('content')):
         return None
     # The existing prompt preview is enough for a local file conversion.
@@ -1324,8 +1324,31 @@ def _saved_result(root, mode, job_id):
         return '', ''
 
 
-def previous_markdown(root, chat, *, before=None):
-    """Pin the single visible final answer/result of the immediately preceding turn."""
+def previous_writeup_for_compile(root, chat, *, before=None):
+    """A single delivered Write-Up in this conversation, across compile-only follow-ups."""
+    cards = []
+    for item in reversed(chat['transcript'][:before]):
+        if item.get('role') == 'route':
+            cards.append(item)
+        elif item.get('role') == 'user':
+            if cards:
+                if len(cards) != 1 or cards[0].get('mode') not in ('writeup', 'summarize'):
+                    return None
+                card = cards[0]
+                job = card.get('job_id')
+                if not job or card.get('status') != 'done':
+                    return None
+                state = research_state(root, job)
+                if state.get('kind') == 'writeup' and state.get('phase') == 'done' and state.get('document'):
+                    return job
+                return None
+            if item.get('files') or item.get('images') or not compile_followup_request(item.get('content')):
+                return None
+    return None
+
+
+def previous_writeup_source(root, chat, *, before=None):
+    """Identify the previous turn's single deliverable, including any displayed experiment files."""
     transcript = chat['transcript'][:before]
     start = next((i for i in range(len(transcript) - 1, -1, -1) if transcript[i].get('role') == 'user'), -1)
     turn = list(enumerate(transcript[start + 1:], start + 1))
@@ -1336,6 +1359,11 @@ def previous_markdown(root, chat, *, before=None):
     routes = [(i, item) for i, item in turn if item.get('role') == 'route']
     if len(answers) > 1 or len(routes) > 1 or any(item.get('status') != 'done' for _, item in routes):
         return None
+    if any(item.get('mode') in ('writeup', 'summarize') for _, item in routes):
+        return None
+    experiments = _shown_experiments(item for _, item in turn)
+    if experiments:
+        return {'experiment_ids': experiments}
     bibliography = ''
     origin = {'chat_id': chat['id']}
     if routes and routes[0][1].get('mode') == 'literature':
@@ -1364,7 +1392,7 @@ def previous_markdown(root, chat, *, before=None):
         except (NotFound, OSError, ValueError, TypeError, KeyError):
             return None
         origin['job_id'] = job
-    elif answers and not any(item.get('mode') in ('writeup', 'summarize') for _, item in routes):
+    elif answers:
         index, content = answers[0]
         name = 'previous-answer.md'
     else:
@@ -1376,6 +1404,11 @@ def previous_markdown(root, chat, *, before=None):
     source = {'id': 'M1', 'path': name, 'content': content, 'sha256': hashlib.sha256(content.encode()).hexdigest(),
               'origin': origin}
     return {'source': source, 'bibliography': bibliography}
+
+
+def previous_markdown(root, chat, *, before=None):
+    snapshot = previous_writeup_source(root, chat, before=before)
+    return snapshot if snapshot and 'source' in snapshot else None
 
 
 def previous_markdown_for_job(root, state):
@@ -1413,7 +1446,11 @@ def previous_markdown_for_job(root, state):
 
 def conversation_experiments(root, chat_id, before=None):
     """Only the sandbox runs shown in this conversation, in transcript order."""
-    return list(dict.fromkeys(item['experiment'] for item in load_chat(root, chat_id)['transcript'][:before]
+    return _shown_experiments(load_chat(root, chat_id)['transcript'][:before])
+
+
+def _shown_experiments(items):
+    return list(dict.fromkeys(item['experiment'] for item in items
                               if item.get('role') == 'experiment' and isinstance(item.get('experiment'), str)
                               and _EXPERIMENT.fullmatch(item['experiment'])))
 

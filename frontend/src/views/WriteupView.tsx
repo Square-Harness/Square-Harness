@@ -225,14 +225,12 @@ function CompileTab({ data, onArtifact }: { data: ResearchDetail; onArtifact: (n
   const result = data.compile
   if (!result && data.conversion_source && data.gates?.length) return <p className="empty-note">{data.gates[0].message}</p>
   if (!result) return <p className="empty-note">Not compiled yet. Compilation follows the sections.</p>
-  if (!result.available) return <p className="empty-note">LaTeX (latexmk) is not installed on this computer, so the document was not compiled.</p>
+  if (!result.available) return <p className="empty-note">The Write-Up server could not find latexmk to build the PDF.</p>
   return (
     <div className="compile">
       <p className={result.ok ? 'valid-note' : 'objection small'}>
         {result.ok ? 'The document compiled without errors.' : `The document did not compile: ${result.errors.length} error${result.errors.length === 1 ? '' : 's'}.`}
-        {data.phase === 'done' && !result.ok && (data.conversion_source
-          ? ' The converted LaTeX source is available to download.'
-          : ' One repair round was tried; fix the remaining errors in the .tex file.')}
+        {data.phase === 'done' && !result.ok && data.outputs?.source && ' The source ZIP contains the files used for this build.'}
       </p>
       {result.pdf && <p><a className="btn" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a></p>}
       {result.errors.length > 0 && (

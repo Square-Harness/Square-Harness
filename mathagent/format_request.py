@@ -31,7 +31,7 @@ _VERSION_REQUEST = re.compile(
     rf'(?:give me|(?:can|could|may) i (?:have|get)) (?:'
     rf'{_TARGET} (?:version|copy|file|document) of {_SOURCE_PHRASE}|'
     rf'{_SOURCE_PHRASE} (?:in|as) {_TARGET}(?: (?:file|document|format|source))?)\b')
-_MATERIAL = (r"(?:(?:the|its|my|original|all|any|of|le|la|les|aux|mes|a la|l') ?){0,4}"
+_MATERIAL = (r"(?:(?:the|its|my|original|all|any|every|of|le|la|les|aux|mes|a la|l') ?){0,4}"
              r'(?:math(?:s|ematics)?|equations?|formul(?:as?|ae|es?)|mathematiques?|wording|text|texte|'
              r'contents?|contenu|prose|notation|structure|everything|anything|rien)')
 _MATERIALS = rf'{_MATERIAL}(?:(?:, |,? and | et ){_MATERIAL}){{0,4}}'
@@ -83,6 +83,20 @@ def markdown_conversion_request(query, files, *, style_mode='auto'):
             return False
         end = clause.end()
     return True
+
+
+_COMPILE_FOLLOWUP = re.compile(
+    r"(?:(?:please|can you|could you|would you) )*(?:"
+    r"(?:re)?compile(?: (?:it|this|that|(?:(?:the|this|that|my|your|last|previous) )?"
+    r"(?:latex |tex )?(?:document|write[ -]?up|file)))?(?: (?:again|to pdf|as a pdf))?|"
+    r"(?:can't you |can you |could you )?(?:re)?use (?:the )?write[ -]?up (?:agent|worker) to compile(?: it)?|"
+    r"(?:re)?compile[rz]? (?:le|ce document|le document))"
+    r"(?:[, ]+please)?[.!? ]*")
+
+
+def compile_followup_request(query):
+    """An explicit build of a previously delivered document, without edits or new inputs."""
+    return isinstance(query, str) and bool(_COMPILE_FOLLOWUP.fullmatch(' '.join(_fold(query).split())))
 
 
 def previous_markdown_request(query, *, style_mode='auto'):

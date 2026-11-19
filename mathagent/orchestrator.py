@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -567,9 +568,15 @@ class Orchestrator:
             predict = min(predict, int(remaining))
         if predict < 128:
             raise AssistantBudget('Fewer than 128 generated tokens remain for the next Assistant call.')
+        system = instruction
+        if output_cap is None:
+            compiler = 'available' if shutil.which('latexmk') else 'unavailable'
+            system = (POLICY + f'\nThe server-side latexmk compiler for Write-Up is {compiler}. '
+                      'A saved document can be recompiled with its original assets. '
+                      'Use the reported preview restriction or compiler error to explain a missing PDF.\n' + instruction)
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
-            'messages': [{'role': 'system', 'content': (instruction if output_cap is not None else POLICY + instruction) + self._numerics_policy(tools) + (
+            'messages': [{'role': 'system', 'content': system + self._numerics_policy(tools) + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
                 'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (

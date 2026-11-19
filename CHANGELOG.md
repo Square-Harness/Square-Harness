@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Compile mathematical Markdown with the standard symbols and named operators
+  supplied by LaTeX and AMS. Write-Up also renders UTF-8 in code listings
+  while keeping the downloadable script and figures intact.
+- In chat, “compile it” rebuilds the saved Write-Up with its original files.
+  Compilation failures identify the source file and line when LaTeX provides them.
+
 - Export a review or the previous written answer to LaTeX from its conversation.
   Write-up converts the saved Markdown locally and includes a matching review
   bibliography in the source ZIP. Existing paused conversions can use the

@@ -576,7 +576,6 @@ def bibliography_entries(text):
 MACRO = re.compile(r'\\(?:(?:re|provide)?newcommand\*?\s*\{?\s*\\([A-Za-z@]+)'
                    r'|def\s*\\([A-Za-z@]+)|DeclareMathOperator\*?\s*\{\s*\\([A-Za-z]+)\s*\})')
 THEOREM = re.compile(r'\\(?:newtheorem|declaretheorem)\*?\s*(?:\[[^\]]*\]\s*)?\{([A-Za-z*]+)\}')
-FILE_ERROR = re.compile(r'^(?:\./)?([^\s:/]+\.(?:tex|sty|cls)):(\d+): (.+)$', re.M)
 DEFAULT_THEOREMS = ('theorem', 'lemma', 'proposition', 'corollary', 'definition', 'remark')
 SUMMARY_REQUEST = 'Summarize the important results obtained so far in this conversation.'
 ATTACHED_REQUEST = 'Write up the attached material as a clean LaTeX document.'
@@ -852,6 +851,66 @@ def _compile_files(tex, files, assets):
     return contents
 
 
+_LISTING_INPUT = re.compile(r'\\lstinputlisting\s*(?:\[[^\]]*\]\s*)?\{([^{}]+)\}')
+_LISTING_INLINE = re.compile(r'\\lstinline\b\*?[ \t]*(?:\[[^\]\r\n]*\][ \t]*)?'
+                             r'(?:\{([^}\r\n]*)\}|([^\s{])([^\r\n]*?)\2)')
+_LISTING_MATH = {
+    'α': r'\alpha', 'β': r'\beta', 'γ': r'\gamma', 'δ': r'\delta', 'ε': r'\epsilon', 'ζ': r'\zeta',
+    'η': r'\eta', 'θ': r'\theta', 'ι': r'\iota', 'κ': r'\kappa', 'λ': r'\lambda', 'μ': r'\mu',
+    'ν': r'\nu', 'ξ': r'\xi', 'π': r'\pi', 'ρ': r'\rho', 'σ': r'\sigma', 'ς': r'\varsigma',
+    'τ': r'\tau', 'υ': r'\upsilon', 'φ': r'\phi', 'χ': r'\chi', 'ψ': r'\psi', 'ω': r'\omega',
+    'Γ': r'\Gamma', 'Δ': r'\Delta', 'Θ': r'\Theta', 'Λ': r'\Lambda', 'Ξ': r'\Xi', 'Π': r'\Pi',
+    'Σ': r'\Sigma', 'Υ': r'\Upsilon', 'Φ': r'\Phi', 'Ψ': r'\Psi', 'Ω': r'\Omega',
+    '±': r'\pm', '−': '-', '×': r'\times', '÷': r'\div', '≤': r'\leq', '≥': r'\geq',
+    '≠': r'\neq', '≈': r'\approx', '→': r'\to', '←': r'\leftarrow', '↔': r'\leftrightarrow',
+    '⇒': r'\Rightarrow', '⇔': r'\Leftrightarrow', '∞': r'\infty', '∈': r'\in', '∑': r'\sum',
+    '∫': r'\int', '∂': r'\partial', '∇': r'\nabla',
+}
+_LISTING_HEADER = '% UTF-8 characters used in code listings'
+
+
+def prepare_listing_document(document, assets):
+    """Add pdfLaTeX listings display rules for the characters the code actually uses.
+
+    Keep the literal inline code, the external file, and the author's own listings mappings.
+    A character without a LaTeX glyph is identified by its Unicode code point in the PDF.
+    """
+    start = re.search(r'(?m)^[ \t]*\\begin\{document\}', document)
+    if not start or _LISTING_HEADER in document[:start.start()]:
+        return document
+    body = document[start.end():]
+    if 'lst' not in body:
+        return document
+    snippets = [m.group() for m in _CODE_BLOCK.finditer(body) if m[1].startswith('lstlisting')]
+    snippets.extend(m[1] or m[3] or '' for m in _LISTING_INLINE.finditer(body))
+    paths = {m[1].strip() for m in _LISTING_INPUT.finditer(_uncommented(body))}
+    for name, data in assets:
+        if name in paths and not data.isascii():
+            try:
+                snippets.append(data.decode('utf-8'))
+            except UnicodeDecodeError:
+                continue  # a legacy listing may declare its own encoding
+    characters = {c for snippet in snippets if not snippet.isascii() for c in snippet if ord(c) > 127}
+    if not characters:
+        return document
+    # Install defaults before listings applies the document's own literate= table. Its starred
+    # form can deliberately restrict that user table to identifiers; UTF-8 still works in comments.
+    lines = [_LISTING_HEADER, r'\makeatletter', r'\@ifpackageloaded{listings}{%',
+             r'\def\sqh@listingchar#1#2{\ifcsname u8:\detokenize{#1}\endcsname'
+             r'\csname u8:\detokenize{#1}\endcsname\else[U+#2]\fi}',
+             r'\lst@AddToHookAtTop{SelectCharTable}{%', r'\let\sqh@xliterate\lst@ifxliterate',
+             r'\let\lst@ifxliterate\iffalse', r'\lst@Literate']
+    for char in sorted(characters):
+        macro = _LISTING_MATH.get(char)
+        if macro:
+            glyph = r'\ensuremath{' + macro + '}'
+        else:
+            glyph = r'\sqh@listingchar{' + char + '}{' + f'{ord(char):04X}' + '}'
+        lines.append('{' + char + '}{{' + glyph + '}}1')
+    lines.extend([r'{}\relax\z@', r'\let\lst@ifxliterate\sqh@xliterate}}{}', r'\makeatother', ''])
+    return document[:start.start()] + '\n'.join(lines) + document[start.start():]
+
+
 
 def reference_diagnostics(log):
     """Unresolved references in the final LaTeX pass, distinct from PDF creation."""
@@ -920,7 +979,7 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
         pdf = (pdf_path.read_bytes() if process.returncode == 0 and not timed_out and pdf_path.exists()
                and pdf_path.stat().st_size < 20_000_000 else None)
     errors = [{'file': name, 'line': int(line), 'message': message.strip()[:300]}
-              for name, line, message in FILE_ERROR.findall(log)]
+              for name, line, message in texcheck.LOG_FILE_ERROR.findall(log) if 'Fatal error occurred' not in message]
     if not errors:
         errors = [{'file': None, 'line': None, 'message': line[2:].strip()[:300]}
                   for line in log.splitlines() if line.startswith('! ')]
@@ -929,7 +988,7 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
     if not errors and pdf is None:
         errors = [{'file': None, 'line': None, 'message': 'LaTeX produced no PDF; see the log'}]
     return {'available': True, 'ok': pdf is not None, 'errors': errors[:20], 'log': log, 'pdf': pdf,
-            'references': reference_diagnostics(log), 'hyperref': hyperref,
+            'references': reference_diagnostics(log) if pdf else {}, 'hyperref': hyperref,
             'pages': dict(list(pages.items())[:500]), 'page_count': int(written.group(1)) if written else None}
 
 
@@ -2690,6 +2749,78 @@ class WriteupRunner(ResearchRunner):
             _atomic_write(runner.directory / 'state.json', _bytes(json.dumps(runner.state, ensure_ascii=False, indent=2)))
         return True
 
+    def compile_saved(self, job_id, request_id):
+        """Compile the delivered source and its pinned assets, without restarting its writer."""
+        self.directory = _job_directory(self.agent.workspace.root, job_id)
+        with self._lock():
+            s = self.state = _read_state(self.directory, job_id)
+            if s.get('kind') != 'writeup' or s.get('phase') != 'done' or not s.get('document'):
+                raise ValueError('The saved Write-Up has no finished LaTeX source to compile.')
+            attempts = s.setdefault('compile_attempts', [])
+            prior = next((a for a in reversed(attempts) if a['request_id'] == request_id), None)
+            if prior:
+                return {**self._result(), 'compile_answer': prior['answer']}
+            attempt = {'request_id': request_id, 'time': _now(), 'previous_log': (s.get('compile') or {}).get('log')}
+            document = s['document']
+            published_pdf = bool((s.get('outputs') or {}).get('pdf') and (self.directory / 'artifacts' / 'compiled.pdf').is_file())
+            note = None
+            if s.get('conversion_source'):
+                _, body, expected, note = self._render_conversion()
+                if not note and (document != expected or s['body'] != body or s.get('source_files')):
+                    note = 'The saved LaTeX or its dependencies differ from the verified Markdown conversion.'
+            if note:
+                answer = 'The saved LaTeX was not compiled. ' + note
+                attempt['preview_note'] = note
+            else:
+                assets = [(f['name'], self._source_bytes(f)) for f in s.get('source_files', [])]
+                if not s.get('conversion_source') and not published_pdf:
+                    document = prepare_listing_document(document, assets)
+                self.emit('notice', 'Compiling the saved document with latexmk.')
+                result = compile_latex(document, assets=assets, cancel=getattr(self.agent.client, 'cancel', None))
+                if not result['available']:
+                    answer = 'The saved LaTeX could not be compiled because latexmk is unavailable.'
+                elif not result['ok']:
+                    error = next((e for e in result['errors'] if 'Fatal error' not in e['message']), {})
+                    location = (str(error['file']) + ', line ' + str(error['line']) + ': ') if error.get('file') else ''
+                    answer = 'The saved LaTeX failed to compile. ' + location + error.get('message', 'See the compiler log.')
+                else:
+                    count = result.get('page_count')
+                    pages = f' ({count} page{"s" if count != 1 else ""})' if count else ''
+                    answer = f'The saved LaTeX compiled successfully{pages}. Download the PDF from the Write-Up card.'
+                    if (result.get('references') or {}).get('unresolved'):
+                        answer += ' The PDF contains unresolved references.'
+                log = self._artifact('compile-log', result['log'] or 'No log.') if result['available'] else None
+                attempt.update(log=log, ok=result['ok'], document_sha256=hashlib.sha256(document.encode()).hexdigest())
+                changed = document != s['document']
+                if result['ok'] or (not changed and not published_pdf):
+                    if changed:
+                        s['body_line'] = s.get('body_line', 1) + document.count('\n') - s['document'].count('\n')
+                        s['draft'] = s['document'] = document
+                    if s.get('conversion_source'):
+                        s['preview_note'] = None
+                    self._record_compile(result, log)
+                    if not s.get('conversion_source'):
+                        self._check_source()
+                    s['gates'] = self._gates()
+                    s['readiness'] = 'draft' if s['gates'] else 'ready'
+                    self._finish()
+                    if result['ok'] and (changed or not (s.get('outputs') or {}).get('source')
+                                         or not (self.directory / 'artifacts' / 'source.zip').is_file()
+                                         or not published_pdf and s.get('deliver') != 'download'):
+                        self._export(preserve_document=True)
+                    elif result['ok'] and s.get('deliver') == 'download':
+                        s['outputs']['pdf'] = True
+                    self._report()
+                elif published_pdf:
+                    answer += ' The previous PDF is still available on the card.'
+            attempt['answer'] = answer
+            attempts.append(attempt)
+            # This local action belongs to a new chat turn. The original job's
+            # inference reservations, literature snapshot and time budget stay intact.
+            s['updated_at'], s['progress'] = _now(), self._progress()
+            _atomic_write(self.directory / 'state.json', _bytes(json.dumps(s, ensure_ascii=False, indent=2)))
+            return {**self._result(), 'compile_answer': answer}
+
     def _skill_folder(self, kind):
         return 'summarize' if self._variant == 'summary' else kind
 
@@ -3097,7 +3228,7 @@ class WriteupRunner(ResearchRunner):
         else:
             raise ValueError('Unknown write-up phase: ' + phase)
 
-    def _convert_markdown(self):
+    def _render_conversion(self):
         try:
             from .markdown_tex import convert_markdown
         except ModuleNotFoundError as exc:
@@ -3106,9 +3237,12 @@ class WriteupRunner(ResearchRunner):
             raise WorkerInputError('Install markdown-it-py to convert Markdown locally.', code='markdown_parser_missing') from exc
         source = next(s for s in self.state['sources'] if s['id'] == self.state['conversion_source'])
         try:
-            body, document, preview_note = convert_markdown(source['content'])
+            return (source, *convert_markdown(source['content']))
         except ValueError as exc:
             raise WorkerInputError(str(exc), code='markdown_conversion_failed') from exc
+
+    def _convert_markdown(self):
+        source, body, document, preview_note = self._render_conversion()
         self.state.update(body=body, document=document, title=Path(source['path']).stem,
                           source_files=[], checks=[], phase='compile', preview_note=preview_note)
         if preview_note:
@@ -4880,6 +5014,12 @@ class WriteupRunner(ResearchRunner):
         while True:
             self._check_time()
             assets = [(f['name'], self._source_bytes(f)) for f in self.state.get('source_files', [])]
+            if not self.state.get('conversion_source'):
+                previous = self.state['document']
+                prepared = prepare_listing_document(previous, assets)
+                if prepared != previous:
+                    self.state['body_line'] = self.state.get('body_line', 1) + prepared.count('\n') - previous.count('\n')
+                    self.state['document'] = self.state['draft'] = prepared
             result = compile_latex(self.state['document'], timeout=max(0.1, deadline - time.monotonic()),
                                    assets=assets, cancel=cancel)
             if self.state.get('conversion_source') or result['ok'] or not result['available'] or time.monotonic() >= deadline:
@@ -4923,18 +5063,7 @@ class WriteupRunner(ResearchRunner):
         elif probing:  # stopped by the compile allowance while probing: keep what was asked for
             self.state['links'] = 'added'
         log_name = self._artifact('compile-log', result['log'] or 'No log.') if result['available'] else None
-        if result['pdf']:
-            _atomic_write(self.directory / 'artifacts' / 'compiled.pdf', result['pdf'])
-        else:
-            (self.directory / 'artifacts' / 'compiled.pdf').unlink(missing_ok=True)
-        self.state['undefined'] = [n for n in undefined_names(result['log']) if n not in macros]
-        self.state['compile'] = {'available': result['available'], 'ok': result['ok'], 'errors': result['errors'],
-                                 'log': log_name, 'pdf': bool(result['pdf']), 'hyperref': bool(result.get('hyperref')),
-                                 'pages': result.get('pages') or {}, 'page_count': result.get('page_count'),
-                                 'references': result.get('references') or reference_diagnostics(result['log'])}
-        self.state['log_warnings'] = texcheck.log_warnings(result['log'] or '', self.state.get('body_line', 1))
-        if not result['available']:
-            self.state['warnings'].append('LaTeX (latexmk) is not installed here; the document was not compiled.')
+        self._record_compile(result, log_name)
         if self.state.get('conversion_source'):
             gates = self._gates()
             self.state.update(gates=gates, readiness='draft' if gates else 'ready', phase='export')
@@ -5118,13 +5247,7 @@ class WriteupRunner(ResearchRunner):
         parts) makes one model call per step, saved in `review_progress`, so a resumed job goes on where it stopped.
         When the block of points to check is no longer what the document should print, the document is assembled
         and compiled once more. Then: another round of revision, the selection of the best candidate, or export."""
-        findings = texcheck.check(self.state['document'], self.state.get('body_line', 1), self._compile_log(),
-                                  '\n'.join(s['content'] for s in self._notes_in()),
-                                  kind='summary' if self.state.get('variant') == 'summary' else self.state.get('document_kind'),
-                                  points_total=self._points_total())
-        self.state['checks'] = (findings + self._part_findings() + self._name_findings() + self._marker_findings()
-                                + self._definition_findings() + self._structure_findings() + self._skeleton_checks()
-                                + self._frame_checks() + self._splice_checks() + self._section_length_findings())
+        self._check_source()
         body = self.state['body']
         digest = _digest(body)
         if self._review_due(digest) and self._review_step(digest):
@@ -5156,6 +5279,39 @@ class WriteupRunner(ResearchRunner):
             self.state['review_round'] = self.state.get('review_round', 0) + 1
         else:
             self.state['phase'] = 'select'
+
+    def _check_source(self):
+        findings = texcheck.check(self.state['document'], self.state.get('body_line', 1), self._compile_log(),
+                                  '\n'.join(s['content'] for s in self._notes_in()),
+                                  kind='summary' if self.state.get('variant') == 'summary' else self.state.get('document_kind'),
+                                  points_total=self._points_total())
+        if not (self.state.get('compile') or {}).get('ok'):
+            findings = [f for f in findings if texcheck.gate(f) != 'G2']
+        self.state['checks'] = (findings + self._part_findings() + self._name_findings() + self._marker_findings()
+                                + self._definition_findings() + self._structure_findings() + self._skeleton_checks()
+                                + self._frame_checks() + self._splice_checks() + self._section_length_findings())
+        review = self._review_of(_digest(self.state['body']))
+        if review and review['layers'].get('fidelity') == 'done':
+            self.state['checks'] = [f for f in self.state['checks'] if f['rule'] != 'composed']
+
+    def _record_compile(self, result, log_name):
+        if result['pdf']:
+            _atomic_write(self.directory / 'artifacts' / 'compiled.pdf', result['pdf'])
+        else:
+            (self.directory / 'artifacts' / 'compiled.pdf').unlink(missing_ok=True)
+        self.state['undefined'] = [n for n in undefined_names(result['log']) if n not in (self.state.get('supplied_macros') or {})]
+        self.state['compile'] = {'available': result['available'], 'ok': result['ok'], 'errors': result['errors'],
+                                 'log': log_name, 'pdf': bool(result['pdf']), 'hyperref': bool(result.get('hyperref')),
+                                 'pages': result.get('pages') or {}, 'page_count': result.get('page_count'),
+                                 'references': (result.get('references') or reference_diagnostics(result['log']))
+                                 if result['ok'] else {}}
+        self.state['log_warnings'] = texcheck.log_warnings(result['log'] or '', self.state.get('body_line', 1))
+        if not result['ok']:
+            # First-pass reference warnings often disappear as soon as the source compiles.
+            self.state['log_warnings'] = [w for w in self.state['log_warnings']
+                                         if w['kind'] not in ('reference', 'citation', 'duplicate', 'rerun')]
+        if not result['available']:
+            self.state['warnings'].append('LaTeX (latexmk) is not installed here; the document was not compiled.')
 
     def _compile_log(self):
         name = (self.state.get('compile') or {}).get('log')
@@ -5371,10 +5527,11 @@ class WriteupRunner(ResearchRunner):
         if not compile_state.get('available'):
             fail('G1', 'LaTeX is not installed here, so it was not compiled')
         elif not compile_state.get('ok'):
-            error = next((e['message'] for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), 'see its page')
-            fail('G1', f'it does not compile ({error})')
+            error = next((e for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), {})
+            where = f"{error['file']}:{error['line']}: " if error.get('file') and error.get('line') else ''
+            fail('G1', f"it does not compile ({where}{error.get('message', 'see its page')})")
         references = self._compiled_references()
-        if references.get('unresolved') or any(texcheck.gate(f) == 'G2' for f in s['checks']):
+        if compile_state.get('ok') and (references.get('unresolved') or any(texcheck.gate(f) == 'G2' for f in s['checks'])):
             details = [label + ' ' + ', '.join(references[key]) for key, label in
                        (('citations', 'undefined citations:'), ('labels', 'undefined references:'),
                         ('duplicates', 'labels defined twice:')) if references.get(key)]
@@ -6483,6 +6640,11 @@ class WriteupRunner(ResearchRunner):
         body, title = self.state['body'], self.state.get('title', '')
         lines, first = self.state['document'].splitlines(), self.state.get('body_line', 1)
         errors = self.state['compile']['errors']
+        listed = {m[1].strip() for m in _LISTING_INPUT.finditer(_uncommented(body))}
+        if any(e.get('file') in listed and re.search(r'invalid UTF-8|Unicode character', e['message'], re.I) for e in errors):
+            # A body-only repair cannot change the encoding of the pinned script.
+            self.state.update(repair_done=True, phase='check')
+            return
         long, rounds = len(body) > self._room(), self.state.get('repair_rounds', 0)
         located = any(e.get('file') == 'document.tex' and (e.get('line') or 0) >= first for e in errors)
         signature = '; '.join(f"{e.get('line')}: {e['message']}" for e in errors[:1])
@@ -6749,8 +6911,8 @@ class WriteupRunner(ResearchRunner):
                      + ''.join(''.join('% ' + row + '\n' for row in line.splitlines()) for line in dict.fromkeys(lines)))
         return head + '\n' + body.strip() + '\n'
 
-    def _export(self):
-        if self.state.get('readiness') == 'ready' and not self.state.get('conversion_source'):
+    def _export(self, *, preserve_document=False):
+        if self.state.get('readiness') == 'ready' and not self.state.get('conversion_source') and not preserve_document:
             self.state['document'] = without_markers(self.state['document'])
         archive = io.BytesIO()
         assets = [(source['name'], self._source_bytes(source)) for source in self.state.get('source_files', [])]
@@ -6831,6 +6993,8 @@ class WriteupRunner(ResearchRunner):
     def _compiled_references(self):
         """Read old compile checkpoints without changing their stored documents."""
         compiled = self.state.get('compile') or {}
+        if not compiled.get('ok'):
+            return {}  # references from an aborted first pass have not been resolved by latexmk
         if isinstance(compiled.get('references'), dict):
             return compiled['references']
         name = compiled.get('log')
