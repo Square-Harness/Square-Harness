@@ -4,8 +4,10 @@
 import { useState } from 'react'
 import { api, type Chat } from '../api'
 import { chatWork, taskById } from '../concurrency'
-import { count, duration } from '../format'
-import { modeLabel } from '../outputs'
+import { count, duration, plural } from '../format'
+import { PlanSteps } from './InvestigationReading'
+import { taskNotice } from '../workNotice'
+import { openWorkPanel } from '../router'
 import { useApp } from '../store'
 import { ErrorNote, UsageMeters } from './common'
 import { Markdown } from './Markdown'
@@ -20,6 +22,12 @@ function taskMark(status: string): Variant {
     case 'skipped': case 'blocked': case 'stopped': case 'cancelled': return 'halted'
     default: return 'waiting'
   }
+}
+
+const planStates: Record<string, string> = {
+  frame: 'Preparing', planned: 'Ready', approval: 'Preparing', running: 'In progress', done: 'Finished',
+  failed: 'Interrupted', declined: 'Declined', stopped: 'Stopped', refused: 'Plan unavailable',
+  clarification: 'Clarification needed',
 }
 
 export function PlanTab({ chat }: { chat: Chat }) {
@@ -53,24 +61,44 @@ export function PlanTab({ chat }: { chat: Chat }) {
       setPending(false)
     }
   }
-  return <section className="work-tab-content">
-    <h3>{investigation.approved ? 'Confirmed statement' : 'Proposed statement'}</h3>
-    {investigation.statement ? <Markdown>{investigation.statement}</Markdown> : <p className="muted">Preparing the statement…</p>}
-    <p className="work-tab-context" role="status">{investigation.phase.replace(/_/g, ' ')}</p>
-    <ol className="work-plan-list">{investigation.tasks.map(task => <li key={task.id}>
-      <Square variant={taskMark(task.status)} label={task.status} size={17} /><div><strong>{modeLabel(task.mode)}</strong>
-      <span className="work-plan-state">{task.status.replace(/_/g, ' ')}</span><p>{task.objective}</p>
-      <small>{task.id}{task.effort ? ' · ' + task.effort + ' effort' : ''}
-      {task.after.length > 0 && ' · after ' + task.after.join(', ')}</small>
-      {task.reason && <p className="muted small">{task.reason}</p>}</div></li>)}</ol>
-    {Object.keys(ceiling).length > 0 && <div className="work-plan-limits"><h3>{investigation.approved ? 'Approved limits' : 'Proposed limits'}</h3>
-      <dl>{ceiling.tokens != null && <><dt>Output tokens</dt><dd>{count(ceiling.tokens)}</dd></>}
-        {ceiling.input_tokens != null && <><dt>Input tokens</dt><dd>{count(ceiling.input_tokens)}</dd></>}
-        {ceiling.seconds != null && <><dt>Active time</dt><dd>{duration(ceiling.seconds)}</dd></>}
-        {ceiling.requests != null && <><dt>Source requests</dt><dd>{count(ceiling.requests)}</dd></>}
-      </dl></div>}
-    {investigation.usage && <div className="work-plan-meters"><h3>Usage</h3><UsageMeters budget={investigation.usage} /></div>}
-    {stoppingAllowed && <button type="button" className="btn" disabled={pending} onClick={stop}>{pending ? 'Finishing the report…' : 'Stop and report'}</button>}
+  const paused = investigation.current && chat.assistant_status === 'paused'
+  const phase = paused ? 'Paused' : planStates[investigation.phase] || 'Preparing'
+  const tasks = investigation.tasks
+  const finished = tasks.filter(task => taskMark(task.status) === 'complete').length
+  return <section className="work-tab-content work-plan">
+    <div className="work-section-head"><h3>Research question</h3>
+      <span className="work-state" role="status"><Square variant={paused ? 'paused' : taskMark(investigation.phase)} size={13} /> {phase}</span>
+    </div>
+    {investigation.statement ? <div className="work-question"><Markdown mathProse>{investigation.statement}</Markdown></div> :
+      <p className="muted">Preparing the statement…</p>}
+    {tasks.length > 0 && <>
+      <div className="work-section-head work-step-head"><h3>Planned work</h3>
+        <small>{finished ? finished + ' of ' + tasks.length + ' finished' : plural(tasks.length, 'step')}</small></div>
+      <PlanSteps tasks={tasks} renderAfter={id => {
+        const task = tasks.find(item => item.id === id)
+        if (!task) return null
+        return <>
+          {task.reason && task.status !== 'complete' && <Markdown className="work-step-note">{taskNotice(task.reason, tasks)}</Markdown>}
+          {task.child_id && (chat.agents || []).some(agent => agent.id === task.child_id) && <button type="button"
+            className="work-text-link" onClick={() => openWorkPanel('agents', task.child_id)}>View activity <span aria-hidden="true">→</span></button>}
+        </>
+      }} />
+    </>}
+    {chat.transcript.some(item => item.investigation_id === investigation.id && item.content) &&
+      <button type="button" className="btn btn-small" onClick={() => openWorkPanel('outputs', investigation.id)}>
+        Read investigation report <span aria-hidden="true">→</span>
+      </button>}
+    {stoppingAllowed && <button type="button" className="btn work-stop" disabled={pending} onClick={stop}>{pending ? 'Preparing the report…' : 'Stop and report'}</button>}
     <ErrorNote>{error}</ErrorNote>
+    {(Object.keys(ceiling).length > 0 || investigation.usage) && <details className="work-fold work-resources">
+      <summary>Time and usage</summary>
+      {Object.keys(ceiling).length > 0 && <div className="work-plan-limits"><h4>Planned limits</h4>
+        <dl>{ceiling.seconds != null && <><dt>Active time</dt><dd>{duration(ceiling.seconds)}</dd></>}
+          {ceiling.requests != null && <><dt>Source requests</dt><dd>{count(ceiling.requests)}</dd></>}
+          {ceiling.tokens != null && <><dt>Output tokens</dt><dd>{count(ceiling.tokens)}</dd></>}
+          {ceiling.input_tokens != null && <><dt>Input tokens</dt><dd>{count(ceiling.input_tokens)}</dd></>}
+        </dl></div>}
+      {investigation.usage && <div className="work-plan-meters"><h4>Used so far</h4><UsageMeters budget={investigation.usage} /></div>}
+    </details>}
   </section>
 }

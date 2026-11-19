@@ -3,7 +3,7 @@
 
 """Confirmed, resumable mathematical investigations.
 
-Framing reads sources and proposes a finite DAG. Approval freezes the target,
+Framing reads sources and freezes a finite plan with an exact target,
 worker slots and allowances. Code dispatches those slots through the native
 worker adapter. Optional model decisions can only skip work or name a variant.
 The report is computed from persisted observations, including on explicit stop.
@@ -20,7 +20,6 @@ from pathlib import Path
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
 from .call_policy import CallContextError, allocate_call
-from .hosted_quota import quota_status
 from .ledger import _atomic_write, _directory, _read
 from .orchestrator import Orchestrator, WorkerInterrupted
 from .tools import schema
@@ -40,7 +39,8 @@ when it is supplied. Never append instructions, a description of the investigati
 the target. If the user explicitly identifies a special case as the intended proof target, register just that statement.
 Keep the broader motivation in the original user request and the planned work in the task objectives.
 When the general question is the target, use a variant Proof slot for a possible special case.
-Use the user's language. Use low effort when possible. Run independent work in parallel. Explore supports numerical checks
+Use the user's language and Markdown math delimiters for formulas you write in task objectives and reading notes.
+Use low effort when possible. Run independent work in parallel. Explore supports numerical checks
 when the sandbox is available. Check handles a single reference, literature surveys sources, quick_review requires a file.
 Reserve Proof for a specific exact statement. Use claim=target for the confirmed statement, or claim=variant for a special
 case selected after earlier evidence; variant Proof needs a predecessor. List dependencies by task ID.
@@ -66,7 +66,7 @@ TASK_SCHEMA = _object({
     'after': dict(type='array', items=_string(2), maxItems=MAX_TASKS),
     'claim': dict(type='string', enum=['target', 'variant']),
 }, ('id', 'mode', 'effort', 'objective', 'after'))
-PROPOSE = schema('propose', 'Submit the exact statement and fixed research plan for approval.', {
+PROPOSE = schema('propose', 'Set the exact statement and start the fixed research plan.', {
     'statement': _string(3000, description='Only one precise mathematical statement; no workflow instructions or background.'),
     'reading': dict(type='string', maxLength=600),
     'tasks': dict(type='array', items=TASK_SCHEMA, minItems=1, maxItems=MAX_TASKS),
@@ -149,37 +149,6 @@ def _ceiling(tasks, limits, budget):
 def _approval_digest(record):
     frozen = {key: record[key] for key in ('plan', 'target', 'allowances', 'ceiling')}
     return _digest(json.dumps(frozen, sort_keys=True, ensure_ascii=False, allow_nan=False))
-
-
-def _proposal(record, sandbox):
-    target, caps = record['target'], record['ceiling']
-    parts = ['START INVESTIGATION', target['statement'], 'SHA-256 ' + target['sha256']]
-    if record['plan'].get('reading'):
-        parts.append(record['plan']['reading'])
-    for task in record['plan']['tasks']:
-        after = ', '.join(task['after']) or 'none'
-        claim = (' · ' + task['claim']) if 'claim' in task else ''
-        parts.append(f"{task['id']} · {task['mode']} · {task['effort']}{claim} · after {after}\n{task['objective']}")
-    parts.append(f"Whole-turn ceilings, including framing: {caps['tokens']:,} output tokens, "
-                 f"{caps['input_tokens']:,} input tokens, {caps['seconds']:,} active seconds.")
-    requests = sum(v['requests'] for v in record['allowances'].values())
-    explores = sum(t['mode'] == 'explore' for t in record['plan']['tasks'])
-    parts.append(f'External source requests across workers: up to {requests}.')
-    if explores:
-        if sandbox:
-            parts.append(f'Automatic numerical checks: up to {explores * sandbox.max_runs} sandbox runs, '
-                         f'{sandbox.ceiling.timeout_seconds:g} seconds per run.')
-        else:
-            parts.append('Automatic numerical sandbox unavailable for this run.')
-    quota = quota_status()
-    if quota:
-        price = (caps['tokens'] * float(quota['output_per_million']) + caps['input_tokens'] * float(quota['input_per_million'])) / 1e6
-        available = (quota['limit_nanos'] - quota['reserved_nanos'] - quota['charged_nanos']) / 1e9
-        parts.append(f'Whole-turn maximum at configured rates: \u0024{price:.4f}. Current tester allowance: \u0024{available:.4f}.'
-                     + (' Workers may stop at the tester limit.' if available < price else ''))
-    parts.append('After approval the controller may skip tasks, stop early, or select a model-declared '
-                 'variant for a designated Proof slot. The final research report uses the saved evidence.')
-    return '\n\n'.join(parts)
 
 
 def _record_path(root, run_id, create=False):
@@ -399,13 +368,16 @@ class Investigation(Orchestrator):
 
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)
+        self._begin_investigation()
+
+    def _begin_investigation(self):
         # The parent chat already stores prior turns; a large chat must not crowd
         # the exact statement out of the framing request. M3 tools can read prior evidence.
-        self.state['messages'] = self.state['messages'][-1:]
+        self.state['messages'] = self.state['messages'][self.state['history_prefix_count']:]
         self.state['history_prefix_count'] = 0
         self.state['required_mode'] = 'investigate'
         self.state['investigation'] = dict(version=VERSION, id=uuid.uuid4().hex, chat_id=self.chat_id,
-                                          query=query, phase='frame', approved=False, max_effort=self.requested_effort,
+                                          query=self.state['query'], phase='frame', approved=False, max_effort=self.requested_effort,
                                           tasks={}, variants=[], decisions=[], frame_calls=0)
 
     def conversation_history(self):
@@ -473,10 +445,8 @@ class Investigation(Orchestrator):
         self.agent.client.adopt(**caps, commit=False)
         statement = plan['statement'].strip()
         record = {**self.inv, 'plan': {**plan, 'statement': statement}, 'target': {'statement': statement, 'sha256': _digest(statement)},
-                  'ceiling': caps, 'allowances': allowances, 'phase': 'approval',
+                  'ceiling': caps, 'allowances': allowances, 'phase': 'planned',
                   'tasks': {t['id']: {'mode': t['mode'], 'effort': t['effort'], 'status': 'pending'} for t in tasks}}
-        sandbox = getattr(getattr(self.agent.workspace, 'numerics', None), 'policy', None)
-        record['proposal'] = _proposal(record, sandbox)
         record['approval_sha256'] = _approval_digest(record)
         self.inv.update(record)
         self._save()
@@ -534,16 +504,10 @@ class Investigation(Orchestrator):
         if self.agent.workspace.cancelled():
             raise WorkerInterrupted('Investigation paused by the user.')
 
-    def _approve(self):
+    def _start_plan(self):
         self._check_cancel()
-        with self.agent.client.waiting():
-            ok = self.agent.workspace.approve(self.inv['proposal'])
-        self._check_cancel()
-        if not ok:
-            _terminal(self.state, 'declined', 'The proposed plan was declined. No workers were started.')
-            return
-        # Save the authorization before adopting its absolute ceilings. Resume
-        # reapplies the same caps even after a crash between these operations.
+        # Persist stable worker slots before dispatch. Older records use
+        # "approved" for the same transition from a frozen plan to execution.
         for task in self.inv['plan']['tasks']:
             slot = self.inv['tasks'][task['id']]
             slot.setdefault('child_id', 'child_' + uuid.uuid4().hex)
@@ -751,8 +715,15 @@ class Investigation(Orchestrator):
                 if pause_error is None:
                     self._check_cancel()
                     self._reflect()
-        reason = self.inv.get('early_stop') or 'The approved research plan finished.'
+        reason = self.inv.get('early_stop') or 'The research plan finished.'
         _terminal(self.state, 'done', reason)
+
+    def run_routed(self, state):
+        """Continue the classified parent turn, keeping its identity, sources and usage."""
+        self._retired_calls = set()
+        self.state = state
+        self._begin_investigation()
+        return self._run_investigation()
 
     def run(self, query, *, files=(), history=(), state=None):
         self._retired_calls = set()
@@ -769,17 +740,20 @@ class Investigation(Orchestrator):
                 raise ValueError('Unsupported investigation version. Saved jobs and the report remain readable.')
             if self.inv['phase'] in TERMINAL:
                 return self._result()
+        return self._run_investigation()
+
+    def _run_investigation(self):
         self.state['status'] = 'running'
         self._save()
         try:
             if self.inv['phase'] == 'frame':
                 self._frame()
-            if self.inv['phase'] in ('approval', 'running'):
+            if self.inv['phase'] in ('planned', 'approval', 'running'):
                 validate_plan(self.inv['plan'], self.state['files'], self.inv['max_effort'])
                 if self.inv.get('approval_sha256') and self.inv['approval_sha256'] != _approval_digest(self.inv):
                     raise AgentError('The saved plan or ceilings no longer match the proposal. Its workers were not dispatched.')
-            if self.inv['phase'] == 'approval':
-                self._approve()
+            if self.inv['phase'] in ('planned', 'approval'):
+                self._start_plan()
             if self.inv['phase'] == 'running':
                 self._dispatch()
         except (WorkerInterrupted, KeyboardInterrupt):

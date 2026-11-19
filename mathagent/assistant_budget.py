@@ -157,6 +157,13 @@ class BudgetClient:
                 if key in ceilings and self.pool.state[key] is not None:
                     self.pool.state[key] = max(self.pool.state[key], min(value, ceilings[key]))
 
+    def allow_investigation_time(self, seconds):
+        """Enable the multi-worker time allowance only for adaptively timed turns."""
+        with self.pool.lock:
+            limits = self.pool.state.get('adaptive_limits', {})
+            if 'max_seconds' in limits:
+                limits['max_seconds'] = max(limits['max_seconds'], seconds)
+
     @property
     def remaining_tokens(self):
         with self.pool.lock:

@@ -6,14 +6,33 @@ import { artifactUrl, type Artifact } from './artifacts'
 import { MODE_CALLS } from './modeCalls'
 import { href } from './router'
 
-export type OutputKind = 'answer' | 'proof' | 'report' | 'check' | 'pdf' | 'tex' | 'source' | 'body' | 'bib' | 'file' | 'conversation' | 'experiment'
+export type OutputKind = 'investigation' | 'answer' | 'proof' | 'report' | 'check' | 'pdf' | 'tex' | 'source' | 'body' | 'bib' | 'file' | 'conversation' | 'experiment'
 export type WorkOutput = {
-  id: string; aliases: string[]; job: string; kind: OutputKind; name: string; producer: string
+  id: string; aliases: string[]; job: string; kind: OutputKind; name: string; producer: string; mode: string
   status: string; time: string; objective: string; text?: string; page?: string; url?: string; download?: string; file?: Artifact
 }
 
 export function modeLabel(mode?: string) {
   return MODE_CALLS.find(item => item.mode === mode)?.label || mode?.replace(/_/g, ' ') || 'Assistant'
+}
+
+const researchNames: Record<string, string> = {
+  prove: 'Proof', explore: 'Exploration', check: 'Literature check', literature: 'Literature review',
+  quick_review: 'Quick review', detailed_review: 'Detailed review', referee: 'Manuscript review',
+  explain: 'Explanation', writeup: 'Write-up', summarize: 'Summary', numerics: 'Numerical check',
+  python_lab: 'Python lab', sanity_check: 'Numerical check',
+}
+
+export function researchModeName(mode: string) {
+  return researchNames[mode] || modeLabel(mode)
+}
+
+export function taskReference(tasks: { id: string; mode: string }[], id: string) {
+  const index = tasks.findIndex(task => task.id === id)
+  if (index < 0) return 'an earlier step'
+  const { mode } = tasks[index]
+  const label = researchModeName(mode)
+  return tasks.filter(task => task.mode === mode).length > 1 ? label + ' (step ' + (index + 1) + ')' : label
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -56,6 +75,13 @@ export function conversationAnswers(chat: Chat) {
 }
 
 export type JobFormats = Record<string, NonNullable<ResearchDetail['outputs']>>
+export function nativeResultPage(mode: string, job: string, chat: string) {
+  const screen = mode === 'prove' || mode === 'literature' ? mode
+    : ['quick_review', 'detailed_review', 'referee', 'explain'].includes(mode) ? 'referee'
+    : ['writeup', 'summarize'].includes(mode) ? 'writeup' : undefined
+  return screen ? href(screen, job, null, chat) : undefined
+}
+
 export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: ResearchListItem[] = [],
   entries: RecordEntry[] = [], discovered: JobFormats = {}): WorkOutput[] {
   const outputs = new Map<string, WorkOutput>()
@@ -63,15 +89,22 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
   const jobs = new Map([...proofs, ...research].map(job => [job.id, job]))
   for (let card = 0; card < chat.transcript.length; card++) {
     const item = chat.transcript[card]
+    if (item.role === 'assistant' && item.investigation_id && item.content) {
+      const id = item.investigation_id
+      const plan = chat.investigation?.id === id ? chat.investigation : null
+      outputs.set(id, { id, job: id, aliases: [], kind: 'investigation', name: 'Investigation report',
+        mode: 'investigate', producer: 'Investigate', status: 'saved', time: item.time, objective: plan?.statement || '', text: item.content })
+      continue
+    }
     const agent = chat.agents?.find(worker => worker.card_index === card || (item.child_id && worker.id === item.child_id))
-    const producer = modeLabel(item.mode || agent?.mode)
+    const producer = researchModeName(item.mode || agent?.mode || '')
     const time = agent?.ended_at || item.time
     if (item.role === 'experiment' && item.experiment) {
       for (const file of item.artifacts || []) {
         const url = artifactUrl(item.experiment, file.filename)
         const id = item.experiment + ':' + file.filename
         outputs.set(id, { id, aliases: [file.artifact_id], job: item.experiment, kind: 'file', name: file.filename,
-          producer: agent ? modeLabel(agent.mode) : 'Numerical sandbox', status: item.run_status || 'saved',
+          mode: agent?.mode || 'numerics', producer: agent ? researchModeName(agent.mode) : 'Numerical experiment', status: item.run_status || 'saved',
           time, objective: item.purpose || '', file, url, download: url })
       }
       continue
@@ -83,22 +116,20 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
     const record = jobs.get(job)
     const mode = item.mode
     const formats = item.outputs || discovered[job]
-    const page = mode === 'prove' ? href('prove', job, null, chat.id) : mode === 'literature' ? href('literature', job, null, chat.id)
-      : ['quick_review', 'detailed_review', 'referee', 'explain'].includes(mode) ? href('referee', job, null, chat.id)
-      : ['writeup', 'summarize'].includes(mode) ? href('writeup', job, null, chat.id) : undefined
+    const page = nativeResultPage(mode, job, chat.id)
     let primary = true
     function add(kind: OutputKind, name: string, url?: string, download?: string, text?: string) {
       const id = primary ? job! : job + ':' + kind
       const aliases = primary ? ['card-' + card, ...(agent ? [agent.id] : []), ...(receipt?.aliases || []), job + ':' + kind] : []
-      outputs.set(id, { id, aliases, job: job!, kind, name, producer, status: record?.status || item.status || 'saved',
+      outputs.set(id, { id, aliases, job: job!, kind, name, producer, mode, status: record?.status || item.status || 'saved',
         time: record?.updated_at || time, objective: item.request || '', page, url, download, text })
       primary = false
     }
     if (!item.answer_id && !item.job_id && receipt) add('conversation', 'Answer in conversation', undefined, undefined, receipt.text)
-    else if (item.answer_id) add('answer', 'Worker answer')
+    else if (item.answer_id) add('answer', mode === 'explore' ? 'Exploration notes' : 'Written answer')
     else if (mode === 'prove') {
-      add('proof', 'Selected proof candidate')
-      add('report', 'Proof report')
+      add('proof', 'Proof response')
+      add('report', 'Proof review')
     } else if (mode === 'check') add('check', 'Literature check')
     else if (mode === 'writeup' || mode === 'summarize') {
       if (formats?.pdf) add('pdf', 'Compiled PDF', api.researchPdfUrl(job), api.researchPdfDownloadUrl(job))
@@ -118,7 +149,7 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
     const kind = entry.folder === 'experiments' ? 'experiment' : entry.folder === 'checks' ? 'check' : undefined
     if (!kind) continue
     outputs.set(entry.job_id, { id: entry.job_id, job: entry.job_id, aliases: [entry.id], kind,
-      name: kind === 'experiment' ? 'Numerical experiment' : 'Literature check', producer: modeLabel(entry.mode),
+      name: kind === 'experiment' ? 'Numerical experiment' : 'Literature check', mode: entry.mode, producer: researchModeName(entry.mode),
       status: entry.status, time: entry.created_at, objective: entry.task.text })
   }
   return [...outputs.values()].sort((a, b) => (b.time || '').localeCompare(a.time || ''))

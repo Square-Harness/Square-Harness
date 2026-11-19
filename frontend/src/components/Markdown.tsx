@@ -48,9 +48,10 @@ type Props = {
   onCite?: (ref: string) => void
   flagged?: Set<string>
   inline?: boolean
+  mathProse?: boolean
 }
 
-export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline }: Props) {
+export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline, mathProse }: Props) {
   const macros = useContext(MathMacros)
   const katex = useMemo(() => ({ ...KATEX, macros: { ...macros } }), [macros])
   const components = useMemo<Components>(() => ({
@@ -75,7 +76,7 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
       )
     },
   }), [onCite, flagged, inline])
-  const source = useMemo(() => normalizeMath(children || ''), [children])
+  const source = useMemo(() => normalizeMath(children || '', mathProse), [children, mathProse])
   const Wrapper = inline ? 'span' : 'div'
   return (
     <Wrapper className={(inline ? 'prose-inline' : 'prose') + (className ? ' ' + className : '')}>
@@ -92,9 +93,9 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
 })
 
 /** One line of text with its mathematics typeset, shortened safely. */
-export function Inline({ children, limit, className }: { children: string; limit?: number; className?: string }) {
+export function Inline({ children, limit, className, mathProse }: { children: string; limit?: number; className?: string; mathProse?: boolean }) {
   const text = limit ? snippet(children, limit) : children.replace(/\s+/g, ' ').trim()
-  return <Markdown inline className={className}>{text}</Markdown>
+  return <Markdown inline mathProse={mathProse} className={className}>{text}</Markdown>
 }
 
 export function StreamingMarkdown({ text, className }: { text: string; className?: string }) {

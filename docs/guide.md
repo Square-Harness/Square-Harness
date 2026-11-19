@@ -423,18 +423,18 @@ the same child job; cancelled queued turns leave a clear notice in the chat.
 
 ### Following agents in a conversation
 
-Open the research notebook from the conversation header. Workers started together
-share a group in the conversation. Each row shows its objective, status, latest
-activity and elapsed time. The bars use the same time scale, so you can see when
-two workers overlapped. Select a row to inspect its agent or a result to open
-its output. A stopped worker and a mathematical objection have different marks.
+Open **Notebook** on the right of the conversation. On desktop its four shortcuts
+take you straight to a section. Workers that start together share a group in the
+conversation. Select a specialist to follow its work or open its result. Timing
+bars share a scale so you can see when two tasks overlapped.
 
-The **Agents** tab shows the worker history and links to native job pages.
-**Outputs** collects saved answers, proof and review text, sandbox artifacts
-and Write-Up downloads. **Record** shows the evidence available in the
-conversation's scope, including its project when it has one. **Plan** shows the
-investigation target, dependencies, progress and budget. It also lets you
-finish a current investigation with its saved evidence.
+- **Activity** shows what each specialist is doing. From a Literature task,
+  **Open literature review** takes you into the review itself.
+- **Results** collects investigation reports, saved answers, proof attempts, reviews, experiments and
+  Write-Up downloads.
+- **Evidence** shows findings and sources available in this conversation or project.
+- **Plan** lists the research question, the steps and their dependencies in
+  mathematical notation. Open **Time and usage** for the resource figures.
 
 On a wide screen the notebook opens beside the conversation. Drag its divider
 or focus the divider and use the arrow keys to resize it. On a smaller screen
@@ -479,7 +479,7 @@ app and the other way round: both use the same saved files.
 | Skill | You get | Web app | Terminal |
 | --- | --- | --- | --- |
 | Conversation | Answers, with focused jobs when needed | type a message | web app only |
-| Guided investigation | A confirmed research plan and an evidence-linked report | `@investigate` | `/investigate` |
+| Guided investigation | A research plan and an evidence-linked report | `@investigate` | `/investigate` |
 | Prove | A proof, its review and every attempt | `@prove`, New proof | `/prove` (default) |
 | Explore | Approaches and useful first steps with heuristics labelled | `@explore` | `/explore` |
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
@@ -541,13 +541,15 @@ Standalone Proof jobs and raw benchmark calls retain their direct path.
 
 In an Assistant conversation, type **@investigate** followed by a question.
 For example, ask whether a proposed identity holds for all square matrices and
-which hypotheses suffice. The planner can propose exploring counterexamples
-and checking a restricted case, then give Proof an exact statement. A plain
-question still goes to the ordinary Assistant. An explicit **@prove** still
-starts its usual proof workflow.
+which hypotheses suffice. The planner can explore counterexamples and check a
+restricted case, then give Proof an exact statement. The plan appears in the
+conversation and work starts automatically. You can follow the steps in the
+notebook or pause while the workers are running. DS4 can also select an investigation
+from an ordinary Assistant question that calls for several lines of research.
+A simple question can receive a direct answer. Selecting **@prove** still
+starts the usual proof workflow.
 
-The approval shows the target, its identifying hash, the tasks, and their
-worst-case allowance. Up to six tasks can draw on Explore, Check, Literature,
+Up to six tasks can draw on Explore, Check, Literature,
 Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
 effort. Independent tasks can run together when the model server supports it.
 As results arrive, the controller can start a newly eligible task, skip further work, or fill a planned slot for
@@ -564,8 +566,7 @@ an Explore card to inspect its mathematics. Select **@summarize** for a separate
 
 In the terminal, use `/investigate <question>`, `/investigations`,
 `/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations
-run one worker at a time. Ctrl+C during work requests a pause. At the
-confirmation prompt Ctrl+C declines the plan. A terminal investigation uses the
+run one worker at a time. Ctrl+C during work requests a pause. A terminal investigation uses the
 workspace writer lock shared with the web interface.
 
 ### Prove

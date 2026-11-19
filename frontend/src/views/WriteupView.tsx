@@ -102,11 +102,14 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
         })}
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
-      <div className="job-facts">
-        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path}</span>)}
-        <span>{String(data.settings.model)}</span>
-        <span>Started {ago(data.created_at)}</span>
-      </div>
+      <details className="job-settings-note">
+        <summary>Run details</summary>
+        <div className="job-facts">
+          {data.sources.map((source) => <span key={source.id} className="fact-file">{source.path}</span>)}
+          <span>{String(data.settings.model)}</span>
+          <span>Started {ago(data.created_at)}</span>
+        </div>
+      </details>
       {(data.outputs?.tex || data.outputs?.download || data.outputs?.source || data.compile?.pdf) && (
         <div className="outputs">
           {data.outputs?.tex && <span className="output-file">Saved as <code>{data.outputs.tex}</code>{typeof data.outputs.pdf === 'string' && <>, <code>{data.outputs.pdf}</code></>}{data.outputs.body && <> and the body alone, <code>{data.outputs.body}</code>,</>} in your folder</span>}

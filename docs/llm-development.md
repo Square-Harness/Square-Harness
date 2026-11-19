@@ -693,9 +693,10 @@ The panel location uses the chat URL's `panel` and `selected` parameters.
 New output types should reuse the authenticated native preview or download
 endpoint and preserve keyboard navigation and both themes.
 
-A guided investigation enters through an explicit mode selection. The hub
-constructs `Investigation` for that turn. Its frame collects an exact target
-and a bounded plan. The approved plan controls worker admission. A changed
+A guided investigation enters through a mode selection or a DS4 routing decision.
+The hub constructs `Investigation` for that turn. Its frame persists an exact
+target and validates a bounded plan before starting its workers. The GUI renders
+the plan as it runs. File writes and other permission prompts retain their own checks. A changed
 statement is registered as a distinct variant. Always preserve the target
 hash when checking a Proof result against a claim. The stop route reads saved
 evidence and must work with the model offline.
@@ -1139,9 +1140,8 @@ limit. A continuing rejection checkpoints the job for Resume. Initial connection
 the request timeout.
 
 DS4 unassigned Assistant turns use `proof_routing.route_request` before free
-generation. The bounded, nonthinking structured decision distinguishes direct
-elementary facts from substantive proof requests; this is a semantic model
-decision, not a keyword or character-count heuristic. Existing explicit mode
+generation. The bounded, nonthinking structured decision selects a direct answer,
+Proof, an investigation or ordinary specialist routing. Existing explicit mode
 and automatic source/reference selections take precedence. `ModeOrchestrator`
 saves the decision and usage, then runs the short preparation and durable Proof
 handoff when required. A malformed routing decision is an operational failure;

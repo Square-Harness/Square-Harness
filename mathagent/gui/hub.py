@@ -773,7 +773,7 @@ class Hub:
                     raise ValueError('That task is no longer running.')
             if investigation_id is not None:
                 if (task.kind != 'chat' or task.target != chat_id or task.investigation_id != investigation_id
-                        or task.investigation_phase not in ('frame', 'approval', 'running')):
+                        or task.investigation_phase not in ('frame', 'planned', 'approval', 'running')):
                     raise Busy('The active task does not belong to this investigation.')
             task.cancel.set()
             task.state = 'pausing'
@@ -1640,8 +1640,9 @@ class Hub:
                 ('max_tokens', 'assistant_tokens'), ('max_input_tokens', 'assistant_input_tokens'),
                 ('max_seconds', 'assistant_seconds'))}
             adaptive_seconds = max(effort.level(mode, 'high', self.args)['minutes'] * 60 for mode in JOB_MODES) + 300
+            investigation_seconds = 6 * adaptive_seconds + 600
             if selected_mode == 'investigate':
-                adaptive_seconds = 6 * adaptive_seconds + 600
+                adaptive_seconds = investigation_seconds
             initial_seconds = configured['max_seconds'] or (PROOF_CALL_SECONDS if is_ds4(main) else 900)
             adaptive = {'max_seconds': max(initial_seconds, adaptive_seconds)} if configured['max_seconds'] is None else {}
             budget = BudgetClient(main.client, state=store.assistant_accounting(root, previous) if previous else None,
@@ -1674,11 +1675,12 @@ class Hub:
             options = dict(emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
                            max_actions=previous['limits']['actions'] if previous else DEFAULT_ACTIONS,
                            max_children=previous['limits']['children'] if previous else None)
-            if selected_mode == 'investigate':
+            def investigation(effort):
                 from ..investigation import Investigation
-                parent = Investigation(main, delegate, args=self.args, chat_id=chat_id,
-                                       requested_effort=required_effort or (previous or {}).get('required_effort') or 'medium',
-                                       **options)
+                return Investigation(main, delegate, args=self.args, chat_id=chat_id, requested_effort=effort, **options)
+
+            if selected_mode == 'investigate':
+                parent = investigation(required_effort or (previous or {}).get('required_effort') or 'medium')
             else:
                 parent = ModeOrchestrator(main, delegate, required_mode=required_mode,
                                           required_effort=required_effort or (previous or {}).get('required_effort'),
@@ -1694,6 +1696,12 @@ class Hub:
                     history.pop()  # the current message is added by the controller
             try:
                 result = parent.run(content, files=files, history=history, state=previous)
+                if result.get('status') == 'handoff' and result['mode'] == 'investigate':
+                    routed = parent.state
+                    parent = investigation(routed['proof_routing']['effort'])
+                    parent._state_lock = checkpoint_lock
+                    budget.allow_investigation_time(investigation_seconds)
+                    result = parent.run_routed(routed)
             except KeyboardInterrupt:
                 checkpoint()
                 store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Assistant paused. Its workers and remaining budget are saved.', 'time': store._now()}])
@@ -1714,7 +1722,7 @@ class Hub:
                 self.bus.publish('chat_saved', chat=chat_id)
                 return {'status': parent.state['status'] if exhausted or permanent else 'paused', 'answer': ''}
             if result['status'] == 'complete':
-                if selected_mode != 'investigate':
+                if not parent.state.get('investigation'):
                     store.commit_turn(root, chat_id, parent.conversation_history(), capture.calls, capture.notices,
                                       echo_user=False, mode='free')
             else:

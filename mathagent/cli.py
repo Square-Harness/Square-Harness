@@ -121,7 +121,7 @@ HELP = '''Commands
   /python-lab [request or code]       Run Python computations and plots in the Docker sandbox
   /sanity-check [claim]               Try to falsify a claim with cheap numerical experiments
   /experiments                       List saved sandbox experiments
-  /investigate <question>              Propose a bounded multi-mode research plan for approval
+  /investigate <question>              Plan and run a bounded multi-mode investigation
   /investigations                     List saved investigations
   /investigate-resume <id>            Continue with the original statement and remaining budget
   /investigate-report <id>            Finish a paused investigation or read its completed report

@@ -16,6 +16,8 @@
 
 /* Notebook covers share white glyphs and the same palette across themes. */
 .mode-free { background: #3b4256; }
+.mode-investigate { background: var(--investigation-cover); color: white; }
+.route-cover.mode-investigate { font-size: 1em; }
 .mode-prove { background: #2f3eb5; }
 .mode-critic { background: #a63348; } /* saved Critique conversations */
 .mode-explore { background: #24684c; }

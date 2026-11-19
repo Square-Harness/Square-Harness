@@ -127,14 +127,17 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
         })}
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} taskId={ownTask?.id} />
-      <div className="job-facts">
-        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
-        {data.unit && <span>{data.unit}</span>}
-        {data.level && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
-        <span>{String(data.settings.model)}</span>
-        <span>{data.settings.online ? 'Online' : 'Offline'}</span>
-        <span>Started {ago(data.created_at)}</span>
-      </div>
+      <details className="job-settings-note">
+        <summary>Run details</summary>
+        <div className="job-facts">
+          {data.sources.map((source) => <span key={source.id} className="fact-file">{source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
+          {data.unit && <span>{data.unit}</span>}
+          {data.level && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
+          <span>{String(data.settings.model)}</span>
+          <span>{data.settings.online ? 'Online' : 'Offline'}</span>
+          <span>Started {ago(data.created_at)}</span>
+        </div>
+      </details>
       {data.stop_reason && !data.running && <p className="muted small">{data.stop_reason}</p>}
       <div className="job-actions">
         {ours ? (

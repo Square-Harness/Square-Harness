@@ -9,14 +9,17 @@ import { AgentsTab } from './AgentGroup'
 import { OutputsTab } from './OutputsTab'
 import { PlanTab } from './PlanTab'
 import { RecordTab } from './RecordTab'
-import { CloseIcon } from './Icons'
+import { CloseIcon, NotebookIcon, NotesIcon, StackIcon, InvestigationIcon, FileIcon } from './Icons'
+import { Glyph } from './Glyph'
+import { Square } from './Square'
 import './WorkPanel.css'
 
-const WIDE = '(min-width: 1320px)'
-const DEFAULT_WIDTH = 390
+const WIDE = '(min-width: 1200px)'
+const DEFAULT_WIDTH = 380
 const MIN_WIDTH = 304
 const MAX_WIDTH = 600
-const LABELS = { agents: 'Agents', outputs: 'Outputs', record: 'Record', plan: 'Plan' }
+const LABELS = { agents: 'Activity', outputs: 'Results', record: 'Evidence', plan: 'Plan' }
+const TAB_ICONS = { agents: StackIcon, outputs: FileIcon, record: NotesIcon, plan: InvestigationIcon }
 const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(value)))
 
 export function WorkPanel({ chat }: { chat: Chat }) {
@@ -33,6 +36,14 @@ export function WorkPanel({ chat }: { chat: Chat }) {
   const drag = useRef<{ x: number; width: number } | null>(null)
   const activeLanes = (chat.agents || []).filter((agent) => agent.status === 'running' || agent.status === 'waiting')
   const currentTurn = activeLanes.length >= 2 ? activeLanes[0].turn_id : ''
+  const running = activeLanes.filter(lane => lane.status === 'running').length
+  const waiting = activeLanes.length - running
+  const activity = [running ? running + ' working' : '', waiting ? waiting + ' waiting' : ''].filter(Boolean).join(' · ')
+  const investigation = chat.investigation
+  const lastTab = workPreferences().tab
+  const defaultTab = lastTab && tabs.includes(lastTab) ? lastTab
+    : activeLanes.length ? 'agents' : investigation ? 'plan' : (chat.agents || []).length ? 'outputs' : 'record'
+  const announcement = activeLanes.map(agent => (agent.mode === 'prove' ? 'Proof' : agent.mode.replaceAll('_', ' ')) + ' ' + agent.status).join('. ')
   useEffect(() => {
     const query = window.matchMedia(WIDE)
     const changed = () => setWide(query.matches)
@@ -90,7 +101,20 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     document.addEventListener('keydown', keys)
     return () => document.removeEventListener('keydown', keys)
   }, [!!selection, wide])
-  if (!selection) return null
+  if (!selection) return <nav className="notebook-rail" aria-label="Research notebook">
+    <button className="notebook-pull" type="button" data-work-trigger aria-label="Open research notebook" aria-expanded={false}
+      title="Open research notebook" onClick={() => openWorkPanel(defaultTab)}>
+      <span className="notebook-pull-cover"><NotebookIcon size={21} /></span><span>Notebook</span>
+    </button>
+    <div className="notebook-index">{tabs.map(key => {
+      const Icon = TAB_ICONS[key]
+      return <button key={key} type="button" onClick={() => openWorkPanel(key)} aria-label={'Open ' + LABELS[key].toLowerCase()}>
+        <span className="notebook-index-icon"><Icon size={18} />{key === 'agents' && !!running && <i />}</span>
+        {LABELS[key]}
+      </button>
+    })}</div>
+    <span aria-live="polite" className="sr-only">{announcement}</span>
+  </nav>
   const choose = (key: WorkTab) => openWorkPanel(key)
   const keys = (event: KeyboardEvent, index: number) => {
     const target = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft'
@@ -116,10 +140,14 @@ export function WorkPanel({ chat }: { chat: Chat }) {
           const value = e.key === 'Home' ? MIN_WIDTH : e.key === 'End' ? MAX_WIDTH : clampWidth(width + (e.key === 'ArrowLeft' ? 1 : -1) * (e.shiftKey ? 64 : 16))
           setWidth(value); rememberWorkPanel({ width: value })
         }} />}
-      <div className="work-panel-head">
-        <h2 id="work-panel-title">Research notebook</h2>
-        <button type="button" className="icon-btn" aria-label="Close work panel" onClick={closeWorkPanel}><CloseIcon size={16} /></button>
-      </div>
+      <header className={'work-panel-head' + (investigation ? ' work-panel-investigation' : '')}>
+        <span className="notebook-header-mark" aria-hidden="true">{investigation ? <Glyph mode="investigate" /> : <NotebookIcon size={22} />}</span>
+        <div className="notebook-heading"><h2 id="work-panel-title">Research notebook</h2>
+          {activity && <span className="notebook-head-status"><Square variant={running ? 'running' : 'waiting'} size={13} /> {activity}</span>}
+        </div>
+        <span aria-live="polite" className="sr-only">{announcement}</span>
+        <button type="button" className="icon-btn" aria-label="Close research notebook" title="Close research notebook" onClick={closeWorkPanel}><CloseIcon size={18} /></button>
+      </header>
       <div ref={tablist} role="tablist" aria-label="Research notebook" className="work-panel-tabs">
         {tabs.map((key, i) => <button type="button" key={key} id={'work-tab-' + key}
           role="tab" tabIndex={key === tab ? 0 : -1} aria-selected={key === tab} aria-controls="work-panel-content"

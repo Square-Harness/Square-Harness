@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
+import { activityCaption } from '../workNotice'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { activeTasks, concurrencyLimits } from '../concurrency'
 import { api, REVIEW_PIPELINE, type Artifact, type Review, type ToolCall } from '../api'
@@ -420,7 +421,8 @@ export function ArtifactViewer({ job, id, name, pipeline, onClose }: { job: 'pro
 const REDUNDANT = /^(Proof [0-9a-f-]{36}:|Research [0-9a-f-]{36}:|Research phase:)/
 
 export function ActivityLog({ items }: { items: { kind: string; text: string }[] }) {
-  const shown = items.filter((item) => !(item.kind === 'notice' && REDUNDANT.test(item.text))).slice(-5)
+  const shown = items.filter(item => !(item.kind === 'notice' && REDUNDANT.test(item.text)))
+    .map(item => ({ ...item, text: activityCaption(item) })).filter(item => item.text).slice(-5)
   if (!shown.length) return null
   return (
     <ul className="activity">

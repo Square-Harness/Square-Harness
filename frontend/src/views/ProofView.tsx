@@ -113,15 +113,18 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
         <Markdown>{data.goal}</Markdown>
       </div>
       {long && <button type="button" className="link-btn" onClick={() => setExpanded(!expanded)}>{expanded ? 'Show less' : 'Show the whole request'}</button>}
-      <div className="job-facts">
-        {data.sources.map((source) => <span key={source.path} className="fact-file">{source.path}</span>)}
-        <span>{String(settings.model)}</span>
-        <span>Context {count(settings.ctx)}</span>
-        {!data.legacy && settings.max_predict !== undefined && <span>Solve up to {count(outputCap(settings, settings.max_predict))} tokens</span>}
-        {!data.legacy && settings.verify_tokens !== undefined && <span>Review up to {count(outputCap(settings, settings.verify_tokens))} tokens</span>}
-        {data.legacy && <span>v0.4 engine</span>}
-        <span>Started {ago(data.created_at)}</span>
-      </div>
+      <details className="job-settings-note">
+        <summary>Run details</summary>
+        <div className="job-facts">
+          {data.sources.map((source) => <span key={source.path} className="fact-file">{source.path}</span>)}
+          <span>{String(settings.model)}</span>
+          <span>Context {count(settings.ctx)}</span>
+          {!data.legacy && settings.max_predict !== undefined && <span>Solve up to {count(outputCap(settings, settings.max_predict))} tokens</span>}
+          {!data.legacy && settings.verify_tokens !== undefined && <span>Review up to {count(outputCap(settings, settings.verify_tokens))} tokens</span>}
+          {data.legacy && <span>v0.4 engine</span>}
+          <span>Started {ago(data.created_at)}</span>
+        </div>
+      </details>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
       {data.legacy && (
         <p className="warning-note">
@@ -429,7 +432,7 @@ function ProofSources({ id, goal, reference }: { id: string; goal: string; refer
       {data?.sources.map((source) => (
         <section key={source.path}>
           <h3 className="section-title">{source.path}</h3>
-          <p className="muted small">Snapshot saved when the job started{source.sha256 ? `, SHA-256 ${source.sha256.slice(0, 16)}…` : ''}. Later edits to the file do not change it.</p>
+          <p className="muted small">Source as it appeared when the proof started.</p>
           <SourceLines content={source.content} />
         </section>
       ))}

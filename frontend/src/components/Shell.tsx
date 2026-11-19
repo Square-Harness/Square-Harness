@@ -217,7 +217,7 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
                   {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
                   {work.queued && <span>Queued</span>}
                   {projectName(chat.project_id) && <span className="side-project" title={`Project: ${projectName(chat.project_id)}`}><FolderIcon size={12} /><span>{projectName(chat.project_id)}</span></span>}
-                  <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
+                  <span className="side-preview">{/^\s*(?:##\s*)?Investigation report\b/i.test(chat.preview || '') ? 'Investigation report' : chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
                   <span className="side-time">{ago(chat.updated_at)}</span>
                 </span>
               </span>

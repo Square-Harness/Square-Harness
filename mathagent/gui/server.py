@@ -885,12 +885,12 @@ def _investigation_view(record, can_stop=False, *, current=False, usage=None):
     for task in (record.get('plan') or {}).get('tasks', []):
         result = record.get('tasks', {}).get(task['id'], {})
         tasks.append({'id': task['id'], 'mode': task['mode'], 'objective': task['objective'],
-                      'after': task['after'], 'status': result.get('status', 'pending'), 'effort': task.get('effort'),
+                      'after': task['after'], 'claim': task.get('claim'), 'status': result.get('status', 'pending'), 'effort': task.get('effort'),
                       'job_id': result.get('job_id'), 'child_id': result.get('child_id'), 'reason': result.get('reason')})
     budget = usage if current else record.get('usage')
     totals = store.budget_view(budget or {}, current and record['phase'] == 'running')
     return {'id': record['id'], 'phase': record['phase'], 'tasks': tasks, 'approved': bool(record.get('approved')),
-            'current': current, 'usage': totals,
+            'current': current, 'usage': totals, 'reading': (record.get('plan') or {}).get('reading', ''),
             'statement': (record.get('target') or {}).get('statement', ''), 'ceiling': record.get('ceiling') or {},
             'can_stop': bool(can_stop and record['phase'] not in TERMINAL)}
 

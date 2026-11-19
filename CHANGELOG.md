@@ -2,13 +2,12 @@
 
 ## Unreleased
 
-- Follow parallel agents in a conversation and open their activity, saved
-  outputs, project evidence and investigation plan in a responsive research
-  notebook. The selected tab and result can be reopened from the chat link.
-
-- Add explicit guided investigations to the Assistant and terminal. Approve an
-  exact target, run a bounded plan across mathematical modes, pause or resume,
-  and finish with an evidence-linked report.
+- Follow parallel work in the right-hand research notebook. Open the literature
+  review, proof or experiment from its task. Plans and saved investigation reports
+  show mathematical statements, findings and readable source references.
+- Investigate prepares a bounded plan and starts work automatically. Select it in
+  the Assistant or terminal, or let DS4 choose it for a multi-part research question.
+  Pause, resume or finish with an evidence-linked report.
 - Make saved research available across turns and project conversations through
   a scoped index. Delegated Proof can reuse pinned source passages, with a
   separate solver-only channel for strategy leads.

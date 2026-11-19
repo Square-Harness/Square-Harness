@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
-import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
+import { api, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
@@ -19,16 +19,17 @@ import { proofLook, researchLook, Square, type Variant } from '../components/Squ
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { literalUnderscores } from '../mathtext'
-import { ago, count } from '../format'
+import { ago } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
-import { go, href, openWorkPanel } from '../router'
+import { ConversationPlan, InvestigationReport } from '../components/InvestigationReading'
+import { go, href } from '../router'
 import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
-import { AgentGroup, AgentHeader } from '../components/AgentGroup'
+import { AgentGroup } from '../components/AgentGroup'
 
 type ChatMode = 'critic' | 'explore' | 'free'
 
@@ -259,7 +260,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     <MathMacrosProvider definitions={data?.math_macros}>
     <div className="chat-workspace">
     <div className="chat">
-      {id && free && <AgentHeader lanes={agentLanes} />}
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
@@ -267,29 +267,24 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
-          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} />}
+          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} />}
           {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
               <p className="muted routing"><Square variant="running" size={12} /> Reading your request…</p>
             </div>
           )}
-          {live && <LiveTurnView live={live} mode={mode} waitingForOutput={!!task?.waiting_model_calls} />}
-          {data?.investigation?.current && data.assistant_status !== 'complete' && (
-            <div className="entry"><span className="in-margin" /><div>
-              <button type="button" className="btn btn-small btn-quiet" onClick={() => openWorkPanel('plan')}>View investigation plan</button>
-            </div></div>
-          )}
-          {free && data?.assistant_progress && <div className="entry">
+          {live && <LiveTurnView live={live} mode={mode} investigating={!!data?.investigation?.current} waitingForOutput={!!task?.waiting_model_calls} />}
+          {free && data?.assistant_progress && !agentLanes.some(activeAgent) && <div className="entry">
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
           </div>}
           {paused && !ours && (
             <div className="entry message message-model">
-              <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
+              <span className={'in-margin speaker speaker-model mode-' + (pausedInvestigation ? 'investigate' : 'free')}><Glyph mode={pausedInvestigation ? 'investigate' : 'free'} /></span>
               <div>
                 <p className="notice">{pausedInvestigation
-                  ? 'The investigation is paused. Resume the approved plan or finish with a report on the evidence collected so far.'
+                  ? 'The investigation is paused. Resume the plan or finish with a report on the evidence collected so far.'
                   : 'The assistant is paused. Resume its saved work or send a new message to set this turn aside.'}</p>
                 {pausedInvestigation && <button type="button" className="btn btn-quiet btn-small" disabled={resuming || work.blocked}
                   onClick={stopInvestigation}>Stop and report</button>}
@@ -342,13 +337,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-bar">
           {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           {free && budgetDisplay && (
-            <span className="muted small composer-budget" title={budgetDisplay.title}>
-              {budgetDisplay.output}
-              {budgetDisplay.reserved && <> {' · '}{budgetDisplay.reserved}</>}
-              {budgetDisplay.uncertain && <> {' · '}{budgetDisplay.uncertain}</>}
-              {budgetDisplay.context && <> {' · '}{budgetDisplay.context}</>}
-              {' · '}{budgetDisplay.time}
-            </span>
+            <details className="composer-usage"><summary>Usage details</summary>
+              <p title={budgetDisplay.title}>{[budgetDisplay.output, budgetDisplay.reserved, budgetDisplay.uncertain,
+                budgetDisplay.context, budgetDisplay.time].filter(Boolean).join(' · ')}</p>
+            </details>
           )}
           {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
@@ -407,7 +399,7 @@ function group(items: TranscriptItem[]): Turn[] {
   return turns
 }
 
-function Transcript({ items, mode, chatId, lanes }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[] }) {
+function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation'] }) {
   const turns = group(items)
   const groups = groupsOf(lanes)
   const byCard = new Map<number, AgentLane[]>()
@@ -428,6 +420,9 @@ function Transcript({ items, mode, chatId, lanes }: { items: TranscriptItem[]; m
       // retain it in Agents; only display it inside a turn of known ownership.
       const owner = owners.get(batch[0].turn_id) ?? (batch.some(activeAgent) ? turns.length - 1 : undefined)
       if (owner !== undefined) {
+        const inReport = plan && turns[owner].steps.some(({ item }) => item.investigation_id === plan.id) &&
+          batch.every(lane => !activeAgent(lane) && plan.tasks.some(task => task.child_id === lane.id))
+        if (inReport) continue
         const previous = unstarted.get(owner)
         if (previous) previous.push(batch)
         else unstarted.set(owner, [batch])
@@ -439,8 +434,10 @@ function Transcript({ items, mode, chatId, lanes }: { items: TranscriptItem[]; m
       {turns.map((turn, index) => (
         <div key={index} className="turn">
           {turn.user && <UserMessage item={turn.user} />}
-          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} />
-          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} />)}
+          {plan && (turn.steps.some(({ item }) => item.investigation_id === plan.id) || (plan.current && index === turns.length - 1)) &&
+            <ConversationPlan key={plan.id} plan={plan} finished={turn.steps.some(({ item }) => item.investigation_id === plan.id)} />}
+          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
+          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} />)}
         </div>
       ))}
     </>
@@ -463,32 +460,32 @@ function UserMessage({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ModelSteps({ steps, mode, chatId, groups }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]> }) {
+function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]>; prompt?: string }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
   // An Assistant conversation answers with one voice, whichever engine mode wrote it, except
   // a literature check, which keeps its citation mark; older critique and exploration chats
   // keep their own mark.
-  let mark: ChatMode | 'check' = mode
+  let mark: ChatMode | 'check' | 'investigate' = mode
   const flush = (key: number) => {
     if (!blocks.length) return
     out.push(
       <div key={'answer' + key} className="entry message message-model">
-        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'check' ? 'Literature Check' : MODES[mark].label}><Glyph mode={mark} /></span>
+        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'investigate' ? 'Investigation' : mark === 'check' ? 'Literature Check' : MODES[mark].label}><Glyph mode={mark} /></span>
         <div className="message-body">{blocks}</div>
       </div>,
     )
     blocks = []
   }
-  const markFor = (item: TranscriptItem): ChatMode | 'check' =>
-    item.mode === 'check' ? 'check' : item.mode === 'free' ? 'free' : mode
+  const markFor = (item: TranscriptItem): ChatMode | 'check' | 'investigate' =>
+    item.investigation_id ? 'investigate' : item.mode === 'check' ? 'check' : item.mode === 'free' ? 'free' : mode
   for (let i = 0; i < steps.length; i++) {
     const { item, index } = steps[i]
     if (item.role === 'route') {
       flush(index)
       const batch = mode === 'free' && item.orchestrated ? groups.get(index) : undefined
       if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
-      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} />)
+      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} prompt={prompt} />)
     } else if (item.role === 'assistant') {
       if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
       const calls = item.tool_calls || []
@@ -503,9 +500,10 @@ function ModelSteps({ steps, mode, chatId, groups }: { steps: Step[]; mode: Chat
               <pre className="plain">{results[n]?.content ?? 'No result was recorded.'}</pre>
             </Collapse>
           ))}
-          {item.content && <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>}
-          {final && item.stats?.eval_count !== undefined && (
-            <span className="message-time">{count(item.stats.eval_count)} tokens{item.stats.done_reason === 'length' ? ', stopped at the output limit' : ''}</span>
+          {item.content && (item.investigation_id ? <InvestigationReport content={item.content} chatId={chatId} />
+            : <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>)}
+          {final && item.stats?.done_reason === 'length' && (
+            <span className="message-time">The answer reached its length limit.</span>
           )}
         </div>,
       )
@@ -722,8 +720,8 @@ export function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpos
   )
 }
 
-function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: ChatMode; waitingForOutput: boolean }) {
-  const glyph: ChatMode | 'check' = live.mode ?? mode
+function LiveTurnView({ live, mode, investigating, waitingForOutput }: { live: LiveTurn; mode: ChatMode; investigating: boolean; waitingForOutput: boolean }) {
+  const glyph = investigating ? 'investigate' : live.mode ?? mode
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}
@@ -736,7 +734,7 @@ function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: 
               <Thinking text={step.thinking} live={!step.text} />
               {step.text && <StreamingMarkdown text={step.text} className="answer" />}
               {!step.text && !step.thinking && !waitingForOutput && index === live.steps.length - 1 && (
-                <p className="muted small">Waiting for the first tokens.</p>
+                <p className="muted small">Preparing a response…</p>
               )}
             </div>
           ) : step.type === 'tool' ? (

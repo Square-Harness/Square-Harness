@@ -35,7 +35,7 @@ export function ApprovalDialog() {
   const task = activeTasks(snapshot).find((entry) => entry.task.id === approval.task)?.task
   const target = approval.target || task?.target
   const mode: Mode = approval.task_kind === 'chat' ? 'free' : approval.task_kind === 'proof' ? 'prove' : research?.find((job) => job.id === target)?.kind || 'literature'
-  const titleText = chats?.find((chat) => chat.id === target)?.title || proofs?.find((job) => job.id === target)?.title || research?.find((job) => job.id === target)?.title || task?.title || target || approval.task
+  const titleText = chats?.find((chat) => chat.id === target)?.title || proofs?.find((job) => job.id === target)?.title || research?.find((job) => job.id === target)?.title || task?.title || 'this conversation'
   const [head, ...rest] = approval.preview.split('\n')
   const body = rest.join('\n')
   const decide = async (approve: boolean) => {

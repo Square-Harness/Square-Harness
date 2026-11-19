@@ -16,6 +16,15 @@ function Icon({ size = 18, title, children }: IconProps & { children: ReactNode 
   )
 }
 
+/** One mathematical question branching into two lines of inquiry. */
+export const InvestigationIcon = (p: IconProps) => <Icon {...p}>
+  <path d="M8 12h4V5.5h4m-4 6.5v6.5h4" />
+  <rect x="2.5" y="9.5" width="5" height="5" fill="currentColor" />
+  <rect x="16" y="3" width="5" height="5" /><rect x="16" y="16" width="5" height="5" />
+</Icon>
+export const NotebookIcon = (p: IconProps) => <Icon {...p}>
+  <rect x="4" y="3" width="16" height="18" rx="1.5" /><path d="M8 3v18m3.5-13h5m-5 3.5h4" />
+</Icon>
 export const MenuIcon = (p: IconProps) => <Icon {...p}><path d="M4 7h16M4 12h16M4 17h16" /></Icon>
 export const PlusIcon = (p: IconProps) => <Icon {...p}><path d="M12 5v14M5 12h14" /></Icon>
 export const PauseIcon = (p: IconProps) => <Icon {...p}><path d="M9 6v12M15 6v12" /></Icon>

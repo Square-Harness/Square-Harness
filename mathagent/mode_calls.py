@@ -428,6 +428,12 @@ class ModeOrchestrator(Orchestrator):
                 raise
             state['proof_routing'] = decision = {'status': 'complete', **decision}
             self._save()
+        if decision['route'] == 'investigate':
+            if not allow_tools:
+                raise AgentError('Investigation was selected but further actions are disabled.')
+            # The GUI's investigation controller continues this saved turn, before
+            # the ordinary assistant has made a main call or started a worker.
+            return {'status': 'handoff', 'mode': 'investigate'}
         if decision['route'] != 'prove':
             return
         if not allow_tools:

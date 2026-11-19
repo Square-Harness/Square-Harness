@@ -1411,8 +1411,10 @@ class Orchestrator:
                 self.state['tool_call_retried'] = True
                 self.state['tool_call_recovery_pending'] = True
                 self._save()
-            self._complete_pending(allow_tools=last.get('tools_enabled') is not False
-                                   and last.get('final_recovery') is not True)
+            handoff = self._complete_pending(allow_tools=last.get('tools_enabled') is not False
+                                             and last.get('final_recovery') is not True)
+            if handoff is not None:
+                return handoff
             # Old reading loops could use every call without retrying their empty
             # final answer. Permit one saved final-only rescue, without resetting
             # actions, usage or the original limits.
