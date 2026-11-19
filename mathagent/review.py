@@ -80,6 +80,17 @@ EFFORT = {
                      cited=4, queries=6, presentation=5, explain_check=True, fills=2),
 }
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
+# Explain: the part of a text a request names when it names no numbered result.
+PAGE_REQUEST = re.compile(r'\b(?:pages?|p\.|pp\.)\s*(\d{1,4})(?:\s*(?:-|–|—|to|à|and|et)\s*(\d{1,4}))?\b', re.I)
+SECTION_REQUEST = re.compile(r'(?:\b(?:sections?|sect\.|subsections?)\s+|§\s*)((?:\d+|[A-Z])(?:\.\d+)*)\b'
+                             r'|\b(?:appendix|annexe)\s+([A-Z])\b', re.I)
+WHOLE_REQUEST = re.compile(r'\b(?:this|these|the whole|cette|ces|tout(?:e)?\s+(?:la|le|ce|cette))\s+(?:page|pages|passage|'
+                           r'paragraph|text|texte|notes?|computations?|calculations?|calculs?|excerpt|extrait|lines|'
+                           r'document|sheet|feuille)\b'
+                           r'|^\s*(?:please\s+)?(?:explain|explique\w*)(?:\s+(?:this|it|that|ceci|cela|ça|ca))?\s*[.!?]?\s*$', re.I)
+PROOF_REQUEST = re.compile(r'\b(?:proof|proves?|proved|strategy|argument|preuve|démonstration|demonstration|'
+                           r'stratégie|strategie|démontr\w*|prouv\w*)\b', re.I)
+WHOLE_TEXT_LINES = 200  # a text this short ("this page", "these notes") is explained whole
 KIND_LABEL = {'invalid_inference': 'Invalid inference', 'missing_justification': 'Missing justification',
               'uncertainty': 'Uncertain step'}
 RANK = {'invalid_inference': 2, 'missing_justification': 1, 'uncertainty': 0}
@@ -784,13 +795,20 @@ class ReviewBase(ResearchRunner):
             parts.append('SETTING AND NOTATION OF THE MANUSCRIPT (context):\n' + self._numbered(sid, a, b, mark=False))
             ranges.append([a, b])
         core = ''
-        if unit.get('statement'):
+        proofs = segment or unit['proofs']
+        if unit.get('passage'):
+            # A page, a section or a short text: explained in order, without a statement/proof split.
+            label = (f'PASSAGE: {unit["name"]}' if segment is None else
+                     f'PASSAGE: {unit["name"]}, PART L{segment[0][0]}-L{segment[-1][1]} (other parts are explained separately)')
+            core += f'\n{label}:\n' + '\n'.join(self._numbered(sid, a, b, mark=False) for a, b in proofs) + '\n'
+            ranges += [list(r) for r in proofs]
+            proofs = []
+        elif unit.get('statement'):
             a, b = unit['statement']
             core += f'\nSTATEMENT: {unit["name"]}' + (f' ({unit["title"]})' if unit.get('title') and unit['title'] not in unit['name'] else '') + '\n' + self._numbered(sid, a, b, mark=False) + '\n'
             ranges.append([a, b])
         else:
             core += '\nSTATEMENT: not identified in the source; judge the argument on its own terms.\n'
-        proofs = segment or unit['proofs']
         if proofs:
             label = 'PROOF' if segment is None else f'PROOF, PART L{segment[0][0]}-L{segment[-1][1]} (other parts are checked separately)'
             core += f'\n{label}:\n' + '\n'.join(self._numbered(sid, a, b, mark=False) for a, b in proofs) + '\n'
@@ -1364,6 +1382,124 @@ class ExplainRunner(ReviewBase):
         return {**super()._extra_state(), 'explanation': None, 'explain_problems': None, 'fills': 0,
                 'explain_plan': [], 'explain_parts': {}}
 
+    # -- what to explain: a named result, else a page, a section or a short text, else the model's location --
+
+    def _pick_unit(self):
+        request = self.state.get('target') or self.state['goal']
+        unit = self._passage_unit(request)
+        if unit == 'locate':
+            unit = self._locate(request)
+            if unit is None:
+                raise WorkerInputError('Say which result, page or section to explain, for example "Lemma 3.2" or "page 4".',
+                                       code='target_not_found', details={'target': self.state.get('target') or ''})
+        if unit is None:
+            try:
+                super()._pick_unit()
+            except WorkerInputError as exc:
+                # No numbered result fits (a theorem stated in prose, an unnumbered paper): ask where it is.
+                if exc.code != 'target_not_found' or self._is_pasted():
+                    raise
+                unit = self._locate(request)
+                if unit is None:
+                    raise
+            else:
+                unit = self.state['unit']
+                if not unit['proofs'] and unit.get('statement') and PROOF_REQUEST.search(request):
+                    # A proof given elsewhere (another section, an appendix, a paragraph without "Proof").
+                    proof = self._locate(request, proof_of=unit)
+                    if proof:
+                        unit['proofs'] = proof
+                return
+        self.state['unit'] = {**unit, 'source': self.state['sources'][0]['id']}
+        self.emit('notice', 'Explaining ' + unit['name'])
+
+    def _passage_unit(self, request):
+        """The page, section or whole short text the request names; None when it names a result or no such part,
+        'locate' when only the model can find it (a subsection, an unrecognised heading)."""
+        source, mapping = self.state['sources'][0], self.state['map']
+        if manuscript.resolve(mapping, request):
+            return None
+        lines = self._lines(source['id'])
+        page = PAGE_REQUEST.search(request) if not self._is_pasted() else None
+        if page:
+            starts = source.get('pages') or []
+            first, last = int(page.group(1)), int(page.group(2) or page.group(1))
+            if not starts:
+                raise WorkerInputError(f'{source["path"]} has no page numbers; say which result, section or passage to explain.',
+                                       code='target_not_found')
+            if not 1 <= first <= last <= len(starts):
+                raise WorkerInputError(f'{source["path"]} has {len(starts)} pages; say which one to explain.',
+                                       code='target_not_found')
+            end = starts[last] - 1 if last < len(starts) else len(lines)
+            return self._passage([starts[first - 1], end], f'page {first}' if first == last else f'pages {first}–{last}')
+        section = SECTION_REQUEST.search(request) if not self._is_pasted() else None
+        if section:
+            label = (section.group(1) or section.group(2)).upper()
+            known = next((s for s in mapping['sections'] if str(s['number']).upper() == label), None)
+            if known is None:
+                return 'locate'
+            ends = [s['line'] - 1 for s in mapping['sections'] if s['line'] > known['line']]
+            ends += [n - 1 for n in range(known['line'] + 1, len(lines) + 1)
+                     if re.match(r'^(?:\d+\.\s+)?(?:references|bibliography)$', lines[n - 1].strip(), re.I)][:1]
+            name = f'Appendix {label}' if label.isalpha() else f'Section {label}'
+            return self._passage([known['line'], min(ends or [len(lines)])], name)
+        if WHOLE_REQUEST.search(request):
+            if sum(1 for line in lines if line.strip()) <= WHOLE_TEXT_LINES:
+                return self._passage([1, len(lines)], 'the text')
+            pages = len(source.get('pages') or [])
+            raise WorkerInputError(f'{source["path"]} is long' + (f' ({pages} pages)' if pages else '') +
+                                   '; say which page, section or result to explain.', code='target_not_found')
+        return None
+
+    def _passage(self, span, name):
+        """A passage unit: its lines take the place of proof lines, so the walkthrough covers every one of them."""
+        lines = self._lines(self.state['sources'][0]['id'])
+        a, b = span
+        while a < b and not lines[a - 1].strip():
+            a += 1
+        while b > a and not lines[b - 1].strip():
+            b -= 1
+        refs = []  # results the passage cites, given as context
+        for match in re.finditer(r'\b(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption|Remark|Example)\s+[A-Z]?\d+(?:\.\d+)*',
+                                 '\n'.join(lines[a - 1:b])):
+            other = manuscript.resolve(self.state['map'], match.group(0))
+            if other and other['id'] not in refs and not (other['statement'] and a <= other['statement'][0] <= b):
+                refs.append(other['id'])
+        return {'id': 'S', 'name': name, 'statement': None, 'proofs': [[a, b]], 'refs': refs[:8],
+                'statement_refs': [], 'equations': [], 'title': '', 'passage': True}
+
+    def _locate(self, request, proof_of=None):
+        """Ask the model which lines the request means; None when it cannot tell or the text does not fit."""
+        sid = self.state['sources'][0]['id']
+        lines = self._lines(sid)
+        numbered = self._numbered(sid, 1, len(lines), mark=False).split('\n')
+        for page, start in reversed(list(enumerate(self._source(sid).get('pages') or [], 1))):
+            numbered.insert(start - 1, f'[page {page}]')
+        policy = (P.LOCATE_PROOF_POLICY.format(name=proof_of['name'], start=proof_of['statement'][0], end=proof_of['statement'][1])
+                  if proof_of else P.LOCATE_POLICY)
+        prompt = policy + '\n\nREQUEST:\n' + request + '\n\nTEXT:\n' + '\n'.join(numbered)
+        if len(prompt.encode()) > self._room(400, policy):
+            return None
+        result = self._ask('locate', prompt, cap=400, schema=P.LOCATE_SCHEMA, key='locate-proof' if proof_of else 'locate')
+        value = result['value'] if isinstance(result['value'], dict) else {}
+
+        def span(a, b):
+            a, b = _int(a), _int(b)
+            return [a, b] if 1 <= a <= b <= len(lines) else None
+        proof = span(value.get('start_line'), value.get('end_line'))
+        if proof_of:
+            return [proof] if value.get('kind') == 'result' and proof else None
+        name = ' '.join(str(value.get('name') or '').split())
+        if len(name) > 60:  # a heading, not a sentence: cut at a word
+            name = name[:60].rsplit(' ', 1)[0].rstrip(' ,;:(—-')
+        if value.get('kind') == 'passage' and proof:
+            return self._passage(proof, name or 'the requested passage')
+        statement = span(value.get('statement_start'), value.get('statement_end'))
+        if value.get('kind') == 'result' and (statement or proof):
+            return {'id': 'L', 'name': name or 'the requested result', 'statement': statement, 'proofs': [proof] if proof else [],
+                    'refs': [], 'statement_refs': [], 'equations': [], 'title': ''}
+        return None
+
     def _mechanism(self):
         request = self.state.get('target') or self.state['goal']
         if self._is_pasted():
@@ -1404,7 +1540,7 @@ class ExplainRunner(ReviewBase):
                 self.state['fills'] += 1
                 return
             if missing:
-                self._warn('Proof lines not explained one by one: ' + _span(missing) + '.')
+                self._warn(('Lines' if self.state['unit'].get('passage') else 'Proof lines') + ' not explained one by one: ' + _span(missing) + '.')
             self.state['phase'] = 'check' if self.effort['explain_check'] else 'done'
         elif phase == 'check':
             if self._affordable(self._analysis_cap(1500), 6000, share=.8):
@@ -1423,11 +1559,15 @@ class ExplainRunner(ReviewBase):
 
     def _explain_parts(self):
         unit = self.state['unit']
-        granularity = P.FINE if self._fine() else P.COARSE
+        passage = bool(unit.get('passage'))
+        granularity = (P.FINE_PASSAGE if passage else P.FINE) if self._fine() else (P.COARSE_PASSAGE if passage else P.COARSE)
         if self._mechanism():
             granularity = ('Explain the proof mechanism and decisive estimates, their hypotheses and dependencies. '
                            'Group the argument into source-located steps; a line-by-line commentary was not requested.')
-        policy = P.EXPLAIN_POLICY.format(granularity=granularity if unit['proofs'] else 'There is no proof: give steps = [] and explain the statement.')
+        if passage:
+            policy = P.PASSAGE_POLICY.format(granularity=granularity)
+        else:
+            policy = P.EXPLAIN_POLICY.format(granularity=granularity if unit['proofs'] else 'There is no proof: give steps = [] and explain the statement.')
         room = self._room(self._explain_cap(), policy)
         self.state.setdefault('explain_plan', [])
         self.state.setdefault('explain_parts', {})
@@ -1471,11 +1611,12 @@ class ExplainRunner(ReviewBase):
         combined = dict(values[0])
         if len(self.state['explain_plan']) > 1:
             combined['idea'] = '\n\n'.join(
-                f'**Proof part {_span(part["segment"] or unit["proofs"])}:** ' + part['value']['idea']
+                f'**{"Part" if passage else "Proof part"} {_span(part["segment"] or unit["proofs"])}:** ' + part['value']['idea']
                 for item in self.state['explain_plan']
                 for part in [self.state['explain_parts'].get(item['key'])]
                 if part and part.get('usable') and part['value']['idea'])
-            self._warn('The explanation was produced in source parts; its local ideas are listed separately, without a whole-proof mechanism synthesis.')
+            self._warn('The explanation was produced in source parts; its local ideas are listed separately, without a synthesis of the whole '
+                       + ('passage.' if passage else 'proof mechanism.'))
         combined['steps'] = [step for value in values for step in value['steps']]
         combined['facts'] = list({fact['name']: fact for value in values for fact in value['facts']}.values())
         for key in ('hypotheses', 'gaps'):
@@ -1523,8 +1664,9 @@ class ExplainRunner(ReviewBase):
 
     def _fill(self, missing):
         unit = self.state['unit']
-        packet, _, _ = self._packet(unit, self._room(self._analysis_cap(), P.FILL_POLICY), segment=missing, context=True)
-        prompt = (P.FILL_POLICY + '\nMISSING LINES: ' + _span(missing) + '\n\nWALKTHROUGH SO FAR:\n' +
+        policy = P.FILL_PASSAGE_POLICY if unit.get('passage') else P.FILL_POLICY
+        packet, _, _ = self._packet(unit, self._room(self._analysis_cap(), policy), segment=missing, context=True)
+        prompt = (policy + '\nMISSING LINES: ' + _span(missing) + '\n\nWALKTHROUGH SO FAR:\n' +
                   json.dumps(self.state['explanation']['steps'], ensure_ascii=False) + '\n\n' + packet)
         with self._timeout():
             result = self._ask('fill', prompt, cap=self._analysis_cap(), schema=P.STEPS_SCHEMA, key=f'fill{self.state["fills"]}')
@@ -1559,9 +1701,10 @@ class ExplainRunner(ReviewBase):
                 problems += part.get('problems', [])
                 continue
             explanation = json.dumps(value, ensure_ascii=False)
-            packet, _, _ = self._packet(unit, self._room(self._analysis_cap(1500), P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
+            policy = P.EXPLAIN_CHECK_PASSAGE_POLICY if unit.get('passage') else P.EXPLAIN_CHECK_POLICY
+            packet, _, _ = self._packet(unit, self._room(self._analysis_cap(1500), policy) - len(explanation.encode()),
                                         segment=item['segment'], context=True)
-            prompt = P.EXPLAIN_CHECK_POLICY + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
+            prompt = policy + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
             with self._timeout():
                 result = self._ask('explain-check', prompt, cap=self._analysis_cap(1500), schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
             found = [{'where': str(p.get('where') or ''), 'problem': str(p.get('problem') or ''), 'fix': str(p.get('fix') or '')}
@@ -1614,8 +1757,12 @@ class ExplainRunner(ReviewBase):
         sid = unit['source']
         lines = self._lines(sid)
         show_source = self._source(sid)['path'].lower().endswith(('.tex', '.ltx', '.latex', '.md', '.txt')) or sid == 'P1'
-        body = [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '', '### What it says', '', value['says'],
-                '', '### ' + ('Ideas for the proof parts' if len(s.get('explain_plan') or []) > 1 else 'The idea'), '', value['idea'] or '—']
+        passage = bool(unit.get('passage'))
+        name = unit['name'][:1].upper() + unit['name'][1:] if unit['id'] in ('P', 'S', 'L') else unit['name']
+        parts = len(s.get('explain_plan') or []) > 1
+        body = [f'## {name}', '', '### ' + ('What it is about' if passage else 'What it says'), '', value['says'],
+                '', '### ' + (('Ideas for the parts' if passage else 'Ideas for the proof parts') if parts
+                              else ('The thread' if passage else 'The idea')), '', value['idea'] or '—']
         if value['steps']:
             body += ['', '### Step by step', '']
             for step in value['steps']:
@@ -1630,16 +1777,17 @@ class ExplainRunner(ReviewBase):
                 if step['uses']:
                     body += [f'*Uses:* {step["uses"]}', '']
             missing = self._missing()
-            body += [('Every line of the proof is explained.' if not missing else f'Lines not explained one by one: {_span(missing)}.')
+            body += [(f'Every line of the {"passage" if passage else "proof"} is explained.' if not missing
+                      else f'Lines not explained one by one: {_span(missing)}.')
                      if self._fine() else ('The requested proof mechanism is explained in grouped steps.' if self._mechanism()
-                                          else 'The proof is long: lines are grouped into steps.')]
+                                          else f'The {"passage" if passage else "proof"} is long: lines are grouped into steps.')]
         if value['facts']:
             body += ['', '### Standard facts used', '']
             body += [f'- **{f["name"]}** — {f["statement"]}' for f in value['facts']]
         if value['hypotheses']:
             body += ['', '### Where the hypotheses matter', '', value['hypotheses']]
         if value['gaps']:
-            body += ['', '### What the proof leaves implicit', '', value['gaps']]
+            body += ['', '### What the ' + ('text' if passage else 'proof') + ' leaves implicit', '', value['gaps']]
         problems = s.get('explain_problems') or []
         appendix = []
         if problems:

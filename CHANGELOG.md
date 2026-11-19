@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Explain works on what you point at: a named result, a page of a PDF ("page 9"),
+  a section or appendix, or a short text as a whole ("explain this page"). When a
+  result is stated in prose, or proved elsewhere without a "Proof" next to it, the
+  model first locates its lines instead of the request being refused. Appendices
+  placed after the references are read again, so their proofs attach to their
+  theorems, and a sentence starting with a capital letter and a period no longer
+  splits a section.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same

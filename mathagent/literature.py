@@ -1380,6 +1380,18 @@ class LiteratureTools:
             raise LiteratureError('Cached extraction changed; source hash verification failed')
         return metadata, text.splitlines()
 
+    def page_starts(self, document_id):
+        """The first line of each page of an extracted PDF, numbered as _document numbers lines; [] without pages.
+
+        pdftotext ends every page with a form feed, which splitlines() treats as a line break: the
+        separator is lost from the lines themselves, so the page map is read from the cached text."""
+        _, lines = self._document(document_id)
+        pieces = self._read(('documents', document_id + '.txt')).splitlines(keepends=True)
+        if len(pieces) != len(lines):
+            return []
+        starts = [1] + [n + 1 for n, piece in enumerate(pieces, 1) if piece.endswith('\x0c') and n < len(pieces)]
+        return starts if len(starts) > 1 else []
+
     def read_paper(self, document_id, start_line=1, end_line=80):
         if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
             raise LiteratureError('Line bounds must be positive integers with start <= end')

@@ -292,12 +292,14 @@ class ResearchRunner:
             rel = Path(name)
             if rel.is_absolute():
                 rel = rel.resolve().relative_to(self.agent.workspace.root)
+            pages = []  # the first line of each PDF page, for requests such as "explain page 4"
             if rel.suffix.lower() == '.pdf':
                 if not self.literature:
                     raise ValueError('Local PDF reading requires the literature backend')
                 metadata = self.literature.import_local(str(rel))
                 _, lines = self.literature._document(metadata['document_id'])
                 content = '\n'.join(lines)
+                pages = self.literature.page_starts(metadata['document_id'])
             else:
                 path = self.agent.workspace.path(str(rel))
                 content = unicode_source(self.agent.workspace.text(path), self.agent.workspace.encodings.get(path))
@@ -317,7 +319,8 @@ class ResearchRunner:
                                         'member_sha256': member['sha256'], 'archive_warnings': warnings})
                     continue
             sources.append({'id': f'{prefix}{len(sources) + 1}', 'path': str(rel), 'content': content,
-                            'sha256': hashlib.sha256(content.encode()).hexdigest()})
+                            'sha256': hashlib.sha256(content.encode()).hexdigest(),
+                            **({'pages': pages} if pages else {})})
         return sources
 
     def _create(self, goal, kind, settings, sources, skill, *, reference=None):

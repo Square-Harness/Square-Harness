@@ -745,6 +745,22 @@ Unsupported quotes remain unresolved. Keep the original report, the existing
 budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
 
+The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
+text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a
+References block placed before the appendices, so "Proof of Theorem 4.4" in an appendix
+attaches to Theorem 4.4. Lettered headings must come in order (A, B, …), so a wrapped
+sentence starting "G. The …" is not a section. `LiteratureTools.page_starts` keeps the
+first line of each PDF page (from the form feeds that `splitlines()` drops); pinned PDF
+sources carry it as `pages`. Explain (`ExplainRunner._pick_unit`) takes, in order: a result
+the request names (`manuscript.resolve`); a page, section or appendix it names, or the whole
+text when it is short (at most `WHOLE_TEXT_LINES` nonblank lines) and the request says "this
+page", "these notes" and the like; the usual unit choice; and otherwise one `locate` call,
+which sees the numbered text with `[page N]` markers. A named result without an attached
+proof gets its proof lines from `locate` when the request asks about the proof. A passage is
+a unit with `passage: True`, no statement and its lines in `proofs`, so the walkthrough, the
+fill and the accuracy check cover every line; `PASSAGE_POLICY` and its fill and check
+variants replace the result-and-proof wording.
+
 Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
 `classify` (domains by field and readership) → `observe` (one call per article,
 answering `QUESTIONS` about how the author explains; the whole body when it fits

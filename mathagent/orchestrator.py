@@ -78,11 +78,12 @@ Recorded sandbox code and figures are supplied automatically to write-up workers
 do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
-its proof; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
+its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
 proofs and is only for an explicit request. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
-with the source file; explain is for one specified result and its proof. Do not spend
+with the source file; explain is for one specified result and its proof, or one specified page, section
+or passage (give the page or section in the request, e.g. "page 4"). Do not spend
 the whole action allowance reading a paper in sequential 100-line excerpts. Start
 with its introduction, results and relevant headings, then read only needed passages.
 Separate the authors' novelty claims from independently verified literature comparisons.
