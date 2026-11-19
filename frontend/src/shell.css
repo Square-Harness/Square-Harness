@@ -449,6 +449,8 @@
 .style-domain ol, .style-domain ul { margin: 4px 0 10px; padding-left: 22px; }
 .style-phrases { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; padding: 0; list-style: none; }
 .style-phrases li { padding: 2px 8px; border-radius: 999px; background: var(--ink-soft); font-size: 13px; }
+.style-departures { margin: 4px 0 10px; padding-left: 22px; }
+.style-departures code { overflow-wrap: anywhere; }
 .style-macros { width: 100%; border-collapse: collapse; font-size: 13px; }
 .style-macros td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line); vertical-align: top; }
 .style-macros code { overflow-wrap: anywhere; }

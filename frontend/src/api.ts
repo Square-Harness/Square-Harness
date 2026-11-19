@@ -131,15 +131,36 @@ export type Template = { name: string; files: string[] }
 export type StyleChoice = { mode: 'auto' | 'none' | 'style' | 'domain'; style?: string; domain?: string }
 
 /** A saved writing style (mathagent/style.py): one JSON file per name, shared by every folder. */
-export type DomainStyle = { name: string; description: string; articles: string[]; aim: string; structure: string[]; habits: string[]; phrases: string[] }
+/** How the author writes one kind of paper. Version 1 styles have `habits` instead of the explanation fields. */
+export type StyleDescription = {
+  audience?: string
+  aim: string
+  structure: string[]
+  definitions?: string[]
+  motivation?: string[]
+  proof_motivation?: string[]
+  proof_organisation?: string[]
+  omissions?: string[]
+  contribution?: string[]
+  tone?: string[]
+  names?: { term: string; note: string }[]
+  typesetting?: { habit: string; example: string }[]
+  habits?: string[]
+  phrases: string[]
+  /** Write-up rules the author does not follow: one article's (with its example), or a domain's (counted over its articles). */
+  departures?: StyleDeparture[]
+}
+export type StyleDeparture = { rule: string; habit: string; example?: string; examples?: string[]; sheet?: string; rule_text?: string; articles?: number; of?: number }
+export type DomainStyle = StyleDescription & { name: string; description: string; articles: string[] }
 export type StyleProfile = {
   format: 'square-style'
-  version: 1
+  version: 1 | 2
   name: string
   created_at: string
   updated_at: string
   articles: { path: string; sha256: string; title: string; domain: string; source_archive?: string }[]
-  macros: { name: string; definition: string; uses: number; articles: string[] }[]
+  packages?: { name: string; options: string; articles: string[] }[]
+  macros: { name: string; definition: string; uses: number; articles: string[]; usage?: string; packages?: string[] }[]
   environments: { name: string; definition: string; uses: number }[]
   domains: DomainStyle[]
   /** The LaTeX template write-ups in this style build on: names and sizes when listed, contents in a job. */
@@ -477,7 +498,7 @@ export type ResearchDetail = {
   style?: { label: string; profile: string; domain: string } | null
   articles?: { id: string; path: string; title: string; abstract: string; headings: string[]; environments: Record<string, number>; inputs: string[]; lines: number; source_archive?: string }[]
   domains?: { name: string; description: string; articles: string[]; complete: boolean }[]
-  observations?: Record<string, { aim: string; structure: string[]; habits: string[]; phrases: string[]; complete: boolean }>
+  observations?: Record<string, StyleDescription & { complete: boolean }>
   profile?: StyleProfile | null
   saved_to?: string | null
 }

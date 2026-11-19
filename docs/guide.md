@@ -815,7 +815,12 @@ How it works:
    a paper's style rules for articles, notes and parts of papers; an
    introduction's required parts (motivation, literature, positioning, main
    result, method, organisation); an exam's header, points and recalled
-   notation; rules for exercise sheets and lecture notes.
+   notation; rules for exercise sheets and lecture notes. Your request comes
+   before these rules, and your active style comes between them (see
+   [Writing styles](#writing-styles)): when the request asks in so many words
+   for what a rule forbids, the plan notes it with your words, and that rule is
+   neither applied nor checked. The report's **Rules set aside** says which
+   rules your request or your style set aside.
    For an article, a part of a paper, notes or lecture notes of a section or
    more, a second short call then fixes the **skeleton** of the document: its
    sections, its results, the formulas cited at a distance and the figures,
@@ -995,10 +1000,35 @@ name and reused in any folder.
 ### Writing styles
 
 **Learn my writing style** condenses the `.tex` sources of your earlier articles
-into a named style: the macros you actually use, your theorem environments and,
-for each kind of paper you write, how you announce, explain and phrase things.
-Choose main article files, ideally two or more per kind of paper; `\input` parts
-are not followed, so pin them as well. A style can also keep a LaTeX template (an
+into a named style. The articles are sorted into kinds of paper (by field and
+readership), and for each kind the style answers, from what your papers actually
+do:
+
+- who the papers are written for, and what that changes;
+- how and when you introduce definitions;
+- how you motivate the work and which results the introduction puts forward;
+- how and when you motivate a proof strategy;
+- how you organise proofs (for example the strategy first, the key results from
+  propositions and lemmas, the lemma proofs at the end);
+- what you leave out or take as given, and when you give references;
+- how you point the reader to the core of the contribution;
+- your tone and voice.
+
+It also keeps your names for things that have several names (Cauchy–Lipschitz or
+Picard–Lindelöf), your typesetting habits (such as `\left(\!`), your phrasings,
+the packages your articles load and the macros you use, with what each is used
+for when the definition does not say it and the packages it needs. Each article
+is also compared with the write-up guidelines: a rule your papers deliberately
+do not follow (contributions as a bulleted list, sections that open by saying
+what they do, all definitions in a preliminaries section) is a departure, kept
+for a kind of paper when most of its articles show it (both of two, two of
+three). Names, typesetting examples, phrasings and departure examples are kept
+only when they occur in your articles; a LaTeX quotation is kept as your article
+writes it, even when the model dropped its backslashes. With the DS4 profile each article is read whole (any `.tex` the
+harness can read, up to 1 MB); smaller models read representative passages, and
+the job's warnings name every article that was not read whole. Choose main
+article files, ideally two or more per kind of paper; `\input` parts are not
+followed, so pin them as well (a pinned macro file counts). A style can also keep a LaTeX template (an
 article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
 style build on unless you attach one. An article that cannot be read as text
 (binary, over 1 MB) is left out and named in the job's warnings; the style is
@@ -1009,10 +1039,33 @@ With the DS4.1 vision profile you can also choose screenshots of articles to
 learn visible phrasing and layout. Exact macro and environment definitions
 still require their `.tex` sources; they are not reconstructed from images.
 
-On the same page, **Style used by write-ups** chooses: automatically (a short
-call picks the style that fits the material, or none), none, one style, or one
-of its domains. A style gives phrasing and macros, never the structure of your
-papers: the request sets the structure. Styles and this choice are kept in the
+At the top of the same page, **Active style** chooses the style write-ups use:
+
+- **Default style**: no rules of its own; write-ups follow the write-up
+  guidelines as they are. It is always there, for instance when a learnt style
+  turns out to copy habits you do not want.
+- a learnt style, or one of its domains;
+- **Automatic**: a short call picks the learnt style that fits the material, or
+  the default style when none fits.
+
+Write-ups apply an order of priority: what your request says, then your style,
+then the guidelines. A rule your active style departs from is set aside: it is
+not applied and not checked, and the report lists it. Your request comes before
+both: ask in so many words to break a rule ("list the contributions as bullet
+points") or to keep one your style departs from ("no sentence that only
+announces a section"), and the write-up does so. Three rules are never set
+aside: a statement keeps all its hypotheses (P4), the text states mathematics and
+never talks about its notes or source (P7), and no two passages contradict each
+other (P15). The introduction's rules (I1 to I12) are set aside only by your
+request, never by a style: an introduction is written for this document's
+readers. Every other rule follows the order above, at your responsibility.
+Neither the request nor the style changes the mathematics, its fidelity to your
+material, or the citations.
+A write-up also uses your macros for what you use them for and loads the
+packages they need. Styles learnt with earlier versions keep their shorter
+description, have no departures and still work; learn them again to get the
+full guide. A departure learnt against a rule that has changed since is not
+applied, and the write-up says so. Styles and the active style are kept in the
 `.mathagent/` folder of `--gui-root` and shared by every folder.
 
 ### Python Lab and Sanity check

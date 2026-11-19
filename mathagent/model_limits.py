@@ -23,7 +23,7 @@ OUTPUTS.update(review_metadata=16_384, router=4_096, writeup_min=32_768)
 INPUTS = {
     'brief_index': 24_000, 'brief_solver': 60_000,
     'source_overview': 224_000, 'review_packet': 56_000, 'review_lines': 600,
-    'research_excerpt': 36_000, 'research_lines': 400, 'style_packet': 96_000,
+    'research_excerpt': 36_000, 'research_lines': 400, 'style_packet': 1_000_000, 'style_guidelines': 12_000,
     'working_note': 10_000, 'recovery_note': 16_000,
     'writeup_conversation': 800_000, 'router_context': 32_768,
 }
