@@ -22,6 +22,7 @@ from .jsonutil import loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
 from .literature import bibliography_entry, bibliography_keys, cited_keys, cites_place
+from .model_limits import is_ds4, substantive_output, workflow_budget
 from .research import ResearchRunner, remaining_limit, _working_reference_prompt
 from .reference_search import StandardReferenceSearch
 
@@ -291,6 +292,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if effort not in EFFORTS:
             raise ValueError('Choose low, medium or high effort')
         level = EFFORTS[effort]
+        profile = workflow_budget(effort) if is_ds4(self.agent) else None
+        if profile:
+            level = {**level, 'seconds': profile['seconds']}
         if lookup == 'standard':
             level = {**level, 'candidates': 3, 'verify_rounds': 1, 'discover': False,
                      'seconds': level['seconds'], 'requests': 12, 'chars': 50000}
@@ -298,7 +302,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         self._guesses = [g for g in (_clean_candidate(g, 'caller') for g in guesses or []) if g][:3]
         self._level = dict(level)
         budgets = dict(max_rounds=level['candidates'] * level['verify_rounds'] + level['verify_rounds'],
-                       max_tokens=None, max_input_tokens=None, max_seconds=level['seconds'],
+                       max_tokens=profile['tokens'] if profile else None, max_input_tokens=None, max_seconds=level['seconds'],
                        max_requests=level['requests'], max_chars=level['chars'])
         standard_bounds = dict(budgets)
         # Overrides only lower a limit (an allocation, a nested check's share); they never raise the effort's.
@@ -308,6 +312,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             budgets = {key: min(value, standard_bounds[key]) if value is not None and standard_bounds[key] is not None else value
                        for key, value in budgets.items()}
         return super().start(question, kind='check', reference_context=reference_context, **budgets)
+
+    def _call(self, role, instruction, *, cap, **kwargs):
+        # Recall, verifying source passages and selecting applicable references all
+        # require a substantive judgment, including when the result is structured.
+        return super()._call(role, instruction, cap=substantive_output(self.agent, cap), **kwargs)
 
     def _pin(self, names, prefix):
         return []  # a check never pins workspace files: queries stay public topic words
@@ -1128,6 +1137,7 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low'):
                                      timeout=parent.timeout if parent else 15)
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())
         inner = Agent(agent.client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
+        inner.document_output_cap = getattr(agent, 'document_output_cap', None)
 
         def relay(kind, value):
             # Shown live under the tool call; the saved answer keeps the tool's result.

@@ -7,7 +7,7 @@ The interface's forms use the same legacy table (frontend/src/effort.ts).
 DS4 presets come from model_limits and are sent to the interface by the server.
 """
 from ..litreview import breadth
-from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits
+from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget
 
 # Token estimates remain for older integrations. New jobs have no cumulative
 # token ceiling unless one was explicitly supplied at launch or in the form.
@@ -33,16 +33,19 @@ def level(mode, name, args=None):
             proof = proof_limits(name, args)
             value.update(tokens=proof['tokens'], minutes=proof['seconds'] / 60)
         else:
-            value['tokens'] = value['research_tokens']
+            work = workflow_budget(name, args)
+            value.update(tokens=work['tokens'], minutes=work['seconds'] / 60)
     if mode == 'literature':
         review = breadth(value['tries'])
-        value.update(minutes=review['seconds'] / 60, requests=review['requests'])
+        value['requests'] = review['requests']
+        if table is not DS4_EFFORTS:
+            value['minutes'] = review['seconds'] / 60
         if getattr(args, 'research_seconds_explicit', False):
             value['minutes'] = min(value['minutes'], args.research_seconds / 60)
         cap = getattr(args, 'research_requests', None)
         if cap is not None:
             value['requests'] = min(cap, value['requests'])
-    if mode == 'detailed_review':
+    if mode == 'detailed_review' and table is not DS4_EFFORTS:
         value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
     return value
 
@@ -76,7 +79,10 @@ def limits(mode, level, args):
             return proof_limits(level, args)
         tokens, solve, verify = _proof_ceilings(args, getattr(args, 'proof_tokens', None))
         return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds, solve_tokens=solve, verify_tokens=verify)
-    output = ceiling('research_tokens', effort['research_tokens']) if ds4 else getattr(args, 'research_tokens', None)
+    output = getattr(args, 'research_tokens', None)
+    if ds4:
+        work = workflow_budget(level, args)
+        output, seconds = work['tokens'], work['seconds']
     input_tokens = ceiling('research_input_tokens', effort['input']) if ds4 else getattr(args, 'research_input_tokens', None)
     if mode in ('writeup', 'summarize'):
         return dict(tokens=output, input_tokens=input_tokens, seconds=seconds)
@@ -86,11 +92,12 @@ def limits(mode, level, args):
     if mode == 'detailed_review':
         # More checking time, without silently increasing an explicit token cap.
         return dict(rounds=effort['tries'], tokens=output,
-                    input_tokens=input_tokens, seconds=2 * seconds,
+                    input_tokens=input_tokens, seconds=seconds if ds4 else 2 * seconds,
                     requests=effort['requests'], chars=effort['chars'])
     if mode == 'literature':
         review = breadth(effort['tries'])
-        seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
+        if not ds4:
+            seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
         return dict(rounds=effort['tries'], tokens=output, input_tokens=input_tokens, seconds=seconds,
                     requests=ceiling('research_requests', review['requests']), chars=effort['chars'])
     if mode in ('referee', 'quick_review', 'explain'):

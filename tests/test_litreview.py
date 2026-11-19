@@ -8,13 +8,52 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mathagent.agent import Agent
+from mathagent.assistant_budget import BudgetClient
+from mathagent.deepinfra import DeepInfraRateLimit
 from mathagent.literature import LiteratureTools
 from mathagent.litreview import ReviewRunner, _cutoff_supported
+from mathagent.proof import count_input
 from mathagent.tools import Workspace
-from tests.test_research import FakeClient
+from tests.test_research import FakeClient, response
 
 
 class LiteratureReviewTests(unittest.TestCase):
+    def test_provider_rejection_pauses_the_wave_and_resume_keeps_completed_work(self):
+        rejection = DeepInfraRateLimit('The model is temporarily at capacity.', completion_rejected=True)
+        transport = FakeClient([response('first'), [rejection], response('second'), response('third')])
+        budget = BudgetClient(transport, max_tokens=5000, max_input_tokens=50000)
+        runner = ReviewRunner(Agent(budget, Workspace(self.root)), concurrency=1)
+
+        def step(phase):
+            state = runner.state
+            if phase == 'plan':
+                state.update(phase='read', scope={'keywords': ['observation']})
+                return
+            def read(n):
+                item = runner._ask('card', str(n), cap=1800)
+                state['notes'].append({'round': n, 'text': item['text'], 'complete': True})
+            pending = [n for n in range(1, 4) if not any(note['round'] == n for note in state['notes'])]
+            runner._wave([(n, lambda n=n: read(n)) for n in pending], lambda n, reason: self.fail(reason))
+            state['phase'] = 'done'
+
+        with patch.object(runner, '_step', side_effect=step):
+            paused = runner.start('Review observation.', max_tokens=5000)
+            self.assertEqual(paused['status'], 'paused')
+            self.assertEqual(paused['worker_error']['code'], 'provider_rate_limit')
+            self.assertEqual([note['text'] for note in runner.state['notes']], ['first'])
+            self.assertEqual([call['status'] for call in runner.state['calls']], ['complete', 'rejected'])
+            rejected = runner.state['calls'][-1]
+            self.assertEqual((rejected['charged_tokens'], rejected['charged_input_tokens']), (0, 0))
+            self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (20, 100))
+            self.assertEqual(budget.snapshot()['tokens'], 20)
+            self.assertEqual(budget.snapshot()['input_tokens'], count_input(transport, transport.requests[0])[0])
+            self.assertTrue((runner.directory / 'review.md').is_file())
+            resumed = runner.resume(paused['id'])
+        self.assertEqual(resumed['id'], paused['id'])
+        self.assertEqual([note['text'] for note in runner.state['notes']], ['first', 'second', 'third'])
+        self.assertEqual(len(transport.requests), 4)
+        self.assertEqual(budget.snapshot()['tokens'], 60)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

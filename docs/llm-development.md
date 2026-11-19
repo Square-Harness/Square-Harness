@@ -103,7 +103,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
 
 ### Dependencies
 
-- Runtime dependencies are `rich` and `prompt-toolkit`. The optional extras are
+- Runtime dependencies are `rich`, `prompt-toolkit` and `markdown-it-py` (also used by Rich). The optional extras are
   `research` (`pypdf`) and `math` (`numpy`, `sympy`, used only by
   `--allow-python`). The CLI runs without any of them.
 - The web server is standard library only.
@@ -181,6 +181,10 @@ Version 1.1.0. The source of truth for the machine-readable version is
   transcript and retained for continued discussion and explicit review requests.
   Re-run document cards retain their previous download job IDs until chat
   deletion, so cleanup includes old copies without deleting work during retry.
+- **Markdown conversion.** A formatting-only request for one pinned Markdown file
+  uses the parser in `markdown_tex.py`. Conversion compiles and exports the literal
+  source directly. A paused pre-conversion writer can use its original pinned
+  Markdown on resume while retaining its call ledger and previously written parts.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
   (`writeup._request_preamble`). A written document is always assembled,
@@ -931,9 +935,11 @@ budgets. Saved job settings record the API profile and reasoning effort;
 resuming uses the saved allowances. Token preflight estimates must be labelled
 as estimates, not as exact server counts.
 
-DS4 Proof uses 384,000 output tokens for every solver, repair and verifier call
-at Medium or above. Those levels change only the maximum solver-pass count
-(3/5). Low retains one pass with 32,768 solve and 16,384 review tokens.
+DS4 substantive generation uses the common 384,000-token ceiling. The per-call
+allocator fits available context and explicit caps. Fixed control protocols such as
+routing and file selection have role-specific ceilings. For new jobs all three
+efforts use 1, 3 or 5 groups of three full calls as the cumulative output and
+time allowances. In Proof the group funds a solver pass and its verifications.
 The cumulative allowance is `N * (solve + 2 * review)`: the second review is
 the existing bounded retry for an invalid or truncated response, not an extra
 mathematical round. Repairs and continuations consume solver passes. Do not
@@ -943,8 +949,8 @@ report an inability to accommodate the full configured output, without
 clipping mathematical input.
 
 The common DS4 Proof per-call time guard defaults to 10,800 seconds through
-`--proof-call-seconds`; Medium and higher workflow time derives from three
-possible calls per solver pass. Low keeps its ten-minute workflow. Align the
+`--proof-call-seconds`; the workflow time derives from three possible
+calls per solver pass at each effort level. Align the
 shared Assistant allowance and request timeout with those values so the old
 short time limits cannot stop a new full-budget job. Explicit overrides remain
 authoritative and saved jobs retain their original allowances on resume.
@@ -978,7 +984,10 @@ elapsed deadline, so a silent or partial-line response cannot prevent the
 worker from reaching its normal interrupted checkpoint. The reading thread
 owns response cleanup; the monitor must not call buffered `close()` while that
 thread is blocked. Preserve unknown-usage reservations and incomplete output
-when testing this path. Initial connection/header waits remain governed by
+when testing this path. A confirmed HTTP 429 before a completion stream opens
+settles the worker, Assistant and hosted reservations at zero. DeepInfra retries
+once for a recognized transient rate or capacity response within its short wait
+limit. A continuing rejection checkpoints the job for Resume. Initial connection/header waits remain governed by
 the request timeout.
 
 DS4 unassigned Assistant turns use `proof_routing.route_request` before free

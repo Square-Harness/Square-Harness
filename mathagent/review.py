@@ -35,7 +35,8 @@ from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
-from .model_limits import output_limit, input_limit
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
+from .deepinfra import DeepInfraGenerationError
 from .source_tasks import _instruction_text
 
 # 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
@@ -369,8 +370,8 @@ class ReviewBase(ResearchRunner):
     def _model_cap(self, name, fallback):
         return self._cap(output_limit(self.agent, name, fallback))
 
-    def _metadata_cap(self, fallback=3000):
-        return self._model_cap('review_metadata', fallback)
+    def _analysis_cap(self, fallback=3000):
+        return self._cap(substantive_output(self.agent, fallback))
 
     def _confirm_cap(self):
         wanted = self._model_cap('review_confirm', 4096)
@@ -379,6 +380,8 @@ class ReviewBase(ResearchRunner):
     def _room(self, cap, prefix=''):
         """Bytes of manuscript text a prompt may still carry for this call."""
         cap = self._cap(cap)
+        if is_ds4(self.agent):
+            cap = min(cap, self.agent.ctx // 2)  # Leave room for the manuscript in a smaller configured context.
         overhead = len((self.POLICY + self.state['skill'] + prefix + self._reference_material()).encode()) + 2500
         # Inherited context uses the full-request counter (or its conservative byte
         # fallback), so reserve it before selecting manuscript packets.
@@ -402,6 +405,9 @@ class ReviewBase(ResearchRunner):
         s = self.state
         return remaining_limit(s['settings'], 'max_tokens', s['tokens_charged']) - reserve
 
+    def _write_reserve(self):
+        return 0
+
     def _input_left(self, reserve=0):
         s = self.state
         return remaining_limit(s['settings'], 'max_input_tokens', s['input_tokens_charged']) - reserve
@@ -409,8 +415,12 @@ class ReviewBase(ResearchRunner):
     def _affordable(self, cap, input_tokens, reserve_out=0, reserve_in=0, share=.8, jobs=1):
         durations = [call['seconds'] for call in self.state['calls'] if call.get('seconds', 0) > 0]
         projected = (sum(durations) / len(durations) * math.ceil(jobs / self.concurrency)) if durations else 0
+        needed = jobs * self._cap(cap)
+        if is_ds4(self.agent) and jobs == 1:
+            # One serial call can use the remainder of a small explicit or saved budget.
+            needed = min(needed, 512)
         return (self._elapsed() + projected < self.state['settings']['max_seconds'] * share
-                and self._tokens_left(reserve_out) >= jobs * self._cap(cap)
+                and self._tokens_left(reserve_out) >= needed
                 and self._input_left(reserve_in) >= input_tokens)
 
     @contextmanager
@@ -437,7 +447,7 @@ class ReviewBase(ResearchRunner):
             try:
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
             except AgentError as exc:
-                if isinstance(exc, (ResearchBudget, TokenBudgetError)):
+                if isinstance(exc, (ResearchBudget, TokenBudgetError, DeepInfraGenerationError)):
                     raise
                 # Some servers fail on thinking plus structured output for a given input (vLLM answered 500).
                 self._warn(f'The model server failed on a {role} call with thinking ({str(exc)[:120]}); it was asked again without thinking.')
@@ -475,7 +485,9 @@ class ReviewBase(ResearchRunner):
         with self._mutex:
             self._check_time()
             settings = self.state['settings']
-            cap = int(min(self._cap(cap), self._tokens_left()))
+            reserve = self._write_reserve() if is_ds4(self.agent) and self.state['phase'] in {
+                'read', 'scope', 'check', 'confirm', 'literature'} else 0
+            cap = int(min(self._cap(cap), self._tokens_left(reserve)))
             if cap < 128:
                 raise ResearchBudget('Generated-token budget exhausted')
             payload = {'model': self.agent.model, 'stream': True, 'think': think,
@@ -532,11 +544,7 @@ class ReviewBase(ResearchRunner):
                 self._save()
         except BaseException as exc:
             with self._mutex:
-                call['status'] = 'interrupted'
-                if isinstance(exc, TokenBudgetError):
-                    call['stats'] = exc.stats
-                    self.state['tokens_charged'] += exc.stats['eval_count'] - cap
-                    call['status'] = 'budget_violation'
+                self._interrupt_call(call, exc)
                 self._save()
             raise
         finally:
@@ -1389,7 +1397,7 @@ class ExplainRunner(ReviewBase):
             self.state['phase'] = 'fill'
         elif phase == 'fill':
             missing = self._missing()
-            if missing and self.state['fills'] < self.effort['fills'] and self._affordable(self._metadata_cap(), 4000, share=.85):
+            if missing and self.state['fills'] < self.effort['fills'] and self._affordable(self._analysis_cap(), 4000, share=.85):
                 self._optional(lambda: self._fill(missing), 'fill')
                 self.state['fills'] += 1
                 return
@@ -1397,7 +1405,7 @@ class ExplainRunner(ReviewBase):
                 self._warn('Proof lines not explained one by one: ' + _span(missing) + '.')
             self.state['phase'] = 'check' if self.effort['explain_check'] else 'done'
         elif phase == 'check':
-            if self._affordable(self._metadata_cap(1500), 6000, share=.8):
+            if self._affordable(self._analysis_cap(1500), 6000, share=.8):
                 self._optional(self._check_explanation, 'accuracy check')
             else:
                 self._warn('The explanation accuracy check was not run within the remaining budget.')
@@ -1513,11 +1521,11 @@ class ExplainRunner(ReviewBase):
 
     def _fill(self, missing):
         unit = self.state['unit']
-        packet, _, _ = self._packet(unit, self._room(self._metadata_cap(), P.FILL_POLICY), segment=missing, context=True)
+        packet, _, _ = self._packet(unit, self._room(self._analysis_cap(), P.FILL_POLICY), segment=missing, context=True)
         prompt = (P.FILL_POLICY + '\nMISSING LINES: ' + _span(missing) + '\n\nWALKTHROUGH SO FAR:\n' +
                   json.dumps(self.state['explanation']['steps'], ensure_ascii=False) + '\n\n' + packet)
         with self._timeout():
-            result = self._ask('fill', prompt, cap=self._metadata_cap(), schema=P.STEPS_SCHEMA, key=f'fill{self.state["fills"]}')
+            result = self._ask('fill', prompt, cap=self._analysis_cap(), schema=P.STEPS_SCHEMA, key=f'fill{self.state["fills"]}')
         wanted = set(n for a, b in missing for n in range(a, b + 1))
         added = []
         for item in (result['value'] or {}).get('steps') or []:
@@ -1549,11 +1557,11 @@ class ExplainRunner(ReviewBase):
                 problems += part.get('problems', [])
                 continue
             explanation = json.dumps(value, ensure_ascii=False)
-            packet, _, _ = self._packet(unit, self._room(self._metadata_cap(1500), P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
+            packet, _, _ = self._packet(unit, self._room(self._analysis_cap(1500), P.EXPLAIN_CHECK_POLICY) - len(explanation.encode()),
                                         segment=item['segment'], context=True)
             prompt = P.EXPLAIN_CHECK_POLICY + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
             with self._timeout():
-                result = self._ask('explain-check', prompt, cap=self._metadata_cap(1500), schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
+                result = self._ask('explain-check', prompt, cap=self._analysis_cap(1500), schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
             found = [{'where': str(p.get('where') or ''), 'problem': str(p.get('problem') or ''), 'fix': str(p.get('fix') or '')}
                      for p in (result['value'] or {}).get('problems') or [] if isinstance(p, dict) and p.get('problem')]
             if part is not None:
@@ -1860,7 +1868,7 @@ class JournalRunner(ReviewBase):
         return ['line', 'adversarial'][:count]
 
     def _write_reserve(self):
-        wanted = output_limit(self.agent, 'review_write', 5000)
+        wanted = self._model_cap('review_write', 5000)
         return min(wanted, (self.state['settings']['max_tokens'] or wanted * 5) // 5)
 
     def _checks(self):
@@ -1953,9 +1961,10 @@ class JournalRunner(ReviewBase):
         from .literature import LiteratureTools
         from .tools import Workspace
         for item in candidates[:wanted]:
-            seconds = min(240, (self.state['settings']['max_seconds'] - self._elapsed()) * .2)
+            profile = workflow_budget('low') if is_ds4(self.agent) else {'seconds': 240, 'tokens': 15000}
+            seconds = min(profile['seconds'], (self.state['settings']['max_seconds'] - self._elapsed()) * .2)
             left = self._tokens_left(self._write_reserve())
-            tokens = 15000 if math.isinf(left) else min(15000, int(left * .3))
+            tokens = int(min(profile['tokens'], left * .3))
             if seconds < 30 or tokens < 4000 or not self._time_left(.8):
                 self._warn('Some cited results were not checked: the budget ran out.')
                 break
@@ -1965,6 +1974,7 @@ class JournalRunner(ReviewBase):
             literature = LiteratureTools(self.agent.workspace.root, online=True, timeout=getattr(parent, 'timeout', 15))
             inner = Agent(self.agent.client, Workspace(self.agent.workspace.root, literature=literature, read_types=()),
                           self.agent.model, self.agent.ctx, self.agent.predict, False, 'check', seed=self.agent.seed)
+            inner.document_output_cap = getattr(self.agent, 'document_output_cap', None)
             self.emit('notice', f'Checking the citation [{item["key"]}, {item["place"]}]')
             checker = CheckRunner(inner, emit=lambda kind, value: self.emit('tool', '↳ ' + str(value)) if kind == 'tool' else None)
             with self._timeout():
@@ -2041,13 +2051,13 @@ class JournalRunner(ReviewBase):
                                     'url': str(hit.get('url') or hit.get('source_url') or '')[:300], 'query': query})
             self.state['search_results'] = results[:15]
             self._save()
-        if not results or not self._affordable(self._metadata_cap(1500), 6000, reserve_out=self._write_reserve(), share=.86):
+        if not results or not self._affordable(self._analysis_cap(1500), 6000, reserve_out=self._write_reserve(), share=.86):
             return
         listing = '\n'.join(f'{n}. {r["title"]} ({r["authors"]}, {r["year"]}). {r["abstract"][:350]}' for n, r in enumerate(results, 1))
         prompt = (P.NOVELTY_POLICY + '\n\nFIELD: ' + scope.get('field', '') + '\nCLAIMED CONTRIBUTION: ' + scope.get('contribution', '')
                   + '\n\nSEARCH RESULTS:\n' + listing)
         with self._timeout():
-            result = self._ask('novelty', prompt, cap=self._metadata_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty')
+            result = self._ask('novelty', prompt, cap=self._analysis_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty')
         value = result['value'] or {}
         related = [{'n': _int(r.get('n')), 'relation': str(r.get('relation') or '')[:300]} for r in value.get('related') or []
                    if isinstance(r, dict) and 1 <= _int(r.get('n')) <= len(results)]
@@ -2069,7 +2079,7 @@ class JournalRunner(ReviewBase):
         starts = sorted({begin} | {sec['line'] for sec in mapping['sections'] if begin < sec['line'] <= end})
         parts = []
         part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
-                         max(512, self._room(self._metadata_cap(), P.READ_POLICY) - 1500))
+                         max(512, self._room(self._analysis_cap(), P.READ_POLICY) - 1500))
         part_lines = input_limit(self.agent, 'review_lines', 150)
         for index, a in enumerate(starts):
             b = (starts[index + 1] - 1) if index + 1 < len(starts) else end
@@ -2115,29 +2125,31 @@ class JournalRunner(ReviewBase):
                 continue
             jobs.append((key, self._read_job(key, sid, a, b, pdf)))
         size = max(1, self.concurrency * 2)
-        for start in range(0, len(jobs), size):
+        start = 0
+        while start < len(jobs):
             batch = []
             for key, fn in jobs[start:start + size]:
-                if not self._affordable(self._metadata_cap(), 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
+                if not self._affordable(self._analysis_cap(), 6000 * (len(batch) + 1), reserve_out=self._write_reserve() + 6000,
                                         reserve_in=20000, share=.45 if self.CHECK_PROOFS else .8, jobs=len(batch) + 1):
                     break
                 batch.append((key, fn))
             if not batch:
                 break
             self._wave(batch)
+            start += len(batch)
         self._warn_reading_gaps()
 
     def _read_job(self, key, sid, a, b, pdf):
         def run():
             self.emit('notice', f'Reading lines {a}-{b}')
             prompt = P.READ_POLICY + ('\n' + P.PDF_READING if pdf else '') + '\n\nPART OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b)
-            result = self._ask('read', prompt, cap=self._metadata_cap(), schema=P.READ_SCHEMA, key=key)
+            result = self._ask('read', prompt, cap=self._analysis_cap(), schema=P.READ_SCHEMA, key=key)
             value = result['value'] or {}
             usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                       and isinstance(value.get('comments'), list))
-            if not usable and self._affordable(self._metadata_cap(), 6000, share=.45 if self.CHECK_PROOFS else .8):
+            if not usable and self._affordable(self._analysis_cap(), 6000, share=.45 if self.CHECK_PROOFS else .8):
                 self._warn(f'Reading lines {a}-{b} produced an unusable answer; one fresh attempt was made on the same exact source.')
-                result = self._ask('read', prompt, cap=self._metadata_cap(), schema=P.READ_SCHEMA, key=key + ':retry', temperature=.4)
+                result = self._ask('read', prompt, cap=self._analysis_cap(), schema=P.READ_SCHEMA, key=key + ':retry', temperature=.4)
                 value = result['value'] or {}
                 usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                           and isinstance(value.get('comments'), list))
@@ -2447,7 +2459,7 @@ class SummaryReviewRunner(JournalRunner):
         if s['followup_ranges'] is None:
             prompt = (P.FOLLOWUP_PLAN_POLICY + previous + '\n\nMANUSCRIPT OUTLINE (navigation only):\n'
                       + manuscript.outline(s['map']) + f'\nTotal lines: {len(self._lines(sid))}.')
-            result = self._ask('followup-plan', prompt, cap=self._metadata_cap(),
+            result = self._ask('followup-plan', prompt, cap=self._model_cap('review_metadata', 3000),
                                schema=P.FOLLOWUP_PLAN_SCHEMA, key='followup-plan')
             value = result['value']
             if not isinstance(value, dict) or not isinstance(value.get('ranges'), list):

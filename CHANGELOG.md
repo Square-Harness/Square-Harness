@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Use the DS4 384,000-token generation ceiling for substantive calls throughout
+  the Assistant and specialist modes. All three efforts fund complete calls,
+  including the single pass in Low Proof. Explicit limits and existing job
+  allowances continue to apply.
+- Convert formatting-only Markdown requests to LaTeX locally, including a
+  resumable write-up which already pinned the original file. Offer the full
+  source and compile a PDF when supported. Show a saved worker interruption
+  once in the conversation, with its Resume action.
+- Release reservations when DeepInfra rejects a generation request before
+  streaming with HTTP 429. Retry transient rate or capacity responses once
+  after a short wait. A persistent rejection pauses the literature review
+  with completed work saved and the rejected step available on Resume.
+
 - Upgrade Literature review for research mathematicians. Resolve citation leads
   in primary bibliographies, reconsider records linked by later papers, and use
   the original mathematical question throughout. A compact plan selects the

@@ -16,9 +16,11 @@ import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, Thinking, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['style', 'outline', 'draft', 'compile', 'review', 'export'] as const
+const STEPS = ['style', 'outline', 'draft', 'compile', 'review', 'export']
+const CONVERSION_STEPS = ['convert_markdown', 'compile', 'export']
 const STEP_NAMES: Record<string, string> = {
   style: 'Style', outline: 'Outline', draft: 'Writing', review: 'Review', compile: 'Compile', repair: 'Repair', export: 'Export', done: 'Done',
+  convert_markdown: 'Convert Markdown',
 }
 
 export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
@@ -83,7 +85,8 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const phase = data.phase === 'repair' || data.phase === 'assemble' ? 'compile'
     : data.phase === 'check' || data.phase === 'revise' || data.phase === 'select' ? 'review' : data.phase
-  const current = STEPS.indexOf(phase as typeof STEPS[number])
+  const steps = data.conversion_source ? CONVERSION_STEPS : STEPS
+  const current = steps.indexOf(phase)
   return (
     <header className="job-head">
       <div className="job-status">
@@ -93,7 +96,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
-        {STEPS.map((step, index) => {
+        {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{step === 'compile' && data.phase === 'repair' ? 'Repair' : STEP_NAMES[step]}</li>
         })}
@@ -138,7 +141,7 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
       {data.running && data.live && <LiveWriteup id={data.id} role={data.live.role} file={data.live.file} ours={ours} owner={data.owner_task} />}
       {data.document ? (
         <>
-          <p className="caveat">{data.document.includes('% src:')
+          <p className="caveat">{data.conversion_source ? 'Converted from the pinned Markdown file.' : data.document.includes('% src:')
             ? <>Model draft. Each <code>% src</code> mark opens the note lines a paragraph came from; red ones cite lines that were never read. TODO comments are left for you.</>
             : <>Model draft: read it before using it. <code>% TODO</code> comments mark points for you to settle.</>}</p>
           <TexSource text={data.document} onCite={onCite} flagged={flagged} errorLines={errorLines} />
@@ -220,13 +223,16 @@ function TexSource({ text, onCite, flagged, errorLines }: { text: string; onCite
 
 function CompileTab({ data, onArtifact }: { data: ResearchDetail; onArtifact: (name: string) => void }) {
   const result = data.compile
+  if (!result && data.conversion_source && data.gates?.length) return <p className="empty-note">{data.gates[0].message}</p>
   if (!result) return <p className="empty-note">Not compiled yet. Compilation follows the sections.</p>
   if (!result.available) return <p className="empty-note">LaTeX (latexmk) is not installed on this computer, so the document was not compiled.</p>
   return (
     <div className="compile">
       <p className={result.ok ? 'valid-note' : 'objection small'}>
         {result.ok ? 'The document compiled without errors.' : `The document did not compile: ${result.errors.length} error${result.errors.length === 1 ? '' : 's'}.`}
-        {data.phase === 'done' && !result.ok && ' One repair round was tried; fix the remaining errors in the .tex file.'}
+        {data.phase === 'done' && !result.ok && (data.conversion_source
+          ? ' The converted LaTeX source is available to download.'
+          : ' One repair round was tried; fix the remaining errors in the .tex file.')}
       </p>
       {result.pdf && <p><a className="btn" href={api.researchPdfUrl(data.id)} target="_blank" rel="noopener">Open the PDF</a></p>}
       {result.errors.length > 0 && (

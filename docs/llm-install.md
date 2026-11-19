@@ -152,6 +152,8 @@ These settings are immutable for an existing ledger. Pair this with a separately
 model-restricted provider credential; reuse credentials and ledgers on restart.
 Priority is refused for a quota-enabled instance. An exhausted allowance is an
 operational stop and does not authorize another allowance automatically.
+The ledger records zero usage when DeepInfra returns HTTP 429 before opening
+a generation stream. Interrupted streams with unknown usage keep their reservations.
 
 For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's
 service configuration. Keep exceptions in private operator configuration. Changing
@@ -288,8 +290,9 @@ Fallbacks:
   `~/.local/bin/uv venv --python 3.12 .venv` and
   `~/.local/bin/uv pip install --python .venv/bin/python -e '.[research]'`.
 - No network access to PyPI: the only runtime dependencies are `rich`,
-  `prompt-toolkit` and, for PDFs, `pypdf`. The harness also runs without them,
-  with a plainer terminal and no PDF reading.
+  `prompt-toolkit` and `markdown-it-py` (also installed by Rich). The optional PDF
+  reader uses `pypdf`. A minimal source checkout can run the terminal with fewer
+  dependencies; the formatting-only Markdown conversion requires `markdown-it-py`.
 
 Check:
 
@@ -397,9 +400,8 @@ A manual Qwen launch uses `--api-profile default` with the local server and
 model settings from B4. Selecting a different profile never rewrites saved
 jobs or grants them new allowances on resume.
 
-New DS4 Proof jobs use 384,000 tokens for each solve, repair and review from
-Medium upwards. Medium and High allow 3 and 5 solver
-passes; Low remains one short solve/review pass. The total output allowance
+DS4 uses 384,000 output tokens as the ceiling for substantive calls across its
+modes. Low, Medium and High allow 1, 3 and 5 solver passes in Proof. The total output allowance
 includes one possible review-format retry per pass. See the budget table in
 [guide.md](guide.md). The common per-call time guard defaults to three hours;
 use `--proof-call-seconds SECONDS` for an explicit value in either the DS4

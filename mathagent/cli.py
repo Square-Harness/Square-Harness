@@ -16,7 +16,8 @@ from urllib.parse import urlparse, quote
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
 from .api_profiles import create_profile_client, resolve_api_profile
-from .model_limits import apply_defaults
+from .format_request import markdown_conversion_request
+from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults
 from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import PythonSandbox, SandboxUnavailable
 from .numerics.session import MIN_AUTOMATIC_CONTEXT
@@ -202,7 +203,7 @@ def parser():
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
     p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Literature/Quick review/Explain, 6 otherwise)')
-    p.add_argument('--research-tokens', type=int, help='Optional cumulative generated-token ceiling per report (default: no cumulative ceiling)')
+    p.add_argument('--research-tokens', type=int, help='Cumulative generated-token ceiling per report (default: effort-based for DS4, unlimited for local profiles)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')
     p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
@@ -300,8 +301,8 @@ def main():
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
         p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
-    if remote_profile and max(args.proof_solve_tokens, args.proof_verify_tokens) > 384_000:
-        p.error('DeepInfra DS4 solve and verify limits cannot exceed 384000 output tokens')
+    if remote_profile and max(args.predict, args.proof_solve_tokens, args.proof_verify_tokens) > MODEL_OUTPUT_TOKENS:
+        p.error(f'DeepInfra DS4 chat, solve and verify limits cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     if args.proof_repair_tokens is not None and not 128 <= args.proof_repair_tokens <= args.proof_solve_tokens:
         p.error('--proof-repair-tokens must be between 128 and --proof-solve-tokens')
     if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= (args.proof_repair_tokens or args.proof_solve_tokens):
@@ -312,6 +313,7 @@ def main():
     if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= 86400:
         p.error('Use resume-add-seconds between 0 and 86400')
     args.research_seconds_explicit = any(value.split('=')[0] == '--research-seconds' for value in sys.argv[1:])
+    args.research_tokens_explicit = any(value.split('=')[0] == '--research-tokens' for value in sys.argv[1:])
     args.research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens is not None and args.research_tokens < 1024
             or args.research_input_tokens is not None and args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
@@ -512,8 +514,10 @@ def main():
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
             result = runner.start(query, kind=kind,
                 source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('literature', 'quick_review', 'explain') else 3),
-                max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
-                max_seconds=args.research_seconds if agent.mode != 'literature' or args.research_seconds_explicit else None,
+                max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
+                max_input_tokens=args.research_input_tokens,
+                max_seconds=args.research_seconds if args.research_seconds_explicit or
+                    (agent.mode != 'literature' and not remote_profile) else None,
                 max_requests=args.research_requests if args.research_requests is not None or agent.mode == 'literature' else 12,
                 max_chars=args.research_chars)
             research_running = False
@@ -524,20 +528,26 @@ def main():
             if not args.online:
                 ui.say('Note: research is offline, so the check can only use cached sources. Relaunch with --online.')
             runner = CheckRunner(agent, ui.emit)
-            result = runner.start(query, lookup='precise' if precise_reference_request(query) else 'standard')
+            result = runner.start(query, lookup='precise' if precise_reference_request(query) else 'standard',
+                                  max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
+                                  max_seconds=args.research_seconds if args.research_seconds_explicit else None)
             ui.say('\n' + (runner.state.get('answer') or runner._compose()))
             ui.say(f'Check {result["id"]} · {result["status"]} · log: {Path(result["directory"]) / "report.md"}')
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': runner.state.get('answer', '')}])
         elif agent.mode == 'writeup':
             if args.output and workspace.path(args.output).suffix.lower() != '.tex':
                 raise ValueError('For a write-up, --output names the new .tex file')
-            ensure_model()
+            runner = WriteupRunner(agent, ui.emit)
+            if args.template_file or not markdown_conversion_request(query, args.research_file or runner._inferred_sources(query)):
+                ensure_model()
             research_running = True
             last_research_id = ''
-            result = WriteupRunner(agent, ui.emit).start(query, source_files=args.research_file,
+            result = runner.start(query, source_files=args.research_file,
                 template_files=args.template_file, output=args.output or '',
-                max_rounds=args.research_rounds, max_tokens=args.research_tokens,
-                max_input_tokens=args.research_input_tokens, max_seconds=args.research_seconds,
+                max_rounds=args.research_rounds,
+                max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
+                max_input_tokens=args.research_input_tokens,
+                max_seconds=args.research_seconds if not remote_profile or args.research_seconds_explicit else None,
                 max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
             research_running = False
             research_result(result, export=False)

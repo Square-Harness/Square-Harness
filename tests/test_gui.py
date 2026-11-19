@@ -17,11 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mathagent import cli, proof
 from mathagent.agent import Agent
 from mathagent.deepinfra import LEGACY_MODEL as DEEPINFRA_LEGACY_MODEL, MODEL as DEEPINFRA_MODEL
-from mathagent.gui import server, store
+from mathagent.gui import effort, server, store
 from mathagent.gui.hub import Hub
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
-from mathagent.model_limits import PROFILE as DS4_PROFILE
+from mathagent.model_limits import MODEL_OUTPUT_TOKENS, PROFILE as DS4_PROFILE
 from mathagent.proof_policy import LEGACY_VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request
 from mathagent.tools import Workspace
 from test_research import FakeClient, response
@@ -227,11 +227,13 @@ class FakeDeepInfra:
                     return False
                 return True
 
-            def json_response(self, status, value):
+            def json_response(self, status, value, headers=None):
                 body = json.dumps(value).encode()
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(body)))
+                for name, header in (headers or {}).items():
+                    self.send_header(name, header)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -254,6 +256,10 @@ class FakeDeepInfra:
                     return
                 fake.completions.append(data)
                 reply = fake.replies.pop(0)
+                if isinstance(reply, dict) and 'http_status' in reply:
+                    self.json_response(reply['http_status'], reply.get('body', {'error': {'message': 'Provider rejected the request.'}}),
+                                       headers=reply.get('headers'))
+                    return
                 if isinstance(reply, dict):
                     events = reply['events']
                 else:
@@ -455,6 +461,48 @@ class DeepInfraWorkflowTests(GuiCase):
             self.assertNotIn(marker, call['messages'][0]['content'])
         self.assertFalse(self.fake.replies)
 
+        # An ordinary mathematical worker and its synthesis receive the same
+        # full generation room. An explicit specialist cap still applies to both.
+        with patch.object(self.hub.args, 'ctx', 1_048_576):
+            for cap in (None, 1536):
+                with self.subTest(specialist_cap=cap), patch.object(self.hub.args, 'specialist_output_tokens', cap):
+                    offset = len(self.fake.completions)
+                    self.fake.replies = [('The given function is even.', '', 10), ('The function is even.', '', 10)]
+                    chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+                    self.ok('POST', f'/api/chats/{chat}/route', {
+                        'content': '@explore Discuss the parity of this example.',
+                        'mode_call': {'mode': 'explore', 'start': 0}})
+                    task = self.wait_task(timeout=15)
+                    self.assertEqual(task['state'], 'done', task)
+                    self.assertEqual([call['max_tokens'] for call in self.fake.completions[offset:]],
+                                     [cap or MODEL_OUTPUT_TOKENS] * 2)
+
+        # A rejected generation has no usage. Resume the same solver round
+        # under its original exact budget, retaining the rejected request.
+        self.fake.replies = [{'http_status': 429}]
+        refused = self.ok('POST', '/api/proofs', {'goal': 'Prove x=x.', 'rounds': 1, 'tokens': 6144, 'seconds': 120})
+        self.assertEqual(self.wait_task()['result_status'], 'paused')
+        saved = ProofStore.load(self.root, refused['id']).state
+        self.assertEqual((saved['calls'][0]['status'], saved['tokens_charged'], saved['rounds_started']), ('rejected', 0, 1))
+        self.assertEqual((saved['calls'][0]['reserved_tokens'], saved['calls'][0]['charged_tokens']), (4096, 0))
+        self.fake.replies = [(PROOF, 'Solver reasoning.', 37), (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
+        self.ok('POST', '/api/proofs/' + refused['id'] + '/resume')
+        self.assertEqual(self.wait_task()['result_status'], 'candidate_complete')
+        saved = ProofStore.load(self.root, refused['id']).state
+        self.assertEqual([call['key'] for call in saved['calls']], ['1-solver-0', '1-solver-0-resume-1', '1-verifier-0'])
+        self.assertEqual((saved['tokens_charged'], saved['rounds_started']), (60, 1))
+
+        # A rejected Proof-preparation request pauses the parent before
+        # delegation and preserves both its short calls on resume.
+        self.fake.replies = [{'http_status': 429}]
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        self.ok('POST', f'/api/chats/{chat}/route',
+                {'content': '@prove Prove x=x.', 'mode_call': {'mode': 'prove', 'start': 0}})
+        self.assertEqual(self.wait_task()['result_status'], 'paused')
+        parent = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual((parent['main_calls'], parent['last_call']['status'], parent['children']), (0, 'rejected', []))
+        for field in ('calls', 'tokens', 'input_tokens'):
+            self.assertEqual(parent['proof_preparation'][field], 0)
 
     def test_api_key_gui_proof_preserves_reasoning_usage_and_private_credentials(self):
         approval = copy.deepcopy(APPROVAL)
@@ -468,6 +516,19 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertEqual(status['defaults']['budget_profile'], DS4_PROFILE)
         self.assertEqual(status['defaults']['effort_presets']['medium']['solve_tokens'], 4096)
         self.assertEqual(status['defaults']['effort_presets']['medium']['verify_tokens'], 2048)
+        launch = ['--gui', '--api-profile', 'deepinfra']
+        defaults = cli.parser().parse_args(launch)
+        cli.apply_defaults(defaults, launch)
+        self.assertEqual(defaults.predict, 384_000)
+        for name, passes in [('low', 1), ('medium', 3), ('high', 5)]:
+            proof_limits = effort.limits('prove', name, defaults)
+            self.assertEqual((proof_limits['solve_tokens'], proof_limits['verify_tokens']), (384_000, 384_000))
+            for mode in ('literature', 'referee', 'quick_review', 'detailed_review', 'explain', 'writeup',
+                         'summarize', 'explore', 'check', 'style', 'python_lab'):
+                with self.subTest(mode=mode, effort=name):
+                    worker = effort.level(mode, name, defaults)
+                    self.assertEqual(worker['tokens'], passes * 3 * 384_000)
+                    self.assertEqual(worker['minutes'], passes * 3 * 180)
         started = self.ok('POST', '/api/proofs', {
             'goal': 'Prove that x = x for every real x.', 'rounds': 1,
             'tokens': 12000, 'seconds': 120})

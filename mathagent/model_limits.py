@@ -9,19 +9,17 @@ Call allocation and each job's saved explicit limits still take precedence.
 """
 
 PROFILE = 'ds4.1-flash-1017'
-PROFILE_VERSION = 2
-PROOF_OUTPUT_TOKENS = 384_000
+PROFILE_VERSION = 3
+MODEL_OUTPUT_TOKENS = 384_000
 PROOF_CALL_SECONDS = 10_800
 
-OUTPUTS = {
-    'assistant': 32_768, 'assistant_final': 65_536, 'assistant_recovery': 131_072,
-    'review_check': 65_536, 'review_confirm': 32_768, 'review_explain': 65_536,
-    'review_recovery': 131_072, 'review_direct': 16_384, 'review_metadata': 16_384,
-    'review_write': 32_768, 'writeup': 65_536, 'writeup_min': 32_768,
-    'research_plan': 8_192, 'research_investigate': 16_384,
-    'research_draft': 32_768, 'research_review': 16_384, 'research_revise': 32_768,
-    'router': 4_096,
-}
+# These roles generate mathematical content. Compact control messages have separate limits.
+OUTPUTS = dict.fromkeys((
+    'assistant', 'assistant_final', 'assistant_recovery', 'review_check', 'review_confirm',
+    'review_explain', 'review_recovery', 'review_direct', 'review_write', 'writeup',
+    'research_plan', 'research_investigate', 'research_draft', 'research_review', 'research_revise',
+), MODEL_OUTPUT_TOKENS)
+OUTPUTS.update(review_metadata=16_384, router=4_096, writeup_min=32_768)
 INPUTS = {
     'source_overview': 224_000, 'review_packet': 56_000, 'review_lines': 600,
     'research_excerpt': 36_000, 'research_lines': 400, 'style_packet': 96_000,
@@ -29,33 +27,33 @@ INPUTS = {
     'writeup_conversation': 800_000, 'router_context': 32_768,
 }
 DEFAULTS = {
-    'ctx': 1_048_576, 'predict': 32_768, 'temperature': 1.0,
-    'proof_solve_tokens': PROOF_OUTPUT_TOKENS, 'proof_verify_tokens': PROOF_OUTPUT_TOKENS,
+    'ctx': 1_048_576, 'predict': MODEL_OUTPUT_TOKENS, 'temperature': 1.0,
+    'proof_solve_tokens': MODEL_OUTPUT_TOKENS, 'proof_verify_tokens': MODEL_OUTPUT_TOKENS,
     'proof_call_seconds': PROOF_CALL_SECONDS,
     'proof_tokens': 5_760_000, 'proof_seconds': 15 * PROOF_CALL_SECONDS,
-    'research_tokens': 2_097_152, 'research_input_tokens': 33_554_432,
-    'research_seconds': 1_800, 'research_chars': 200_000,
+    'research_tokens': 15 * MODEL_OUTPUT_TOKENS, 'research_input_tokens': 33_554_432,
+    'research_seconds': 15 * PROOF_CALL_SECONDS, 'research_chars': 200_000,
     'assistant_tokens': 12_568_576, 'assistant_input_tokens': 33_554_432,
     'gui_model_concurrency': 5, 'gui_concurrency': 5, 'assistant_concurrency': 5,
 }
 EFFORTS = {
-    'low': dict(tries=1, minutes=10, tokens=65_536, research_tokens=65_536,
-                input=1_048_576, requests=20, chars=60_000, solve_tokens=32_768, verify_tokens=16_384),
-    'medium': dict(tries=3, minutes=30, tokens=3_456_000, research_tokens=262_144,
+    'low': dict(tries=1, minutes=3 * PROOF_CALL_SECONDS // 60, tokens=3 * MODEL_OUTPUT_TOKENS, research_tokens=3 * MODEL_OUTPUT_TOKENS,
+                input=1_048_576, requests=20, chars=60_000, solve_tokens=MODEL_OUTPUT_TOKENS, verify_tokens=MODEL_OUTPUT_TOKENS),
+    'medium': dict(tries=3, minutes=9 * PROOF_CALL_SECONDS // 60, tokens=3_456_000, research_tokens=9 * MODEL_OUTPUT_TOKENS,
                    input=4_194_304, requests=50, chars=120_000,
-                   solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
-    'high': dict(tries=5, minutes=60, tokens=5_760_000, research_tokens=524_288,
+                   solve_tokens=MODEL_OUTPUT_TOKENS, verify_tokens=MODEL_OUTPUT_TOKENS),
+    'high': dict(tries=5, minutes=15 * PROOF_CALL_SECONDS // 60, tokens=5_760_000, research_tokens=15 * MODEL_OUTPUT_TOKENS,
                  input=8_388_608, requests=80, chars=240_000,
-                 solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
+                 solve_tokens=MODEL_OUTPUT_TOKENS, verify_tokens=MODEL_OUTPUT_TOKENS),
 }
 # Paused workers retain the allowances they started with.
 LEGACY_EFFORTS = {
     'xhigh': dict(tries=7, minutes=120, tokens=8_064_000, research_tokens=1_048_576,
                   input=16_777_216, requests=120, chars=400_000,
-                  solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
+                  solve_tokens=MODEL_OUTPUT_TOKENS, verify_tokens=MODEL_OUTPUT_TOKENS),
     'poincare': dict(tries=10, minutes=240, tokens=11_520_000, research_tokens=2_097_152,
                      input=33_554_432, requests=160, chars=600_000,
-                     solve_tokens=PROOF_OUTPUT_TOKENS, verify_tokens=PROOF_OUTPUT_TOKENS),
+                     solve_tokens=MODEL_OUTPUT_TOKENS, verify_tokens=MODEL_OUTPUT_TOKENS),
 }
 
 
@@ -72,8 +70,7 @@ def proof_limits(name, args):
     configured = getattr(args, 'proof_tokens', None)
     if configured is not None:
         tokens = min(tokens, configured)
-    seconds = (600 if name == 'low' else
-               3 * effort['tries'] * getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS))
+    seconds = 3 * effort['tries'] * getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)
     configured_seconds = getattr(args, 'proof_seconds', None)
     if configured_seconds is not None:
         seconds = min(seconds, configured_seconds)
@@ -82,12 +79,25 @@ def proof_limits(name, args):
                 repair_tokens=min(solve, getattr(args, 'proof_repair_tokens', None) or solve))
 
 
+def workflow_budget(name, args=None):
+    """Cumulative inference allowance for a DS4 worker at its selected effort."""
+    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['medium']))
+    tokens, seconds = effort['research_tokens'], effort['minutes'] * 60
+    configured = getattr(args, 'research_tokens', None)
+    if configured is not None:
+        tokens = min(tokens, configured)
+    if getattr(args, 'research_seconds', None) is not None:
+        seconds = min(seconds, args.research_seconds)
+    return dict(tokens=tokens, seconds=seconds)
+
+
 def effort_presets(args):
     """Server-provided presets, keeping non-Proof budgets and times separate."""
     presets = {}
     for name, effort in EFFORTS.items():
         proof = proof_limits(name, args)
-        presets[name] = {**effort, 'tokens': proof['tokens'],
+        work = workflow_budget(name, args)
+        presets[name] = {**effort, 'research_tokens': work['tokens'], 'minutes': work['seconds'] / 60, 'tokens': proof['tokens'],
                          'solve_tokens': proof['solve_tokens'], 'verify_tokens': proof['verify_tokens'],
                          'repair_tokens': proof['repair_tokens'], 'proof_seconds': proof['seconds'],
                          'proof_call_seconds': getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)}
@@ -97,6 +107,10 @@ def effort_presets(args):
 def is_ds4(subject):
     client = getattr(subject, 'client', subject)
     return getattr(client, 'profile', 'default') == 'deepinfra'
+
+
+def substantive_output(subject, fallback):
+    return MODEL_OUTPUT_TOKENS if is_ds4(subject) else fallback
 
 
 def output_limit(subject, name, fallback):
@@ -119,6 +133,8 @@ def apply_defaults(args, arguments):
     for name, value in DEFAULTS.items():
         if '--' + name.replace('_', '-') not in explicit:
             setattr(args, name, value)
+    if '--predict' not in explicit:
+        args.predict = min(args.predict, args.ctx - 1025)
     if '--request-timeout' not in explicit:
         args.request_timeout = args.proof_call_seconds
     # GUI launch caps accommodate every effort; terminal jobs derive their

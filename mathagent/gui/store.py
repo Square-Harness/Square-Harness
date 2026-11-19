@@ -23,6 +23,7 @@ import time
 import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
+from ..format_request import markdown_conversion_request
 from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..research import _job_directory, _read_state as _read_research
@@ -435,7 +436,7 @@ def research_detail(root, job_id, active=None):
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
                                         'outputs', 'macros', 'theorems', 'output_name', 'style', 'scoped', 'deliver',
                                         'title', 'style_checked', 'readiness', 'gates', 'checks', 'needs', 'document_kind',
-                                        'reviews', 'review_round')}
+                                        'reviews', 'review_round', 'conversion_source')}
            if s['kind'] == 'writeup' else {}),
         # Candidates without their texts: the page shows each version's round, score and readiness.
         **({'candidates': [{key: c.get(key) for key in ('round', 'score', 'readiness', 'compile_ok')} | {'selected': c.get('id') == s.get('selected')}
@@ -788,14 +789,16 @@ def claim_auto_title(root, chat_id):
     chat = load_chat(root, chat_id)
     if chat.get('auto_title_attempted') or chat.get('title_source') == 'manual':
         return None
-    first = next((item.get('content', '').strip() for item in chat['transcript']
+    first = next((item for item in chat['transcript']
                   if item.get('role') == 'user' and not item.get('discarded')
-                  and len(item.get('content', '').strip()) >= 12), '')
-    if not first:
+                  and len(item.get('content', '').strip()) >= 12), None)
+    if first is None:
         return None
     chat['auto_title_attempted'] = True
     _save_chat(root, chat)
-    return first
+    # The existing prompt preview is enough for a local file conversion.
+    query = first['content'].strip()
+    return None if markdown_conversion_request(query, first.get('files') or []) else query
 
 
 def load_chat(root, chat_id):

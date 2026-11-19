@@ -96,7 +96,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
 
   const scaled = (next: EffortLevel, kind: ReviewVariant = variant) => {
     const limits = effortLimits(review ? 'research' : 'literature', d!, next)
-    const scale = review ? VARIANT_SCALE[kind] : 1
+    const scale = review && d?.api_profile !== 'deepinfra' ? VARIANT_SCALE[kind] : 1
     return { ...limits, seconds: limits.seconds * scale }
   }
   const applyLevel = (next: EffortLevel, kind: ReviewVariant = variant) => {

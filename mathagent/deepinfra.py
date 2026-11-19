@@ -12,6 +12,8 @@ import ipaddress
 import json
 import os
 import stat
+import time
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -19,6 +21,7 @@ from urllib.request import Request
 
 from .agent import AgentError
 from .backends import OpenAICompatible
+from .model_limits import MODEL_OUTPUT_TOKENS
 
 
 BASE_URL = 'https://api.deepinfra.com/v1/openai'
@@ -26,7 +29,105 @@ MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
 LEGACY_MODEL = 'deepseek-ai/DeepSeek-V4-Flash-0731'
 SUPPORTED_MODELS = (MODEL, LEGACY_MODEL)
 CONTEXT_TOKENS = 1_048_576
-MAX_OUTPUT_TOKENS = 384_000
+MAX_OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
+
+
+class DeepInfraGenerationError(AgentError):
+    """Provider failure that must reach the workflow before it dispatches more work."""
+
+
+class DeepInfraRateLimit(DeepInfraGenerationError):
+    """A definitive HTTP 429 response, before the transport opened a success stream."""
+
+    def __init__(self, hint, *, completion_rejected):
+        super().__init__('DeepInfra HTTP 429: ' + hint)
+        self.completion_rejected = completion_rejected
+
+
+class _RejectedRetryCancelled(KeyboardInterrupt):
+    """A cancellation between an explicit 429 and any subsequent request."""
+
+    def __init__(self, completion_rejected):
+        super().__init__()
+        self.completion_rejected = completion_rejected
+
+
+def rejected_before_inference(exc):
+    return isinstance(exc, (DeepInfraRateLimit, _RejectedRetryCancelled)) and exc.completion_rejected
+
+
+def _rate_limit(exc, deadline):
+    # Only match recognized signals. Never retain or quote a provider body,
+    # which may reflect submitted material or request headers.
+    # The HTTP status alone confirms rejection. Spend at most one second reading
+    # the optional diagnostic, even when the normal generation timeout is hours.
+    read_end = min(deadline, time.monotonic() + 1)
+    body = bytearray()
+    complete = False
+    response = exc.fp
+    sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+    try:
+        while len(body) <= 4096:
+            remaining = read_end - time.monotonic()
+            if remaining <= 0:
+                break
+            if sock is not None:
+                sock.settimeout(remaining)
+            chunk = response.read1(4097 - len(body))
+            if not chunk:
+                complete = True
+                break
+            body.extend(chunk)
+            if response.isclosed():
+                complete = len(body) <= 4096
+                break
+    except (OSError, HTTPException, ValueError):
+        pass
+    value = None
+    if complete:
+        try:
+            value = json.loads(body)
+        except (ValueError, UnicodeError, RecursionError):
+            value = body.decode('ascii', errors='replace')
+    fields = []
+    if isinstance(value, dict):
+        for item in (value, value.get('error'), value.get('detail')):
+            if isinstance(item, dict):
+                fields.extend(item.get(k) for k in ('code', 'type', 'message', 'detail'))
+            else:
+                fields.append(item)
+    else:
+        fields.append(value)
+    signals = {' '.join(s.lower().replace('_', ' ').replace('-', ' ').split()).strip('.')
+               for s in fields if isinstance(s, str)}
+    if any(word in s for s in signals for word in ('credit', 'balance', 'spending', 'billing', 'payment', 'insufficient quota', 'quota exhausted')):
+        return 'Check the provider credit balance and spending limit.', False
+    if signals & {'rate limited', 'rate limit exceeded', 'rate limit error', 'too many requests',
+                  'concurrency limit exceeded', 'too many concurrent requests'}:
+        return 'The provider is temporarily limiting requests.', True
+    if signals & {'model busy', 'model overloaded', 'capacity exceeded', 'server overloaded'}:
+        return 'The model is temporarily at capacity.', True
+    return 'The provider rate, capacity or spending limit was reached.', False
+
+
+def _retry_delay(header):
+    """Seconds to wait, or None when the provider requests a long or invalid wait."""
+    if header is None:
+        return 1.0
+    header = header.strip()
+    if len(header) > 128:
+        return None
+    try:
+        if header.isascii() and header.isdigit():
+            seconds = int(header)
+        else:
+            date = parsedate_to_datetime(header)
+            if date.tzinfo is None:
+                return None
+            seconds = max(0, date.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+    return seconds if seconds <= 5 else None
 
 
 def read_api_key():
@@ -107,26 +208,46 @@ class DeepInfra(OpenAICompatible):
             headers['Authorization'] = 'Bearer ' + self._api_key
         request = Request(url, data=None if data is None else json.dumps(data, ensure_ascii=False).encode(),
                           headers=headers)
-        try:
-            return self.opener.open(request, timeout=self.timeout)
-        except HTTPError as exc:
-            with exc:
-                if optional and exc.code in {404, 405}:
-                    return None
-            # A provider error can reflect submitted headers or credentials.
-            # Never copy any part of its body into saved jobs or GUI logs.
-            hints = {400: 'Check the model request and supported parameters.',
-                     401: 'Check the API credential and its expiry.',
-                     402: 'Check available credit and the credential spending limit.',
-                     403: 'Check the credential scopes and allowed models.',
-                     404: 'The requested model or endpoint is unavailable.',
-                     405: 'This endpoint does not support the requested operation.',
-                     422: 'Check the model request and supported parameters.',
-                     429: 'The provider rate, capacity or spending limit was reached.'}
-            hint = hints.get(exc.code, 'The provider request failed; check its service status.')
-            raise AgentError(f'DeepInfra HTTP {exc.code}: {hint}') from None
-        except (URLError, TimeoutError, OSError, HTTPException) as exc:
-            raise AgentError('Cannot reach DeepInfra: ' + self._redact(exc)) from None
+        hints = {400: 'Check the model request and supported parameters.',
+                 401: 'Check the API credential and its expiry.',
+                 402: 'Check available credit and the credential spending limit.',
+                 403: 'Check the credential scopes and allowed models.',
+                 404: 'The requested model or endpoint is unavailable.',
+                 405: 'This endpoint does not support the requested operation.',
+                 422: 'Check the model request and supported parameters.'}
+        completion = parsed.path.endswith('/chat/completions')
+        deadline = time.monotonic() + self.timeout
+        timeout = self.timeout
+        cancel = getattr(self, 'cancel', None)
+        for attempt in (0, 1):
+            if attempt and cancel is not None and cancel.is_set():
+                raise _RejectedRetryCancelled(completion)
+            try:
+                return self.opener.open(request, timeout=timeout)
+            except HTTPError as exc:
+                with exc:
+                    if optional and exc.code in {404, 405}:
+                        return None
+                    if exc.code != 429:
+                        hint = hints.get(exc.code, 'The provider request failed; check its service status.')
+                        raise AgentError(f'DeepInfra HTTP {exc.code}: {hint}') from None
+                    hint, transient = _rate_limit(exc, deadline)
+                    delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None)
+                rejection = DeepInfraRateLimit(hint, completion_rejected=completion)
+                if attempt or not transient or delay is None or time.monotonic() + delay >= deadline:
+                    raise rejection from None
+                try:
+                    if cancel is None:
+                        time.sleep(delay)
+                    elif cancel.wait(delay):
+                        raise KeyboardInterrupt
+                except KeyboardInterrupt:
+                    raise _RejectedRetryCancelled(completion) from None
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise rejection from None
+            except (URLError, TimeoutError, OSError, HTTPException) as exc:
+                raise AgentError('Cannot reach DeepInfra: ' + self._redact(exc)) from None
 
     def _payload(self, payload, *, include_images=True):
         if payload.get('model') not in SUPPORTED_MODELS:
@@ -293,7 +414,23 @@ class DeepInfra(OpenAICompatible):
                                 event = {**event, 'accounting_warning':
                                     'Tester allowance settlement failed; the full reservation was retained.'}
                         yield event
-        except AgentError as exc:
+        except (AgentError, _RejectedRetryCancelled) as exc:
+            if rejected_before_inference(exc):
+                if quota is not None:
+                    try:
+                        quota.settle(reservation, 0, 0)
+                    except AgentError:
+                        # Storage failure retains the hosted reservation; the rejection
+                        # still reaches the worker so it can checkpoint its own budget.
+                        if isinstance(exc, DeepInfraRateLimit):
+                            exc.args = (str(exc) + ' The tester allowance could not be updated.',)
+                raise
+            if str(exc).startswith('Model stream error:'):
+                raise DeepInfraGenerationError('DeepInfra reported an error during generation.') from None
+            if str(exc).startswith('Model stream ended '):
+                raise DeepInfraGenerationError(str(exc)) from None
+            if str(exc).startswith('Malformed or interrupted model stream:'):
+                raise DeepInfraGenerationError('DeepInfra returned a malformed or interrupted model stream.') from None
             redacted = self._redact(exc)
             if redacted != str(exc):
                 raise AgentError(redacted) from None

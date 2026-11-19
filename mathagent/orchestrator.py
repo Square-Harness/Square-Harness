@@ -20,8 +20,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from .agent import AgentError
+from .assistant_budget import AssistantBudget
 from .backends import ToolCallError
 from .call_policy import CallContextError, allocate_call
+from .deepinfra import rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
 from .refcheck import standalone_reference_request
@@ -210,6 +212,10 @@ def _delegate_schema():
                        'The worker returns before you decide the next step. It cannot spawn workers.',
         'parameters': copy.deepcopy(TASK_SCHEMA),
     }}
+
+
+class WorkerInterrupted(AgentError):
+    """The worker recorded the cause and checkpointed its open delegation."""
 
 
 class Orchestrator:
@@ -559,8 +565,8 @@ class Orchestrator:
         remaining = getattr(self.agent.client, 'remaining_tokens', None)
         if isinstance(remaining, (int, float)) and math.isfinite(remaining):
             predict = min(predict, int(remaining))
-        if predict <= 0:
-            raise AgentError('The shared generated-token budget is exhausted')
+        if predict < 128:
+            raise AssistantBudget('Fewer than 128 generated tokens remain for the next Assistant call.')
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
             'messages': [{'role': 'system', 'content': (instruction if output_cap is not None else POLICY + instruction) + self._numerics_policy(tools) + (
@@ -643,9 +649,15 @@ class Orchestrator:
                 'what could be established and what is missing.'})
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
-        payload, allocation = allocate_call(self.agent.client, payload, predict,
-                                            explicit_cap=getattr(self.agent, 'document_output_cap', None))
-        if output_cap is None and tools and self.state['actions'] > 0 and allocation['available_output_tokens'] < final_predict:
+        explicit = getattr(self.agent, 'document_output_cap', None)
+        payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        # A smaller explicit or physical context must still permit several tool
+        # rounds. Keep room for synthesis without reserving more than half the
+        # context of a locally configured DS4 deployment.
+        final_room = min(final_predict, predict, explicit or final_predict)
+        if is_ds4(self.agent):
+            final_room = min(final_room, allocation['context_tokens'] // 2)
+        if output_cap is None and tools and self.state['actions'] > 0 and allocation['available_output_tokens'] < final_room:
             # Preserve enough physical room for a supported answer before a
             # sequence of new source reads fills the working context entirely.
             self.state['force_final'] = True
@@ -654,8 +666,7 @@ class Orchestrator:
                 '\nFINAL ANSWER REQUIRED: the working context is nearly full. Use the exact saved '
                 'findings to answer now, identify unread or unresolved source obligations, and '
                 'do not claim an exhaustive reading or promise further work.')
-            payload, allocation = allocate_call(self.agent.client, payload, predict,
-                explicit_cap=getattr(self.agent, 'document_output_cap', None))
+            payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
         self.state['next_allocation'] = allocation
         if capped and type(previous) is int and payload['options']['num_predict'] <= previous:
             raise CallContextError('A longer replacement answer cannot fit the remaining output or context budget. '
@@ -708,6 +719,11 @@ class Orchestrator:
             self.state['last_call']['status'] = 'invalid_tool_call'
             self.state['rejected_tool_calls'].append({'main_call': self.state['main_calls'],
                 'calls': copy.deepcopy(exc.calls), 'stats': copy.deepcopy(exc.stats), 'error': str(exc)})
+            raise
+        except (AgentError, KeyboardInterrupt) as exc:
+            if rejected_before_inference(exc):
+                self.state['last_call'].update(status='rejected', charged_tokens=0, charged_input_tokens=0)
+                self.state['main_calls'] -= 1
             raise
         finally:
             self.state['last_call']['partial'] = copy.deepcopy(assistant)
@@ -922,7 +938,7 @@ class Orchestrator:
                         child['status'] = 'interrupted'
                         self._save()
                     # Keep the native tool transaction open: Resume continues this same saved child.
-                    raise AgentError(error.get('message') or 'The worker stopped; its saved work can be resumed.')
+                    raise WorkerInterrupted(error.get('message') or 'The worker stopped; its saved work can be resumed.')
                 with self._state_lock:
                     child['result'] = copy.deepcopy(value)
                     child['job_id'] = value.get('job_id') or child['job_id'] or child['id']

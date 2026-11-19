@@ -3,13 +3,18 @@
 
 """Compile a conversation write-up with figures, a table, citations and honest draft status."""
 import base64
+import io
 import json
 import re
 import shutil
 import unittest
+import zipfile
+from unittest.mock import patch
 from uuid import uuid4
 
 from mathagent.gui import store
+from mathagent.format_request import conversion_source, markdown_conversion_request
+from mathagent.writeup import WriteupRunner
 
 try:
     from .test_gui import GuiCase, text
@@ -43,6 +48,54 @@ class ConversationWriteupTests(GuiCase):
 
     @unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
     def test_a_draft_with_figures_tables_and_citations_compiles_and_shows_what_to_check(self):
+        request = "Please rewrite this md document in latex (don't touch the math, juste rewrite it entirely in latex)"
+        (self.root / 'survey.md').write_text('# Results\n\nUnder assumption **A**, the bound is $a_n \\leq 2^n$.\n')
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        store.append_items(self.root, chat, [{'role': 'assistant', 'content': 'This earlier discussion is unrelated.'}])
+        with patch.object(self.hub, '_ensure_model', side_effect=AssertionError('model catalogue unavailable')):
+            self.ok('POST', f'/api/chats/{chat}/route', {'content': request, 'files': ['survey.md']})
+            task = self.wait_task()
+        self.assertEqual(task['state'], 'done', task.get('error'))
+        card = next(item for item in self.ok('GET', f'/api/chats/{chat}')['transcript'] if item['role'] == 'route')
+        converted = self.ok('GET', '/api/research/' + card['job_id'])
+        self.assertEqual((converted['calls'], self.fake.requests), ([], []))
+        self.assertTrue(converted['outputs']['download'])
+        self.assertTrue(converted['outputs']['pdf'], converted['compile'])
+        self.assertIn(r'a_n \leq 2^n', converted['document'])
+        self.assertNotIn('earlier discussion', converted['document'])
+        self.assertIn(r'\title{Results}', converted['document'])
+        _, body = store.research_body(self.root, card['job_id'])
+        for command in (b'\\title', b'\\author', b'\\date', b'\\maketitle', b'\\documentclass'):
+            self.assertNotIn(command, body)
+        self.assertIn(rb'a_n \leq 2^n', body)
+        _, archive = store.research_source(self.root, card['job_id'])
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            self.assertEqual(bundle.read('document-body.tex'), body)
+            self.assertEqual(bundle.read('document.tex'), converted['document'].encode())
+        self.assertEqual(converted['stop_reason'], 'Converted the Markdown file to LaTeX. The PDF compiled successfully.')
+        self.assertIsNone(store.claim_auto_title(self.root, chat))
+        for mixed in ('Convert the Markdown to LaTeX and improve the introduction.',
+                      'Convert section 2 of this file to LaTeX.', 'Translate this file into French in LaTeX.',
+                      'Use my LaTeX template to rewrite this survey.',
+                      'Convert different.md to LaTeX.'):
+            self.assertFalse(markdown_conversion_request(mixed, ['survey.md']), mixed)
+        pinned = {'id': 'M1', 'path': 'conversation.md'}
+        state = {'goal': request, 'sources': [pinned, {'id': 'M0', 'path': 'conversation.md'}]}
+        self.assertEqual(conversion_source(state), 'M1')
+        for extra in ({'style_choice': {'mode': 'style'}}, {'variant': 'summary'},
+                      {'sources': [pinned, {'id': 'T1', 'path': 'style.tex'}]},
+                      {'sources': [{'id': 'M0', 'path': 'conversation.md'}]}):
+            self.assertIsNone(conversion_source({**state, **extra}))
+
+        (self.root / 'broken.md').write_text('# An example\n\nThe formula is $a_1_2$.')
+        result = self.ok('POST', '/api/writeup', {'goal': 'Convert broken.md to LaTeX.', 'source_files': ['broken.md']})
+        self.assertEqual(self.wait_task()['state'], 'done')
+        broken = self.ok('GET', '/api/research/' + result['id'])
+        self.assertEqual((broken['status'], broken['calls'], broken['compile']['ok']), ('partial', [], False))
+        self.assertIn('Converted the Markdown file to LaTeX.', broken['stop_reason'])
+        self.assertFalse(WriteupRunner.reopen_for_repair(self.root, result['id']))
+        self.assertEqual(self.ok('GET', '/api/research/' + result['id'])['document'], broken['document'])
+
         paper = self.root / 'paper'
         paper.mkdir()
         (paper / 'macros.sty').write_text('\\newcommand{\\E}{\\mathrm{E}}\n')

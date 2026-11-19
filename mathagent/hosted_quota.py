@@ -144,12 +144,17 @@ class HostedQuota:
 
     def settle(self, identifier, input_tokens, output_tokens):
         with self._transaction() as db:
-            row = db.execute('SELECT input_cap, output_cap, reserved, charged FROM calls WHERE id=?', (identifier,)).fetchone()
-            if row is None or row[3] is not None:
-                raise AgentError('Tester allowance reservation is missing or already settled')
+            row = db.execute('SELECT input_cap, output_cap, reserved, charged, input_tokens, output_tokens FROM calls WHERE id=?',
+                             (identifier,)).fetchone()
+            if row is None:
+                raise AgentError('Tester allowance reservation is missing')
             if any(type(value) is not int or not 0 <= value <= cap
                    for value, cap in zip((input_tokens, output_tokens), row[:2])):
                 raise AgentError('Tester allowance received invalid usage; reservation retained')
+            if row[3] is not None:
+                if row[4:] == (input_tokens, output_tokens):
+                    return
+                raise AgentError('Tester allowance reservation already settled with different usage')
             charged = self._cost(input_tokens, output_tokens)
             if charged > row[2]:
                 raise AgentError('Tester allowance usage exceeded its reservation; reservation retained')

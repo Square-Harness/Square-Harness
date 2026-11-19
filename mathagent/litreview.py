@@ -29,6 +29,8 @@ from .call_policy import allocate_call, CallContextError
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
+from .model_limits import is_ds4, substantive_output, workflow_budget
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .reporting import usage_footer
 from .research import (ResearchRunner, ResearchBudget, _job_directory, _read_state, _reference_prompt,
                        announces_only, remaining_limit, usable_completion)
@@ -832,7 +834,8 @@ class ReviewRunner(ResearchRunner):
         if budgets.get('max_requests') is None:
             budgets['max_requests'] = level['requests']
         if budgets.get('max_seconds') is None:
-            budgets['max_seconds'] = level['seconds']
+            effort = 'low' if budgets['max_rounds'] == 1 else 'medium' if budgets['max_rounds'] <= 3 else 'high'
+            budgets['max_seconds'] = workflow_budget(effort)['seconds'] if is_ds4(self.agent) else level['seconds']
         # A delegated worker also shares the enclosing Assistant's deadline.
         deadline = getattr(self.agent.client, 'deadline', None)
         if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
@@ -972,9 +975,6 @@ class ReviewRunner(ResearchRunner):
                 self._timeout_saved = getattr(client, 'timeout', None)
                 if self._timeout_saved is not None:
                     seconds = min(self._timeout_saved, self._seconds_for_phase(self.state['phase']))
-                    # A silent hosted batch must not take the entire discovery allowance.
-                    if getattr(client, 'profile', None) == 'deepinfra':
-                        seconds = min(seconds, {'screen': 65, 'read': 100, 'check': 180}.get(self.state['phase'], seconds))
                     client.timeout = max(.1, seconds)
             self._timeout_depth += 1
         try:
@@ -1009,8 +1009,14 @@ class ReviewRunner(ResearchRunner):
                         self._warn(f'The {role} call used its output allowance before answering; retried without reasoning.')
                         continue
                     return result
-            except AgentError as exc:
-                if attempt or isinstance(exc, (ResearchBudget, TokenBudgetError)) or type(exc).__name__ == 'AssistantBudget':
+            except (AgentError, KeyboardInterrupt) as exc:
+                if isinstance(exc, DeepInfraGenerationError) or rejected_before_inference(exc):
+                    if role == 'recover-write' and rejected_before_inference(exc):
+                        self.state.pop('core_recovery', None)
+                    elif role == 'recover-check' and rejected_before_inference(exc):
+                        self.state['core_recovery']['stage'] = 'proposed'
+                    raise
+                if attempt or isinstance(exc, (ResearchBudget, TokenBudgetError, KeyboardInterrupt)) or type(exc).__name__ == 'AssistantBudget':
                     raise
                 self._warn(f'The model server failed on a {role} call ({str(exc)[:120]}); it was asked again.')
                 time.sleep(3)
@@ -1028,10 +1034,6 @@ class ReviewRunner(ResearchRunner):
             payload = {'model': self.agent.model, 'stream': True,
                        'think': bool(deliberate and not answer_only and getattr(self.agent, 'think', True) and cap >= 1800),
                        'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': temperature}}
-            if (payload['think'] and getattr(self.agent.client, 'profile', '') == 'deepinfra'
-                    and getattr(self.agent.client, 'reasoning_effort', 'high') != 'none'
-                    and (role != 'check' or cap < 8000)):
-                payload['reasoning_effort'] = 'low'
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
             if schema:
@@ -1039,8 +1041,9 @@ class ReviewRunner(ResearchRunner):
             payload['messages'] = [{'role': 'system', 'content': self.POLICY + '\n' + self.state['skill']},
                                    {'role': 'user', 'content': prompt}]
             try:
-                payload, allocation = allocate_call(self.agent.client, payload, cap, minimum=min(512, cap),
-                                                    explicit_cap=getattr(self.agent, 'document_output_cap', None))
+                explicit = getattr(self.agent, 'document_output_cap', None)
+                payload, allocation = allocate_call(self.agent.client, payload, cap, minimum=min(512, cap, explicit or cap),
+                                                    explicit_cap=explicit)
             except CallContextError as exc:
                 raise WorkerInputError(str(exc), code='context_overflow', scope='context', details=exc.details) from None
             cap = payload['options']['num_predict']
@@ -1108,11 +1111,7 @@ class ReviewRunner(ResearchRunner):
                 self._save()
         except BaseException as exc:
             with self._mutex:
-                call['status'] = 'interrupted'
-                if isinstance(exc, TokenBudgetError):
-                    call['stats'] = exc.stats
-                    self.state['tokens_charged'] += exc.stats['eval_count'] - cap
-                    call['status'] = 'budget_violation'
+                self._interrupt_call(call, exc)
                 self._save()
             raise
         finally:
@@ -1148,10 +1147,17 @@ class ReviewRunner(ResearchRunner):
         if not jobs:
             return
         errors = []
+        provider_failed = threading.Event()
 
         def guarded(key, job):
+            if provider_failed.is_set():
+                return
             try:
                 job()
+            except DeepInfraGenerationError:
+                # Preserve this unit for Resume while already-running siblings checkpoint.
+                provider_failed.set()
+                raise
             except (ResearchBudget, TokenBudgetError, WorkerInputError, KeyboardInterrupt):
                 raise
             except Exception as exc:  # isolate a malformed unit or an exhausted transport retry
@@ -1182,12 +1188,13 @@ class ReviewRunner(ResearchRunner):
         errors = [e for e in errors if not isinstance(e, CancelledError)]
         if errors:
             interrupts = [e for e in errors if isinstance(e, KeyboardInterrupt)]
-            raise interrupts[0] if interrupts else errors[0]
+            provider_errors = [e for e in errors if isinstance(e, DeepInfraGenerationError)]
+            raise (interrupts or provider_errors or errors)[0]
 
     def _wave_cap(self, cap, jobs):
         """A per-call allowance that lets every call of a wave reserve its output together."""
         parallel = max(1, min(jobs, self.concurrency))
-        return int(min(cap, self._tokens_left() / parallel))
+        return int(min(substantive_output(self.agent, cap), self._tokens_left() / parallel))
 
     # -- sources -----------------------------------------------------------------------------
 
@@ -1475,7 +1482,7 @@ class ReviewRunner(ResearchRunner):
         for attempt in (0, 1):
             result = self._ask('scope', instruction + ('' if not attempt else
                                '\n\nAnswer with one JSON object with the fields topic, title, setting, terms, facets, '
-                               'keywords, categories, msc, intent and seeds.'), cap=6000, schema=SCOPE_SCHEMA)
+                               'keywords, categories, msc, intent and seeds.'), cap=self._wave_cap(6000, 1), schema=SCOPE_SCHEMA)
             value = result['value'] or {}
             for key, item in value.items():
                 kept.setdefault(key, item)
@@ -2958,8 +2965,10 @@ class ReviewRunner(ResearchRunner):
 
         def failed(i, reason):
             s['sections'][str(i)] = {'text': '', 'failed': reason}
-        self._wave([(i, lambda i=i: self._write_section(i, min(per_call, 350 + 4 * self._section_words(i))))
-                    for i in batch], failed)
+        def write(i):
+            target = substantive_output(self.agent, 350 + 4 * self._section_words(i))
+            self._write_section(i, min(per_call, target))
+        self._wave([(i, lambda i=i: write(i)) for i in batch], failed)
 
     def _write_section(self, i, cap):
         s = self.state
@@ -3345,7 +3354,7 @@ class ReviewRunner(ResearchRunner):
                       question + '\n\n' + '\n\n'.join(prompts))
             s['core_recovery'] = {'stage': 'drafting'}
             self._save()
-            response = self._ask('recover-write', prompt, cap=int(min(3800, self._tokens_left() * .44)),
+            response = self._ask('recover-write', prompt, cap=int(min(substantive_output(self.agent, 3800), self._tokens_left() * .44)),
                                  schema=RECOVERY_SCHEMA, temperature=.15)
             rows = _items((response.get('value') or {}).get('statements')) if response.get('complete') else []
             candidates = []
@@ -3417,7 +3426,7 @@ class ReviewRunner(ResearchRunner):
                   'itself establishes no mathematical facts.\nRequest: ' + question + '\n\n' + '\n\n'.join(evidence))
         prior['stage'] = 'verifying'
         self._save()
-        response = self._ask('recover-check', prompt, cap=min(4800, self._tokens_left()), schema=RECOVERY_CHECK_SCHEMA,
+        response = self._ask('recover-check', prompt, cap=self._wave_cap(4800, 1), schema=RECOVERY_CHECK_SCHEMA,
                              temperature=0)
         decisions = _items((response.get('value') or {}).get('decisions')) if response.get('complete') else []
         accepted = []
@@ -3476,7 +3485,7 @@ class ReviewRunner(ResearchRunner):
             + self._review_question() + '\n\n' + numbered + '\n\nPRIMARY PASSAGES\n'
             + self._pack(primary[:20], full=20, sources_only=True))
         self.emit('notice', 'Checking the assembled review for lost hypotheses and repeated results')
-        result = self._ask('editorial', prompt, cap=3600, schema=EDIT_SCHEMA)
+        result = self._ask('editorial', prompt, cap=self._wave_cap(3600, 1), schema=EDIT_SCHEMA)
         raw = (result.get('value') or {}).get('omit')
         if not isinstance(raw, list) or not result.get('complete'):
             s['editorial_check'] = {'complete': False, 'omitted': []}

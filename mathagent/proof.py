@@ -19,6 +19,7 @@ from .jsonutil import loads_single
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_input
+from .deepinfra import rejected_before_inference
 from .ledger import LedgerError, ProofStore
 from .model_limits import is_ds4
 from .proof_policy import (
@@ -334,8 +335,8 @@ class ProofRunner:
         if self._elapsed() >= settings['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted')
         # After one full cycle, its measured duration estimates the next one.
-        solver = next((c for c in self.state['calls'] if c['role'] == 'solver' and 'seconds' in c), None)
-        verifier = next((c for c in self.state['calls'] if c['role'] == 'verifier' and 'seconds' in c), None)
+        solver = next((c for c in self.state['calls'] if c['role'] == 'solver' and 'seconds' in c and c['status'] != 'rejected'), None)
+        verifier = next((c for c in self.state['calls'] if c['role'] == 'verifier' and 'seconds' in c and c['status'] != 'rejected'), None)
         if solver and verifier:
             cycle = solver['seconds'] + verifier['seconds']
             left = settings['max_seconds'] - self._elapsed()
@@ -384,8 +385,10 @@ class ProofRunner:
                 self._stop('budget_exhausted', str(exc))
             except TokenBudgetError as exc:
                 self._stop('budget_violation', str(exc))
-            except KeyboardInterrupt:
-                self._stop('paused', 'Interrupted by the user. Completed calls will not be repeated; unfinished calls retain their full token reservation and resume may issue a new call from saved work.')
+            except KeyboardInterrupt as exc:
+                self._stop('paused', 'Interrupted while waiting to retry a provider rejection. Resume retries the saved step.'
+                           if rejected_before_inference(exc) else
+                           'Interrupted by the user. Completed calls will not be repeated; unfinished calls retain their full token reservation and resume may issue a new call from saved work.')
             except AgentError as exc:
                 if self._elapsed() >= self.state['settings']['max_seconds']:
                     self._stop('budget_exhausted', 'Elapsed-time budget exhausted: ' + str(exc))
@@ -859,6 +862,13 @@ class ProofRunner:
                 previous_charge = call.get('charged_tokens', cap)
                 call.update(status='budget_violation', stats=exc.stats, charged_tokens=exc.stats['eval_count'])
                 self.state['tokens_charged'] += call['charged_tokens'] - previous_charge
+            elif rejected_before_inference(exc):
+                # The completion endpoint refused this request before opening a
+                # stream. Keep its empty journal and retry the same proof phase
+                # under a fresh dispatch key, with the original allowance.
+                call.update(status='rejected', charged_tokens=0)
+                self.state['tokens_charged'] -= cap
+                pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
             elif call['status'] == 'running':
                 call['status'] = 'interrupted'
                 call['charged_tokens'] = cap

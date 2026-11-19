@@ -36,6 +36,7 @@ from urllib.parse import unquote
 import zipfile
 
 from .jsonutil import loads as json_loads
+from .format_request import conversion_source
 from .ledger import _atomic_write, _bytes, _directory, _now, _regular
 from . import texcheck
 from .texcheck import POSITIONAL as _POSITIONAL
@@ -43,7 +44,7 @@ from .research import ResearchBudget, ResearchRunner, _job_directory, _read_stat
 from .style import (_group, definition_body, environment_definitions, grouped, list_profiles, macro_definitions,
                     style_digest, uses)
 from .worker_errors import WorkerInputError
-from .model_limits import output_limit, input_limit, sampling, is_ds4
+from .model_limits import output_limit, input_limit, sampling, is_ds4, substantive_output
 
 TEMPLATE_SUFFIXES = ('.sty', '.cls', '.tex', '.bib')
 GRAPHIC_SUFFIXES = ('.pdf', '.png', '.jpg', '.jpeg')
@@ -2573,6 +2574,16 @@ class WriteupRunner(ResearchRunner):
             return
         super()._check_time()
 
+    def _recover(self):
+        super()._recover()
+        # A paused writer may already have paid for an outline and partial drafts.
+        # The pinned source is authoritative. Keep the old parts, streams and ledger.
+        if (self.state['phase'] in ('outline', 'skeleton', 'draft') and 'parts' in self.state
+                and not self.state.get('document') and not self.state.get('body')
+                and not self.state.get('outputs') and (source := conversion_source(self.state))):
+            self.state.update(conversion_source=source, phase='convert_markdown')
+            self._save()
+
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
               conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
               explain_templates=False, experiment_ids=(), reference_records=(), waive_needs=False, **budgets):
@@ -2653,15 +2664,17 @@ class WriteupRunner(ResearchRunner):
 
     @classmethod
     def reopen_for_repair(cls, root, job_id, hint=''):
-        """Reopen a finished write-up whose document does not compile, so that a request to fix its errors repairs
-        that document (compile, repair the failing passages, check) and does not write a new one. False when the
-        job is not a finished write-up with a document that failed to compile."""
+        """Reopen an editorial draft that failed to compile for an explicitly requested repair.
+
+        Format conversions preserve the pinned source and have no editable writer draft.
+        """
         runner = cls.__new__(cls)
         runner.directory = _job_directory(root, job_id)
         with runner._lock():
             runner.state = _read_state(runner.directory, job_id)
             compiled = runner.state.get('compile') or {}
             if (runner.state.get('kind') != 'writeup' or runner.state.get('status') not in ('partial', 'complete')
+                    or runner.state.get('conversion_source')
                     or not runner.state.get('body') or not compiled.get('available') or compiled.get('ok')):
                 return False
             for key in ('repair_done', 'repair_whole', 'repair_rounds', 'repair_signature', 'accents_asked'):
@@ -2672,7 +2685,6 @@ class WriteupRunner(ResearchRunner):
             runner.state['progress'] = runner._progress()
             _atomic_write(runner.directory / 'state.json', _bytes(json.dumps(runner.state, ensure_ascii=False, indent=2)))
         return True
-        return runner.state['status']
 
     def _skill_folder(self, kind):
         return 'summarize' if self._variant == 'summary' else kind
@@ -2714,6 +2726,8 @@ class WriteupRunner(ResearchRunner):
         server already configured with one (vLLM thinking budgets), and only for the duration of this call.
         Jobs cannot overlap on it: the hub builds a client per job and per Assistant worker (Hub._engine), and
         _transport unwraps only this job's budget wrappers."""
+        if role not in ('style', 'resolve_refs'):
+            kwargs['cap'] = substantive_output(self.agent, kwargs['cap'])
         transport = self._transport() if thinking_budget and kwargs.get('think') and not is_ds4(self.agent) else None
         policy = getattr(transport, 'thinking_budget_policy', None)
         if not policy or 'ordinary' not in policy:
@@ -2782,11 +2796,14 @@ class WriteupRunner(ResearchRunner):
             # full writing allowance and framing under its byte-based estimate;
             # a Unicode character can occupy four UTF-8 bytes. Full-request
             # admission still checks the actual assembled prompt before use.
-            return max(4000, (self.agent.ctx - output_limit(self.agent, 'writeup', self.WRITE_TOKENS) - 32768) // 4)
+            cap = min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), self.agent.ctx // 2,
+                      getattr(self.agent, 'document_output_cap', None) or float('inf'))
+            return max(4000, (self.agent.ctx - cap - min(32768, self.agent.ctx // 8)) // 4)
         return max(4000, int((self.agent.ctx - self._minimum_output() - 3000) * 2.5))
 
     def _minimum_output(self):
-        return min(output_limit(self.agent, 'writeup_min', 12288), max(1024, self.agent.ctx // 3))
+        return min(output_limit(self.agent, 'writeup_min', 12288), max(1024, self.agent.ctx // 3),
+                   getattr(self.agent, 'document_output_cap', None) or float('inf'))
 
     def _protected(self):
         """Macros the user fixed (request, then template): name -> replacement text."""
@@ -3025,6 +3042,8 @@ class WriteupRunner(ResearchRunner):
             self.state['phase'] = 'style'
         elif phase == 'style':
             self._prepare()
+        elif phase == 'convert_markdown':
+            self._convert_markdown()
         elif phase == 'outline':
             self._outline()
         elif phase == 'skeleton':
@@ -3065,8 +3084,29 @@ class WriteupRunner(ResearchRunner):
         else:
             raise ValueError('Unknown write-up phase: ' + phase)
 
+    def _convert_markdown(self):
+        try:
+            from .markdown_tex import convert_markdown
+        except ModuleNotFoundError as exc:
+            if exc.name != 'markdown_it':
+                raise
+            raise WorkerInputError('Install markdown-it-py to convert Markdown locally.', code='markdown_parser_missing') from exc
+        source = next(s for s in self.state['sources'] if s['id'] == self.state['conversion_source'])
+        try:
+            body, document, preview_note = convert_markdown(source['content'])
+        except ValueError as exc:
+            raise WorkerInputError(str(exc), code='markdown_conversion_failed') from exc
+        self.state.update(body=body, document=document, title=Path(source['path']).stem,
+                          source_files=[], checks=[], phase='compile', preview_note=preview_note)
+        if preview_note:
+            self.state.update(gates=[{'gate': 'G1', 'message': preview_note}], readiness='draft', phase='export')
+
     def _prepare(self):
         """Read the templates, cut the material into parts that fit, and pick a fitting saved style."""
+        source = conversion_source(self.state)
+        if source:
+            self.state.update(phase='convert_markdown', conversion_source=source)
+            return
         self.state['macros'], self.state['theorems'], self.state['definitions'] = template_vocabulary(self._templates_in())
         if self.state.get('variant') == 'summary':
             self._pin_experiment_code()  # no outline for a summary
@@ -3328,7 +3368,10 @@ class WriteupRunner(ResearchRunner):
             share = {piece['sections'][0]: piece['text'] for piece in pieces}
         # About one call's output: the text, not the reasoning, well under the allowance (a section of a paper is
         # about one and a half times the notes it covers, plus its lead-in).
-        target = (min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), 24576) - self.THINK_TOKENS) * 2.5 * 0.6
+        output = min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS),
+                     getattr(self.agent, 'document_output_cap', None) or float('inf'),
+                     remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged']))
+        target = max(1024, output - self.THINK_TOKENS) * 2.5 * 0.6
         units = []
         for section in outline['sections']:
             if section['role'] == 'abstract':
@@ -4826,7 +4869,7 @@ class WriteupRunner(ResearchRunner):
             assets = [(f['name'], self._source_bytes(f)) for f in self.state.get('source_files', [])]
             result = compile_latex(self.state['document'], timeout=max(0.1, deadline - time.monotonic()),
                                    assets=assets, cancel=cancel)
-            if result['ok'] or not result['available'] or time.monotonic() >= deadline:
+            if self.state.get('conversion_source') or result['ok'] or not result['available'] or time.monotonic() >= deadline:
                 break
             if probing:
                 # It fails without hyperref too: hyperref was not the cause. Put it back and go on as usual.
@@ -4879,6 +4922,10 @@ class WriteupRunner(ResearchRunner):
         self.state['log_warnings'] = texcheck.log_warnings(result['log'] or '', self.state.get('body_line', 1))
         if not result['available']:
             self.state['warnings'].append('LaTeX (latexmk) is not installed here; the document was not compiled.')
+        if self.state.get('conversion_source'):
+            gates = self._gates()
+            self.state.update(gates=gates, readiness='draft' if gates else 'ready', phase='export')
+            return
         # Passage repairs go on round after round until `repair_done`; a saved job from before the rounds has
         # only `repaired`.
         done = self.state.get('repair_done', self.state['repaired'] and 'repair_rounds' not in self.state)
@@ -5319,6 +5366,10 @@ class WriteupRunner(ResearchRunner):
                        (('citations', 'undefined citations:'), ('labels', 'undefined references:'),
                         ('duplicates', 'labels defined twice:')) if references.get(key)]
             fail('G2', 'the PDF has ' + ('; '.join(details) if details else 'references that do not resolve'))
+        if s.get('conversion_source'):
+            if any(w['message'].startswith('Missing character:') for w in s.get('log_warnings', [])):
+                fail('G8', 'the PDF font is missing characters from the source')
+            return failed
         problems = [f for f in s['checks'] if texcheck.gate(f) == 'G3']
         if problems:
             kinds = list(dict.fromkeys(f['message'] for f in problems))
@@ -6686,12 +6737,12 @@ class WriteupRunner(ResearchRunner):
         return head + '\n' + body.strip() + '\n'
 
     def _export(self):
-        if self.state.get('readiness') == 'ready':
+        if self.state.get('readiness') == 'ready' and not self.state.get('conversion_source'):
             self.state['document'] = without_markers(self.state['document'])
         archive = io.BytesIO()
         assets = [(source['name'], self._source_bytes(source)) for source in self.state.get('source_files', [])]
         contents = _compile_files(self.state['document'], (), assets)
-        body = self._body_file().encode('utf-8')
+        body = (self.state['body'] if self.state.get('conversion_source') else self._body_file()).encode('utf-8')
         contents['document-body.tex'] = body
         _atomic_write(self.directory / 'artifacts' / 'body.tex', body)
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
@@ -6742,13 +6793,18 @@ class WriteupRunner(ResearchRunner):
     def _finish(self):
         """Complete only when the gate says ready (see _check); a draft is partial, with what failed. A write-up
         that stopped after its outline for missing material is `needs_input`."""
-        if self.state.get('needs_input'):
+        if self.state.get('needs_input') and not self.state.get('conversion_source'):
             self.state['status'] = 'needs_input'
             self.state['stop_reason'] = 'Needs: ' + '; '.join(self._missing_pieces()) + '. Nothing was written.'
             return
         ready = self.state.get('readiness') == 'ready'
         self.state['status'] = 'complete' if ready else 'partial'
         gates = self.state.get('gates') or []
+        if self.state.get('conversion_source'):
+            outcome = ('The PDF compiled successfully.' if ready else
+                       ' '.join(g['message'][:1].upper() + g['message'][1:].rstrip('.') + '.' for g in gates))
+            self.state['stop_reason'] = ('Converted the Markdown file to LaTeX. ' + outcome).rstrip()
+            return
         self.state['stop_reason'] = ('Ready: written, compiled and checked; read it before using it.' if ready else
                                      'Draft: ' + '; '.join(g['message'] for g in gates) + '.' if gates else
                                      'Draft: see the checks for what still needs you.')
@@ -6861,6 +6917,10 @@ class WriteupRunner(ResearchRunner):
                     'write-up again; or write it anyway from its page, with these as points to check.')
         if not name:
             return f'The {noun} was not finished: {s.get("stop_reason") or s["status"]}'
+        if s.get('conversion_source'):
+            location = ('Download the files from the write-up card.' if outputs.get('download')
+                        else f'Saved the LaTeX source as `{name}`.')
+            return (s.get('stop_reason') or 'Converted the Markdown file to LaTeX.') + ' ' + location
         todo = len(todo_comments(s.get('body') or ''))
         body_note = (f'; it still holds {todo} TODO comment{"s" if todo > 1 else ""}, so it is a draft too' if todo else '')
         if outputs.get('download'):
@@ -6903,6 +6963,8 @@ class WriteupRunner(ResearchRunner):
 
     def _progress(self):
         parts = self.state.get('parts', [])
+        if self.state.get('conversion_source'):
+            parts = [{'complete': bool(self.state.get('document'))}]
         return {'phase': self.state['phase'], 'completed': sum(bool(p.get('complete')) for p in parts),
                 'total': len(parts), 'unit': 'parts', 'scope': self.state['goal'],
                 'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
@@ -6910,6 +6972,12 @@ class WriteupRunner(ResearchRunner):
 
     def _report(self):
         s = self.state
+        if s.get('conversion_source'):
+            source = next(item['path'] for item in s['sources'] if item['id'] == s['conversion_source'])
+            lines = ['# Markdown to LaTeX', '', s.get('stop_reason') or 'Conversion in progress.', '',
+                     f'Source file: `{source}`', '', usage_footer(s), '']
+            _atomic_write(self.directory / 'report.md', '\n'.join(lines).encode('utf-8'))
+            return
         compile_state = s.get('compile') or {}
         todo = len(re.findall(r'%\s*TODO', s.get('document', '')))
         outputs = s.get('outputs') or {}

@@ -26,10 +26,12 @@ from ..agent import Agent, AgentError, Ollama
 from ..assistant_budget import AssistantBudget, BudgetClient
 from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources, references_previous_pdf
+from ..deepinfra import DeepInfraRateLimit
+from ..format_request import markdown_conversion_request
 from ..source_tasks import automatic_source_action, source_overview
 from ..backends import LlamaCpp, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
-from ..model_limits import input_limit as model_input_limit, output_limit
+from ..model_limits import MODEL_OUTPUT_TOKENS, input_limit as model_input_limit, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
@@ -41,7 +43,7 @@ from ..research import ResearchRunner
 from ..style import StyleRunner, load_choice, style_path
 from ..mode_calls import USER_MODES, ModeOrchestrator
 from ..router import JOB_MODES
-from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT, MAIN_PREDICT
+from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT, MAIN_PREDICT, WorkerInterrupted
 from ..numerics import PythonSandbox, SandboxUnavailable
 from ..tools import Workspace
 from ..writeup import WriteupRunner
@@ -231,6 +233,9 @@ class Interruptible:
                 raise KeyboardInterrupt
             if state['expired']:
                 raise AgentError('Model stream exceeded its elapsed-time guard')
+        except DeepInfraRateLimit:
+            # Preserve confirmed zero usage even when a stop/deadline races the HTTP status.
+            raise
         except Exception:
             if self.cancel.is_set():
                 raise KeyboardInterrupt from None
@@ -535,7 +540,8 @@ class Hub:
             result = work(task)
             with self._lock:
                 task.result_status = result.get('status') if isinstance(result, dict) else None
-                task.state = 'paused' if task.result_status == 'paused' and task.cancel.is_set() else 'done'
+                paused = task.result_status == 'paused' and (task.cancel.is_set() or task.kind == 'chat')
+                task.state = 'paused' if paused else 'done'
         except KeyboardInterrupt:
             with self._lock:
                 task.state = 'paused'
@@ -967,7 +973,9 @@ class Hub:
         repair = args.proof_repair_tokens
         if getattr(args, 'api_profile', None) == 'deepinfra':
             repair = min(solve, repair or solve)
-        _check_ctx(ctx, args.predict)
+        # Proof allocates its own output from the actual prompt and context.
+        # A DS4 context override is independent of the ordinary-chat ceiling.
+        _check_ctx(ctx, None if getattr(args, 'api_profile', None) == 'deepinfra' else args.predict)
         _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx)
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
 
@@ -1065,13 +1073,17 @@ class Hub:
             # A write-up works from the pinned notes only; it never searches.
             agent, _ = self._engine(task, mode='writeup', online=False)
             images.bind(agent, image_refs)
-            self._ensure_model(agent)
             runner = WriteupRunner(agent, styles_root=self.base)
+            style_choice = load_choice(self.base)
+            if (variant or notes.strip() or template_files or texts or image_refs
+                    or not markdown_conversion_request(goal, source_files or runner._inferred_sources(goal),
+                                                       style_mode=style_choice['mode'])):
+                self._ensure_model(agent)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, source_files=list(source_files), template_files=list(template_files),
                                 template_texts=texts, notes=notes, output=output, conversation=conversation,
                                 experiment_ids=experiment_ids, reference_records=reference_records,
-                                variant=variant, scoped=scoped, deliver=deliver, style_choice=load_choice(self.base), **budgets)
+                                variant=variant, scoped=scoped, deliver=deliver, style_choice=style_choice, **budgets)
         label = LABELS['summarize' if variant == 'summary' else 'writeup']
         return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
 
@@ -1200,7 +1212,12 @@ class Hub:
                     capture.emit(kind, value)
             runner = CheckRunner(agent, emit=emit)
             try:
-                result = runner.start(question, effort=effort,
+                limits = {}
+                if is_ds4(agent):
+                    work_limit = workflow_budget(effort, self.args)
+                    limits = dict(max_tokens=work_limit['tokens'], max_seconds=work_limit['seconds'],
+                                  max_input_tokens=self.args.research_input_tokens)
+                result = runner.start(question, effort=effort, **limits,
                     lookup='precise' if precise_reference_request(question) else 'standard')
             except BaseException as exc:
                 self._discarded(chat_id, '', exc)
@@ -1240,7 +1257,8 @@ class Hub:
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
-            agent.predict = output_limit(agent, 'assistant', MAIN_PREDICT)
+            review_limit = output_limit(agent, 'assistant', MAIN_PREDICT)
+            agent.predict = min(review_limit, agent.document_output_cap or review_limit)
             agent.workspace.pin_files([name for item in fresh['transcript'] if item.get('role') == 'user'
                                        for name in item.get('files', []) if not images.is_image(name) and (self.root / name).is_file()])
             agent.workspace.readable = set()
@@ -1395,7 +1413,11 @@ class Hub:
             main.turn_image_refs = attached_images
             main.workspace.pin_files([name for name in files if not images.is_image(name)])
             self._show_experiments(main.workspace, root, chat_id, task)
-            self._ensure_model(main)
+            selected_mode = required_mode or (previous or {}).get('required_mode')
+            local_conversion = (selected_mode in (None, 'writeup') and not image_refs
+                                and markdown_conversion_request(content, files, style_mode=load_choice(self.base)['mode']))
+            if not local_conversion:
+                self._ensure_model(main)
             checkpoint_lock = threading.RLock()
             parent = None
             budget = None
@@ -1421,11 +1443,12 @@ class Hub:
                 ('max_tokens', 'assistant_tokens'), ('max_input_tokens', 'assistant_input_tokens'),
                 ('max_seconds', 'assistant_seconds'))}
             adaptive_seconds = max(effort.level(mode, 'high', self.args)['minutes'] * 60 for mode in JOB_MODES) + 300
-            adaptive = {'max_seconds': adaptive_seconds} if configured['max_seconds'] is None else {}
+            initial_seconds = configured['max_seconds'] or (PROOF_CALL_SECONDS if is_ds4(main) else 900)
+            adaptive = {'max_seconds': max(initial_seconds, adaptive_seconds)} if configured['max_seconds'] is None else {}
             budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
                                   max_tokens=configured['max_tokens'],
                                   max_input_tokens=configured['max_input_tokens'],
-                                  max_seconds=configured['max_seconds'] or 900,
+                                  max_seconds=initial_seconds,
                                   adaptive_limits=adaptive,
                                   checkpoint=checkpoint, concurrency=concurrency)
             main.client = budget
@@ -1451,7 +1474,8 @@ class Hub:
                 emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
                 max_actions=previous['limits']['actions'] if previous else DEFAULT_ACTIONS,
                 max_children=previous['limits']['children'] if previous else None,
-                required_mode=required_mode, required_effort=required_effort or (previous or {}).get('required_effort'))
+                required_mode=required_mode, required_effort=required_effort or (previous or {}).get('required_effort'),
+                local_markdown_conversion=local_conversion)
             checkpoint_lock = parent._state_lock
             history = store.image_history(fresh)
             if not history:
@@ -1474,11 +1498,14 @@ class Hub:
                 parent.state['status'] = 'budget_exhausted' if exhausted else 'failed' if permanent else 'interrupted'
                 parent.state.setdefault('warnings', []).append(str(exc))
                 checkpoint()
-                store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc), 'discarded': True, 'time': store._now()}])
-                self.bus.publish('chat_saved', chat=chat_id)
                 if exhausted or permanent:
-                    return {'status': parent.state['status'], 'answer': ''}
-                raise
+                    store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc),
+                                                        'discarded': True, 'time': store._now()}])
+                elif not isinstance(exc, WorkerInterrupted):
+                    # A delegated worker already displays its cause on its saved card.
+                    store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc), 'time': store._now()}])
+                self.bus.publish('chat_saved', chat=chat_id)
+                return {'status': parent.state['status'] if exhausted or permanent else 'paused', 'answer': ''}
             if result['status'] == 'complete':
                 store.commit_turn(root, chat_id, parent.conversation_history(), capture.calls, capture.notices,
                                   echo_user=False, mode='free')
@@ -1501,19 +1528,18 @@ class Hub:
             except Exception as exc:
                 fresh = store.load_chat(root, chat_id)
                 state = fresh.get('assistant_state')
-                if state and state.get('status') == 'interrupted':
-                    raise
                 unreachable = isinstance(exc, AgentError) and not isinstance(exc, CallContextError)
                 ours = bool(state) and (resume or state.get('query') == content)
                 if resume and unreachable:
                     # The model server is down: the turn stays paused, to resume once it is back.
-                    message = f'The model server could not be reached ({exc}); the turn is still paused.'
-                else:
-                    message = 'Not added to the conversation: ' + str(exc)
-                    if ours:  # never mark the previous, finished turn as failed
-                        state['status'] = 'failed'
-                        state.setdefault('warnings', []).append(str(exc))
-                        store.save_assistant(root, chat_id, state)
+                    store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc), 'time': store._now()}])
+                    self.bus.publish('chat_saved', chat=chat_id)
+                    return {'status': 'paused', 'answer': ''}
+                message = 'Not added to the conversation: ' + str(exc)
+                if ours:  # never mark the previous, finished turn as failed
+                    state['status'] = 'failed'
+                    state.setdefault('warnings', []).append(str(exc))
+                    store.save_assistant(root, chat_id, state)
                 store.append_items(root, chat_id, [{'role': 'notice', 'content': message,
                     'discarded': True, 'time': store._now()}])
                 self.bus.publish('chat_saved', chat=chat_id)
@@ -1559,7 +1585,12 @@ class Hub:
                 # Leave room for synthesis and one empty-answer recovery. Workers
                 # share what remains in proportion to their requested effort.
                 requested = sum(l['tokens'] for l in levels)
-                available = max(0, budget.remaining_tokens - 2 * output_limit(parent.agent, 'assistant_final', FINAL_PREDICT))
+                remaining = budget.remaining_tokens
+                reserve = 2 * output_limit(parent.agent, 'assistant_final', FINAL_PREDICT)
+                if is_ds4(parent.agent):
+                    # Give small explicit totals room for a worker as well as its reply.
+                    reserve = min(reserve, remaining // 4 if math.isfinite(remaining) else reserve)
+                available = max(0, remaining - reserve)
                 for candidate, level in zip(pending, levels):
                     allocation = None if math.isinf(available) else int(available * level['tokens'] // requested)
                     cap = getattr(self.args, 'proof_tokens' if candidate['action']['mode'] == 'prove' else 'research_tokens', None)
@@ -1582,7 +1613,7 @@ class Hub:
                     'orchestrated': True, 'task': task.id, 'time': store._now()}])
                 child['card_index'] = index
             else:
-                store.update_item(root, chat_id, index, status='started', task=task.id, outcome='')
+                store.update_item(root, chat_id, index, status='started', task=task.id, outcome='', error=None)
             save()
         agent, _ = self._engine(task, mode=mode, online=online)
         if mode == 'explore':
@@ -1621,7 +1652,7 @@ class Hub:
             agent.client.thinking_budget_policy.setdefault('ordinary', 0.6)
         reserve = min(300, 0.1 * budget.pool.state['max_seconds'])
         worker_seconds = (REFCHECK_EFFORTS.get(action['effort'], REFCHECK_EFFORTS['high'])['seconds']
-                          if mode == 'check' else level['minutes'] * 60)
+                          if mode == 'check' and not is_ds4(agent) else level['minutes'] * 60)
         seconds = max(0.1, min(worker_seconds, budget.remaining_seconds - reserve))
         agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds)
         input_limit = budget.pool.state['max_input_tokens']
@@ -1830,8 +1861,9 @@ class Hub:
                              'Distinguish the authors\' novelty claims from independent '
                              'verification. State any limits of the selected reading.')
                     agent.think = False
-                output_cap = output_limit(agent, 'assistant_final', FINAL_PREDICT) if action['effort'] == 'low' else output_limit(agent, 'assistant_final', 16384)
-                agent.predict = min(output_cap, agent.client.remaining_tokens)
+                fallback = FINAL_PREDICT if action['effort'] == 'low' else 16384
+                output_cap = output_limit(agent, 'assistant_final', fallback)
+                agent.predict = min(output_cap, agent.document_output_cap or output_cap)
                 agent.max_rounds = 0 if article_overview else USER_MODE_ROUNDS.get(mode, level['tries'])
                 answer = agent.run(goal, emit, fresh=True)
                 complete = (agent.last_stats.get('done_reason') in ('stop', 'tool_calls') and bool(answer.strip())
@@ -1877,8 +1909,6 @@ class Hub:
                 child.pop('progress', None)
                 parent.state.pop('progress', None)
                 save()
-            store.update_item(root, chat_id, index, status='failed', outcome=str(exc), error=str(exc))
-            self.bus.publish('chat_saved', chat=chat_id)
             if isinstance(exc, WorkerInputError):
                 error = exc.as_dict()
             elif isinstance(exc, ValueError):
@@ -1892,6 +1922,9 @@ class Hub:
             else:
                 error = {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
                          'scope': 'operation', 'details': {'mode': mode}}
+            store.update_item(root, chat_id, index, status='stopped' if error['retryable'] else 'failed',
+                              outcome=str(exc), error=str(exc))
+            self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'failed', 'answer': '', 'warnings': [str(exc)], 'error': error,
                     'job_id': child.get('job_id') or child['id']}
 
@@ -2063,14 +2096,16 @@ def _review_outcome(state):
 def _check_ctx(ctx, predict):
     if ctx is None:
         return
-    if type(ctx) is not int or ctx < 2048 or ctx <= predict + 1024:
-        raise ValueError('Context must be an integer of at least 2048 that exceeds the output budget + 1024')
+    if type(ctx) is not int or ctx < 2048:
+        raise ValueError('Context must be an integer of at least 2048')
+    if predict is not None and ctx <= predict + 1024:
+        raise ValueError('Context must exceed the output budget + 1024')
 
 
 def _check_proof(args, *, tokens, solve, verify, ctx):
     """The terminal's checks for a new proof, made before the job exists."""
-    if getattr(args, 'api_profile', None) == 'deepinfra' and max(solve, verify) > 384_000:
-        raise ValueError('DeepInfra DS4 solve and review ceilings cannot exceed 384000 output tokens')
+    if getattr(args, 'api_profile', None) == 'deepinfra' and max(solve, verify) > MODEL_OUTPUT_TOKENS:
+        raise ValueError(f'DeepInfra DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     cap = getattr(args, 'specialist_output_tokens', None)
     required = min(solve, cap) + min(verify, cap) if cap is not None else solve + verify
     if tokens is not None and tokens < required:

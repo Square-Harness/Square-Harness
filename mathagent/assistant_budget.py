@@ -10,6 +10,7 @@ from contextlib import contextmanager, nullcontext
 
 from .agent import AgentError
 from .backends import TokenBudgetError, ToolCallError
+from .deepinfra import rejected_before_inference
 from .proof import count_input
 
 
@@ -265,8 +266,17 @@ class BudgetClient:
                 self.usage['tokens'] -= cap - used
             self.pool.checkpoint()
             raise
-        except AgentError as exc:
-            if not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
+        except (AgentError, KeyboardInterrupt) as exc:
+            if reserved and not charged and rejected_before_inference(exc):
+                with self.pool.lock:
+                    self.pool.state['reserved_tokens'] -= cap
+                    reserved = False
+                    self.pool.state['tokens'] -= cap
+                    self.pool.state['input_tokens'] -= count
+                    self.usage['tokens'] -= cap
+                    self.usage['input_tokens'] -= count
+                raise
+            if isinstance(exc, AgentError) and not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
                 raise AssistantBudget('Assistant time budget exhausted during generation.') from exc
             raise
         finally:

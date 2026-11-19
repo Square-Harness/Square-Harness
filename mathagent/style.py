@@ -28,7 +28,7 @@ from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
 from .tools import unicode_source, source_suffix
 from .worker_errors import WorkerInputError
-from .model_limits import input_limit
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output
 from . import images
 
 FORMAT = 'square-style'
@@ -409,6 +409,8 @@ class StyleRunner(ResearchRunner):
 
     def _room(self, cap):
         """Characters of article text that fit beside the instructions (text runs at 3+ characters a token)."""
+        if is_ds4(self.agent):
+            cap = min(cap, getattr(self.agent, 'document_output_cap', None) or cap, self.agent.ctx // 2)
         return max(2000, min(input_limit(self.agent, 'style_packet', 24000), (self.agent.ctx - cap - 3000) * 2))
 
     def _article(self, source_id):
@@ -462,7 +464,7 @@ class StyleRunner(ResearchRunner):
                        'one-sentence description of its aim, and list its article identifiers such as "M1". Every article '
                        'belongs to exactly one domain.\n\nAUTHOR\'S NOTE (may be empty): ' + self.state['goal'] +
                        '\n\nARTICLES:\n' + '\n\n'.join(self._digest(a) for a in articles))
-        result = self._call('classify', instruction, cap=1500, format_schema=DOMAINS_SCHEMA)
+        result = self._call('classify', instruction, cap=output_limit(self.agent, 'review_metadata', 1500), format_schema=DOMAINS_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
@@ -491,7 +493,7 @@ class StyleRunner(ResearchRunner):
             self.state['phase'] = 'condense'
             return
         article = pending[0]
-        cap = 2500
+        cap = substantive_output(self.agent, 2500)
         domain = next(d for d in self.state['domains'] if article['id'] in d['articles'])
         instruction = (f'Describe the writing style of article {article["id"]}, from the domain "{domain["name"]}". '
                        'Describe how it is written, not what it proves: what the paper sets out to do for its reader '
@@ -531,7 +533,7 @@ class StyleRunner(ResearchRunner):
                        'mathematics. The structure is the author\'s usual order of parts. Keep phrasings exactly as '
                        'quoted.\n\nDESCRIPTIONS:\n' + json.dumps(
                            [{k: n[k] for k in ('aim', 'structure', 'habits', 'phrases')} for n in notes], ensure_ascii=False, indent=1))
-        result = self._call('condense', instruction, cap=2500, format_schema=STYLE_SCHEMA)
+        result = self._call('condense', instruction, cap=substantive_output(self.agent, 2500), format_schema=STYLE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:

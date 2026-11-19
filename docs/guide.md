@@ -50,8 +50,10 @@ list prices of $0.20/M input and $0.60/M output, a $2 allowance is 3.333M
 output-equivalent tokens; each input token consumes one third of an output token.
 This is conservative allowance accounting, not the provider's bill: cached input
 uses the uncached price and promotional charges may be lower. Active calls reserve
-their worst-case allowance; complete usage releases the unused part. Unreported
-or interrupted calls retain reservations. A small remaining balance may therefore
+their worst-case allowance. Complete usage releases the unused part. When DeepInfra
+rejects a generation request with HTTP 429 before streaming, the entire reservation
+is released. An interrupted stream with unknown usage retains its reservation.
+A small remaining balance may therefore
 be insufficient to start a full-length call. This pilot limit is separate from
 each Proof job's existing solve/review budgets.
 The account menu separates used, reserved and available amounts, with actual
@@ -72,13 +74,17 @@ remain sequential; this setting does not launch five attempts of the same
 proof. The Qwen launcher keeps its previous single-job settings.
 
 The DS4 profile uses a 1,048,576-token context with separate generation and
-workflow allowances. From Medium upwards, Proof gives every solve, repair and
-review the same 384,000-token output ceiling. Effort changes the maximum number
-of solver passes, not the length available to each pass:
+workflow allowances. New DS4 jobs allow up to 384,000 output tokens per substantive model call.
+This includes Assistant replies, Explore, Review and Explanation, Literature review,
+reference checking, Write-up, Summary, Writing Style and the Python modes. Short
+control operations such as routing and generating a conversation title have smaller
+limits. Research workers fit each request to its available context, explicit limits and
+remaining budget. Proof reserves room for each complete solve and verification.
+The Proof presets are
 
 | Proof effort | Solver passes | Solve / repair | Review | Total output allowance |
 | --- | ---: | ---: | ---: | ---: |
-| Low | 1 | 32,768 | 16,384 | 65,536 |
+| Low | 1 | 384,000 | 384,000 | 1,152,000 |
 | Medium | 3 | 384,000 | 384,000 | 3,456,000 |
 | High | 5 | 384,000 | 384,000 | 5,760,000 |
 
@@ -94,10 +100,11 @@ Low, Medium and High select workflow allowances, separately from the provider's
 reasoning effort. DS4 uses thinking for both solving and review, with provider
 reasoning effort High by default; selecting Low here does not lower that setting.
 
-Medium and higher levels use the same per-call time guard; the workflow time
+All three levels use the same per-call time guard; the workflow time
 allowance grows with the permitted number of calls. The default guard is three
-hours per call, configurable with `--proof-call-seconds`. Low retains a short
-ten-minute workflow. Explicit launch or Advanced limits and the provider's
+hours per call, configurable for Proof with `--proof-call-seconds`.
+The default cumulative DS4 worker allowances are 1,152,000, 3,456,000 and
+5,760,000 output tokens, with 9, 27 and 45 hours of active work. Explicit launch or Advanced limits and the provider's
 spending allowance can stop work earlier. Full input plus output must fit the
 context; the harness reports an insufficient allowance rather than silently
 shrinking a DS4 Proof call. These settings have not been established as optimal
@@ -664,6 +671,12 @@ introduction, exercises, solutions, exam questions) is written in sections of
 its own, and any new mathematics in them is marked as generated: a document
 that contains some is a draft until it has been checked.
 
+To convert a finished Markdown file, attach it and ask “Convert this file to LaTeX”.
+Write-up converts the document locally and keeps its equations, headings and references
+in source order. The card provides the LaTeX source and a PDF when compilation succeeds.
+A formula that needs a user-defined command stays in the source for compilation with your
+own preamble. Requests for editing or a selected template use the writing workflow.
+
 Use it for:
 
 - a clean note from your notes or from a proof the Assistant found:
@@ -1001,8 +1014,8 @@ declaration, and so do the sandbox limits: the text of a skill cannot raise them
 ### Effort
 
 The following table describes the original local-model profiles, including
-Qwen. The hosted DS4 Proof profile uses the separate table above; its other
-skills retain their own limits.
+Qwen. The hosted DS4 profile uses the generation and workflow allowances
+described above for Proof and the other modes.
 
 | Effort | Attempts / rounds | Working time | Retrieval requests |
 | --- | ---: | ---: | ---: |

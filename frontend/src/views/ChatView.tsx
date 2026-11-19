@@ -233,8 +233,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
-  const taskError = app.snapshot.task?.target === id && app.snapshot.task.state === 'error' ? app.snapshot.task.error : ''
   const transcript = data?.transcript || []
+  const lastTask = app.snapshot.task
+  const taskError = lastTask?.target === id && lastTask.state === 'error' ? lastTask.error : ''
+  const last = transcript.at(-1)
+  const errorInChat = taskError && (last?.role === 'notice' && last.content.includes(taskError) ||
+    transcript.some(item => item.role === 'route' && item.task === lastTask?.id && item.error === taskError))
   // Another conversation's work can be queued; this conversation has one active turn.
   const blocked = work.blocked
 
@@ -260,7 +264,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
           </div>}
-          {free && assistantResumable(data) && !ours && (
+          {paused && !ours && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
               <p className="notice">The assistant is paused. Its work is saved: resume from where it stopped, or send a new message to set this turn aside.</p>
@@ -323,7 +327,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         </div>
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
-        <ErrorNote>{sendError || taskError}</ErrorNote>
+        <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
     </div>
     </MathMacrosProvider>
@@ -456,6 +460,9 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
         </div>,
       )
     } else if (item.role === 'notice') {
+      // Older saved turns repeat a paused worker's card as a discarded message.
+      if (item.discarded && steps.some(({ item: card }) => card.role === 'route' && card.orchestrated &&
+          card.status === 'stopped' && card.error && item.content === 'Not added to the conversation: ' + card.error)) continue
       blocks.push(<p key={index} className={'notice' + (item.discarded ? ' notice-discarded' : '')}>{item.content}</p>)
     } else if (item.role === 'tool') {
       blocks.push(<Collapse key={index} className="tool-step" summary={<span className="tool-line">{item.tool_name || 'tool'} result</span>}><pre className="plain">{item.content}</pre></Collapse>)
@@ -557,7 +564,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
             {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
             {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
-            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>Download review (.md)</a>}
+            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
             {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(item.job_id)} download>References (.bib)</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
@@ -575,7 +582,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
           </Collapse>
         </div>
-        {item.outcome && item.outcome !== error && <p className="muted small">{item.outcome}</p>}
+        {item.outcome && item.outcome !== error && !(item.status === 'stopped' && error && item.outcome.includes(error)) &&
+          <p className="muted small">{item.outcome}</p>}
         <ErrorNote>{error}</ErrorNote>
       </div>
     </div>

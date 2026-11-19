@@ -437,6 +437,7 @@ export type ResearchDetail = {
   outline?: { title: string; sections: { title: string; sources: string[]; goal: string }[] } | WriteupPlan | null
   sections?: WriteupSection[]
   document?: string
+  conversion_source?: string | null
   section_lines?: [number, number][]
   compile?: CompileResult | null
   outputs?: { tex?: string; pdf?: string | boolean; download?: string; source?: string; body?: string; review?: string; bib?: string }

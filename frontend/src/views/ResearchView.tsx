@@ -178,7 +178,7 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
             : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
           {(data.outputs?.review || data.outputs?.bib) && (
             <div className="outputs">
-              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(data.id)} download>Download review (.md)</a>}
+              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(data.id)} download>{data.status === 'complete' ? 'Download review (.md)' : 'Download partial review (.md)'}</a>}
               {data.outputs.bib && <a className={'btn btn-small' + (data.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(data.id)} download>References (.bib)</a>}
             </div>
           )}

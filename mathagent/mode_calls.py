@@ -7,6 +7,7 @@ import re
 
 from .agent import AgentError
 from .call_policy import CallContextError
+from .deepinfra import rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
@@ -142,13 +143,14 @@ class ModeOrchestrator(Orchestrator):
     modes and narrow source/reference requests keep their existing seeded calls.
     """
 
-    def __init__(self, *args, required_mode=None, required_effort=None, **kwargs):
+    def __init__(self, *args, required_mode=None, required_effort=None, local_markdown_conversion=False, **kwargs):
         if required_mode is not None and required_mode not in JOB_MODES + USER_MODES:
             raise ValueError('Unknown selected mode call')
         if required_effort is not None and required_effort not in EFFORTS + LEGACY_EFFORTS:
             raise ValueError('Unknown selected effort')
         self.required_mode = required_mode
         self.required_effort = required_effort
+        self.local_markdown_conversion = local_markdown_conversion
         super().__init__(*args, **kwargs)
 
     def _validate_delegate(self, args):
@@ -289,13 +291,19 @@ class ModeOrchestrator(Orchestrator):
         prep['input_tokens'] += self.state['next_allocation']['input_tokens']
         self._save()  # Reserve before dispatch; cancellation/resume cannot reset it.
         try:
-            try:
-                assistant, warning = super()._stream(payload, output_char_limit=16384)
-            finally:
-                self.state['last_call']['preparation'] = True
-                self._save()
-        except AgentError as exc:
+            assistant, warning = super()._stream(payload, output_char_limit=16384)
+        except (AgentError, KeyboardInterrupt) as exc:
+            if rejected_before_inference(exc):
+                prep['calls'] -= 1
+                prep['tokens'] -= payload['options']['num_predict']
+                prep['input_tokens'] -= self.state['next_allocation']['input_tokens']
+                raise
+            if isinstance(exc, KeyboardInterrupt):
+                raise
             return self._handoff(str(exc))
+        finally:
+            self.state['last_call']['preparation'] = True
+            self._save()
         used = self.agent.last_stats.get('eval_count')
         if type(used) is int and 0 <= used <= payload['options']['num_predict']:
             prep['tokens'] -= payload['options']['num_predict'] - used
@@ -323,10 +331,15 @@ class ModeOrchestrator(Orchestrator):
         super()._new_state(query, files, history)
         if self.required_mode == 'referee' and getattr(self.agent, 'review_reference', None):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
-        action = ({'mode': self.required_mode, 'request': query, 'files': list(files),
-                   'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'), 'reason': 'User explicitly selected @' + self.required_mode + '.'}
-                  if self.required_mode is not None else
-                  automatic_source_action(query, files) or automatic_reference_action(query, files, history))
+        if self.required_mode is not None:
+            action = {'mode': self.required_mode, 'request': query, 'files': list(files),
+                      'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'),
+                      'reason': 'User explicitly selected @' + self.required_mode + '.'}
+        elif self.local_markdown_conversion:
+            action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'low',
+                      'reason': 'Convert the supplied Markdown file to LaTeX.'}
+        else:
+            action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
         if action is None:
             return
         self._validate_delegate(action)
