@@ -59,7 +59,7 @@ class LiteratureReviewTests(unittest.TestCase):
         unsupported = 'All bounded domains have the same numerical threshold.'
         located = {'verdicts': [
             {'unit': 1, 'reading': 'Positive time for an exterior strip.', 'verdict': 'supported',
-             'support': [{'source': 1, 'condition': 1, 'conclusion': 1}]},
+             'support': [{'source': 1, 'condition': 'E1', 'conclusion': 'E1'}]},
             {'unit': 2, 'reading': 'nothing', 'verdict': 'unsupported', 'support': [],
              'problem': 'No numerical statement in the paper.'}]}
         compared = {'checks': [{'unit': 1, 'faithful': True}]}
@@ -352,7 +352,7 @@ class LiteratureReviewTests(unittest.TestCase):
         draft = '\n\n'.join(['Let $C$ denote the constant.', fact[:-1] + ' [@1].', *claims,
                             '| Estimate | Value |\n| --- | --- |\n| Bound | $C=24$ [@1] |'])
         units = [p for p in self.runner._assertion_units(draft) if p.strip()]
-        good = {2: {'verdict': 'supported', 'support': [{'source': 1, 'condition': 1, 'conclusion': 1}]}}
+        good = {2: {'verdict': 'supported', 'support': [{'source': 1, 'condition': 'E1', 'conclusion': 'E1'}]}}
         rejected = {'verdict': 'unsupported', 'support': [], 'problem': 'No numerical constant in the paper.'}
         every = {**good, **{j: rejected for j in [*range(3, 26), len(units)]}}
         # A referee can return fewer verdicts than sentences, twice: the others stay unjudged.
@@ -537,7 +537,7 @@ class LiteratureReviewTests(unittest.TestCase):
                              '1': {'text': 'Every measurable set gives observation [@1].'}}
         spans = {}
         self.runner._pack([2], sources_only=True, source_spans=spans)
-        ids = {sentence: int(key[1:]) for key, (_, _, sentence) in spans.items()}
+        ids = {sentence: key for key, (_, _, sentence) in spans.items()}
         # Even a referee endorsing both sentences with real source spans cannot drop d>1.
         verdict = {'verdict': 'supported',
                    'support': [{'source': 2, 'condition': ids[condition], 'conclusion': ids[result]}]}

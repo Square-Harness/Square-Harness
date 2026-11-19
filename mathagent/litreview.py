@@ -135,9 +135,10 @@ OUTLINE_SCHEMA = {
 
 def _check_schema(count):
     """One verdict per requested sentence. The count is fixed: a long section cannot lose its last sentences."""
+    # The labels as printed, "E12": a bare integer is too easily the number of the work.
+    label = {'type': 'string', 'pattern': '^E[0-9]{1,4}$'}
     anchor = {'type': 'object', 'additionalProperties': False, 'required': ['source', 'condition', 'conclusion'],
-              'properties': {'source': {'type': 'integer'}, 'condition': {'type': 'integer', 'minimum': 0},
-                             'conclusion': {'type': 'integer', 'minimum': 0}}}
+              'properties': {'source': {'type': 'integer'}, 'condition': label, 'conclusion': label}}
     return {'type': 'object', 'additionalProperties': False, 'required': ['verdicts'], 'properties': {'verdicts': {
         'type': 'array', 'minItems': count, 'maxItems': count, 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['unit', 'reading', 'verdict', 'support'],
@@ -198,9 +199,10 @@ Answer with one JSON object {"verdicts": [...]} holding exactly one verdict per 
   one; a sentence that announces or prepares later units lists them).
   "unsupported": the supplied evidence does not state it, even if it is plausible.
   "wrong": the evidence contradicts the unit, or the unit attributes a statement to the wrong work.
-- support: for "supported", one entry per work cited in the unit: {"source": n, "condition": k, "conclusion": m}, where
-  E k is the evidence sentence giving the decisive setting or hypothesis and E m the one giving the conclusion (the
-  same number twice when one sentence gives both). Both sentences belong to work n. Empty for the other verdicts.
+- support: for "supported", one entry per work cited in the unit: {"source": 7, "condition": "E12", "conclusion": "E13"}.
+  source is the number of the work [@7]. condition is the label printed before the evidence sentence that gives the
+  decisive setting or hypothesis, conclusion the label of the sentence that gives the conclusion (the same label
+  twice when one sentence gives both). Both sentences belong to that work. Empty for the other verdicts.
 - depends_on: other units that must remain for this unit to keep its meaning (its domain, model, parameters or
   notation). Empty when the unit stands alone.
 - problem: for "unsupported" or "wrong", the precise defect in at most 30 words. Otherwise omit it.
@@ -1180,11 +1182,11 @@ class ReviewRunner(ResearchRunner):
             cap = int(min(cap, self._tokens_left()))
             if cap < 256:
                 raise ResearchBudget('Generated-token budget exhausted')
-            # Only the recovery of a lost central result reasons. DS4 maps think=False to
+            # Only the referee of a recovered central result reasons. DS4 maps think=False to
             # reasoning_effort=none. The two referee calls write what the source says before each
             # verdict, in the answer itself: measured on DS4, hidden reasoning re-decided the same
             # sentences until the allowance was spent, for the same verdicts.
-            deliberate = role in ('recover-check', 'recover-write')
+            deliberate = role == 'recover-check'
             hosted = is_ds4(self.agent)
             payload = {'model': self.agent.model, 'stream': True,
                        'think': bool(deliberate and not answer_only and getattr(self.agent, 'think', True) and cap >= 1800),
@@ -3059,14 +3061,25 @@ class ReviewRunner(ResearchRunner):
             return None
         selected, sections = set(self.state['selected']), []
         has_table = False
-        for x in _items(value.get('sections')):
+        unfounded = []
+        planned = _items(value.get('sections'))
+        for x in planned + [None]:
+            if x is None:
+                if sections or not unfounded:
+                    break
+                # The plan's only usable section carries the open-problems label and its sources hold no
+                # dated question: it is a results section mislabelled, not an empty plan.
+                x = dict(unfounded[0], kind='results')
             heading = _section_heading(x.get('heading'))
             if not heading or any(_norm(heading) == _norm(sec['heading']) for sec in sections):
                 continue
             works = list(dict.fromkeys(n for n in (_int(w) for w in _list(x.get('works'))) if n in selected))
             kind = x.get('kind') if x.get('kind') in SECTION_KINDS else 'other'
             works = works[:12]
-            if not works or kind == 'open_problems' and not self._has_documented_question(works):
+            if not works:
+                continue
+            if kind == 'open_problems' and not self._has_documented_question(works):
+                unfounded.append(x)
                 continue
             columns = [' '.join(str(c).split())[:40] for c in _list(x.get('table_columns')) if str(c).strip()][:5]
             if has_table or len(columns) < 2 or kind == 'open_problems':
@@ -3570,7 +3583,9 @@ class ReviewRunner(ResearchRunner):
                   + '\n\nSOURCE EVIDENCE\n' + frame['evidence'] + '\n\nJudge now '
                   + (f'units {chunk[0]} to {chunk[-1]}' if run and len(chunk) > 1 else
                      ('units ' if len(chunk) > 1 else 'unit ') + ', '.join(map(str, chunk)))
-                  + f', in this order: {len(chunk)} verdict' + 's' * (len(chunk) > 1) + '.')
+                  + f', in this order: {len(chunk)} verdict' + 's' * (len(chunk) > 1) + '.'
+                  + (' The labels given before for these units were not evidence of the named work: copy them '
+                     'from the square brackets in SOURCE EVIDENCE.' if any(self._check_work(i)['misses'].get(str(j)) for j in chunk) else ''))
         result = self._ask('check', prompt, cap=cap, schema=_check_schema(len(chunk)), units=[f'{i}:{j}' for j in chunk])
         work = self._check_work(i)
         with self._mutex:
@@ -3578,10 +3593,15 @@ class ReviewRunner(ResearchRunner):
                 j = _int(item.get('unit'))
                 if j not in chunk or item.get('verdict') not in VERDICTS or str(j) in work['verdicts']:
                     continue
-                anchors = [{k: _int(x.get(k)) for k in ('source', 'condition', 'conclusion')} for x in _items(item.get('support'))]
+                anchors = [{'source': _int(x.get('source')), **{k: str(x.get(k) or '').strip('[] ') for k in ('condition', 'conclusion')}}
+                           for x in _items(item.get('support'))]
+                spans = frame['spans']
+                found = [x for x in anchors if all((spans.get(x[k]) or (None,))[0] == x['source'] for k in ('condition', 'conclusion'))]
+                if item['verdict'] == 'supported' and not found and not work['misses'].get(str(j)):
+                    continue  # labels that are not evidence of the named work: asked once more, like a missing answer
                 work['verdicts'][str(j)] = {
                     'verdict': item['verdict'], 'reading': ' '.join(str(item.get('reading') or '').split())[:260],
-                    'support': [x for x in anchors if None not in x.values()][:4],
+                    'support': found[:4],
                     'depends_on': [d for d in (_int(d) for d in _list(item.get('depends_on'))) if d and d != j][:4],
                     'problem': ' '.join(str(item.get('problem') or '').split())[:240],
                     'quote': str(item.get('quote') or '').strip(), 'replacement': str(item.get('replacement') or '').strip()}
@@ -3628,8 +3648,8 @@ class ReviewRunner(ResearchRunner):
                     rejected[j] = problem
                     continue
                 current[j] = corrected
-            judgments += [{'units': [j], 'source': x['source'], 'condition_id': x['condition'],
-                           'conclusion_id': x['conclusion'], 'depends_on': [d for d in others if d < j]}
+            judgments += [{'units': [j], 'source': x['source'], 'condition': x['condition'],
+                           'conclusion': x['conclusion'], 'depends_on': [d for d in others if d < j]}
                           for x in v['support']]
         support = self._support(judgments, [current[j] for j in range(1, len(units) + 1)], works,
                                 source_spans=frame['spans'])
