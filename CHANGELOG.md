@@ -2,12 +2,21 @@
 
 ## Unreleased
 
+- Make literature reviews several times faster and broader. The source check
+  judges every sentence: one call names the source sentences that carry it, a
+  second compares it with those passages, and a grounded correction replaces a
+  deletion. Screen up to 100, 250 and 500 candidates, first those linked by
+  citation to a paper on the topic, and keep places for recent results. The
+  plan situates related works in a sentence each. Planned works that the
+  checked text does not discuss appear as Further reading. A DeepInfra request
+  accepted without an answer is submitted again after 25 seconds. arXiv and the
+  other registries are asked at the same time. The job report shows the time
+  of each step.
 - Compile mathematical Markdown with the standard symbols and named operators
   supplied by LaTeX and AMS. Write-Up also renders UTF-8 in code listings
   while keeping the downloadable script and figures intact.
 - In chat, “compile it” rebuilds the saved Write-Up with its original files.
   Compilation failures identify the source file and line when LaTeX provides them.
-
 - Export a review or the previous written answer to LaTeX from its conversation.
   Write-up converts the saved Markdown locally and includes a matching review
   bibliography in the source ZIP. Existing paused conversions can use the

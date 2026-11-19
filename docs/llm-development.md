@@ -303,19 +303,32 @@ Version 1.1.0. The source of truth for the machine-readable version is
   reserve capacity for writing and checking, and deterministic assembly can
   deliver partial results after the deadline. Missing checks, marked cuts and
   unresolved source findings are recorded in the job. The discovery shares begin
-  when scoping finishes. Registry screening and first drafts run without model
-  reasoning. Each effort level reserves reasoning for source checking and
-  recovery. DS4 uses its configured effort for a fully funded section check. A response
-  that spends its entire allowance thinking can retry in answer-only mode within
-  the remaining job budget. A missing core result can be reconstructed from a
-  primary passage and independently checked before export. A final comparison of the
-  surviving sections can remove a paragraph that lost a hypothesis or duplicates
-  a theorem treated elsewhere. Removed material and reasons remain in the
-  checkpoint. When no prose survives, verified result numbers can still support
-  a short primary-source reading guide.
+  when scoping finishes. Registry screening, first drafts and the two referee
+  calls of the source check (`check`, `verify`) run without hidden model
+  reasoning and with finite output allowances: each referee writes what the
+  source states before its verdict, in the answer itself. Measured on DS4, hidden
+  reasoning at effort `high` or `low` re-decided the same sentences until the
+  allowance was spent, often without an answer, for the same verdicts. Only the
+  recovery of a lost core result reasons, at DS4 effort `low`. A response that
+  spends its entire allowance thinking can retry in answer-only mode within the
+  remaining job budget. A missing core result can be reconstructed from a
+  primary passage and independently checked before export. Assembly prints once
+  a paragraph that a later section repeats (`_without_repeats`). A job checked by
+  an earlier version keeps its `editorial_check` record, which the recovery of a
+  core result still reads. When no prose survives, verified result numbers can
+  still support a short primary-source reading guide.
+  `state['timings']` holds the active seconds of each step, each call record its
+  `started` offset and `seconds`, each `sweep_log` row its `seconds`; the report
+  prints the time by step.
   An accepted model stream can fail before returning its first token. The worker
   records the phase, affected units, sanitized provider category and any known
   usage. Recovery happens at the unit boundary under a fresh reservation.
+  A hosted stream that carries no model output `START_SECONDS` after it was
+  accepted is closed by the transport (the payload key `_start_seconds`,
+  `backends._started`, `DeepInfraSilentStart`) instead of waiting minutes for
+  the provider's own error. The review submits it again at once, at most
+  `RESUBMISSIONS` times, with a changed first character; only the last silent
+  start counts as a failed unit. Other runners do not set the key.
   Completed sibling results stay in the checkpoint. An interrupted screening
   export lists registry-confirmed candidates separately from a finished selection.
   Older paused screening downloads can be reconstructed from their saved records.
@@ -761,12 +774,24 @@ with the conversation as material (`store.conversation_record`). With no other
 material, notes pasted under the request are pinned as `request-notes.md`
 (`state['inline_material']`) and printed once in the writing call.
 
-Literature review screens candidates in batches and reserves places for papers
-discovered during citation expansion. It reconsiders records when a citation
+Literature review screens candidates in batches and keeps half of its screening
+allowance, in equal parts, for the papers each citation round discovers. A
+candidate that cites a paper on the topic itself, or that such a paper cites,
+is screened before a weaker query hit. It reconsiders records when a citation
 establishes a new connection. The controller follows identifier-bearing leads
 in source bibliographies before using title lookups. Ranking accounts for
-relevance, links and recent work. The abstract is available directly to the
-writer. Primary text can come from arXiv, the journal or an author deposit identified by
+relevance, links, recent work and whether a work can be read: a quarter of the
+places for works on the topic goes to recent results unless the request asks
+for the classical canon, and a bare record ranks below a work with an abstract
+or an open text. The abstract is available directly to the writer; a selected
+work whose registry abstract was clipped gets the whole one from the registry
+or from the verified paper.
+arXiv spaces its requests, so the topic searches and the downloads of the
+papers whose bibliographies are traced run in a helper thread while the main
+thread asks the other registries (`_apart`, `_joined`). The helper uses a second
+`LiteratureTools` instance and touches no job state; the main thread records
+every result and charges the helper's requests to the job. A paper downloaded
+for its bibliography counts in the reading allowance. Primary text can come from arXiv, the journal or an author deposit identified by
 DOI through OpenAIRE. Check the paper identity and content before assigning
 full-text evidence.
 Source passages retain their line ranges. A locator must occur with the
@@ -778,11 +803,26 @@ to model extraction for documents with ambiguous structure. Keep a locator only
 when it matches the heading of a retained source passage.
 
 A single compact plan assigns the selected results to sections under one word
-target. Tables count towards that target. The opening belongs to the first
-checked section. Writing and checking run in bounded waves. The checker sees
-original evidence, locates a defect in a particular paragraph or table row and
-proposes a source-supported local change. The controller checks the cited source,
-quotation and location before applying it. An unsupported unit can be withheld.
+target. For each section it lists the works explained in detail (`works`) and
+the works situated in one sentence each (`context`). Tables count towards the
+target. The opening belongs to the first checked section. A section's length
+follows its evidence: paper passages carry a theorem, an abstract a sentence or
+two (`_write_section`).
+
+The source check judges every sentence, in waves over all sections (`_check`).
+`_locate` asks for one verdict per sentence, in groups of at most `CHECK_UNITS`
+under a schema whose length is the number of sentences asked: supported, with
+the labels of the source sentences that carry it; follows, with the sentences
+it connects; unsupported; or wrong. A sentence left without an answer is asked
+once more. `_verify` then compares each located sentence with the whole passages
+its labels come from. `_settle_check` applies the verdicts through
+`_apply_findings`. The controller resolves every label against the cited work,
+applies a referee's drop-in correction only when its quote occurs exactly once,
+keeps a connecting sentence only with all the sentences it connects, and
+withholds the rest. Sentences that received no verdict or no comparison make
+the check incomplete. Verdicts collected so far stay in `state['check_work']`
+across waves and Resume. Planned works that the checked text does not cite are
+listed as further reading (`FURTHER_READING`), with no claim about them.
 `_issues` and the review's coverage note record incomplete checks and cuts.
 Keep the old call roles renderable for saved jobs.
 

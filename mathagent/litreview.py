@@ -193,8 +193,9 @@ Answer with one JSON object {"verdicts": [...]} holding exactly one verdict per 
   constants, attribution to a work) is stated by the evidence of the work it cites. Equivalent notation and a short
   valid consequence of a quoted statement count as supported. A unit without a citation can be supported by the work
   whose evidence states it.
-  "follows": the unit states no mathematical fact of its own: it only introduces, connects or contrasts other units
-  of this section. List those units in depends_on (at least one; a sentence that announces later units lists them).
+  "follows": the unit states no result of its own: it only introduces, connects or contrasts other units of this
+  section, or fixes the notation and the standard definitions they use. List those units in depends_on (at least
+  one; a sentence that announces or prepares later units lists them).
   "unsupported": the supplied evidence does not state it, even if it is plausible.
   "wrong": the evidence contradicts the unit, or the unit attributes a statement to the wrong work.
 - support: for "supported", one entry per work cited in the unit: {"source": n, "condition": k, "conclusion": m}, where
@@ -213,6 +214,10 @@ Rules:
   a constant may depend on.
 - An abstract or a bibliographic review supports exactly what it says. A title supports only a statement of what the
   work studies, never a result. "Bibliographic record only" supports nothing mathematical.
+- A statement about an earlier work that the unit makes on the authority of another work it cites (that paper's own
+  account of the literature) is supported by the sentence of the citing paper that names the earlier authors: give
+  that entry; the earlier work then needs none.
+- When only a part of a unit is unsupported, repair it: quote that part and give a replacement that removes it.
 - A theorem number, formula, exponent, hypothesis or attribution absent from the evidence makes the unit unsupported,
   however familiar it looks. A claim that something is open, unknown or sharp needs an evidence sentence saying so.
 - A unit that relies on a symbol defined nowhere in the section, or on a paper's own equation number, is unsupported:
@@ -225,7 +230,8 @@ every substantive assertion of the unit is stated by the passages of the cited w
 and their order, direction of implication, strict versus non-strict bounds, constants and what they depend on,
 equation and theorem numbers, and the work a statement is attributed to. Everything in the supplied passages of a
 cited work counts. Equivalent notation and a short valid consequence are faithful; do not fault a unit for leaving
-details out. An abstract supports exactly what it says, and a title only what the work studies.
+details out. An abstract supports exactly what it says, and a title only what the work studies. A statement about
+an earlier work can rest on the account that a cited paper gives of it, in a passage naming the earlier authors.
 
 Answer with one JSON object {"checks": [...]}, one entry per unit, in order:
 {"unit": k, "reading": "", "faithful": true or false, "problem": "", "quote": "", "replacement": ""}.
@@ -3330,7 +3336,9 @@ class ReviewRunner(ResearchRunner):
             'in the evidence. Use {@n} for author names. Every sentence is checked against these sources and is '
             'removed when they do not state it: write what the passages and abstracts say, to the precision they '
             'say it, and define each symbol you use. A work given by its record alone supports only a statement '
-            'of what its title says it studies. '
+            'of what its title says it studies, or what a cited paper\'s own text says about it (then cite that '
+            'paper in the same sentence); give such a work a sentence apart from the results you can support. '
+            'Use a theorem locator only for the statement of that theorem. '
             'An arXiv record identifies the version consulted and cannot establish that a paper remains unpublished. '
             'Authors’ questions are historical claims: attribute and date them. '
             'A theorem stopping short of a case does not establish current open status.',
@@ -3627,6 +3635,30 @@ class ReviewRunner(ResearchRunner):
                                 source_spans=frame['spans'])
         return {'current': current, 'support': support, 'follows': follows, 'rejected': rejected, 'findings': found}
 
+    def _named_works(self, text, anchors, spans):
+        """The works a sentence cites without evidence of their own, whose authors are named in the anchoring
+        passages of another work the sentence cites. A paper's own account of an earlier result supports a
+        sentence that cites both; the comparison call judges whether it says the same thing."""
+        citations = self._cited_works(text, [])
+        passages = []
+        for m, anchor in anchors.items():
+            if m in citations:
+                tags = {tag for work, tag, sentence in spans.values()
+                        if work == m and sentence in (anchor['condition'], anchor['conclusion'])}
+                passages += [_fold(self._source_text(m, tag)) for tag in tags]
+        named = set()
+        for n in citations:
+            names = {_fold(_surname(a)) for a in (self._by_n(n) or {}).get('authors') or []}
+            if n not in anchors and any(len(name) >= 3 and re.search(r'(?<![a-z])' + re.escape(name) + r'(?![a-z])', passage)
+                                        for name in names for passage in passages):
+                named.add(n)
+        return named
+
+    def _anchored(self, text, anchors, spans):
+        """Every work the sentence cites has evidence of its own or is named in the evidence of another."""
+        named = self._named_works(text, anchors, spans)
+        return all(n in anchors or n in named for n in self._cited_works(text, []))
+
     def _source_text(self, n, tag):
         card, record = self.state['cards'].get(str(n)) or {}, self._by_n(n) or {}
         if tag in (card.get('passages') or {}):
@@ -3642,7 +3674,7 @@ class ReviewRunner(ResearchRunner):
             located = self._located(i, frame)
             pending = [j for j in sorted(located['support'])
                        if str(j) not in work['verified'] and work['unverified'].get(str(j), 0) < 2
-                       and all(n in located['support'][j] for n in self._cited_works(located['current'][j], []))]
+                       and self._anchored(located['current'][j], located['support'][j], frame['spans'])]
             groups += [(i, pending[a:a + VERIFY_UNITS], located) for a in range(0, len(pending), VERIFY_UNITS)]
         cap = self._call_cap(600 + 320 * VERIFY_UNITS, len(groups))
         return [((i, tuple(batch)), lambda i=i, batch=batch, located=located: self._verify(i, batch, frames[i], located, cap))
@@ -3695,7 +3727,7 @@ class ReviewRunner(ResearchRunner):
         for j in sorted(support):
             verdict = work['verified'].get(str(j))
             if verdict is None:
-                if all(n in support[j] for n in self._cited_works(current[j], [])):
+                if self._anchored(current[j], support[j], frame['spans']):
                     unverified.append(j)  # anchors resolved by the controller; the comparison did not answer
                 else:
                     rejected[j] = 'a cited work has no supporting passage'  # withheld below, never compared
@@ -3709,7 +3741,8 @@ class ReviewRunner(ResearchRunner):
                 else:
                     support.pop(j)
                     rejected[j] = problem
-        revised, withheld = self._apply_findings(i, found, support=support, follows=follows)
+        named = {j: self._named_works(current[j], anchors, frame['spans']) for j, anchors in support.items()}
+        revised, withheld = self._apply_findings(i, found, support=support, follows=follows, named=named)
         substantive = set(frame['todo'])
         judged = {j for j in substantive if str(j) in work['verdicts']}
         usable = judged == substantive and not unverified
@@ -4251,7 +4284,7 @@ class ReviewRunner(ResearchRunner):
             kept.append(sentence)
         return ' '.join(kept)
 
-    def _apply_findings(self, i, findings, *, support=None, follows=None):
+    def _apply_findings(self, i, findings, *, support=None, follows=None, named=None):
         original = self.state['sections'][str(i)]['text']
         pieces = self._check_units(original) if support is None else self._assertion_units(original)
         units = [k for k, part in enumerate(pieces) if part.strip()]
@@ -4316,7 +4349,9 @@ class ReviewRunner(ResearchRunner):
                     withheld[k] = []
                     lost_premise = True
                     continue
-                if anchors and all(n in anchors for n in citations) and (not status_claim or status_supported):
+                credited = (named or {}).get(j, ())  # cited on the authority of another cited work's own text
+                if (anchors and all(n in anchors or n in credited for n in citations)
+                        and (not status_claim or status_supported)):
                     kept_claim = True
                     visible.add(j)
                     lost_premise = False  # only the sentence right after a removed one can have lost its premise
