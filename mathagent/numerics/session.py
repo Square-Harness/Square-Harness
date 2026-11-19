@@ -61,6 +61,7 @@ class NumericsSession:
         self.executor, self.store, self.policy, self.skill = executor, store, policy, skill
         self.explicit, self.approve, self.cancel = explicit, approve, cancel
         self.runs = 0
+        self.on_run_change = None
         self.on_record = None  # Set by the interface to show each saved run in the conversation.
         self._lock = threading.Lock()
 
@@ -142,12 +143,16 @@ class NumericsSession:
                         'message': f'This check has used its {self.policy.max_runs} runs. Reason from the results '
                                    'obtained, or report the check as inconclusive.'}
             self.runs += 1
+            if self.on_run_change:
+                self.on_run_change(self.runs)
         try:
             image = self.executor.probe()
             result = self.executor.run(code, limits, seed=seed, parameters=parameters, cancel=self.cancel)
         except (SandboxUnavailable, OSError, ValueError) as exc:
             with self._lock:
                 self.runs -= 1
+                if self.on_run_change:
+                    self.on_run_change(self.runs)
             if isinstance(exc, ValueError):
                 raise
             return {'status': 'sandbox_unavailable',

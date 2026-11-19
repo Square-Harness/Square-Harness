@@ -98,7 +98,8 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
             {hasEffort ? <>
               <p className="selected-mode-label">Effort</p>
               <div role="radiogroup" aria-label="Effort for this message" className="effort-menu">
-                {[{ id: null, label: 'Auto', hint: 'Not set: the harness picks the effort for this mode' }, ...EFFORTS].map((item) => (
+                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Tasks may use up to Medium effort' : 'The harness picks the effort for this mode' },
+                  ...EFFORTS.filter((item) => call.mode !== 'investigate' || item.id !== 'high')].map((item) => (
                   <button key={item.id ?? 'auto'} type="button" role="radio" aria-checked={item.id === effort}
                     className={'effort-menu-item' + (item.id === effort ? ' effort-menu-current' : '')}
                     disabled={disabled} onClick={() => choose(item.id)}>

@@ -482,7 +482,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
+export type RouteMode = 'investigate' | 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 
 export type TranscriptItem = {
@@ -502,6 +502,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
+  answer_id?: string
   outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string; review?: string; bib?: string }
   task?: string
   error?: string | null
@@ -528,6 +529,9 @@ export type Chat = {
   context_messages: number
   math_macros?: Record<string, string>
   assistant_status?: 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted' | 'failed'
+  investigation?: { id: string; phase: string; tasks: {
+    id: string; mode: string; objective: string; after: string[]; status: string
+  }[] } | null
   assistant_resumable?: boolean
   assistant_budget?: AssistantBudget
   assistant_progress?: WorkProgress | null
@@ -684,6 +688,8 @@ export const api = {
   researchBibDownloadUrl: (id: string) => `/api/research/${id}/bib?download=1`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
+  savedChatAnswer: (chat: string, answer: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/answers/${answer}`),
+  stopInvestigation: (id: string) => post<{ status: string; answer: string }>(`/api/chats/${id}/investigation/stop`),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number | null> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),

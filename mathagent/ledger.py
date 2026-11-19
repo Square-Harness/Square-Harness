@@ -213,9 +213,11 @@ class ProofStore:
         self._recovered = recovered
 
     @classmethod
-    def create(cls, workspace_root, goal: str, settings: dict, sources: list | None = None) -> "ProofStore":
+    def create(cls, workspace_root, goal: str, settings: dict, sources: list | None = None, *, job_id=None) -> "ProofStore":
         workspace = _workspace(workspace_root)
-        proof_id = str(uuid.uuid4())
+        proof_id = job_id if job_id is not None else str(uuid.uuid4())
+        if not isinstance(proof_id, str) or not _ID.fullmatch(proof_id):
+            raise LedgerError('Invalid native proof ID')
         stamp = _now()
         # JSON round-trip detaches caller-owned data and rejects non-JSON values.
         try:

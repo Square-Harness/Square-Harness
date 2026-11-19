@@ -671,6 +671,22 @@ solver output, omit it and retry preflight, preserving the exact mathematical
 inputs and ordinary allocation rule. Keep unfinished-solver continuation and
 interruption recovery on their existing saved-text/reasoning paths.
 
+A guided investigation enters through an explicit mode selection. The hub
+constructs `Investigation` for that turn. Its frame collects an exact target
+and a bounded plan. The approved plan controls worker admission. A changed
+statement is registered as a distinct variant. Always preserve the target
+hash when checking a Proof result against a claim. The stop route reads saved
+evidence and must work with the model offline.
+
+Worker execution lives in `workers.py`. The host supplies workspace and
+interface services. A mode maintainer can change a solver, reviewer or prompt
+inside its existing runner. Changes to its start/resume arguments, status
+semantics, or persisted evidence need corresponding changes to the adapter or
+the index reader. Exercise the mode both standalone and as a delegated child
+before changing that boundary. Derived findings belong in `project_index.py`.
+Source passages a proof depends on must reach both solver and verifier.
+Strategy leads belong to the solver alone. Treat saved model text as data.
+
 The Assistant (`orchestrator.py`) is a controller whose model may call a
 `delegate` tool with a mode, an objective, an effort and files. A worker
 adapter runs the child job. The child is saved before it runs, and its result

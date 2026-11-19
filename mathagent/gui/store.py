@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from ..reporting import one_line
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
@@ -101,11 +102,6 @@ _cache = {}
 
 class NotFound(LookupError):
     """A requested job, chat, artifact or approval does not exist."""
-
-
-def one_line(text, limit=80):
-    text = ' '.join(str(text).split())
-    return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
 def _cached(path, load, revision=None):
@@ -848,6 +844,13 @@ def delete_chat(root, chat_id):
         raise NotFound('Unknown chat') from None
     _regular(path)
     load_chat(root, chat_id)  # Validate the record's identity before deletion.
+    answers = private / 'answers'
+    if answers.is_symlink():
+        raise ValueError('Refusing symlink in answer storage')
+    folder = answers / chat_id
+    if folder.exists() or folder.is_symlink():
+        _directory(folder)
+        shutil.rmtree(folder)
     path.unlink()
     _sync_directory(base)
     with _cache_lock:
@@ -899,7 +902,7 @@ def list_chats(root, templates_root=None):
 
 @_locked_chat
 def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None,
-                project_snapshot=None, image_refs=()):
+                project_snapshot=None, image_refs=(), job_id=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -924,6 +927,8 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
+            if job_id and mode == 'check':
+                item['job_id'] = job_id
             if message.get('tool_calls'):
                 item['tool_calls'] = message['tool_calls']
             if index < len(calls):
@@ -1004,6 +1009,25 @@ def save_assistant(root, chat_id, state):
     """Checkpoint the parent and its child identities in the same atomic chat file."""
     chat = load_chat(root, chat_id)
     chat['assistant_state'] = state
+    _save_chat(root, chat)
+
+
+@_locked_chat
+def checkpoint_investigation(root, chat_id, state):
+    """Commit the final report and checkpoint together, including after a crash or a repeated stop."""
+    chat = load_chat(root, chat_id)
+    chat['assistant_state'] = state
+    record_id = state['investigation']['id']
+    if state.get('status') == 'complete' and not any(
+            item.get('investigation_id') == record_id for item in chat['transcript']):
+        answer = {'role': 'assistant', 'content': state['answer']}
+        prefix = state.get('history_prefix_count', len(state.get('history', ())))
+        user = next((item for item in state.get('messages', [])[prefix:] if item['role'] == 'user'),
+                    {'role': 'user', 'content': state['query']})
+        chat['history'] = list(state.get('history', ())) + [user, answer]
+        chat['transcript'].append({**answer, 'mode': 'free', 'investigation_id': record_id, 'time': _now()})
+        if not chat['title']:
+            chat['title'] = one_line(state['query'], 80)
     _save_chat(root, chat)
 
 
@@ -1529,6 +1553,42 @@ def conversation_references(root, chat_id, before=None, skip=None):
     return references
 
 
+def _card_answer(root, chat, card):
+    from ..workers import _answer_path
+    from ..mode_calls import USER_MODES
+    if card.get('mode') not in ('explore', *USER_MODES):
+        raise NotFound('No small worker answer for this card')
+    ident = card['answer_id']
+    path = _answer_path(root, chat['id'], ident)
+    if not path.exists():
+        raise NotFound('Saved worker answer is unavailable')
+    record = json.loads(_read(path))
+    answer = record.get('answer')
+    if (record.get('id') != ident or record.get('chat_id') != chat['id'] or record.get('mode') != card['mode']
+            or record.get('request') != card.get('request') or not isinstance(answer, str)
+            or not isinstance(record.get('status'), str)):
+        raise ValueError('Saved answer identity differs from its conversation card')
+    for child in (chat.get('assistant_state') or {}).get('children', []):
+        if ident in (child.get('job_id'), child.get('native_id')) and record.get('child_id') != child.get('id'):
+            raise ValueError('Saved answer identity differs from its worker')
+    digest = hashlib.sha256(answer.encode()).hexdigest()
+    if any(known is not None and known != digest for known in (record.get('answer_sha256'), card.get('answer_sha256'))):
+        raise ValueError('Saved answer differs from its recorded digest')
+    return {'answer': answer, 'status': record['status']}
+
+
+def saved_chat_answer(root, chat_id, answer_id):
+    """Read a durable worker answer through the matching card in its owning chat."""
+    if not isinstance(answer_id, str) or not _ID.fullmatch(answer_id):
+        raise ValueError('Invalid answer ID')
+    chat = load_chat(root, chat_id)
+    card = next((item for item in chat['transcript'] if item.get('role') == 'route'
+                 and item.get('status') == 'done' and item.get('answer_id') == answer_id), None)
+    if card is None:
+        raise NotFound('Unknown answer in this chat')
+    return _card_answer(root, chat, card)
+
+
 def conversation_record(root, chat_id, before=None, skip=None):
     """An Assistant conversation as one text source for a write-up or a summary.
 
@@ -1587,7 +1647,17 @@ def conversation_record(root, chat_id, before=None, skip=None):
             value = next((v for v in queue if item.get('job_id') and v.get('job_id') == item['job_id']), None)
             if value is None and not item.get('job_id') and queue:
                 value = queue[0]
-            if value is not None:
+            if item.get('answer_id'):
+                # A frozen worker receipt may outlive the tool result in the model's history.
+                try:
+                    saved = _card_answer(root, chat, item)
+                except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
+                    parts.append('## Worker answer unavailable\n\nThe saved answer could not be verified.')
+                    continue
+                text, status = saved['answer'], saved['status']
+                if value is not None and value.get('job_id') == item['answer_id']:
+                    queue.remove(value)
+            elif value is not None:
                 queue.remove(value)
                 result = value['result']
                 text = result.get('answer') or ''
@@ -1656,3 +1726,102 @@ def set_style_choice(root, mode, style=None, domain=None):
         return save_choice(root, mode, style, domain)
     except FileNotFoundError:
         raise NotFound('Unknown style') from None
+
+
+def _chat_evidence(chat):
+    """Native identifiers only. Use the stored transcript, which survives history compaction."""
+    jobs = set()
+
+    def link(mode, value):
+        if not isinstance(value, str):
+            return
+        if mode == 'experiment' and _EXPERIMENT.fullmatch(value):
+            jobs.add(('experiments', value))
+        elif _ID.fullmatch(value):
+            folder = {'prove': 'proofs', 'check': 'checks', 'answer': 'answers'}.get(mode, 'research')
+            jobs.add((folder, value))
+
+    for item in chat['transcript']:
+        if not isinstance(item, dict):
+            continue
+        role, mode = item.get('role'), item.get('mode')
+        if role == 'route':
+            link(mode, item.get('job_id'))
+            link('answer', item.get('answer_id'))
+        elif role == 'assistant' and mode == 'check':
+            if item.get('job_id'):
+                link('check', item['job_id'])
+            else:
+                # Legacy check chats carried the native ID in the controller-generated footer.
+                match = re.search(r'(?:^|\n)Full log: `\.mathagent/checks/([a-f0-9-]{36})/report\.md`\s*\Z',
+                                  str(item.get('content') or ''))
+                if match:
+                    link('check', match[1])
+        elif role == 'experiment':
+            link('experiment', item.get('experiment'))
+        elif role == 'tool' and item.get('tool_name') in ('check_reference', 'execute_python'):
+            try:
+                data = json.loads(item['content'])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if isinstance(data, dict):
+                if item['tool_name'] == 'check_reference':
+                    link('check', data.get('check_id'))
+                else:
+                    result = data.get('sandbox_result') or data
+                    if isinstance(result, dict):
+                        link('experiment', result.get('experiment_id'))
+    parent = chat.get('assistant_state') or {}
+    for child in (parent.get('children') or []):
+        action = child.get('action') or {}
+        link(action.get('mode') or child.get('mode'), child.get('job_id'))
+    for task in ((parent.get('investigation') or {}).get('tasks') or {}).values():
+        link(task.get('mode'), task.get('job_id'))
+    return jobs
+
+
+def evidence_links(root):
+    """Return chat-derived links alongside each chat's current project or private scope."""
+    links, chats = {}, {}
+    base = _chats(root)
+    if base:
+        for path in sorted(base.iterdir()):
+            if path.suffix != '.json' or not _ID.fullmatch(path.stem) or path.is_symlink():
+                continue
+            def read():
+                chat = load_chat(root, path.stem)
+                return chat.get('project_id'), _chat_evidence(chat)
+            try:
+                info = path.lstat()
+                project, jobs = _cached(path, read, ('evidence-links-v1', info.st_ino, info.st_ctime_ns))
+            except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                continue
+            chats[path.stem] = 'project:' + project if project else 'chat:' + path.stem
+            for job in jobs:
+                links.setdefault(job, set()).add(path.stem)
+    return links, chats
+
+
+def index_view(root, *, chat=None, project=None, all_scopes=False, limit=None):
+    from .. import project_index
+    if sum(bool(x) for x in (chat is not None, project is not None, all_scopes)) > 1:
+        raise ValueError('Select one research-record scope')
+    if limit is not None and (type(limit) is not int or limit < 0):
+        raise ValueError('Invalid research-record limit')
+    scope = 'all' if all_scopes else 'workspace'
+    links, chats = evidence_links(root)
+    if chat is not None:
+        if not isinstance(chat, str) or not _ID.fullmatch(chat):
+            raise ValueError('Invalid chat ID')
+        if chat not in chats:
+            raise NotFound('Unknown chat')
+        scope = chats[chat]
+    if project is not None:
+        try:
+            projects.read_project(root, project)
+        except FileNotFoundError:
+            raise NotFound('Unknown project') from None
+        scope = 'project:' + project
+    view = project_index.scoped(project_index.collect(root), links, chats, scope, limit)
+    project_index.freeze_documents(root, view)
+    return view

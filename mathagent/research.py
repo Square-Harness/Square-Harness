@@ -227,7 +227,7 @@ class ResearchRunner:
 
     def start(self, goal, *, kind='literature', source_files=(), max_rounds=6,
               max_tokens=None, max_input_tokens=None, max_seconds=None,
-              max_requests=12, max_chars=30000, reference_context=None):
+              max_requests=12, max_chars=30000, reference_context=None, job_id=None):
         if kind not in self.KINDS:
             raise ValueError('Research kind must be ' + ' or '.join(self.KINDS))
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 20000:
@@ -259,7 +259,7 @@ class ResearchRunner:
         if sum(len(s['content'].encode()) for s in sources) > 2_000_000:
             raise ValueError('Pinned manuscripts exceed 2 MB; split this research task')
         skill = files('mathagent').joinpath('skills', self._skill_folder(kind), 'SKILL.md').read_text(encoding='utf-8')
-        return self._create(goal, kind, settings, sources, skill, reference=reference)
+        return self._create(goal, kind, settings, sources, skill, reference=reference, job_id=job_id)
 
     def _inferred_sources(self, goal):
         """A filename mentioned in prose is not an explicit permission to pin it."""
@@ -320,7 +320,7 @@ class ResearchRunner:
                             'sha256': hashlib.sha256(content.encode()).hexdigest()})
         return sources
 
-    def _create(self, goal, kind, settings, sources, skill, *, reference=None):
+    def _create(self, goal, kind, settings, sources, skill, *, reference=None, job_id=None):
         settings.update(model=self.agent.model, ctx=self.agent.ctx, predict=self.agent.predict,
                         document_output_cap=getattr(self.agent, 'document_output_cap', None),
                         host=getattr(self.agent.client, 'host', None),
@@ -333,7 +333,9 @@ class ResearchRunner:
         root = self.agent.workspace.root / '.mathagent'
         _directory(root, create=True)
         _directory(root / self.FOLDER, create=True)
-        job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4()) if job_id is None else job_id
+        if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+            raise ValueError('Invalid native job ID')
         self.directory = root / self.FOLDER / job_id
         if self.literature:
             self.literature.reset_budget(max_requests=settings['max_requests'], max_chars=settings['max_chars'])
@@ -494,7 +496,11 @@ class ResearchRunner:
             old_callback = getattr(self.literature, 'on_budget_change', None) if self.literature else None
             old_deadline = getattr(self.literature, 'deadline', None) if self.literature else None
             if self.literature:
-                self.literature.on_budget_change = self._save
+                def checkpoint_retrieval():
+                    if old_callback:
+                        old_callback()
+                    self._save()
+                self.literature.on_budget_change = checkpoint_retrieval if old_callback else self._save
                 self.literature.deadline = time.monotonic() + max(0, self.state['settings']['max_seconds'] - self._seconds_before)
             try:
                 images.restore(self.agent, self.state)

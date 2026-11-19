@@ -286,7 +286,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 value(kind, text)
         self._emit = quiet
 
-    def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, **overrides):
+    def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None, **overrides):
         if lookup not in ('standard', 'precise'):
             raise ValueError('lookup must be standard or precise')
         if effort not in EFFORTS:
@@ -298,6 +298,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if lookup == 'standard':
             level = {**level, 'candidates': 3, 'verify_rounds': 1, 'discover': False,
                      'seconds': level['seconds'], 'requests': 12, 'chars': 50000}
+        self._asker = asker
         self._lookup = lookup
         self._guesses = [g for g in (_clean_candidate(g, 'caller') for g in guesses or []) if g][:3]
         self._level = dict(level)
@@ -311,7 +312,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if lookup == 'standard':
             budgets = {key: min(value, standard_bounds[key]) if value is not None and standard_bounds[key] is not None else value
                        for key, value in budgets.items()}
-        return super().start(question, kind='check', reference_context=reference_context, **budgets)
+        return super().start(question, kind='check', reference_context=reference_context, job_id=job_id, **budgets)
 
     def _call(self, role, instruction, *, cap, **kwargs):
         # Recall, verifying source passages and selecting applicable references all
@@ -325,7 +326,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         return {'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
                 'discovered': False, 'answer': '', 'standard_author': '',
                 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
-                                                        'lookup': self._lookup}}
+                                                        'lookup': self._lookup, 'asker': self._asker}}
 
     # -- context -----------------------------------------------------------------
 
@@ -1121,7 +1122,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
 
-def nested_checker(agent, emit=lambda kind, value: None, effort='low'):
+def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_source_budget=False):
     """check_reference for an answering agent: a separate verifier with its own budget and context.
 
     It shares the model client but not the answer's literature budget, and it is
@@ -1135,6 +1136,16 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low'):
         parent = agent.workspace.literature
         literature = LiteratureTools(agent.workspace.root, online=bool(parent and parent.online),
                                      timeout=parent.timeout if parent else 15)
+        if share_source_budget and parent is not None:
+            # This synchronous nested lookup draws on the investigation child's
+            # remaining retrieval budget. Persist each reservation before HTTP.
+            before = dict(parent.stats)
+            def charge():
+                for key, used in before.items():
+                    parent.stats[key] = used + literature.stats[key]
+                if parent.on_budget_change:
+                    parent.on_budget_change()
+            literature.on_budget_change = charge
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())
         inner = Agent(agent.client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
         inner.document_output_cap = getattr(agent, 'document_output_cap', None)
@@ -1151,9 +1162,53 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low'):
             limits['max_tokens'] = max(1024, int(tokens // 4))
         if isinstance(seconds, (int, float)) and seconds != float('inf'):
             limits['max_seconds'] = max(20.0, seconds / 4)
+        if share_source_budget and parent is not None:
+            limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
+                          max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            runner.start(statement, guesses=guesses, effort=effort, **limits)
+            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()
     return check
+
+
+def export_evidence(state):
+    """Use the saved gated level; the model's statement paraphrase is not evidence."""
+    statuses = {'read': 'source read', 'cited': 'cited by another paper', 'located': 'located, place unconfirmed',
+                'contradicted': 'locator rejected', 'not_found': 'not found', 'inconclusive': 'inconclusive'}
+    rows = []
+    for n, candidate in enumerate(state.get('candidates', []), 1):
+        verdict = candidate.get('verdict') or {}
+        level = verdict.get('level')
+        if level not in statuses:
+            continue
+        if state['check'].get('lookup') == 'standard':
+            if state.get('standard_selection_done') and not candidate.get('selected'):
+                continue
+            if not state.get('standard_selection_done') and candidate.get('source') == 'bibliographic_discovery':
+                continue
+        qualifiers = []
+        asker = state['check'].get('asker')
+        if asker in ('nested checker', 'detailed review'):
+            qualifiers.append('worded by ' + asker)
+        elif not asker and not state.get('reference_context'):
+            qualifiers.append('asker unknown')
+        record = verdict.get('record') or {}
+        document, lines = verdict.get('document_id'), verdict.get('lines')
+        title = record.get('title') or candidate.get('title') or ''
+        place = verdict.get('locator') or ''
+        summary = describe(candidate) + (f' · {place}' if place else '')
+        if verdict.get('corrected_from'):
+            summary += ' · corrected from ' + verdict['corrected_from']
+        evidence = {'level': level, 'locator': place, 'quote': str(verdict.get('quote') or '')[:500],
+                    'url': verdict.get('source_url'), 'record': record.get('identifier'), 'lines': lines if document else None,
+                    'document_id': document, 'cited_entry': verdict.get('cited_entry') or ''}
+        # A citing passage or a rejected locator is not the primary source of this claim.
+        docs = []
+        if level == 'read' and document and lines:
+            docs = [{'document_id': document, 'title': title, 'extractor': '',
+                     'passages': [{'range': lines, 'label': place}]}]
+        rows.append({'kind': 'reference', 'mode': 'check', 'number': n, 'status': statuses[level],
+                     'qualifiers': qualifiers, 'summary': summary, 'evidence': evidence, 'documents': docs})
+    return rows

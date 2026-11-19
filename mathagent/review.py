@@ -1981,7 +1981,7 @@ class JournalRunner(ReviewBase):
             checker = CheckRunner(inner, emit=lambda kind, value: self.emit('tool', '↳ ' + str(value)) if kind == 'tool' else None)
             with self._timeout():
                 try:
-                    checker.start(question, guesses=self._guess(item), effort='low', max_seconds=seconds, max_tokens=tokens)
+                    checker.start(question, guesses=self._guess(item), effort='low', asker='detailed review', max_seconds=seconds, max_tokens=tokens)
                     result = json.loads(checker.result_for_agent())
                 except (ValueError, OSError, AgentError) as exc:
                     result = {'status': 'error', 'references': [], 'error': str(exc)}
@@ -2557,3 +2557,32 @@ class SummaryReviewRunner(JournalRunner):
                 appendix += ['', s['novelty']['assessment']]
             appendix += ['', 'Search hits do not establish or refute novelty.']
         return body, appendix
+
+
+def export_evidence(state):
+    """Save what the review checked. Neither a step check nor a referee report determines proof direction."""
+    variant = variant_for_state(state)
+    if variant not in ('quick', 'journal'):
+        return []
+    quals = [] if state.get('status') in ('reviewed', 'budget_violation') else ['unfinished']
+    links = [('checks', item['check_id']) for item in state.get('cited_checks', []) if item.get('check_id')]
+    if variant == 'quick':
+        unit = state.get('unit') or {}
+        task = state.get('target') or state['goal']
+        span = unit.get('statement')
+        source = next((s for s in state.get('sources', []) if s.get('id') == unit.get('source')), None)
+        if source and isinstance(span, (list, tuple)) and len(span) == 2:
+            a, b = span
+            lines = source['content'].splitlines()
+            if type(a) is int and type(b) is int and 1 <= a <= b <= len(lines):
+                task = '\n'.join(lines[a - 1:b])
+        labels = {'no_issue_found': 'no issue found in steps checked', 'issues_found': 'issues found',
+                  'issues_alleged': 'issues alleged', 'uncertain': 'review uncertain', 'unavailable': 'no usable check'}
+        return [{'kind': 'review', 'mode': 'quick_review', 'text': task, 'qualifiers': quals, 'links': links,
+                 'status': labels.get(state.get('verdict'), 'review unfinished'),
+                 'evidence': {'unit': unit.get('id'), 'source': unit.get('source'), 'proof_ranges': unit.get('proofs', [])}}]
+    valid = [key for key, item in (state.get('confirms') or {}).items() if item.get('assessment') == 'valid']
+    unchecked = state.get('unchecked') or []
+    return [{'kind': 'review', 'mode': 'detailed_review', 'status': 'detailed review', 'qualifiers': quals, 'links': links,
+             'summary': f'{len(valid)} re-check(s) judged valid; {len(unchecked)} unchecked unit(s)',
+             'evidence': {'valid_rechecks': valid, 'unchecked': unchecked}}]

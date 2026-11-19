@@ -101,7 +101,7 @@ class Agent:
         from . import images
         images.bind(self, copy.deepcopy(getattr(client, 'image_refs', [])))
 
-    def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None):
+    def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None, recover_empty_tool_answer=False):
         # Only commit history when a full turn completes; interruptions cannot
         # leave a dangling assistant tool call in the next API request.
         messages = copy.deepcopy([] if fresh else self.history)
@@ -158,6 +158,18 @@ class Agent:
                         raise
                     # Only generated scratch notes may be omitted, never the task or source text.
                     recovery_notes = recovery_notes[len(recovery_notes) // 2:] if len(recovery_notes) > 256 else ''
+            optional = getattr(self, 'optional_leads', '')
+            if optional:
+                extra = dict(payload, messages=[payload['messages'][0], {'role': 'user', 'content': optional},
+                                                *payload['messages'][1:]])
+                try:
+                    extra, fit = allocate_call(self.client, extra, predict)
+                    if extra['options']['num_predict'] >= payload['options']['num_predict']:
+                        payload, allocation = extra, fit
+                    else:
+                        self.optional_leads = ''
+                except CallContextError:
+                    self.optional_leads = ''
             self.last_allocation = allocation
             emit('start', '')
             assistant = {'role': 'assistant', 'content': ''}
@@ -201,18 +213,28 @@ class Agent:
                 if round_no + 1 == self.max_rounds:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')
                 continue
+            empty_after_tool = (recover_empty_tool_answer and round_no > 0
+                                and self.last_stats.get('done_reason') == 'stop')
             if (not assistant['content'].strip() and not answer_now
-                    and self.last_stats.get('done_reason') == 'length'):
+                    and (self.last_stats.get('done_reason') == 'length' or empty_after_tool)):
                 # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
                 # without reasoning or tools, asks for the answer instead of returning nothing.
                 answer_now = True
                 recovery_notes = thinking[-input_limit(self, 'recovery_note', 4000):]
-                emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
-                messages.append({'role': 'user', 'content': ANSWER_NOW})
+                if empty_after_tool:
+                    emit('notice', 'The worker returned an empty answer after a tool call. Requesting its conclusion.')
+                    prompt = 'Give your final mathematical answer using the work above. Identify any unresolved points.'
+                else:
+                    emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
+                    prompt = ANSWER_NOW
+                messages.append({'role': 'user', 'content': prompt})
                 continue
             if not assistant['content'].strip():
-                self.last_stop_reason = ('Output limit reached while reasoning; no final answer after one recovery attempt.'
-                                         if answer_now else 'The model returned no final answer.')
+                if answer_now and recover_empty_tool_answer:
+                    self.last_stop_reason = 'The model returned no final answer after one recovery attempt.'
+                else:
+                    self.last_stop_reason = ('Output limit reached while reasoning; no final answer after one recovery attempt.'
+                                             if answer_now else 'The model returned no final answer.')
                 emit('notice', self.last_stop_reason)
             elif self.last_stats.get('done_reason') == 'length':
                 self.last_stop_reason = 'Generation hit its output limit; the written answer is incomplete.'

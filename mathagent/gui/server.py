@@ -351,6 +351,20 @@ def image_snapshot(h, body, sha):
     return Streamed
 
 
+@route('GET', '/api/index')
+def research_index(h, body):
+    if set(h.query) - {'chat', 'project'} or any(len(values) != 1 for values in h.query.values()):
+        raise ValueError('Use one chat or project identifier')
+    result = store.index_view(h.server.hub.root, **{key: values[0] for key, values in h.query.items()})
+    for entry in result['entries']:
+        task = entry['task']
+        for field in ('text', 'original_request'):
+            if len(task[field]) > 2000:
+                task[field] = task[field][:2000]
+                task[field + '_truncated'] = True
+    return result
+
+
 @route('GET', '/api/proofs')
 def proofs(h, body):
     return {'jobs': store.list_proofs(h.server.hub.root, h.active('proof'))}
@@ -487,6 +501,11 @@ def chat_create(h, body):
     return _chat_view(chat, hub.root)
 
 
+@route('GET', '/api/chats/' + UUID + '/answers/' + UUID.replace('P<id>', 'P<answer_id>'))
+def chat_answer(h, body, id, answer_id):
+    return store.saved_chat_answer(h.server.hub.root, id, answer_id)
+
+
 @route('GET', '/api/chats/' + UUID)
 def chat(h, body, id):
     hub = h.server.hub
@@ -548,6 +567,11 @@ def chat_route(h, body, id):
     content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
     h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode, required_effort=(body.get('mode_call') or {}).get('effort'))
     return {'ok': True}
+
+
+@route('POST', '/api/chats/' + UUID + '/investigation/stop')
+def investigation_stop(h, body, id):
+    return h.server.hub.stop_investigation(id)
 
 
 @route('POST', '/api/chats/' + UUID + '/assistant/resume')
@@ -822,8 +846,21 @@ def chat_review(h, body, id):
     return {'task': h.server.hub.review(id, queue=bool(_flag(body, 'queue'))).summary()}
 
 
+def _investigation_view(record):
+    if not record:
+        return None
+    tasks = []
+    for task in (record.get('plan') or {}).get('tasks', []):
+        result = record.get('tasks', {}).get(task['id'], {})
+        tasks.append({'id': task['id'], 'mode': task['mode'], 'objective': task['objective'],
+                      'after': task['after'], 'status': result.get('status', 'pending')})
+    return {'id': record['id'], 'phase': record['phase'], 'tasks': tasks}
+
+
 def _chat_view(chat, root):
+    investigation = (chat.get('assistant_state') or {}).get('investigation') or {}
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
+            'investigation': _investigation_view(investigation),
             'project_id': chat.get('project_id'), 'title_source': chat.get('title_source'),
             'images': store.chat_images(chat),
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
@@ -1102,13 +1139,17 @@ def folder_lock(root):
     """Hold the folder for this interface: two interfaces writing one folder's jobs and chats corrupt them."""
     import fcntl
     path = Path(root) / '.mathagent' / 'gui.lock'
-    path.parent.mkdir(exist_ok=True)
-    handle = open(path, 'a+')
+    _directory(path.parent, create=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    handle = os.fdopen(fd, 'r+')
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        handle.close()
+        raise ValueError('The workspace lock must be a regular file.')
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.seek(0)
-        owner = handle.read().strip()
+        owner = handle.read(40).strip()
         handle.close()
         raise ValueError(f'Another Square Harness interface already serves {root}'
                          + (f' (process {owner})' if owner else '') + '; use it, or stop it first.') from None

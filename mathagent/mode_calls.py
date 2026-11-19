@@ -116,8 +116,10 @@ def validated_mode_call(content, selection, files=()):
     if selection.get('effort') is not None and selection['effort'] not in EFFORTS:
         raise ValueError('Unknown selected effort')
     mode, start = selection['mode'], selection['start']
-    if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES or type(start) is not int:
+    if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES + ('investigate',) or type(start) is not int:
         raise ValueError('Unknown selected mode call')
+    if mode == 'investigate' and selection.get('effort') == 'high':
+        raise ValueError('Investigation tasks support Low or Medium effort.')
     token = '@' + mode
     end = start + len(token)
     if (start < 0 or content[start:end] != token
@@ -216,7 +218,7 @@ class ModeOrchestrator(Orchestrator):
                    'Preparation reached its short handoff limit; no partial parent argument is an established fact.')
         if len(self.state['query']) <= 6000:
             request += '\n\nORIGINAL REQUEST:\n' + self.state['query']
-        action = {'mode': 'prove', 'request': request, 'files': list(self.state['files']),
+        action = {'mode': 'prove', 'request': request, 'files': [f for f in self.state['files'] if not f.lower().endswith('.pdf')],
                   'effort': chosen, 'reason': 'Start Proof now from the unchanged original request and context.'}
         self._validate_delegate(action)
         self._save()
@@ -249,7 +251,7 @@ class ModeOrchestrator(Orchestrator):
         if not tools:
             raise AgentError('Proof needs a prepared delegation, but further actions are unavailable; saved work is unchanged')
         prep = self._preparation()
-        allowed = {'delegate', 'read_conversation', 'read_file'}
+        allowed = {'delegate', 'read_conversation', 'read_file', 'list_index', 'read_index'}
         if prep['calls'] >= 1:
             allowed = {'delegate'}
         tools = [tool for tool in tools if tool['function']['name'] in allowed]
@@ -266,7 +268,8 @@ class ModeOrchestrator(Orchestrator):
         if exhausted:
             return {'tools': tools, '_proof_handoff': 'The preparation call allowance is exhausted.'}
         try:
-            payload = super()._payload(tools, instruction=PROOF_PREPARATION, output_cap=PROOF_PREP_OUTPUT)
+            payload = super()._payload(tools, instruction=PROOF_PREPARATION, output_cap=PROOF_PREP_OUTPUT,
+                                       lead_input_limit=min(PROOF_PREP_INPUT, PROOF_PREP_TOTAL_INPUT - prep['input_tokens']))
         except CallContextError:
             return {'tools': tools, '_proof_handoff': 'The complete preparation input does not fit; hand it to Proof.'}
         if getattr(self.agent.client, 'backend', 'ollama') == 'openai':

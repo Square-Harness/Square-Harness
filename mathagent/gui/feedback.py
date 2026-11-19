@@ -122,6 +122,12 @@ def _text(value):
 
 def _redact(value):
     if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key not in ('index_view', 'dependency_entries')}
+        for key in ('brief', 'solver_leads'):
+            if isinstance(value.get(key), dict):
+                value[key] = {k: v for k, v in value[key].items() if k in ('entries', 'omitted', 'sha256')}
+        if value.get('tool_name') in ('read_index', 'list_index') and 'content' in value:
+            value['content'] = '[Prior research record omitted]'
         return {key: ('[REDACTED]' if _SECRET_KEYS.search(re.sub(r'[^a-z]', '', key.lower()))
                        or key.lower() in {'token', 'headers', 'request_headers', 'response_headers'} else _redact(item))
                 for key, item in value.items()}
@@ -134,6 +140,8 @@ def _redact(value):
                 return json.dumps(_redact(json.loads(value)), ensure_ascii=False)
             except (ValueError, RecursionError):
                 pass
+        from ..briefs import LEAD_START, LEAD_END
+        value = re.sub(re.escape(LEAD_START) + '.*?' + re.escape(LEAD_END), '[Prior research record omitted]', value, flags=re.S)
         return _text(value)
     return value
 

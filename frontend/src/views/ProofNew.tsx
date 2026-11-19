@@ -14,7 +14,7 @@ import { capacityFull } from '../concurrency'
 import { BusyNote, queuedMessage } from './shared'
 
 // File names in the statement, as the terminal notices them (proof jobs have no file tools).
-const MENTIONED = /(?<![\w/])[\w./-]+\.(?:tex|md|txt)\b/g
+const MENTIONED = /(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b/g
 
 export function ProofNew() {
   const { status, snapshot } = useApp()
@@ -35,9 +35,7 @@ export function ProofNew() {
   const changed = useTick('files')
 
   const uploading = useDropTarget('Pinned to this proof as sources', (paths) => {
-    const text = paths.filter((path) => !path.toLowerCase().endsWith('.pdf'))
-    setFiles((items) => [...new Set([...items, ...text])])
-    if (text.length < paths.length) setError('Proofs pin text and image sources; the PDF was saved in the folder but not pinned.')
+    setFiles((items) => [...new Set([...items, ...paths])])
   })
 
   // The form opens on the Medium effort; the context is the launch context.
@@ -63,7 +61,7 @@ export function ProofNew() {
   }, [changed])
 
   const unpinned = useMemo(() => {
-    const known = new Set(workspace.filter((file) => file.kind === 'text').map((file) => file.path))
+    const known = new Set(workspace.filter((file) => file.kind === 'text' || file.kind === 'pdf').map((file) => file.path))
     return [...new Set(goal.match(MENTIONED) || [])].filter((name) => known.has(name) && !files.includes(name))
   }, [goal, files, workspace])
 
@@ -141,8 +139,8 @@ export function ProofNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Pinned sources</span>
-            <FilePicker selected={files} onChange={setFiles} allowImages />
-            <span className="field-hint">The model sees only the statement and the pinned files: proof work has no file or web tools. A snapshot of each pinned file is saved with the job and stays fixed even if you edit the file.</span>
+            <FilePicker selected={files} onChange={setFiles} allowImages allowPdf />
+            <span className="field-hint">The model sees only the statement and the pinned files: proof work has no file or web tools. The job saves a fixed snapshot of each source. PDF extraction can alter mathematical notation.</span>
             {unpinned.length > 0 && (
               <p className="warning-note">
                 Named in the statement but not pinned, so the model will not see {unpinned.length === 1 ? 'it' : 'them'}: {unpinned.join(', ')}.{' '}

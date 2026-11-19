@@ -68,14 +68,14 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
   sanity_check: { noun: 'a numerical sanity check', label: 'Numerical Sanity Check', cover: 'sanity_check' },
 }
-const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
+const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' || mode === 'investigate' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
-type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
+type Paged = Exclude<RouteMode, 'investigate' | 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
-  mode !== 'critic' && mode !== 'free' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
+  mode !== 'critic' && mode !== 'free' && mode !== 'investigate' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
 const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
@@ -158,6 +158,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const hasImages = attachments.some(isImagePath)
   const budgetDisplay = data?.assistant_budget ? assistantBudgetDisplay(data.assistant_budget) : null
   const paused = free && assistantResumable(data)
+  const pausedInvestigation = paused && !!data?.investigation
   const send = async (text?: string) => {
     let raw = text ?? draft
     let imageOnlyCall: ModeCall | null = null
@@ -174,7 +175,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
-    if (!content.trim() || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
+    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
     setSending(true)
     setSendError('')
     try {
@@ -233,6 +234,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
+  const stopInvestigation = async () => {
+    if (!id || resuming) return
+    setResuming(true)
+    setSendError('')
+    try { await api.stopInvestigation(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
+  }
   const transcript = data?.transcript || []
   const lastTask = app.snapshot.task
   const taskError = lastTask?.target === id && lastTask.state === 'error' ? lastTask.error : ''
@@ -260,6 +267,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </div>
           )}
           {live && <LiveTurnView live={live} mode={mode} waitingForOutput={!!task?.waiting_model_calls} />}
+          {data?.investigation && data.investigation.tasks.length > 0 && data.assistant_status !== 'complete' && (
+            <div className="entry">
+              <span className="in-margin" />
+              <details open className="route-card">
+                <summary>Investigation plan · {data.investigation.phase === 'approval' ? 'awaiting approval' : data.investigation.phase}</summary>
+                <ol>{data.investigation.tasks.map((step) => <li key={step.id}>
+                  <strong>{step.id} · {step.mode}</strong> · {step.status}
+                  {!!step.after.length && <small> · after {step.after.join(', ')}</small>}
+                  <p>{step.objective}</p>
+                </li>)}</ol>
+              </details>
+            </div>
+          )}
           {free && data?.assistant_progress && <div className="entry">
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
@@ -267,7 +287,13 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {paused && !ours && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
-              <p className="notice">The assistant is paused. Its work is saved: resume from where it stopped, or send a new message to set this turn aside.</p>
+              <div>
+                <p className="notice">{pausedInvestigation
+                  ? 'The investigation is paused. Resume the approved plan or finish with a report on the evidence collected so far.'
+                  : 'The assistant is paused. Resume its saved work or send a new message to set this turn aside.'}</p>
+                {pausedInvestigation && <button type="button" className="btn btn-quiet btn-small" disabled={resuming || work.blocked}
+                  onClick={stopInvestigation}>Stop and report</button>}
+              </div>
             </div>
           )}
         </div>
@@ -289,8 +315,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
-            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !!effortKind(selectedCall.mode)}
-            onSend={() => { send() }} disabled={blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
+            onSend={() => { send() }} disabled={pausedInvestigation || blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Continue the conversation…' : 'Ask about an approach, a reformulation or a connection…'}
@@ -299,7 +325,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
             </button>
-          ) : paused && !draft.trim() && !hasImages ? (
+          ) : paused && (pausedInvestigation || (!draft.trim() && !hasImages)) ? (
             <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending || !!uploading} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
@@ -584,12 +610,36 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
           </Collapse>
         </div>
+        {item.answer_id && <SavedWorkerAnswer key={item.answer_id} chat={chatId} id={item.answer_id} />}
         {item.outcome && item.outcome !== error && !(item.status === 'stopped' && error && item.outcome.includes(error)) &&
           <p className="muted small">{item.outcome}</p>}
         <ErrorNote>{error}</ErrorNote>
       </div>
     </div>
   )
+}
+
+function SavedWorkerAnswer({ chat, id }: { chat: string; id: string }) {
+  const [result, setResult] = useState<{ answer: string; status: string } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const toggle = async () => {
+    if (open || result) { setOpen(!open); return }
+    setLoading(true)
+    setError('')
+    try { setResult(await api.savedChatAnswer(chat, id)); setOpen(true) }
+    catch (reason) { setError((reason as Error).message) }
+    finally { setLoading(false) }
+  }
+  return <div>
+    <button type="button" className="btn btn-small btn-quiet" aria-expanded={open} disabled={loading} onClick={toggle}>
+      {loading ? 'Loading…' : open ? 'Hide worker answer' : 'Read worker answer'}
+    </button>
+    {open && result && (result.answer ? <Markdown>{result.answer}</Markdown> :
+      <p className="muted small">This worker saved no answer. Its final status was {result.status}.</p>)}
+    <ErrorNote>{error}</ErrorNote>
+  </div>
 }
 
 /** The files of one sandbox run, shown where the run happened, each by its MIME type. */

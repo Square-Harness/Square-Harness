@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add explicit guided investigations to the Assistant and terminal. Approve an
+  exact target, run a bounded plan across mathematical modes, pause or resume,
+  and finish with an evidence-linked report.
+- Make saved research available across turns and project conversations through
+  a scoped index. Delegated Proof can reuse pinned source passages, with a
+  separate solver-only channel for strategy leads.
+
 - Make literature reviews several times faster and broader. The source check
   judges every sentence: one call names the source sentences that carry it, a
   second compares it with those passages, and a grounded correction replaces a

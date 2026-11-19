@@ -215,8 +215,10 @@ New turns receive a bounded copy of the selected project's notes; their workers
 receive that same context. Switching projects or editing notes does not alter
 work already running. Resume uses the original saved copy. Project notes are
 user-maintained working context and are never updated
-automatically from model answers. Only that project's note is added; earlier
-conversations and all project files are not silently imported. You can move an
+automatically from model answers. The Assistant can also consult a bounded index
+of saved research from the same project. It receives short, labelled findings and
+can read their backing records on demand. An unassigned conversation uses its own
+chat scope. Moving a conversation changes where future turns find its records. You can move an
 idle conversation to a project using the **Project** selector above its message
 box, including conversations that have no project yet. The conversation menu
 also offers this action. The top-level list includes unassigned chats.
@@ -435,6 +437,9 @@ a statement, or `/prove <statement>`. Other commands:
 | `/review` | Fresh-context critique of the last answer |
 | `/proofs`, `/proof-report <id>`, `/resume <id>` | List, read and resume proofs (reading needs no model) |
 | `/researches`, `/research-report <id>`, `/research-resume <id>` | The same for reports and other jobs |
+| `/investigate <question>`, `/investigations` | Start a guided investigation or list saved runs |
+| `/investigate-resume <id>`, `/investigate-report <id>` | Resume or finish with the evidence already saved |
+| `/record`, `/record all`, `/record <chat-or-project-uuid>` | Inspect unfiled workspace jobs, every scope, or the research record of one conversation or project. A filed conversation opens its project’s record. |
 | `/experiments`, `/skills`, `/status`, `/help` | Saved experiments, skill files, settings, help |
 
 For scripts, run one job and exit:
@@ -453,6 +458,7 @@ app and the other way round: both use the same saved files.
 | Skill | You get | Web app | Terminal |
 | --- | --- | --- | --- |
 | Conversation | Answers, with focused jobs when needed | type a message | web app only |
+| Guided investigation | A confirmed research plan and an evidence-linked report | `@investigate` | `/investigate` |
 | Prove | A proof, its review and every attempt | `@prove`, New proof | `/prove` (default) |
 | Explore | Approaches and useful first steps with heuristics labelled | `@explore` | `/explore` |
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
@@ -495,9 +501,11 @@ must not begin the proof or add a missing hypothesis.
 If preparation reaches its limit or fails to produce a usable delegation,
 Proof starts from the original request and saved context instead of extending
 the preparation. Unfinished preparation is not adopted as a proof or task
-brief. Proof's solve and review allowances are unchanged. The solver
-and reviewer receive the original request and exact conversation as
-authoritative reference context. The Proof page's **Sources** tab shows **Original request**
+brief. Proof's solve and review allowances are unchanged. For new delegated jobs, both solver and reviewer receive the original user
+request, applicable user premises and the same pinned source text. For example,
+both can inspect the cited theorem and check its hypotheses. The solver can
+also use labelled ideas from earlier work. The independent reviewer sees the
+candidate and verifies it against the shared task and sources. The Proof page's **Sources** tab shows **Original request**
 and, when the delegation differs from it, **Prepared task**.
 
 Preparation is charged to the shared Assistant budget and uses the existing
@@ -507,6 +515,37 @@ getting a fresh preparation allowance. Resume reuses work already delegated;
 it does not rewrite the task of an existing Proof job. When Proof has been selected, the
 Assistant must call that worker rather than substitute a direct proof.
 Standalone Proof jobs and raw benchmark calls retain their direct path.
+
+### Guided investigations
+
+In an Assistant conversation, type **@investigate** followed by a question.
+For example, ask whether a proposed identity holds for all square matrices and
+which hypotheses suffice. The planner can propose exploring counterexamples
+and checking a restricted case, then give Proof an exact statement. A plain
+question still goes to the ordinary Assistant. An explicit **@prove** still
+starts its usual proof workflow.
+
+The approval shows the target, its identifying hash, the tasks, and their
+worst-case allowance. Up to six tasks can draw on Explore, Check, Literature,
+Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
+effort. Independent tasks can run together when the model server supports it.
+As results arrive, the controller can start a newly eligible task, skip further work, or fill a planned slot for
+a variant. A change in hypotheses gets its own statement and hash. Numerical
+experiments are available through Explore when the numerical sandbox is enabled.
+
+Pause saves the investigation. **Resume** continues the saved plan. **Stop and
+report** finishes a paused run using its existing evidence, even when the model
+is offline. The report identifies the statements examined, the worker records,
+and work that failed or remains open. A model-reviewed proof is evidence about
+its exact statement. An exploration or a numerical observation can suggest a
+direction for later work. Open a Proof card or select **Read worker answer** on
+an Explore card to inspect its mathematics. Select **@summarize** for a separate LaTeX write-up.
+
+In the terminal, use `/investigate <question>`, `/investigations`,
+`/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations
+run one worker at a time. Ctrl+C during work requests a pause. At the
+confirmation prompt Ctrl+C declines the plan. A terminal investigation uses the
+workspace writer lock shared with the web interface.
 
 ### Prove
 
@@ -1060,7 +1099,10 @@ Everything is saved in your folder under `.mathagent/`:
 | `proofs/` | Proof jobs |
 | `research/` | Reports, reviews, literature reviews, write-ups (those made in a conversation are deleted with it) |
 | `checks/` | Literature checks |
-| `chats/` | Conversations |
+| `chats/` | Conversations and saved Assistant checkpoints |
+| `investigations/` | Investigation statements, task records and final reports |
+| `answers/` | Delegated chat-worker answers, removed with their owning conversation |
+| `index/experiments/` | Compact experiment records retained when older sandbox artifacts are pruned |
 | `experiments/` | Sandbox runs |
 | `literature/` | Cache of downloaded sources |
 

@@ -155,6 +155,7 @@ class Workspace:
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
+        self.index = None
         self.pinned = set()
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
         self.source_archives = {}  # path -> last bounded, immutable source extraction
@@ -472,6 +473,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             web_names = {item['function']['name'] for item in web_schemas}
             result.extend(item for item in self.literature.schemas() if item['function']['name'] not in web_names)
             result.extend(web_schemas)
+        if self.index is not None:
+            result.extend(self.index.schemas())
         if self.numerics is not None:
             result.extend(self.numerics.schemas())
         if self.checker is not None and self.literature is not None and self.literature.online:
@@ -495,6 +498,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
+            if self.index is not None and name in self.index.names:
+                return self.index.execute(name, arguments)
             if self.numerics is not None and name in self.numerics.tool_names:
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:

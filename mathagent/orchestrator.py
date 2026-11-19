@@ -164,7 +164,7 @@ experiment with execute_python; skip it when an exact argument is immediate. Num
 agreement is never a proof; heavier computations are for the user's /python-lab.
 """
 WEB_TOOLS = frozenset({'open_url', 'read_page', 'search_page', 'read_references', 'search_web'})
-READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text'}) | WEB_TOOLS
+READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text', 'list_index', 'read_index'}) | WEB_TOOLS
 # Sandbox tools of a controller-bound NumericsSession (automatic sanity checks only here).
 NUMERICS_TOOLS = frozenset({'execute_python', 'read_experiment', 'read_skill_reference'})
 STATE_VERSION = 1
@@ -210,7 +210,9 @@ def _delegate_schema():
     return {'type': 'function', 'function': {
         'name': 'delegate',
         'description': 'Run one existing mathematical worker for a precise objective. '
-                       'The worker returns before you decide the next step. It cannot spawn workers.',
+                       'The worker returns before you decide the next step. A proof can pin an explicit PDF or '
+                       'cached doc-ID in files. To use only verified passages from a specific research entry, '
+                       'name its exact entry ID in the proof objective.',
         'parameters': copy.deepcopy(TASK_SCHEMA),
     }}
 
@@ -317,6 +319,8 @@ class Orchestrator:
             'limits': {'actions': self.max_actions, 'children': self.max_children,
                        'concurrency': self.concurrency},
         }
+        if getattr(self.agent, 'index_view', None) is not None:
+            self.state['index_view'] = copy.deepcopy(self.agent.index_view)
         project = getattr(self.agent, 'project_snapshot', None)
         if project is not None:
             self.state['project_snapshot'] = copy.deepcopy(project)
@@ -448,9 +452,16 @@ class Orchestrator:
         args = pending['call']['function']['arguments']
         return self._blocked(args.get('mode'), self._delegate_target(args))
 
+    def _worker_files(self, args):
+        explicit = args.get('files', [])
+        inherited = self.state['files']
+        if args.get('mode') == 'prove':
+            inherited = [name for name in inherited if not name.lower().endswith('.pdf')]
+        return list(dict.fromkeys([*inherited, *explicit]))
+
     def _delegate_target(self, args):
         from .source_tasks import _instruction_text
-        files = list(dict.fromkeys(self.state['files'] + args.get('files', [])))
+        files = self._worker_files(args)
         text = _instruction_text(args.get('request', ''))
         target = re.search(r'\b(theorem|theoreme|thm|lemma|lemme|lem|proposition|corollary|corollaire)\s*[:.]?\s*(\d+(?:\.\d+)*|[a-z])\b', text)
         label = re.search(r'\\(?:ref|eqref)\{([^}]+)\}', args.get('request', ''))
@@ -506,6 +517,16 @@ class Orchestrator:
                 frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
                 values.append([filename, frozen['sha256'] if frozen else None])
                 continue
+            from .briefs import DOC_ID
+            if isinstance(filename, str) and DOC_ID.fullmatch(filename):
+                if workspace is not None and getattr(workspace, 'literature', None):
+                    try:
+                        meta, _ = workspace.literature._document(filename)
+                        digest = meta['text_sha256']
+                    except (OSError, ValueError):
+                        pass
+                values.append([filename, digest])
+                continue
             if workspace is not None and hasattr(workspace, 'path'):
                 try:
                     path = workspace.path(filename, pdf=True)
@@ -526,14 +547,14 @@ class Orchestrator:
             return True
         for message in self.state['messages']:
             if message.get('role') != 'tool' or message.get('tool_name') not in (
-                    READ_ONLY_TOOLS - {'list_files'}) | {'execute_python'}:
+                    READ_ONLY_TOOLS - {'list_files', 'list_index'}) | {'execute_python'}:
                 continue
             try:
                 result = loads(message.get('content', ''))
             except (TypeError, ValueError):
                 continue
             if isinstance(result, dict) and result and not result.get('error'):
-                if message['tool_name'] in ('read_file', 'search_text'):
+                if message['tool_name'] in ('read_file', 'search_text', 'read_index'):
                     excerpt = result.get('source_excerpt')
                     if (not isinstance(excerpt, str) or not excerpt.strip()
                             or excerpt.lstrip().startswith(('Tool error:', 'No matches'))):
@@ -541,7 +562,7 @@ class Orchestrator:
                 return True
         return False
 
-    def _payload(self, tools, instruction='', output_cap=None):
+    def _payload(self, tools, instruction='', output_cap=None, lead_input_limit=None):
         last = self.state.get('last_call') or {}
         partial = last.get('partial') or {}
         capped = (output_cap is None and not last.get('preparation')
@@ -658,6 +679,23 @@ class Orchestrator:
         # old turns, slicing a statement or splitting a native tool transaction.
         explicit = getattr(self.agent, 'document_output_cap', None)
         payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        view = self.state.get('index_view') or {}
+        if view.get('entries'):
+            from .briefs import for_worker
+            digest = for_worker(self.agent.workspace.root, view, self.state['query'], 'assistant',
+                                chat_id=getattr(self.agent, 'scope_chat_id', None),
+                                max_chars=input_limit(self.agent, 'brief_index', 3000))['text']
+            if digest:
+                augmented = dict(payload, messages=[payload['messages'][0], {'role': 'user', 'content': digest},
+                                                   *payload['messages'][1:]])
+                try:
+                    augmented, fit = allocate_call(self.agent.client, augmented, predict, explicit_cap=explicit)
+                    if (augmented['options']['num_predict'] >= payload['options']['num_predict'] and
+                            (lead_input_limit is None or fit['input_tokens'] <= lead_input_limit)):
+                        payload, allocation = augmented, fit
+                except CallContextError:
+                    pass  # Optional prior work cannot displace the current mathematical input.
+
         # A smaller explicit or physical context must still permit several tool
         # rounds. Keep room for synthesis without reserving more than half the
         # context of a locally configured DS4 deployment.
@@ -856,6 +894,12 @@ class Orchestrator:
                     raise ValueError('Use only image snapshots attached to this conversation: ' + filename)
                 images.validate(workspace.root, frozen)
                 continue
+            from .briefs import DOC_ID
+            if args['mode'] == 'prove' and DOC_ID.fullmatch(filename):
+                if workspace is None or workspace.literature is None:
+                    raise ValueError('No cached literature is available')
+                workspace.literature._document(filename)
+                continue
             if experiments is not None and any(experiments.figure(i, filename) for i in experiment_ids):
                 # These are controller-owned conversation artifacts, not general workspace reads.
                 sandbox_files.add(filename)
@@ -876,7 +920,7 @@ class Orchestrator:
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
         if child is not None:
             return child
-        source_key = self._source_key(list(dict.fromkeys(self.state['files'] + args['files'])))
+        source_key = self._source_key(self._worker_files(args))
         request = ' '.join(args['request'].split()).casefold()
         duplicate = next((item for item in self.state['children'] if item['status'] == 'complete'
                           and not _needs_input(item.get('result'))  # a write-up waiting for material is asked again
@@ -909,11 +953,7 @@ class Orchestrator:
             child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
                 project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
                                     'Preserve assumptions and conjectures; verify mathematical claims when needed.')
-        child['action']['files'] = list(dict.fromkeys(self.state['files'] + args['files']))
-        if args['mode'] == 'prove':
-            child['action']['files'] = [f for f in child['action']['files'] if not f.lower().endswith('.pdf')]
-        elif args['mode'] == 'check':
-            child['action']['files'] = []
+        child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
         self.state['children'].append(child)
         pending['child_id'] = child['id']
         self._save()
