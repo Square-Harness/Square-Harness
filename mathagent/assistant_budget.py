@@ -9,8 +9,8 @@ import time
 from contextlib import contextmanager, nullcontext
 
 from .agent import AgentError
-from .backends import TokenBudgetError, ToolCallError
-from .deepinfra import rejected_before_inference
+from .backends import MeasuredStreamCancellation, TokenBudgetError, ToolCallError
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .proof import count_input
 
 
@@ -71,6 +71,9 @@ class BudgetClient:
         reserved = budget.get('reserved_tokens', 0)
         if type(reserved) is not int or not 0 <= reserved <= budget['tokens']:
             raise ValueError('Invalid Assistant budget: reserved_tokens')
+        measured = budget.setdefault('measured_tokens', 0)
+        if type(measured) is not int or not 0 <= measured <= budget['tokens'] - reserved:
+            raise ValueError('Invalid Assistant budget: measured_tokens')
         # A restored process cannot still own its old streams. Their charged
         # reservations remain spent, but are no longer displayed as in flight.
         budget['reserved_tokens'] = 0
@@ -251,21 +254,9 @@ class BudgetClient:
                         if used is not None:
                             self.pool.state['tokens'] -= cap - used
                             self.usage['tokens'] -= cap - used
+                            self.pool.state['measured_tokens'] += used
                     self.pool.checkpoint()
                 yield event
-        except ToolCallError as exc:
-            # The server completed and reported usage even though its tool
-            # arguments are invalid. Refund only that measured unused portion.
-            used = exc.stats.get('eval_count')
-            if charged or type(used) is not int or not 0 <= used <= cap:
-                raise AssistantBudget('Invalid usage on a rejected tool call.') from exc
-            with self.pool.lock:
-                self.pool.state['reserved_tokens'] -= cap
-                reserved = False
-                self.pool.state['tokens'] -= cap - used
-                self.usage['tokens'] -= cap - used
-            self.pool.checkpoint()
-            raise
         except (AgentError, KeyboardInterrupt) as exc:
             if reserved and not charged and rejected_before_inference(exc):
                 with self.pool.lock:
@@ -275,6 +266,18 @@ class BudgetClient:
                     self.pool.state['input_tokens'] -= count
                     self.usage['tokens'] -= cap
                     self.usage['input_tokens'] -= count
+                raise
+            if (reserved and not charged and isinstance(exc, (DeepInfraGenerationError, ToolCallError, TokenBudgetError,
+                                                               MeasuredStreamCancellation)) and exc.stats):
+                used = exc.stats.get('eval_count')
+                if type(used) is not int or used < 0 or (used > cap and not isinstance(exc, TokenBudgetError)):
+                    raise AssistantBudget('Invalid token usage on a failed model call.') from exc
+                with self.pool.lock:
+                    self.pool.state['reserved_tokens'] -= cap
+                    reserved = False
+                    self.pool.state['tokens'] += used - cap
+                    self.usage['tokens'] += used - cap
+                    self.pool.state['measured_tokens'] += used
                 raise
             if isinstance(exc, AgentError) and not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
                 raise AssistantBudget('Assistant time budget exhausted during generation.') from exc

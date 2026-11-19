@@ -4,7 +4,7 @@
 // Typed client for the harness's local /api. Shapes mirror mathagent/gui/store.py.
 import type { EffortLevel } from './effort'
 
-export type Budget = { used: number; limit: number | null; reserved?: number }
+export type Budget = { used: number; limit: number | null; reserved?: number; uncertain?: number }
 
 export type WorkProgress = {
   phase: string
@@ -17,7 +17,7 @@ export type WorkProgress = {
 }
 
 export type AssistantBudget = {
-  tokens: { used: number; reserved?: number; limit: number | null }
+  tokens: Budget
   input_tokens?: { used: number; limit: number | null }
   seconds: Budget
   context?: Budget

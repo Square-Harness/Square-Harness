@@ -17,6 +17,7 @@ import sqlite3
 import stat
 
 from .agent import AgentError
+from .deepinfra import TesterAllowanceInsufficient
 
 NANODOLLARS = Decimal(1_000_000_000)
 MAX_INTEGER = 2 ** 63 - 1
@@ -138,7 +139,7 @@ class HostedQuota:
         with self._transaction() as db:
             used = db.execute('SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM calls').fetchone()[0]
             if reservation > self.budget - used:
-                raise AgentError('Tester allowance is insufficient for this call; wait for active calls or contact the administrator')
+                raise TesterAllowanceInsufficient()
             db.execute('INSERT INTO calls VALUES (?,?,?,?,NULL,NULL,NULL)', (identifier, input_cap, output_cap, reservation))
         return identifier
 

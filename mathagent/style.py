@@ -26,6 +26,7 @@ import re
 
 from .ledger import _atomic_write, _directory, _now
 from .research import ResearchRunner
+from .reporting import usage_footer
 from .tools import unicode_source, source_suffix
 from .worker_errors import WorkerInputError
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output
@@ -630,9 +631,7 @@ class StyleRunner(ResearchRunner):
         for article in s.get('articles', []):
             out.append(f'- {article["id"]} `{article["path"]}`: {article["title"] or "untitled"}'
                        f'{" — " + domain_of[article["id"]] if article["id"] in domain_of else ""}.')
-        out += ['', f'Generated tokens charged: {s["tokens_charged"]}/{s["settings"]["max_tokens"]}; input tokens charged: '
-                    f'{s["input_tokens_charged"]}/{s["settings"]["max_input_tokens"]}; elapsed seconds: '
-                    f'{s["seconds_used"]:.1f}/{s["settings"]["max_seconds"]}.', '']
+        out += ['', usage_footer(s), '']
         _atomic_write(self.directory / 'report.md', '\n'.join(out).encode('utf-8'))
 
 

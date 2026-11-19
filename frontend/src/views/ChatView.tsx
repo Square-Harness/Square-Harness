@@ -319,6 +319,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <span className="muted small composer-budget" title={budgetDisplay.title}>
               {budgetDisplay.output}
               {budgetDisplay.reserved && <> {' · '}{budgetDisplay.reserved}</>}
+              {budgetDisplay.uncertain && <> {' · '}{budgetDisplay.uncertain}</>}
               {budgetDisplay.context && <> {' · '}{budgetDisplay.context}</>}
               {' · '}{budgetDisplay.time}
             </span>

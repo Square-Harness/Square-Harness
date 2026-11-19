@@ -30,7 +30,7 @@ from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
 from .model_limits import is_ds4, substantive_output, workflow_budget
-from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, rejected_before_inference
 from .reporting import usage_footer
 from .research import (ResearchRunner, ResearchBudget, _job_directory, _read_state, _reference_prompt,
                        announces_only, remaining_limit, usable_completion)
@@ -47,6 +47,7 @@ FINDINGS = ('unsupported', 'misattributed', 'wrong_detail', 'missing_work', 'str
 LOOP = re.compile(r'(.{3,40}?)\1{12,}', re.S)
 # Fractions of the working time at which a phase stops admitting new work.
 SHARES = {'search': .16, 'screen': .35, 'expand': .31, 'read': .60, 'outline': .67, 'write': .84, 'check': .99}
+SELECTION_PHASES = ('search', 'screen', 'expand', 'rank')
 # Breadth is an upper bound. A narrow question can finish with fewer papers and sections.
 LEVELS = (
     dict(queries=3, newest=2, per_source=12, anchors=2, citing=40, rounds=1, leads=6, cocited=6, full_text=3,
@@ -797,6 +798,14 @@ def paper_excerpts(lines, keywords, budget=7600, *, primary=None, abstract='', q
     return shown, bibliography
 
 
+class _UnitGenerationFailure(Exception):
+    """One inference unit could not be completed; other units retain their own evidence."""
+
+    def __init__(self, reason, *, deferred=False):
+        super().__init__(reason)
+        self.deferred = deferred
+
+
 class ReviewRunner(ResearchRunner):
     KINDS = ('literature',)
     TERMINAL = ('complete', 'partial', 'budget_exhausted', 'budget_violation')
@@ -810,10 +819,11 @@ class ReviewRunner(ResearchRunner):
         self._mutex = threading.RLock()
         self._budget_changed = threading.Condition(self._mutex)
         super().__init__(agent, emit)
-        limit = 5 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        limit = 5 if is_ds4(agent) else 4
         self.concurrency = max(1, min(limit, int(concurrency or 1)))
         self._keys, self._indexed, self._title_words, self._counts = {}, 0, {}, {}
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
+        self._generation_failure_streak, self._provider_pause = 0, None
 
     @property
     def emit(self):
@@ -991,17 +1001,23 @@ class ReviewRunner(ResearchRunner):
     def _tokens_left(self):
         return remaining_limit(self.state['settings'], 'max_tokens', self.state['tokens_charged'])
 
-    def _ask(self, role, prompt, *, cap, schema=None, temperature=.3):
-        """One model call; thread-safe, budgeted and streamed to an artifact. A transport failure is retried once."""
+    def _failure_count(self, role, unit):
+        return self.state.get('generation_failures', {}).get(role, {}).get(str(unit), 0)
+
+    def _ask(self, role, prompt, *, cap, schema=None, temperature=.3, units=()):
+        """Retry critical work once, defer failed independent units, and preserve every call's accounting."""
         answer_only = False
         for attempt in (0, 1):
             self._cancel()
+            if self._provider_pause:
+                raise self._provider_pause
             if self._seconds_for_phase(self.state['phase']) <= 0:
                 raise ResearchBudget(f'The {role} phase deadline was reached')
             try:
                 with self._timeout():
                     options = {'answer_only': True} if answer_only else {}
-                    result = self._ask_once(role, prompt, cap=cap, schema=schema, temperature=temperature, **options)
+                    result = self._ask_once(role, prompt, cap=cap, schema=schema, temperature=temperature,
+                                            units=units, **options)
                     if attempt == 0 and result.get('stopped') == 'reasoning_limit':
                         # The first call delivered no answer. The same prompt and source passage
                         # still need a verdict, under the original cumulative and elapsed limits.
@@ -1011,19 +1027,41 @@ class ReviewRunner(ResearchRunner):
                     return result
             except (AgentError, KeyboardInterrupt) as exc:
                 if isinstance(exc, DeepInfraGenerationError) or rejected_before_inference(exc):
-                    if role == 'recover-write' and rejected_before_inference(exc):
-                        self.state.pop('core_recovery', None)
-                    elif role == 'recover-check' and rejected_before_inference(exc):
-                        self.state['core_recovery']['stage'] = 'proposed'
-                    raise
+                    if (not isinstance(exc, DeepInfraGenerationError) or isinstance(exc, DeepInfraRateLimit)
+                            or exc.category in ('quota', 'auth', 'rate_limit') or self._provider_pause):
+                        # Neither recovery call has published its result yet. The outer
+                        # checkpoint can resume the stage while retaining every debit.
+                        if role == 'recover-write':
+                            self.state.pop('core_recovery', None)
+                        elif role == 'recover-check':
+                            self.state['core_recovery']['stage'] = 'proposed'
+                        raise
+                    may_recover = exc.retryable or exc.category == 'unknown'
+                    first_failure = all(self._failure_count(role, key) == 1 for key in units or (role,))
+                    if units:
+                        # Prefer unaffected work before a single fresh, separately admitted request.
+                        deferred = may_recover and first_failure
+                        if deferred:
+                            self._warn(f'A {role} model stream stopped. The affected work was deferred for one retry.')
+                        raise _UnitGenerationFailure(str(exc), deferred=deferred) from None
+                    if role == 'outline':
+                        raise _UnitGenerationFailure(str(exc)) from None
+                    if attempt == 0 and first_failure and may_recover:
+                        self._warn(f'A {role} model stream stopped. The saved inputs were submitted once more.')
+                        continue
+                    if role == 'scope':
+                        raise
+                    raise _UnitGenerationFailure(str(exc)) from None
                 if attempt or isinstance(exc, (ResearchBudget, TokenBudgetError, KeyboardInterrupt)) or type(exc).__name__ == 'AssistantBudget':
                     raise
                 self._warn(f'The model server failed on a {role} call ({str(exc)[:120]}); it was asked again.')
                 time.sleep(3)
 
-    def _ask_once(self, role, prompt, *, cap, schema, temperature, answer_only=False):
+    def _ask_once(self, role, prompt, *, cap, schema, temperature, units=(), answer_only=False):
         with self._mutex:
             self._cancel()
+            if self._provider_pause:
+                raise self._provider_pause
             self._check_time()
             cap = int(min(cap, self._tokens_left()))
             if cap < 256:
@@ -1056,13 +1094,16 @@ class ReviewRunner(ResearchRunner):
                 if remaining <= 0 or not any(c['status'] == 'running' for c in self.state['calls']):
                     raise ResearchBudget('Input-token budget exhausted or phase deadline reached')
                 self._budget_changed.wait(timeout=min(.5, remaining))
+            if self._provider_pause:
+                raise self._provider_pause
             cap = int(min(cap, self._tokens_left()))
             if cap < allocation['minimum_output_tokens']:
                 raise ResearchBudget('Generated-token budget exhausted')
             allocation['output_tokens'] = payload['options']['num_predict'] = cap
             request = self._artifact(role + '-request', json.dumps(payload, ensure_ascii=False, indent=2))
             stream_name = self._artifact(role + '-stream', '')
-            call = {'role': role, 'status': 'running', 'request': request, 'stream': stream_name,
+            call = {'role': role, 'phase': self.state['phase'], 'units': list(units),
+                    'status': 'running', 'request': request, 'stream': stream_name,
                     'reserved_tokens': cap, 'reserved_input_tokens': estimated, 'allocation': allocation}
             self.state['calls'].append(call)
             self.state['tokens_charged'] += cap
@@ -1108,10 +1149,22 @@ class ReviewRunner(ResearchRunner):
                 complete = usable_completion(stats, cap)
                 call['stats'] = stats
                 call['status'] = 'complete' if complete else 'truncated' if stats.get('done_reason') == 'length' else 'incomplete'
+                self._generation_failure_streak = 0
                 self._save()
         except BaseException as exc:
             with self._mutex:
                 self._interrupt_call(call, exc)
+                if isinstance(exc, DeepInfraGenerationError):
+                    if isinstance(exc, DeepInfraRateLimit) or exc.category in ('quota', 'auth', 'rate_limit'):
+                        self._provider_pause = exc
+                    else:
+                        failures = self.state.setdefault('generation_failures', {}).setdefault(role, {})
+                        for key in units or (role,):
+                            failures[str(key)] = failures.get(str(key), 0) + 1
+                        self._generation_failure_streak += 1
+                        if self._generation_failure_streak >= 3:
+                            self._provider_pause = exc
+                            self._warn('Three consecutive model streams failed. Remaining work was saved for Resume.')
                 self._save()
             raise
         finally:
@@ -1154,6 +1207,11 @@ class ReviewRunner(ResearchRunner):
                 return
             try:
                 job()
+            except _UnitGenerationFailure as exc:
+                if not exc.deferred:
+                    with self._mutex:
+                        failed(key, str(exc))
+                        self._warn(f'Model generation failed for {self.state["phase"]} work {key}: {exc}')
             except DeepInfraGenerationError:
                 # Preserve this unit for Resume while already-running siblings checkpoint.
                 provider_failed.set()
@@ -1785,9 +1843,11 @@ class ReviewRunner(ResearchRunner):
             self.state['phase'] = self._after_screen()
             return
         attempts = self.state['screen_attempts']
-        fresh = [n for n in pending if not attempts.get(str(n))]
-        again = [n for n in pending if attempts.get(str(n))]
+        fresh = [n for n in pending if not attempts.get(str(n)) and not self._failure_count('screen', n)]
+        again = [n for n in pending if attempts.get(str(n)) and not self._failure_count('screen', n)]
+        deferred = [n for n in pending if self._failure_count('screen', n)]
         batches = [fresh[i:i + 32] for i in range(0, len(fresh), 32)] + [again[i:i + 10] for i in range(0, len(again), 10)]
+        batches += [deferred[i:i + 10] for i in range(0, len(deferred), 10)]
         batches = batches[:self.concurrency]
         self._counts = self._cited_by_relevant()  # how many works on the topic cite each candidate
         self.emit('notice', f'Screening {sum(map(len, batches))} candidates ({len(pending)} waiting)')
@@ -1839,7 +1899,7 @@ class ReviewRunner(ResearchRunner):
             'Judge from the title, abstract and citation signals only; a highly cited work can be off topic and a new '
             'preprint can be central. Answer for every number.\n\n'
             'CANDIDATES (number | year | authors | title | venue | signals | abstract):\n' + lines)
-        result = self._ask('screen', instruction, cap=cap, schema=SCREEN_SCHEMA)
+        result = self._ask('screen', instruction, cap=cap, schema=SCREEN_SCHEMA, units=batch)
         answered = set()
         with self._mutex:
             for item in _items((result['value'] or {}).get('items')):
@@ -2261,7 +2321,7 @@ class ReviewRunner(ResearchRunner):
         s['selected'] = selected
         s['importance'] = {n: v for n, v in s['importance'].items() if int(n) in set(selected)}
         if not selected:
-            self._warn('No candidate was screened as relevant to the topic.')
+            self._warn('No work was retained after screening and bibliographic confirmation.')
             s['phase'] = 'assemble'
             return
         self.emit('notice', f'{len(selected)} works selected for the review')
@@ -2444,6 +2504,7 @@ class ReviewRunner(ResearchRunner):
                 s['cards'][key] = self._record_card(n)
         pending = [n for n in s.get('read_order', targets) if s['read_plan'].get(str(n)) == 'full_text'
                    and str(n) not in s['cards'] and str(n) not in s['card_failed']]
+        pending.sort(key=lambda n: self._failure_count('card', n))
         if not pending or self._late('read'):
             if pending:
                 self._cut('read', 'Time was short: some planned full-text passages could not be consulted.')
@@ -2577,7 +2638,7 @@ class ReviewRunner(ResearchRunner):
             'statements conflict, omit the claim. Capture the decisive idea when it is present in the source. '
             'Do not reproduce long formulas twice.\n\n'
             + self._card_header(n) + '\n\n' + excerpts)
-        result = self._ask('card', prompt, cap=self._wave_cap(2100, self.concurrency), schema=CARD_SCHEMA)
+        result = self._ask('card', prompt, cap=self._wave_cap(2100, self.concurrency), schema=CARD_SCHEMA, units=[n])
         card = self._record_card(n)
         card['document_id'] = (self.state.get('documents', {}).get(str(n)) or {}).get('document_id')
         for raw in _items((result.get('value') or {}).get('results'))[:3]:
@@ -2712,8 +2773,12 @@ class ReviewRunner(ResearchRunner):
             'only if dated, explicit questions survive comparison with the other evidence. An early result missing '
             'a case does not make that case open today. Do not pad the plan to use every work.\n\n'
             'CANDIDATE WORKS (numbers to use in works):\n' + works)
-        result = self._ask('outline', prompt, cap=self._wave_cap(4000, 1), schema=OUTLINE_SCHEMA)
-        best = self._settle_outline(result['value'])
+        try:
+            result = self._ask('outline', prompt, cap=self._wave_cap(4000, 1), schema=OUTLINE_SCHEMA)
+            best = self._settle_outline(result['value'])
+        except _UnitGenerationFailure as exc:
+            self._warn(f'The outline model stream failed ({exc}).')
+            best = None
         if best is None:
             self._warn('The model gave no usable plan; sections were grouped from the selected works.')
             best, s['outline_fallback'] = self._fallback_outline(), True
@@ -2942,6 +3007,7 @@ class ReviewRunner(ResearchRunner):
             if str(i) not in s['sections'] and not any(self._has_source_text(n) for n in section['works']):
                 s['sections'][str(i)] = {'text': '', 'failed': 'bibliographic metadata only'}
         todo = [i for i in range(len(outline['sections'])) if str(i) not in s['sections']]
+        todo.sort(key=lambda i: self._failure_count('write', i))
         if not todo:
             s['phase'] = 'check'
             return
@@ -3044,7 +3110,7 @@ class ReviewRunner(ResearchRunner):
                   + 'SOURCES FOR THIS SECTION:\n' + self._pack(works))
         text = cut = ''
         for attempt in range(2):
-            result = self._ask('write', prompt, cap=cap, temperature=.3)
+            result = self._ask('write', prompt, cap=cap, temperature=.3, units=[i])
             candidate = self._clean_section(result['text'], section['heading'], allowed=works, table=table)
             if len(candidate) >= min(80, words * 2) and not announces_only(candidate):
                 if result['complete']:
@@ -3122,6 +3188,7 @@ class ReviewRunner(ResearchRunner):
         sections = (s['outline'] or {}).get('sections', [])
         unchecked = [i for i in range(len(sections)) if s['sections'].get(str(i), {}).get('text')
                      and str(i) not in s['checks']]
+        unchecked.sort(key=lambda i: self._failure_count('check', i))
         if not self._level()['check'] or not unchecked:
             if s.get('checked_export') and not unchecked:
                 actions = [('editorial_check', self._edit_checked_sections), ('core_recovery', self._recover_core_answer)]
@@ -3131,7 +3198,9 @@ class ReviewRunner(ResearchRunner):
                     if key in s and not (key == 'core_recovery' and s[key].get('stage') == 'proposed'):
                         continue
                     try:
-                        self._wave([(key, action)], lambda _, reason: s.update({key: {'stage': 'failed', 'complete': False, 'error': reason}}))
+                        def failed(action_key, reason):
+                            s.setdefault(action_key, {}).update(stage='failed', complete=False, error=reason)
+                        self._wave([(key, action)], failed)
                     except WorkerInputError as exc:
                         if exc.code != 'context_overflow':
                             raise
@@ -3903,7 +3972,7 @@ class ReviewRunner(ResearchRunner):
             + '\n\nSECTION EVIDENCE:\n' + self._pack(works, full=len(works), focus=text, sources_only=True, source_spans=source_spans))
         if rivals:
             prompt += '\n\nRELATED PAPERS FOR CHECKING CLAIMS OF OPEN STATUS:\n' + self._pack(rivals, full=len(rivals), focus=text, sources_only=True)
-        result = self._ask('check', prompt, cap=cap, schema=CHECK_SCHEMA)
+        result = self._ask('check', prompt, cap=cap, schema=CHECK_SCHEMA, units=[i])
         value = result.get('value')
         raw = value.get('findings') if isinstance(value, dict) else None
         judgments = value.get('judgments', value.get('supported')) if isinstance(value, dict) else None
@@ -3998,9 +4067,25 @@ class ReviewRunner(ResearchRunner):
         s = self.state
         s['draft'] = self._compose()
         _atomic_write(self.directory / 'review.md', _bytes(s['draft']))
-        cited = [_publication_record(self._by_n(n)) for n in s['bibliography']]
-        _atomic_write(self.directory / 'references.bib', _bytes(record_bibliography(cited, math_titles=True)))
+        _atomic_write(self.directory / 'references.bib', _bytes(self._bibtex()))
         s['outputs'] = {'review': 'review.md', 'bib': 'references.bib'}
+        s['screening_export_version'] = 1
+
+    def _bibtex(self):
+        records = [_publication_record(self._by_n(n)) for n in self.state['bibliography']]
+        return record_bibliography(records, math_titles=True)
+
+    @classmethod
+    def refresh_screening_preview(cls, state):
+        """Rebuild an older paused selection's display and BibTeX from its saved records in memory."""
+        if (state.get('pipeline') != PIPELINE or state.get('screening_export_version')
+                or state.get('phase') not in SELECTION_PHASES or state.get('status') == 'running'
+                or not (state.get('outputs') or {}).get('review')):
+            return None
+        runner = cls(None)
+        runner.state = state
+        state['draft'] = runner._compose()
+        return runner._bibtex()
 
     def _reading_guide(self, sections, already):
         """Point to real primary-result headings without reviving the interpretation that was withheld."""
@@ -4198,7 +4283,19 @@ class ReviewRunner(ResearchRunner):
             out.append('')
         elif not parts:
             out += [self._empty_review(), '']
-            for n in s['selected']:
+            works = s['selected']
+            if s.get('phase') in SELECTION_PHASES:
+                # Selection and registry confirmation can be interrupted independently.
+                # Export only records already returned by a primary registry. Do not
+                # modify the selection used when this job resumes.
+                relevant = sorted(self._relevant(), key=lambda n: (-s['screened'][str(n)]['relevance'], n))
+                records = [n for n in relevant if set(self._by_n(n)['sources']) & {'crossref', 'arxiv', 'zbmath'}]
+                duplicates = self._duplicates(records)
+                works = [n for n in records if str(n) not in duplicates][:sum(self._level()['keep'][:2])]
+                if works:
+                    out += ['The provisional references below come from registry records already screened as relevant. '
+                            'Their mathematical results have yet to be checked.', '']
+            for n in works:
                 number(n)
         if parts and any(c.get('withheld') for c in s['checks'].values()):
             # Do not reconstruct a damaged fraction. Give the reader the exact place
@@ -4222,7 +4319,8 @@ class ReviewRunner(ResearchRunner):
         s['bibliography'] = list(order)
         s['references'] = []
         if order:
-            out += ['## References', '']
+            provisional = s.get('phase') in SELECTION_PHASES
+            out += ['## Provisional references' if provisional else '## References', '']
             for k, n in enumerate(order, 1):
                 r, card = _publication_record(self._by_n(n)), s['cards'].get(str(n)) or {}
                 read = card.get('mode') or ('abstract' if r.get('abstract') else 'metadata')
@@ -4257,6 +4355,11 @@ class ReviewRunner(ResearchRunner):
         return '\n'.join(out).strip() + '\n'
 
     def _empty_review(self):
+        phase = self.state.get('phase')
+        if phase in SELECTION_PHASES:
+            return ('Paper selection is still in progress. '
+                    f'{len(self.state["screened"])} of {len(self.state["pool"])} candidate records have been screened. '
+                    'The review has no source-checked sections yet.')
         if not self.state['pool']:
             queries = self.state.get('sweep_log') or []
             if not queries:
@@ -4265,7 +4368,7 @@ class ReviewRunner(ResearchRunner):
                 return 'The source searches returned no usable response.'
             return 'No candidate work was found for this topic in the sources that answered.'
         if not self.state['selected']:
-            return 'The sources returned candidate works, but none was screened as relevant to this topic.'
+            return 'No work was retained after screening and bibliographic confirmation.'
         return ('No source-checked synthesis was available. The bibliography lists the selected works. '
                 'The Evidence tab shows the source material collected for this question.')
 
@@ -4276,8 +4379,9 @@ class ReviewRunner(ResearchRunner):
         names = {'zbmath': 'zbMATH Open', 'arxiv': 'arXiv', 'crossref': 'Crossref', 'semantic_scholar': 'Semantic Scholar',
                  'opencitations': 'OpenCitations'}
         providers = ', '.join(names.get(n, n) for n, v in coverage['sources'].items() if v['answered'])
+        selection = ('selection pending' if s.get('phase') in SELECTION_PHASES else f'{coverage["selected"]} selected')
         text = (f'*About this review.* Square Harness, {date.today().strftime("%d %B %Y").lstrip("0")}. '
-                f'{coverage["screened"]} works screened, {coverage["selected"]} selected, {cited} in the bibliography. '
+                f'{coverage["screened"]} works screened, {selection}, {cited} in the bibliography. '
                 f'Passages from {coverage["full_text"]} full-text papers were consulted.')
         if providers:
             text += f' Sources: {providers}.'
@@ -4316,7 +4420,7 @@ class ReviewRunner(ResearchRunner):
         """Why a written review is partial, from code checks only."""
         s, issues = self.state, []
         if not s['selected']:
-            issues.append('no relevant work was found')
+            issues.append('no work was retained after screening and bibliographic confirmation')
         elif not any(self._has_source_text(n) for n in s['selected']):
             issues.append('only bibliographic metadata was available')
         elif not any(r.get('read') == 'full_text' for r in s.get('references', [])):
@@ -4349,6 +4453,10 @@ class ReviewRunner(ResearchRunner):
             issues.append('time or budget was short in: ' + ', '.join(s['cuts']))
         if s['screen_failed']:
             issues.append(f'{len(s["screen_failed"])} candidates could not be screened')
+        if s['card_failed']:
+            issues.append(f'{len(s["card_failed"])} full-text source cards could not be completed')
+        if (s.get('core_recovery') or {}).get('stage') == 'failed':
+            issues.append('the supplementary check of omitted primary results was incomplete')
         for name, v in self._coverage()['sources'].items():
             if name in ('zbmath', 'arxiv', 'crossref') and v['asked'] >= 3 and v['answered'] < v['asked'] / 2:
                 issues.append(f'most {name} requests failed')
@@ -4356,6 +4464,8 @@ class ReviewRunner(ResearchRunner):
 
     def _recover(self):
         """Interrupted calls keep their reservations and are not replayed; their partial text is not reused."""
+        self._generation_failure_streak, self._provider_pause = 0, None
+        self._stop.clear()
         interrupted = [c for c in self.state['calls'] if c['status'] in ('running', 'interrupted')]
         for call in interrupted:
             call['status'] = 'abandoned'

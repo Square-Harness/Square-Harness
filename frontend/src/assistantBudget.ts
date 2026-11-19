@@ -8,15 +8,17 @@ import { count, duration } from './format.ts'
 export function assistantBudgetDisplay(budget: AssistantBudget) {
   const { tokens, input_tokens: input, seconds } = budget
   const reserved = tokens.reserved ?? 0
+  const uncertain = tokens.uncertain ?? 0
   const outputLimit = tokens.limit === null ? '' : ` of ${count(tokens.limit)} allowed`
   const inputUsage = input
-    ? ` Cumulative input processed: ${count(input.used)}${input.limit === null ? '' : ` / ${count(input.limit)}`} tokens across all model calls; repeated input is counted again.`
+    ? ` Input allowance used: ${count(input.used)}${input.limit === null ? '' : ` / ${count(input.limit)}`} tokens, including estimates and repeated inputs.`
     : ''
   return {
-    output: `Output ${count(tokens.used)}${outputLimit} tokens`,
+    output: `Reported output ${count(tokens.used)}${outputLimit} tokens`,
     reserved: reserved > 0 ? `${count(reserved)} tokens held for active calls` : null,
+    uncertain: uncertain > 0 ? `${count(uncertain)} tokens held for calls with unknown usage` : null,
     context: budget.context ? `Input context ${count(budget.context.used)}${budget.context.limit === null ? '' : ` / ${count(budget.context.limit)}`} tokens` : null,
     time: `Working time ${duration(seconds.used)}${seconds.limit === null ? '' : ` of ${duration(seconds.limit)}`}`,
-    title: `Cumulative output charged to this assistant and its focused tasks, not the current context size. Interrupted calls with unreported usage may be charged conservatively. ${tokens.limit === null ? 'No cumulative output token limit.' : 'The output limit is shared by this assistant and its focused tasks.'} Reservations are temporary output capacity for calls in progress and are separate from charged output.${inputUsage} Other conversations have their own budgets.`,
+    title: `Output reported by the model for this Assistant and its tasks, including thinking. Calls with unknown usage continue to hold their allowance. Active calls reserve capacity until they finish.${inputUsage}`,
   }
 }

@@ -48,8 +48,9 @@ export function Meter({ label, used, limit, unit = '', decimals = 0, title }: { 
 /** Usage is cumulative; a reservation is capacity for an unfinished call. */
 export function UsageMeters({ budget }: { budget: { tokens: Budget; input_tokens?: Budget; seconds: Budget; context?: Budget } }) {
   return <>
-    <Meter label="Output tokens" {...budget.tokens} title="Cumulative output, including thinking. A call with unreported usage may be charged conservatively." />
-    {!!budget.tokens.reserved && <p className="muted small">{count(budget.tokens.reserved)} tokens reserved for the current calls; separate from output used.</p>}
+    <Meter label="Reported output tokens" {...budget.tokens} title="Cumulative output reported by the model, including thinking." />
+    {!!budget.tokens.reserved && <p className="muted small">{count(budget.tokens.reserved)} tokens held for active calls.</p>}
+    {!!budget.tokens.uncertain && <p className="muted small">{count(budget.tokens.uncertain)} tokens held for calls with unknown usage.</p>}
     {budget.input_tokens && <Meter label="Cumulative input tokens" {...budget.input_tokens} title="Input summed across model calls; repeated text counts again. This is not the current context size." />}
     {budget.context && <Meter label="Current input context" {...budget.context} title="Input to the current model call, against its context capacity. Generated output also uses this capacity." />}
     <Meter label="Working time, minutes" used={budget.seconds.used / 60} limit={budget.seconds.limit === null ? null : budget.seconds.limit / 60} decimals={1} />

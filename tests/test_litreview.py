@@ -2,6 +2,8 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Offline literature-review regressions using synthetic primary passages."""
+import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +11,8 @@ from unittest.mock import patch
 
 from mathagent.agent import Agent
 from mathagent.assistant_budget import BudgetClient
-from mathagent.deepinfra import DeepInfraRateLimit
+from mathagent.backends import MeasuredStreamCancellation
+from mathagent.deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
 from mathagent.literature import LiteratureTools
 from mathagent.litreview import ReviewRunner, _cutoff_supported
 from mathagent.proof import count_input
@@ -18,6 +21,134 @@ from tests.test_research import FakeClient, response
 
 
 class LiteratureReviewTests(unittest.TestCase):
+    def test_parallel_screen_failure_defers_only_affected_candidates_and_splits_the_retry(self):
+        client = FakeClient([])
+        runner = ReviewRunner(Agent(client, Workspace(self.root)), concurrency=2)
+        groups = []
+        def stream(payload):
+            candidates = payload['messages'][-1]['content'].split('CANDIDATES (', 1)[1]
+            ids = [int(n) for n in re.findall(r'^#?(\d+)\s*\|', candidates, re.M)]
+            groups.append(ids)
+            if ids == list(range(1, 33)):
+                yield {'message': {'content': 'incomplete classifications'}}
+                raise DeepInfraGenerationError('Model generation failed.', stream_progress={'content_chars': 26})
+            yield from response(json.dumps({'items': [
+                {'n': n, 'kind': 'result', 'relevance': 3, 'facet': 0} for n in ids]}))
+        def step(phase):
+            if phase == 'plan':
+                for n in range(1, 46):
+                    runner._record({'title': f'Example result {n}', 'doi': f'10.5555/screen.{n}'}, 'crossref', '')
+                runner.state.update(phase='screen', scope={'topic': 'test', 'facets': [], 'setting': ''})
+            else:
+                runner._screen()
+        pending = lambda: [n for n in range(1, 46) if str(n) not in runner.state['screened']
+                           and str(n) not in runner.state['screen_failed']]
+        with patch.object(client, 'stream', side_effect=stream), patch.object(runner, '_step', side_effect=step), \
+                patch.object(runner, '_pending_screen', side_effect=pending), patch.object(runner, '_after_screen', return_value='done'):
+            result = runner.start('Review the example results.', max_tokens=40000)
+        self.assertEqual(runner.state['phase'], 'done', result.get('stop_reason'))
+        self.assertFalse(runner.state['screen_failed'])
+        self.assertEqual(len(runner.state['screened']), 45)
+        self.assertEqual(sorted(groups), sorted([list(range(1, 33)), list(range(33, 46)), list(range(1, 11)),
+                                                 list(range(11, 21)), list(range(21, 31)), [31, 32]]))
+        failed, = [row for row in runner.state['calls'] if row['status'] == 'generation_failed']
+        self.assertEqual((failed['units'], failed['stream_progress']), (list(range(1, 33)), {'content_chars': 26}))
+        self.assertEqual(runner.state['tokens_charged'], failed['reserved_tokens'] + 5 * 20)
+
+    def test_outline_failure_and_interrupted_check_still_deliver_only_source_checked_prose(self):
+        fact = 'The observation time is strictly positive for an exterior strip at positive distance from the singular line.'
+        unsupported = 'All bounded domains have the same numerical threshold.'
+        check = {'judgments': [{'units': [1], 'source': 1, 'condition_id': 1, 'conclusion_id': 1},
+                               {'units': [2], 'source': 0, 'problem': 'No numerical statement in the paper.'}],
+                 'findings': []}
+        measured = DeepInfraGenerationError('Stream interrupted.', category='interrupted',
+                                            stats={'eval_count': 12, 'prompt_eval_count': 130})
+        transport = FakeClient([[measured], response(fact[:-1] + ' [@1].\n\n' + unsupported[:-1] + ' [@1].'),
+                                [measured], response(json.dumps(check))])
+        runner = ReviewRunner(Agent(transport, Workspace(self.root)))
+        default_step = runner._step
+        def step(phase):
+            if phase == 'plan':
+                runner._record({'title': 'Time for exterior strips', 'authors': ['A. Author'],
+                                'year': 2020, 'doi': '10.5555/strip'}, 'crossref', 'fixture')
+                runner.state.update(phase='outline', selected=[1], outline_read_done=True,
+                                    scope={'topic': 'Observation timing', 'title': 'Observation timing',
+                                           'facets': [], 'terms': [], 'keywords': []},
+                                    cards={'1': {'mode': 'primary_passages', 'passages': {'L4-L4': fact}}},
+                                    screened={'1': {'relevance': 3, 'kind': 'core', 'facet': -1}})
+            else:
+                default_step(phase)
+        with patch.object(runner, '_step', side_effect=step):
+            result = runner.start('Survey observation timing.', max_tokens=40000)
+        self.assertEqual(result['status'], 'partial', result.get('stop_reason'))
+        self.assertTrue(runner.state['outline_fallback'])
+        self.assertTrue(runner.state['checks']['0']['ran'])
+        markdown = (runner.directory / 'review.md').read_text()
+        self.assertIn(fact[:-1] + ' [1].', markdown)
+        self.assertNotIn(unsupported[:-1], markdown)
+        self.assertEqual([row['status'] for row in runner.state['calls']],
+                         ['generation_failed', 'complete', 'generation_failed', 'complete'])
+        self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (64, 460))
+
+    def test_outage_stops_before_a_fourth_unknown_charge_and_resume_keeps_the_failed_units(self):
+        outage = DeepInfraGenerationError('The model stream stopped.', category='interrupted')
+        transport = FakeClient([[outage]] * 3 + [response(str(n)) for n in range(4)])
+        runner = ReviewRunner(Agent(transport, Workspace(self.root)))
+        def step(phase):
+            if phase == 'plan':
+                runner.state.update(phase='read', scope={'topic': 'Observation', 'keywords': []})
+                return
+            pending = [n for n in range(4) if str(n) not in runner.state['cards']]
+            pending.sort(key=lambda n: runner._failure_count('card', n))
+            if not pending:
+                runner.state['phase'] = 'done'
+                return
+            n = pending[0]
+            def read():
+                result = runner._ask('card', 'Read work ' + str(n), cap=1000, units=[n])
+                runner.state['cards'][str(n)] = {'summary': result['text']}
+            runner._wave([(n, read)], lambda _, reason: self.fail(reason))
+        with patch.object(runner, '_step', side_effect=step):
+            paused = runner.start('Review the records.', max_tokens=6000)
+            self.assertEqual(paused['status'], 'paused')
+            self.assertEqual(paused['worker_error']['code'], 'provider_generation_failed')
+            self.assertEqual(runner.state['tokens_charged'], 3000)
+            self.assertFalse(runner.state['card_failed'])
+            self.assertEqual([call['units'] for call in runner.state['calls']], [[0], [1], [2]])
+            resumed = runner.resume(paused['id'])
+        self.assertEqual(resumed['id'], paused['id'])
+        self.assertEqual(runner.state['phase'], 'done')
+        self.assertEqual([call['units'] for call in runner.state['calls'][3:]], [[3], [0], [1], [2]])
+        self.assertEqual(runner.state['tokens_charged'], 3080)
+
+    def test_critical_scope_is_retried_only_once_and_an_account_error_stops_immediately(self):
+        for category, tries in [('server_error', 2), ('quota', 1)]:
+            with self.subTest(category=category):
+                error = DeepInfraGenerationError('The provider stopped generation.', category=category)
+                runner = ReviewRunner(Agent(FakeClient([[error]] * 2), Workspace(self.root)))
+                result = runner.start('Review observation times.', max_tokens=20000)
+                self.assertEqual(result['status'], 'paused')
+                self.assertEqual(result['worker_error']['details'], {'phase': 'scope', 'provider_category': category})
+                self.assertEqual(len(runner.state['calls']), tries)
+                self.assertIsNone(runner.state['scope'])
+
+    def test_local_allowance_refusal_and_measured_cancellation_pause_without_an_automatic_retry(self):
+        cases = [(TesterAllowanceInsufficient(), 0, 0), (MeasuredStreamCancellation({'eval_count': 18, 'prompt_eval_count': 70}), 18, 70)]
+        for error, output, incoming in cases:
+            with self.subTest(error=type(error).__name__):
+                client = FakeClient([[error]])
+                budget = BudgetClient(client, max_tokens=20000, max_input_tokens=20000)
+                runner = ReviewRunner(Agent(budget, Workspace(self.root)))
+                result = runner.start('Survey controllability.', max_tokens=20000)
+                self.assertEqual(result['status'], 'paused')
+                self.assertEqual(len(client.requests), 1)
+                self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (output, incoming))
+                self.assertFalse(runner.state.get('generation_failures'))
+                if isinstance(error, TesterAllowanceInsufficient):
+                    self.assertEqual(result['worker_error']['scope'], 'account')
+                    self.assertEqual(runner.state['calls'][0]['rejection_reason'], 'tester_allowance_insufficient')
+                    self.assertEqual((budget.snapshot()['tokens'], budget.snapshot()['input_tokens']), (0, 0))
+
     def test_provider_rejection_pauses_the_wave_and_resume_keeps_completed_work(self):
         rejection = DeepInfraRateLimit('The model is temporarily at capacity.', completion_rejected=True)
         transport = FakeClient([response('first'), [rejection], response('second'), response('third')])

@@ -21,14 +21,14 @@ import uuid
 
 from .reporting import usage_footer
 from .agent import AgentError
-from .backends import TokenBudgetError
+from .backends import MeasuredStreamCancellation, TokenBudgetError
 from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
-from .deepinfra import DeepInfraRateLimit, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference
 from . import images
 
 
@@ -510,7 +510,7 @@ class ResearchRunner:
                 self._finish()
             except KeyboardInterrupt:
                 self.state['status'] = 'paused'
-                self.state['stop_reason'] = 'Interrupted; evidence, partial streams and budget reservations were retained.'
+                self.state['stop_reason'] = 'Interrupted. Evidence and available stream records were saved for Resume.'
             except WorkerInputError as exc:
                 self.state['status'], self.state['stop_reason'] = 'error', str(exc)
                 self.state['worker_error'] = exc.as_dict()
@@ -530,10 +530,19 @@ class ResearchRunner:
                 if isinstance(exc, AssistantBudget):
                     # The Assistant's shared budget or this worker's deadline: resumable with more.
                     self.state['status'], self.state['stop_reason'] = 'budget_exhausted', str(exc)
+                elif isinstance(exc, TesterAllowanceInsufficient):
+                    self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
+                    self.state['worker_error'] = {'code': 'tester_allowance_insufficient', 'message': str(exc),
+                                                  'retryable': True, 'scope': 'account', 'details': {'phase': self.state['phase']}}
                 elif isinstance(exc, DeepInfraRateLimit):
                     self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
                     self.state['worker_error'] = {'code': 'provider_rate_limit', 'message': str(exc), 'retryable': True,
                                                   'scope': 'transport', 'details': {'phase': self.state['phase']}}
+                elif isinstance(exc, DeepInfraGenerationError):
+                    self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
+                    self.state['worker_error'] = {'code': 'provider_generation_failed', 'message': str(exc),
+                                                  'retryable': True, 'scope': 'transport', 'details': {
+                                                      'phase': self.state['phase'], 'provider_category': exc.category}}
                 else:
                     # The model server stopped answering (tunnel, restart, time-out): the work is saved.
                     self.state['status'] = 'paused'
@@ -1024,6 +1033,19 @@ class ResearchRunner:
             self.state['tokens_charged'] -= call['reserved_tokens']
             self.state['input_tokens_charged'] -= call['reserved_input_tokens']
             call.update(status='rejected', charged_tokens=0, charged_input_tokens=0)
+            if isinstance(exc, TesterAllowanceInsufficient):
+                call['rejection_reason'] = 'tester_allowance_insufficient'
+        elif isinstance(exc, MeasuredStreamCancellation) or (
+                isinstance(exc, DeepInfraGenerationError) and not isinstance(exc, DeepInfraRateLimit)):
+            if isinstance(exc, DeepInfraGenerationError):
+                call.update(status='generation_failed', provider_category=exc.category,
+                            stream_progress=dict(exc.stream_progress))
+            if exc.stats:
+                call['stats'] = dict(exc.stats)
+                used, incoming = exc.stats['eval_count'], exc.stats['prompt_eval_count']
+                call.update(charged_tokens=used, charged_input_tokens=incoming)
+                self.state['tokens_charged'] += used - call['reserved_tokens']
+                self.state['input_tokens_charged'] += incoming - call['reserved_input_tokens']
         elif isinstance(exc, TokenBudgetError):
             call.update(status='budget_violation', stats=exc.stats)
             self.state['tokens_charged'] += exc.stats['eval_count'] - call['reserved_tokens']
@@ -1035,7 +1057,7 @@ class ResearchRunner:
         """A transport guard at our deadline is a budget stop; an earlier outage still propagates."""
         try:
             yield from stream
-        except (TokenBudgetError, DeepInfraRateLimit):
+        except (TokenBudgetError, DeepInfraGenerationError):
             raise
         except AgentError:
             if self._elapsed() < self.state['settings']['max_seconds']:

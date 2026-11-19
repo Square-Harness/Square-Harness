@@ -484,14 +484,14 @@ def chat_create(h, body):
     chat = store.create_chat(hub.root, body.get('mode'), (not hub.args.no_think) if think is None else think,
                              hub.args.model, hub.online(online), project_id=body.get('project_id'))
     hub.bus.publish('chat_saved', chat=chat['id'])
-    return _chat_view(chat)
+    return _chat_view(chat, hub.root)
 
 
 @route('GET', '/api/chats/' + UUID)
 def chat(h, body, id):
     hub = h.server.hub
     saved = store.load_chat(hub.root, id)
-    result = _chat_view(saved)
+    result = _chat_view(saved, hub.root)
     result['math_macros'] = store.chat_macros(hub.root, saved, hub.base)
     snapshot = hub.snapshot()
     if any(task['target'] == id and task['state'] == 'queued' for task in snapshot['queue']):
@@ -501,6 +501,9 @@ def chat(h, body, id):
         tasks = [entry['task'] for entry in snapshot['tasks']] + snapshot['queue']
         if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
             result['assistant_status'] = 'paused'
+            tokens = result['assistant_budget']['tokens']
+            tokens['uncertain'] += tokens['reserved']
+            tokens['reserved'] = 0
     return result
 
 
@@ -514,12 +517,13 @@ def chat_title(h, body, id):
     hub = h.server.hub
     saved = store.set_chat_title(hub.root, id, _text(body, 'title', 120))
     hub.bus.publish('chat_saved', chat=id)
-    return _chat_view(saved)
+    return _chat_view(saved, hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/project')
 def chat_project(h, body, id):
-    return _chat_view(h.server.hub.set_chat_project(id, body.get('project_id')))
+    hub = h.server.hub
+    return _chat_view(hub.set_chat_project(id, body.get('project_id')), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/settings')
@@ -530,7 +534,7 @@ def chat_settings(h, body, id):
         raise ValueError('Give think or online as true or false')
     if online:
         hub.online(True)  # refuses when launched with --offline
-    return _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online))
+    return _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/messages')
@@ -818,12 +822,12 @@ def chat_review(h, body, id):
     return {'task': h.server.hub.review(id, queue=bool(_flag(body, 'queue'))).summary()}
 
 
-def _chat_view(chat):
+def _chat_view(chat, root):
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
             'project_id': chat.get('project_id'), 'title_source': chat.get('title_source'),
             'images': store.chat_images(chat),
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
-            'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat)}
+            'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat, root)}
 
 
 # -- HTTP plumbing ------------------------------------------------------------

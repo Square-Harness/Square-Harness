@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request
 
 from .agent import AgentError
-from .backends import OpenAICompatible
+from .backends import MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, ToolCallError
 from .model_limits import MODEL_OUTPUT_TOKENS
 
 
@@ -35,13 +35,28 @@ MAX_OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
 class DeepInfraGenerationError(AgentError):
     """Provider failure that must reach the workflow before it dispatches more work."""
 
+    def __init__(self, message, *, category='unknown', stream_progress=None, stats=None):
+        super().__init__(message)
+        self.category = category
+        self.retryable = category in {'interrupted', 'service_unavailable', 'server_error'}
+        self.stream_progress = dict(stream_progress or {})
+        self.stats = dict(stats or {})
+
 
 class DeepInfraRateLimit(DeepInfraGenerationError):
     """A definitive HTTP 429 response, before the transport opened a success stream."""
 
     def __init__(self, hint, *, completion_rejected):
-        super().__init__('DeepInfra HTTP 429: ' + hint)
+        super().__init__('DeepInfra HTTP 429: ' + hint, category='rate_limit')
         self.completion_rejected = completion_rejected
+
+
+class TesterAllowanceInsufficient(DeepInfraGenerationError):
+    """The local tester ledger declined admission before a completion request was sent."""
+
+    def __init__(self):
+        super().__init__('Tester allowance is insufficient for this call; wait for active calls or contact the administrator',
+                         category='quota')
 
 
 class _RejectedRetryCancelled(KeyboardInterrupt):
@@ -53,7 +68,45 @@ class _RejectedRetryCancelled(KeyboardInterrupt):
 
 
 def rejected_before_inference(exc):
-    return isinstance(exc, (DeepInfraRateLimit, _RejectedRetryCancelled)) and exc.completion_rejected
+    return isinstance(exc, TesterAllowanceInsufficient) or (
+        isinstance(exc, (DeepInfraRateLimit, _RejectedRetryCancelled)) and exc.completion_rejected)
+
+
+def _provider_signals(value):
+    fields = []
+    if isinstance(value, dict):
+        for item in (value, value.get('error'), value.get('detail')):
+            if isinstance(item, dict):
+                fields.extend(item.get(k) for k in ('code', 'type', 'status', 'status_code', 'message', 'detail'))
+            else:
+                fields.append(item)
+    else:
+        fields.append(value)
+    return {' '.join(str(field).lower().replace('_', ' ').replace('-', ' ').split()).strip('.')
+            for field in fields if isinstance(field, (str, int))}
+
+
+def _credit_limit(signals):
+    return any(word in s for s in signals for word in ('credit', 'balance', 'spending', 'billing', 'payment',
+                                                         'insufficient quota', 'quota exhausted'))
+
+
+def _generation_failure(value):
+    """Map known provider signals to public diagnostics. Raw fields may reflect private inputs."""
+    signals = _provider_signals(value)
+    if _credit_limit(signals) or '402' in signals:
+        return 'quota', 'DeepInfra reported a credit or spending limit during generation.'
+    if signals & {'401', '403', 'authentication error', 'permission denied', 'unauthorized', 'forbidden'}:
+        return 'auth', 'DeepInfra reported an authorization error during generation.'
+    if signals & {'429', 'rate limit error', 'rate limit exceeded', 'rate limited', 'too many requests'}:
+        return 'rate_limit', 'DeepInfra reported a rate limit during generation.'
+    if signals & {'400', '404', '422', 'invalid request', 'invalid request error', 'context length exceeded'}:
+        return 'invalid_request', 'DeepInfra reported an invalid model request during generation.'
+    if signals & {'502', '503', '504', 'model busy', 'model overloaded', 'server overloaded', 'service unavailable', 'gateway timeout'}:
+        return 'service_unavailable', 'DeepInfra reported a temporary service failure during generation.'
+    if signals & {'500', 'internal server error', 'server error', 'internal error', 'inference error', 'generation error'}:
+        return 'server_error', 'DeepInfra reported an internal model error during generation.'
+    return 'unknown', 'DeepInfra reported an unspecified error during generation.'
 
 
 def _rate_limit(exc, deadline):
@@ -89,18 +142,8 @@ def _rate_limit(exc, deadline):
             value = json.loads(body)
         except (ValueError, UnicodeError, RecursionError):
             value = body.decode('ascii', errors='replace')
-    fields = []
-    if isinstance(value, dict):
-        for item in (value, value.get('error'), value.get('detail')):
-            if isinstance(item, dict):
-                fields.extend(item.get(k) for k in ('code', 'type', 'message', 'detail'))
-            else:
-                fields.append(item)
-    else:
-        fields.append(value)
-    signals = {' '.join(s.lower().replace('_', ' ').replace('-', ' ').split()).strip('.')
-               for s in fields if isinstance(s, str)}
-    if any(word in s for s in signals for word in ('credit', 'balance', 'spending', 'billing', 'payment', 'insufficient quota', 'quota exhausted')):
+    signals = _provider_signals(value)
+    if _credit_limit(signals):
         return 'Check the provider credit balance and spending limit.', False
     if signals & {'rate limited', 'rate limit exceeded', 'rate limit error', 'too many requests',
                   'concurrency limit exceeded', 'too many concurrent requests'}:
@@ -156,6 +199,7 @@ def read_api_key():
 class DeepInfra(OpenAICompatible):
     """Authenticated stateless Chat Completions; no redirects or proxy env."""
     profile = 'deepinfra'
+    require_terminal_usage = True
 
     def __init__(self, host=BASE_URL, timeout=600):
         parsed = urlsplit(host.rstrip('/'))
@@ -390,6 +434,19 @@ class DeepInfra(OpenAICompatible):
         self.input_token_count_method = 'DeepInfra UTF-8 byte and framing estimate (tokenizer unavailable)' + image_method
         return self._bytes(data['messages']) + framing + extra_allowance + image_allowance
 
+    def _stream_failure(self, exc, category, progress, final_usage):
+        if str(exc) in {'Proof preparation exceeded its short text allowance', 'Proof preparation exceeded its short tool-argument allowance'}:
+            return exc
+        if isinstance(exc, ProviderStreamError):
+            category, message = _generation_failure(exc.detail)
+        elif category == 'interrupted':
+            message = 'The DeepInfra connection ended before the completion stream finished.'
+        elif str(exc) == 'Model stream ended without finish reason and token usage':
+            message = str(exc)
+        else:
+            message = 'DeepInfra returned an invalid completion stream.'
+        return DeepInfraGenerationError(message, category=category, stream_progress=progress, stats=final_usage)
+
     def stream(self, payload):
         quota = None
         if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
@@ -414,7 +471,7 @@ class DeepInfra(OpenAICompatible):
                                 event = {**event, 'accounting_warning':
                                     'Tester allowance settlement failed; the full reservation was retained.'}
                         yield event
-        except (AgentError, _RejectedRetryCancelled) as exc:
+        except (AgentError, MeasuredStreamCancellation, _RejectedRetryCancelled) as exc:
             if rejected_before_inference(exc):
                 if quota is not None:
                     try:
@@ -425,12 +482,11 @@ class DeepInfra(OpenAICompatible):
                         if isinstance(exc, DeepInfraRateLimit):
                             exc.args = (str(exc) + ' The tester allowance could not be updated.',)
                 raise
-            if str(exc).startswith('Model stream error:'):
-                raise DeepInfraGenerationError('DeepInfra reported an error during generation.') from None
-            if str(exc).startswith('Model stream ended '):
-                raise DeepInfraGenerationError(str(exc)) from None
-            if str(exc).startswith('Malformed or interrupted model stream:'):
-                raise DeepInfraGenerationError('DeepInfra returned a malformed or interrupted model stream.') from None
+            if quota is not None and isinstance(exc, (ToolCallError, DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
+                try:
+                    quota.settle(reservation, exc.stats['prompt_eval_count'], exc.stats['eval_count'])
+                except AgentError:
+                    exc.args = (str(exc) + ' Tester allowance settlement failed; the full reservation was retained.',)
             redacted = self._redact(exc)
             if redacted != str(exc):
                 raise AgentError(redacted) from None

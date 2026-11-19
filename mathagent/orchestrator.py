@@ -21,9 +21,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
-from .backends import ToolCallError
+from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
-from .deepinfra import rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
 from .refcheck import standalone_reference_request
@@ -724,6 +724,13 @@ class Orchestrator:
             if rejected_before_inference(exc):
                 self.state['last_call'].update(status='rejected', charged_tokens=0, charged_input_tokens=0)
                 self.state['main_calls'] -= 1
+            elif isinstance(exc, DeepInfraGenerationError):
+                self.state['last_call'].update(status='interrupted', provider_error=exc.category,
+                                               stream_progress=exc.stream_progress)
+                self.agent.last_stats = dict(exc.stats)
+            elif isinstance(exc, MeasuredStreamCancellation):
+                self.state['last_call']['status'] = 'interrupted'
+                self.agent.last_stats = dict(exc.stats)
             raise
         finally:
             self.state['last_call']['partial'] = copy.deepcopy(assistant)

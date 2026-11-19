@@ -7,7 +7,8 @@ import re
 
 from .agent import AgentError
 from .call_policy import CallContextError
-from .deepinfra import rejected_before_inference
+from .backends import MeasuredStreamCancellation
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
@@ -298,6 +299,8 @@ class ModeOrchestrator(Orchestrator):
                 prep['tokens'] -= payload['options']['num_predict']
                 prep['input_tokens'] -= self.state['next_allocation']['input_tokens']
                 raise
+            if isinstance(exc, (DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
+                prep['tokens'] += exc.stats['eval_count'] - payload['options']['num_predict']
             if isinstance(exc, KeyboardInterrupt):
                 raise
             return self._handoff(str(exc))

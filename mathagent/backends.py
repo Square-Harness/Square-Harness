@@ -56,6 +56,20 @@ class ToolCallError(AgentError):
         super().__init__(message)
 
 
+class ProviderStreamError(AgentError):
+    def __init__(self, detail):
+        self.detail = detail
+        super().__init__('The model provider reported an error during generation.')
+
+
+class MeasuredStreamCancellation(KeyboardInterrupt):
+    """Cancellation still prevents delivery of a result, even if its provider usage arrived."""
+
+    def __init__(self, stats):
+        super().__init__()
+        self.stats = dict(stats)
+
+
 def create_client(backend, host, timeout=600):
     if backend == 'ollama':
         client = Ollama(host, timeout=timeout)
@@ -283,16 +297,22 @@ class OpenAICompatible:
         data = self._payload(payload)
         yield from self._stream(data, output_char_limit=payload.get('_output_char_limit'))
 
+    def _stream_failure(self, exc, category, progress, final_usage):
+        return exc
+
     def _stream(self, data, output_char_limit=None):
         calls, finish, usage = {}, None, None
+        accepted, final_usage = False, None
+        progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
         generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = time.monotonic() + self.timeout
         try:
             with self.request('/chat/completions', data) as response:
+                accepted = True
                 for raw in self._sse(response, deadline):
                     if raw.strip() == '[DONE]':
-                        if finish is None or usage is None:
+                        if finish is None or usage is None or (getattr(self, 'require_terminal_usage', False) and final_usage is None):
                             raise AgentError('Model stream ended without finish reason and token usage')
                         complete_calls, ids = [], set()
                         raw_calls = [calls[index] for index in sorted(calls)]
@@ -323,11 +343,11 @@ class OpenAICompatible:
                     chunk = json.loads(raw)
                     if not isinstance(chunk, dict):
                         raise AgentError('Malformed SSE model event')
-                    if 'error' in chunk:
-                        raise AgentError(f'Model stream error: {chunk["error"]}')
-                    if chunk.get('usage') is not None:
-                        current = chunk['usage']
+                    current = chunk.get('usage')
+                    if current is not None:
                         if not isinstance(current, dict) or any(type(current.get(key)) is not int or current[key] < 0 for key in ('prompt_tokens', 'completion_tokens')):
+                            if 'error' in chunk:
+                                raise ProviderStreamError(chunk['error'])
                             raise AgentError('Missing or invalid token usage in model stream')
                         if current['completion_tokens'] > requested_cap:
                             raise TokenBudgetError({'eval_count': current['completion_tokens'],
@@ -337,6 +357,17 @@ class OpenAICompatible:
                     choices = chunk.get('choices', [])
                     if not isinstance(choices, list) or len(choices) > 1:
                         raise AgentError('Expected one streamed completion choice')
+                    reported = ({'eval_count': current['completion_tokens'], 'prompt_eval_count': current['prompt_tokens']}
+                                if current is not None else None)
+                    if 'error' in chunk:
+                        # An error can accompany the provider's empty-choice usage
+                        # trailer or an explicit terminal choice. A prior partial
+                        # count cannot settle a later failure.
+                        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+                        terminal_choice = choice.get('index', 0) == 0 and choice.get('finish_reason') in ('stop', 'length', 'tool_calls', 'error')
+                        if reported and (chunk.get('choices') == [] or terminal_choice):
+                            final_usage = reported
+                        raise ProviderStreamError(chunk['error'])
                     for choice in choices:
                         if not isinstance(choice, dict) or choice.get('index', 0) != 0:
                             raise AgentError('Unexpected streamed completion index')
@@ -344,6 +375,7 @@ class OpenAICompatible:
                         if not isinstance(delta, dict):
                             raise AgentError('Malformed streamed completion delta')
                         if finish is not None and delta:
+                            final_usage = None
                             raise AgentError('Model output received after finish reason')
                         message = {}
                         for target, value in [('content', delta.get('content')),
@@ -351,6 +383,7 @@ class OpenAICompatible:
                             if value is not None and not isinstance(value, str):
                                 raise AgentError('Non-text content in model stream')
                             if value:
+                                progress[target + '_chars'] += len(value)
                                 generated_chars += len(value)
                                 if output_char_limit is not None and generated_chars > output_char_limit:
                                     raise AgentError('Proof preparation exceeded its short text allowance')
@@ -372,6 +405,7 @@ class OpenAICompatible:
                                     if not isinstance(value, str):
                                         raise AgentError('Malformed streamed tool call fragment')
                                     if key != 'id':
+                                        progress['tool_chars'] += len(value)
                                         generated_chars += len(value)
                                         if output_char_limit is not None and generated_chars > output_char_limit:
                                             raise AgentError('Proof preparation exceeded its short tool-argument allowance')
@@ -380,12 +414,31 @@ class OpenAICompatible:
                             yield {'message': message, 'done': False}
                         reason = choice.get('finish_reason')
                         if reason is not None:
+                            if reason == 'error':
+                                if reported:
+                                    final_usage = reported
+                                raise ProviderStreamError(choice.get('error') or {})
                             if finish is not None or reason not in {'stop', 'length', 'tool_calls'}:
                                 raise AgentError(f'Unsupported or repeated model finish reason: {reason}')
                             finish = reason
-            raise AgentError('Model stream ended before [DONE]; partial output is incomplete')
+                    if finish is not None and reported:
+                        final_usage = reported
+            error = AgentError('Model stream ended before [DONE]; partial output is incomplete')
+        except (ToolCallError, TokenBudgetError):
+            raise
+        except KeyboardInterrupt:
+            if final_usage:
+                raise MeasuredStreamCancellation(final_usage) from None
+            raise
+        except AgentError as exc:
+            if not accepted:
+                raise
+            raise self._stream_failure(exc, 'protocol', progress, final_usage) from None
         except (ValueError, UnicodeError, TypeError, KeyError, AttributeError, OSError, HTTPException) as exc:
-            raise AgentError(f'Malformed or interrupted model stream: {exc}') from exc
+            error = AgentError(f'Malformed or interrupted model stream: {exc}')
+            category = 'interrupted' if isinstance(exc, (OSError, HTTPException)) else 'protocol'
+            raise self._stream_failure(error, category, progress, final_usage) from None
+        raise self._stream_failure(error, 'interrupted', progress, final_usage)
 
 
 class LlamaCpp(OpenAICompatible):

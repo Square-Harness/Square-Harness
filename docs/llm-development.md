@@ -301,6 +301,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   a theorem treated elsewhere. Removed material and reasons remain in the
   checkpoint. When no prose survives, verified result numbers can still support
   a short primary-source reading guide.
+  An accepted model stream can fail before returning its first token. The worker
+  records the phase, affected units, sanitized provider category and any known
+  usage. Recovery happens at the unit boundary under a fresh reservation.
+  Completed sibling results stay in the checkpoint. An interrupted screening
+  export lists registry-confirmed candidates separately from a finished selection.
+  Older paused screening downloads can be reconstructed from their saved records.
 - **Source transport.** A transient network failure is retried once after 1.5 s
   and a 5xx once after 2 s; a 429 is retried twice (2 s, then 6 s, or a
   Retry-After up to 15 s). A provider is marked `down` after two failed requests

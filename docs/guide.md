@@ -622,7 +622,9 @@ The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper av
 
 Sections are checked against the available evidence. A checker can correct a local error or withhold a passage it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
 
-Low, Medium and High normally allow 6, 12 and 20 minutes respectively, with up to 55, 110 and 165 public source requests. All three check the written sections. Higher effort broadens discovery and allows more source passages. Explicit time and request limits are respected. Reading lists created by the earlier mode remain available to read.
+When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
+
+Low, Medium and High allow up to 55, 110 and 165 public source requests. Local-model profiles normally allow 6, 12 and 20 minutes respectively. Hosted DS4 uses the workflow time allowances described above. All three efforts check the written sections. Higher effort broadens discovery and allows more source passages. Explicit time and request limits apply.
 
 ### Quick review, Review, Detailed review, Explain
 

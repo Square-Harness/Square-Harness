@@ -26,10 +26,10 @@ from ..agent import Agent, AgentError, Ollama
 from ..assistant_budget import AssistantBudget, BudgetClient
 from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources, references_previous_pdf
-from ..deepinfra import DeepInfraRateLimit
+from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
 from ..format_request import markdown_conversion_request
 from ..source_tasks import automatic_source_action, source_overview
-from ..backends import LlamaCpp, OpenAICompatible, create_client
+from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
 from ..model_limits import MODEL_OUTPUT_TOKENS, input_limit as model_input_limit, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget
 from ..ledger import ProofStore
@@ -224,22 +224,35 @@ class Interruptible:
         try:
             events = super().stream(payload)
             for event in events:
+                terminal_usage = None
+                if (self.cancel.is_set() or state['expired']) and event.get('done') and all(
+                        type(event.get(k)) is int and event[k] >= 0 for k in ('eval_count', 'prompt_eval_count')):
+                    terminal_usage = {k: event[k] for k in ('eval_count', 'prompt_eval_count')}
                 if self.cancel.is_set():
+                    if terminal_usage:
+                        raise MeasuredStreamCancellation(terminal_usage)
                     raise KeyboardInterrupt
                 if state['expired']:
+                    if terminal_usage and getattr(self, 'profile', None) == 'deepinfra':
+                        raise DeepInfraGenerationError('The model stream reached its time limit.', category='deadline', stats=terminal_usage)
                     raise AgentError('Model stream exceeded its elapsed-time guard')
                 yield event
             if self.cancel.is_set():
                 raise KeyboardInterrupt
             if state['expired']:
                 raise AgentError('Model stream exceeded its elapsed-time guard')
-        except DeepInfraRateLimit:
+        except (DeepInfraRateLimit, TesterAllowanceInsufficient):
             # Preserve confirmed zero usage even when a stop/deadline races the HTTP status.
             raise
-        except Exception:
+        except Exception as exc:
             if self.cancel.is_set():
+                if isinstance(exc, DeepInfraGenerationError) and exc.stats:
+                    raise MeasuredStreamCancellation(exc.stats) from None
                 raise KeyboardInterrupt from None
             if state['expired']:
+                if isinstance(exc, DeepInfraGenerationError) and exc.stats:
+                    raise DeepInfraGenerationError('The model stream reached its time limit.', category='deadline',
+                                                   stream_progress=exc.stream_progress, stats=exc.stats) from None
                 raise AgentError('Model stream exceeded its elapsed-time guard') from None
             raise
         finally:
@@ -1445,7 +1458,7 @@ class Hub:
             adaptive_seconds = max(effort.level(mode, 'high', self.args)['minutes'] * 60 for mode in JOB_MODES) + 300
             initial_seconds = configured['max_seconds'] or (PROOF_CALL_SECONDS if is_ds4(main) else 900)
             adaptive = {'max_seconds': max(initial_seconds, adaptive_seconds)} if configured['max_seconds'] is None else {}
-            budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
+            budget = BudgetClient(main.client, state=store.assistant_accounting(root, previous) if previous else None,
                                   max_tokens=configured['max_tokens'],
                                   max_input_tokens=configured['max_input_tokens'],
                                   max_seconds=initial_seconds,
@@ -2090,6 +2103,9 @@ def _review_outcome(state):
         return f'Review written: {count} reference{"" if count == 1 else "s"}.'
     if state.get('status') == 'partial':
         return one_line(state.get('stop_reason') or 'Review written with gaps. See the saved report.', 300)
+    if state.get('status') == 'paused' and state.get('phase') == 'screen':
+        return (f'Screened {len(state["screened"])} of {len(state["pool"])} candidate records. '
+                'Resume continues from the saved screening results.')
     return None
 
 

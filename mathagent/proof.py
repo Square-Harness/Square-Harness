@@ -17,9 +17,10 @@ import time
 from . import __version__, images
 from .jsonutil import loads_single
 from .agent import AgentError
-from .backends import TokenBudgetError
+from .backends import MeasuredStreamCancellation, TokenBudgetError
 from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_input
-from .deepinfra import rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .reporting import output_summary
 from .ledger import LedgerError, ProofStore
 from .model_limits import is_ds4
 from .proof_policy import (
@@ -388,6 +389,8 @@ class ProofRunner:
             except KeyboardInterrupt as exc:
                 self._stop('paused', 'Interrupted while waiting to retry a provider rejection. Resume retries the saved step.'
                            if rejected_before_inference(exc) else
+                           'Interrupted by the user. The provider reported final token usage. Resume continues from saved work.'
+                           if isinstance(exc, MeasuredStreamCancellation) else
                            'Interrupted by the user. Completed calls will not be repeated; unfinished calls retain their full token reservation and resume may issue a new call from saved work.')
             except AgentError as exc:
                 if self._elapsed() >= self.state['settings']['max_seconds']:
@@ -732,7 +735,8 @@ class ProofRunner:
             if result['done']:
                 self._charge_completed(call, result)
             else:
-                call.update(status='interrupted', charged_tokens=call['reserved_tokens'])
+                call['status'] = 'interrupted'
+                call.setdefault('charged_tokens', call['reserved_tokens'])
                 pending = self.state.get('pending')
                 role = call['role']
                 if pending and call['key'] == self._call_key(role):
@@ -872,6 +876,11 @@ class ProofRunner:
             elif call['status'] == 'running':
                 call['status'] = 'interrupted'
                 call['charged_tokens'] = cap
+                if isinstance(exc, DeepInfraGenerationError):
+                    call.update(provider_error=exc.category, stream_progress=exc.stream_progress)
+                if isinstance(exc, (DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
+                    call.update(stats=exc.stats, charged_tokens=exc.stats['eval_count'])
+                    self.state['tokens_charged'] += call['charged_tokens'] - cap
             raise
         finally:
             if stream is not None and hasattr(stream, 'close'):
@@ -899,12 +908,10 @@ class ProofRunner:
         selected = self._get_candidate(selected_id) if selected_id else None
         initial = self._get_candidate(initial_id) if initial_id else None
         answer = self._candidate_text(selected) if selected else ''
-        token_limit = self.state['settings']['max_tokens']
-        token_usage = str(self.state['tokens_charged']) + (f' / {token_limit}' if token_limit is not None else ' (no cumulative limit)')
         lines = ['# Square Harness proof run', '', f'Status: **{self.state["status"]}**', '',
                  self.state.get('stop_reason', ''), '',
                  'Model reviews are fallible assessments, not formal proof certificates.', '',
-                 f'Generated tokens charged: {token_usage}.',
+                 output_summary(self.state),
                  f'Elapsed active seconds charged: {self.state["seconds_used"]:.1f}.', '']
         for migration in self.state.get('policy_migrations', []):
             lines += [f'Proof policy upgraded on resume: {migration["from_policy"]} → {migration["to_policy"]}. '

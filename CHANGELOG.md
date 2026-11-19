@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Continue a literature review when one model stream fails during screening,
+  reading, writing or checking. Keep completed work, retry eligible units within
+  the saved budget and pause on a sustained outage. Before selection finishes,
+  Markdown and BibTeX downloads can include provisional registry references.
+  The token meter distinguishes reported output from calls with unknown usage.
 - Use the DS4 384,000-token generation ceiling for substantive calls throughout
   the Assistant and specialist modes. All three efforts fund complete calls,
   including the single pass in Low Proof. Explicit limits and existing job

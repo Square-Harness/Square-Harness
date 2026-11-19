@@ -26,6 +26,7 @@ from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _rea
 from ..format_request import markdown_conversion_request
 from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
+from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, source_suffix
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
@@ -222,15 +223,6 @@ def _budget(used, limit):
     return {'used': used, 'limit': limit}
 
 
-def _output_budget(state, running):
-    """Keep in-flight capacity separate from settled cumulative output."""
-    charged = state['tokens_charged']
-    reserved = min(charged, sum(call.get('reserved_tokens', 0) for call in state['calls']
-                                if running and call.get('status') == 'running'
-                                and 'charged_tokens' not in call))
-    return {**_budget(charged - reserved, state['settings']['max_tokens']), 'reserved': reserved}
-
-
 def _live_context(call):
     allocation = (call or {}).get('allocation') or (call or {}).get('context') or {}
     if 'input_tokens' in allocation and 'context_tokens' in allocation:
@@ -283,7 +275,7 @@ def list_proofs(root, active=None):
                      'created_at': state['created_at'], 'running': running,
                      'sources': [s['path'] for s in state['sources']],
                      'rounds': _budget(state['rounds_started'], state['settings']['max_rounds']),
-                     'tokens': _output_budget(state, running),
+                     'tokens': job_output_budget(state, running),
                      'reviews': _review_counts(state)})
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
@@ -303,7 +295,7 @@ def proof_detail(root, proof_id, active=None):
         'settings': settings,
         'images': s.get('images', []),
         'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
-                   'tokens': _output_budget(s, running),
+                   'tokens': job_output_budget(s, running),
                    'seconds': _working_time(s, running),
                    **_live_context(call)},
         'progress': s.get('progress'),
@@ -393,12 +385,13 @@ def list_research(root, active=None):
                      'updated_at': state['updated_at'], 'created_at': state['created_at'],
                      'running': running, 'sources': [s['path'] for s in state['sources']],
                      'variant': state.get('variant'), 'verdict': state.get('verdict') or None,
-                     'tokens': _output_budget(state, running)})
+                     'tokens': job_output_budget(state, running)})
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
 
 def research_detail(root, job_id, active=None):
     s = research_state(root, job_id)
+    ReviewRunner.refresh_screening_preview(s)
     directory = _job_directory(root, job_id)
     running = s['status'] == 'running' and (job_id == active or locked(directory))
     call = next((c for c in reversed(s['calls']) if c.get('status') == 'running'), None) if running else None
@@ -413,7 +406,7 @@ def research_detail(root, job_id, active=None):
         # A literature review's interface meter is "Model calls": the calls made, with no round limit.
         'budget': {'rounds': (_budget(len(s.get('calls') or []), None) if s.get('pipeline') == ReviewRunner.PIPELINE
                               else _budget(s['rounds_started'], settings['max_rounds'])),
-                   'tokens': _output_budget(s, running),
+                   'tokens': job_output_budget(s, running),
                    'input_tokens': _budget(s['input_tokens_charged'], settings['max_input_tokens']),
                    'seconds': _working_time(s, running),
                    'requests': _budget(usage.get('requests', 0), settings['max_requests']),
@@ -517,6 +510,10 @@ def research_review_file(root, job_id, output):
     if state['kind'] != 'literature' or not path.exists():
         raise NotFound('This literature review has no ' + ('review' if output == 'review' else 'BibTeX') + ' file yet')
     _regular(path)
+    corrected_bib = ReviewRunner.refresh_screening_preview(state)
+    if corrected_bib is not None:
+        text = state['draft'] if output == 'review' else corrected_bib
+        return _review_name(state) + path.suffix, text.encode('utf-8')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as stream:
         data = stream.read(UPLOAD_BYTES + 1)
@@ -594,6 +591,7 @@ def review_evidence(root, job_id):
     state = research_state(root, job_id)
     if state.get('pipeline') != ReviewRunner.PIPELINE:
         raise NotFound('This job has no literature-review evidence')
+    ReviewRunner.refresh_screening_preview(state)
     pool = {r['n']: r for r in state.get('pool') or []}
     references = {r['n']: r for r in state.get('references') or []}
     items = []
@@ -1003,12 +1001,58 @@ def save_assistant(root, chat_id, state):
     _save_chat(root, chat)
 
 
-def assistant_view(chat):
+def assistant_accounting(root, state, transcript=()):
+    """Recover only independently identifiable usage for turns saved before measured totals existed."""
+    budget = dict(state.get('budget') or {})
+    if not budget or 'measured_tokens' in budget:
+        return budget
+    rejected = {entry['main_call']: reported_output(entry) for entry in state.get('rejected_tool_calls', [])}
+    last = 0 if state.get('main_calls') in rejected else reported_output(state.get('last_call') or {})
+    # A completed turn also committed its accepted main calls to the chat.
+    # The last-call checkpoint may duplicate one of them. Rejected tool batches
+    # have separate audit entries and were excluded from the committed turn.
+    committed = 0
+    if state.get('status') == 'complete':
+        for item in reversed(transcript):
+            if item.get('role') == 'user':
+                if item.get('content') != state.get('query'):
+                    committed = 0
+                break
+            if item.get('role') == 'assistant' and item.get('mode') == 'free' and not item.get('discarded'):
+                committed += reported_output(item)
+        else:
+            committed = 0
+    # The typed routing call is separately budgeted, outside the main-call ordinal.
+    measured = max(last, committed) + sum(rejected.values()) + reported_output(state.get('proof_routing') or {})
+    seen = set()
+    for child in state.get('children', []) if root is not None else []:
+        job = child.get('job_id')
+        if not isinstance(job, str) or not _ID.fullmatch(job) or job in seen:
+            continue
+        seen.add(job)
+        try:
+            if (child.get('action') or {}).get('mode') == 'prove':
+                directory = _proof_directory(root, job)
+                journal = _cached(directory / 'state.json', lambda: ProofStore.load(root, job).state)
+            else:
+                directory = _job_directory(root, job)
+                journal = _cached(directory / 'state.json', lambda: research_state(root, job, verify=False))
+        except (OSError, ValueError, KeyError, NotFound):
+            continue
+        # A later turn can reopen a job. Do not attribute another turn's calls
+        # to this one when the job no longer matches its saved worker charge.
+        if journal['tokens_charged'] == (child.get('usage') or {}).get('tokens'):
+            measured += sum(map(reported_output, journal['calls']))
+    budget['measured_tokens'] = min(measured, max(0, budget.get('tokens', 0) - budget.get('reserved_tokens', 0)))
+    return budget
+
+
+def assistant_view(chat, root=None):
     state = chat.get('assistant_state') or {}
     status = state.get('status')
     status = 'paused' if status in ('interrupted', 'incomplete') else status
-    budget = state.get('budget') or {}
-    reserved = budget.get('reserved_tokens', 0)
+    budget = assistant_accounting(root, state, chat.get('transcript', ()))
+    reserved = budget.get('reserved_tokens', 0) if status == 'running' else 0
     progress = state.get('progress') if status != 'set_aside' else None
     if not isinstance(progress, dict) and status != 'set_aside':
         children = state.get('children') or []
@@ -1032,8 +1076,8 @@ def assistant_view(chat):
     return {'assistant_status': status,
             'assistant_resumable': status in ('paused', 'running'),
             'assistant_progress': progress,
-            'assistant_budget': {'tokens': {**_budget(max(0, budget.get('tokens', 0) - reserved), budget.get('max_tokens')),
-                                             'reserved': reserved},
+            'assistant_budget': {'tokens': output_totals(budget.get('tokens', 0), budget.get('max_tokens'),
+                                                         reserved, budget.get('measured_tokens', 0)),
                                  'input_tokens': _budget(budget.get('input_tokens', 0), budget.get('max_input_tokens')),
                                  'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900)),
                                  **context}}

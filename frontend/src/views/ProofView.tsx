@@ -311,7 +311,8 @@ function CallList({ calls, onArtifact }: { calls: Call[]; onArtifact: (name: str
               <td>{ROLES[call.role]?.name || call.role}</td>
               <td>{call.status === 'truncated' ? 'hit its output limit' : call.status}</td>
               <td className="num" title={call.context?.method}>{call.context ? count(call.context.input_tokens) : ''}</td>
-              <td className="num">{count(call.charged_tokens ?? call.reserved_tokens)}{call.charged_tokens === undefined ? ' reserved' : ''}</td>
+              <td className="num">{call.stats?.eval_count !== undefined ? count(call.stats.eval_count)
+                : call.status === 'rejected' ? '0' : `${count(call.charged_tokens ?? call.reserved_tokens)} held`}</td>
               <td className="num">{call.seconds !== undefined ? duration(call.seconds) : ''}</td>
               <td className="call-links">
                 <button type="button" className="link-btn" onClick={() => onArtifact(call.request)}>Request</button>
