@@ -4844,6 +4844,8 @@ class ReviewRunner(ResearchRunner):
                                         'cited': not parts or k <= discussed})
             if len(order) == discussed and any(row['read'] != 'full_text' for row in s['references']):
                 out += ['', legend, '']
+        if out[-1]:
+            out.append('')  # the note is a paragraph of its own, not the end of the last reference
         out += [self._about(len(order)), '']
         return '\n'.join(out).strip() + '\n'
 
