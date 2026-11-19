@@ -590,9 +590,13 @@ Use it for "a reference for the tubular neighbourhood theorem", or "is Theorem
 
 How it works:
 
-1. The model recalls up to three candidate books or papers.
+1. The model recalls up to three candidate books or papers and, for a book, the
+   chapter or section where it remembers the result. The answer gives that place
+   as memory ("By memory, I think it is in Chapter 3, Section 3.5"), never as
+   checked.
 2. The code checks that they exist in bibliographic indexes (zbMATH, Crossref,
-   arXiv). If none fits, it searches by topic.
+   arXiv), and the model picks the records that fit the question. Only when none
+   fits does the code search once more by topic.
 3. For a precise request (an exact theorem, page or edition, or checking a given
    citation), the code opens open-access papers that cite the work and reads how
    they cite it.
@@ -617,8 +621,9 @@ Each reference gets an evidence level:
 - **inconclusive**: no record was found while a source was failing, so the
   absence proves nothing.
 
-The code lowers any level that the passages read do not support. A theorem
-number the model remembers stays labelled as a guess. Needs online search.
+The code lowers any level that the passages read do not support. A chapter,
+section or theorem number the model remembers stays labelled as memory. Needs
+online search.
 
 ### Literature review
 

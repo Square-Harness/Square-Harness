@@ -241,6 +241,13 @@ def _lines(value):
     return (a, b) if 1 <= a <= b <= a + 40 else None
 
 
+# The answer labels a remembered place itself; a note the model adds to the place
+# ("(by memory, unverified)") would be printed twice.
+_MEMORY_NOTE = re.compile(r'\s*[(\[][^()\[\]]*\b(?:by memory|from memory|de m[ée]moire|unverified|unconfirmed|'
+                          r'not (?:verified|checked)|non v[ée]rifi\w*|[àa] confirmer|to be confirmed|guess\w*)'
+                          r'[^()\[\]]*[)\]]', re.I)
+
+
 def _clean_candidate(value, source):
     if not isinstance(value, dict):
         return None
@@ -257,7 +264,8 @@ def _clean_candidate(value, source):
         return None  # nothing to look up: a guess needs an author
     year = re.search(r'(?:1[5-9]|20)\d\d', str(value.get('year') or ''))
     return {'authors': authors, 'title': title, 'year': year.group() if year else '',
-            'locator': str(value.get('locator') or '').strip()[:120], 'why': str(value.get('why') or '')[:400],
+            'locator': _MEMORY_NOTE.sub('', str(value.get('locator') or '')).strip(' ,;')[:120],
+            'why': str(value.get('why') or '')[:400],
             'source_type': value.get('source_type') if value.get('source_type') in ('book', 'article') else 'unknown',
             'source': source, 'rounds': 0, 'notes': [], 'claimed': None, 'verdict': None}
 
@@ -415,8 +423,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         standard = self.state['check'].get('lookup') == 'standard'
         if standard:
             instruction += ('\nThis is a standard-reference lookup: suggest up to three relevant sources, with alternatives if recall is uncertain. '
-                            'A chapter is useful but optional; give a place only if you recall it, '
-                            'otherwise leave locator empty. The precise place need not be verified. '
+                            'For a book, give in locator the chapter or section you think treats the result, even if '
+                            'unsure; it is shown as your memory and need not be verified. '
                             'Keep the statement and keywords brief. '
                             'If the question explicitly requests the latest/newest publication by a named author, '
                             'copy that author\'s full name from the question into author and return candidates: []: '
@@ -1032,7 +1040,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                    'reasons': (c.get('verdict') or {}).get('reasons', [])} for c in self.state['candidates'] if c not in self.chosen()]
         value = {'status': self.state['status'], 'check_id': self.state['id'], 'references': refs, 'not_confirmed': others,
                  'stop_reason': self.state.get('stop_reason', ''),
-                 'note': 'Only read/cited references have a checked place; say "located" ones are unconfirmed when you cite them.'}
+                 'note': 'Only read/cited references have a checked place. Any other place is unchecked memory: '
+                         'give it as "by memory, I think it is in …", never as a checked place.'}
         if self.state['check'].get('lookup') == 'standard':
             value.update(lookup='standard', disposition='answer_with_qualification',
                          precise_place_confirmed=bool(self._confirmed()))

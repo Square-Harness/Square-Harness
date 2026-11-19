@@ -122,7 +122,8 @@ cite a checked reference, keep its evidence level; located means the exact place
 was not confirmed. This includes chapter numbers and titles, section and theorem
 numbers, and pages: a guessed locator never becomes confirmed just because the
 book's bibliographic record was found. At level located, give the work's verified
-metadata and label every guessed place unconfirmed, or omit the guessed place.
+metadata and any remembered chapter or section as memory ("by memory, I think it is
+in Chapter 3"), never as a checked place.
 For two independent objectives, return both delegate calls in the same response:
 the controller runs them concurrently within a shared budget. Do not delegate
 dependent objectives together; inspect the first result before choosing the next.
@@ -612,9 +613,9 @@ class Orchestrator:
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER LOOKUP COMPLETION: one standard-reference lookup is finished. '
                 "Answer the original request briefly using only the worker's supported works and known "
-                'bibliographic details. If a chapter or other place was recalled, you may give it '
-                'as a possible unconfirmed lead. Say explicitly that you did not verify the precise '
-                'reference. A bibliographic record confirms the work exists, not that the theorem is in a '
+                'bibliographic details. If a chapter or section was recalled, give it as memory '
+                '("by memory, I think it is in Chapter 3"), never as a checked place. '
+                'A bibliographic record confirms the work exists, not that the theorem is in a '
                 'particular chapter. Do not search again or promise another lookup.'})
         if self._reviews():
             payload['messages'].append({'role': 'user', 'content':

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Literature check: a standard reference now comes with the chapter or section
+  the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
+  Section 3.5"), never as checked. The Assistant gives remembered places the same
+  way. The check searches by topic a second time only when no record fits: the
+  extra round it used to run did not change the answer in live checks and often
+  doubled the wait.
 - Make literature reviews several times faster and broader. The source check
   judges every sentence: one call names the source sentences that carry it, a
   second compares it with those passages, and a grounded correction replaces a

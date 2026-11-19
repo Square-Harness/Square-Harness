@@ -293,6 +293,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - **Reference retrieval.** Keep all eligible fetched records within the existing
   request and character budgets; early results must not hide later providers.
   Retries archive rejected records and preserve their R identifiers on rediscovery.
+  A standard lookup makes one relevance selection; it searches by topic again
+  only when that selection picks no record, never because of an `unresolved`
+  note or a partial coverage. A recalled chapter or section stays with its work,
+  including another record of it (`_recalled_place`, with the recalled edition
+  year), and `_compose_standard` prints it as memory, never as a checked place.
   Latest-author requests use arXiv author queries with `sort=newest`, a separate
   expiring cache and ordering by original submission date, rather than model recall.
   Source errors carry typed codes and do not masquerade as model outages.
