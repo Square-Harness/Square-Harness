@@ -194,9 +194,9 @@ Answer with one JSON object {"verdicts": [...]} holding exactly one verdict per 
   constants, attribution to a work) is stated by the evidence of the work it cites. Equivalent notation and a short
   valid consequence of a quoted statement count as supported. A unit without a citation can be supported by the work
   whose evidence states it.
-  "follows": the unit states no result of its own: it only introduces, connects or contrasts other units of this
-  section, or fixes the notation and the standard definitions they use. List those units in depends_on (at least
-  one; a sentence that announces or prepares later units lists them).
+  "follows": the unit states no result of its own: it only introduces, summarises, connects or contrasts other
+  units of this section, or fixes the notation and the standard definitions they use, and claims no more than they
+  do. List those units in depends_on (at least one; a sentence that announces or prepares later units lists them).
   "unsupported": the supplied evidence does not state it, even if it is plausible.
   "wrong": the evidence contradicts the unit, or the unit attributes a statement to the wrong work.
 - support: for "supported", one entry per work cited in the unit: {"source": 7, "condition": "E12", "conclusion": "E13"}.
@@ -4240,6 +4240,13 @@ class ReviewRunner(ResearchRunner):
                              r'alors|donc|on (?:a|obtient)|il en résulte)\b|(?:⇒|⟹|\\implies\b)|'
                              r';\s*(?!(?:let|suppose|assume|fix)\b)\w', MATH_SPANS.sub(' ', body), re.I)
 
+    @classmethod
+    def _setting_only(cls, unit):
+        """A sentence that only states hypotheses ("For the nonlinear system, let A be ..."): the setting
+        of the statement that follows it, with no outcome of its own."""
+        body = re.sub(r'^[^,.;:$\\]{0,60},\s*', '', TOKENS.sub('', unit).strip())  # a leading "In this case, "
+        return cls._hypothesis_only(body)
+
     def _support(self, raw, units, works, *, source_spans=None):
         """Admit a mathematical unit only with source text for its scope AND its conclusion.
         Author abstracts may support an existential result even when its proof was unavailable."""
@@ -4276,8 +4283,9 @@ class ReviewRunner(ResearchRunner):
                 if j is None or not 1 <= j <= len(units):
                     continue
                 unit = units[j - 1]
-                if self._hypothesis_only(conclusion) and not self._notation(TOKENS.sub('', unit)):
-                    continue
+                if (self._hypothesis_only(conclusion) and not self._notation(TOKENS.sub('', unit))
+                        and not self._setting_only(unit)):
+                    continue  # hypotheses alone carry a setting sentence, never an outcome
                 if all(_strict_endpoint_wording(unit, p) != unit for p in matches if not MISSING_FORMULA.search(p)):
                     continue  # The draft asserted necessity at a boundary its source did not decide.
                 # An existence statement cannot certify that a value was calculated.
@@ -4398,7 +4406,7 @@ class ReviewRunner(ResearchRunner):
             pieces[k] = self._independent_sentences(pieces[k], quotes) if support is None else ''
         if support is not None:
             follows = follows or {}
-            visible, claims, connecting, needs = set(), set(), set(), {}
+            visible, claims, connecting, settings, needs = set(), set(), set(), set(), {}
             lost_premise = False
 
             def withhold(j):
@@ -4453,6 +4461,8 @@ class ReviewRunner(ResearchRunner):
                     visible.add(j)
                     claims.add(j)
                     needs[j] = dependencies
+                    if self._setting_only(body) and all(self._hypothesis_only(a['conclusion']) for a in anchors.values()):
+                        settings.add(j)
                     lost_premise = False  # only the sentence right after a removed one can have lost its premise
                     if not citations:
                         cite = ' [@' + '; @'.join(map(str, anchors)) + ']'
@@ -4470,14 +4480,18 @@ class ReviewRunner(ResearchRunner):
                 lost_premise = True
             # A connecting sentence was admitted before the sentences it announces were judged, and a claim
             # before a connecting sentence it depends on was settled: withdraw until nothing changes.
+            # A sentence of hypotheses stands only with the statement it prepares: the next sentence of its paragraph.
+            prepares = lambda j: (j < len(units) and j + 1 in visible
+                                  and not any('\n\n' in sep for sep in pieces[units[j - 1] + 1:units[j]]))
             changed = True
             while changed:
                 changed = False
-                for j in sorted(visible):
-                    if j in connecting and not linked(j) or j in claims and not needs[j] <= visible:
+                for j in sorted(visible, reverse=True):
+                    if (j in connecting and not linked(j) or j in claims and not needs[j] <= visible
+                            or j in settings and not prepares(j)):
                         withhold(j)
                         changed = True
-            if not claims & visible:
+            if not (claims - settings) & visible:
                 return '', len(withheld)
         section = self.state['outline']['sections'][i]
         allowed = self._cited_works(original, self._section_works(i))
