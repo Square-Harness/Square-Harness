@@ -271,15 +271,14 @@ class LiteratureReviewTests(unittest.TestCase):
         spans = {}
         packet = self.runner._pack([1, 2], sources_only=True, source_spans=spans)
         self.assertNotIn('Unsupported paraphrase', packet)
-        ids = {value: int(key[1:]) for key, value in spans.items()}
-        condition_id = ids[1, 'L4-L6', condition]
-        valid = {'units': [1], 'source': 1, 'condition_id': condition_id,
-                 'conclusion_id': ids[1, 'L4-L6', conclusion]}
+        ids = {value: key for key, value in spans.items()}
+        valid = {'units': [1], 'source': 1, 'condition': ids[1, 'L4-L6', condition],
+                 'conclusion': ids[1, 'L4-L6', conclusion]}
         support = self.runner._support([valid], [conclusion], [1, 2], source_spans=spans)
         self.assertEqual(support[1][1], {'condition': condition, 'conclusion': conclusion})
         for address in [(2, 'L3-L3', conclusion), (1, 'L20-L21', other), (1, 'L4-L6', condition)]:
             with self.subTest(address=address):
-                wrong = {**valid, 'conclusion_id': ids[address]}
+                wrong = {**valid, 'conclusion': ids[address]}
                 self.assertFalse(self.runner._support([wrong], [conclusion], [1, 2], source_spans=spans))
 
     def test_specialized_cutoff_uses_the_exact_affine_bound(self):

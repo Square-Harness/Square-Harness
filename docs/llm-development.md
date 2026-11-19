@@ -303,13 +303,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   reserve capacity for writing and checking, and deterministic assembly can
   deliver partial results after the deadline. Missing checks, marked cuts and
   unresolved source findings are recorded in the job. The discovery shares begin
-  when scoping finishes. Registry screening, first drafts and the two referee
-  calls of the source check (`check`, `verify`) run without hidden model
-  reasoning and with finite output allowances: each referee writes what the
+  when scoping finishes. Every call has a finite output allowance, the size the
+  controller gave its answer, on a hosted model too (`_wave_cap`): a failed call
+  keeps its reservation, and a 384,000-token one would exhaust a Low review in
+  three failures. Registry screening, drafts and the two referee calls of the
+  source check (`check`, `verify`) run without hidden model reasoning: each
+  referee writes what the
   source states before its verdict, in the answer itself. Measured on DS4, hidden
   reasoning at effort `high` or `low` re-decided the same sentences until the
   allowance was spent, often without an answer, for the same verdicts. Only the
-  recovery of a lost core result reasons, at DS4 effort `low`. A response that
+  referee of a recovered core result (`recover-check`) reasons, at DS4 effort
+  `low`. A response that
   spends its entire allowance thinking can retry in answer-only mode within the
   remaining job budget. A missing core result can be reconstructed from a
   primary passage and independently checked before export. Assembly prints once
@@ -323,12 +327,14 @@ Version 1.1.0. The source of truth for the machine-readable version is
   An accepted model stream can fail before returning its first token. The worker
   records the phase, affected units, sanitized provider category and any known
   usage. Recovery happens at the unit boundary under a fresh reservation.
-  A hosted stream that carries no model output `START_SECONDS` after it was
-  accepted is closed by the transport (the payload key `_start_seconds`,
-  `backends._started`, `DeepInfraSilentStart`) instead of waiting minutes for
-  the provider's own error. The review submits it again at once, at most
-  `RESUBMISSIONS` times, with a changed first character; only the last silent
-  start counts as a failed unit. Other runners do not set the key.
+  On a personal key (no tester ledger), a hosted stream that carries no model
+  output `START_SECONDS` after it was accepted is closed by the transport (the
+  payload key `_start_seconds`, `backends._started`, `DeepInfraSilentStart`)
+  instead of waiting minutes for the provider's own error. The review submits
+  it again at once, at most `RESUBMISSIONS` times, with a changed first
+  character. Every silent start keeps its reservation and counts towards the
+  pause after three failed streams in a row; only the last one counts as a
+  failed unit. Other runners do not set the key.
   Completed sibling results stay in the checkpoint. An interrupted screening
   export lists registry-confirmed candidates separately from a finished selection.
   Older paused screening downloads can be reconstructed from their saved records.
@@ -813,15 +819,25 @@ The source check judges every sentence, in waves over all sections (`_check`).
 `_locate` asks for one verdict per sentence, in groups of at most `CHECK_UNITS`
 under a schema whose length is the number of sentences asked: supported, with
 the labels of the source sentences that carry it; follows, with the sentences
-it connects; unsupported; or wrong. A sentence left without an answer is asked
-once more. `_verify` then compares each located sentence with the whole passages
+it connects; unsupported; or wrong. Labels are the printed ones (`"E12"`). A
+sentence left without an answer, or supported with labels that do not resolve
+to every work it cites, is asked once more. `_verify` then compares each located sentence with the whole passages
 its labels come from. `_settle_check` applies the verdicts through
 `_apply_findings`. The controller resolves every label against the cited work,
 applies a referee's drop-in correction only when its quote occurs exactly once,
-keeps a connecting sentence only with all the sentences it connects, and
-withholds the rest. Sentences that received no verdict or no comparison make
-the check incomplete. Verdicts collected so far stay in `state['check_work']`
-across waves and Resume. Planned works that the checked text does not cite are
+keeps a connecting sentence only with the earlier sentences it refers to and
+at least one anchored sentence it connects, withdraws a claim whose
+dependencies went (to a fixed point), and withholds the rest. A correction from
+the comparison passes `_support` again before it is applied. A work cited without evidence of its own counts as anchored
+when the anchoring passage of another work cited in the same sentence names one
+of its authors (`_named_works`): a paper's own account of earlier results can
+carry a sentence that cites both. Sentences that received no verdict or no comparison make
+the check incomplete. A section is settled as soon as nothing is left to ask
+for it, and `_settle_judged` settles the judged sections when time or budget
+stops the check. Verdicts collected so far stay in `state['check_work']` across
+waves and Resume. The evidence of a check or writing prompt is sized to the
+model context (`_evidence_room`); a referee request that still does not fit
+leaves its sentences unchecked instead of ending the job. Planned works that the checked text does not cite are
 listed as further reading (`FURTHER_READING`), with no claim about them.
 `_issues` and the review's coverage note record incomplete checks and cuts.
 Keep the old call roles renderable for saved jobs.
@@ -982,7 +998,13 @@ message after twelve seconds without model output. A terminal transient
 provider error before any reasoning, text or tool output permits one new
 attempt within the original deadline. Each new attempt goes through budget
 admission again. Keep unknown usage reserved. A heartbeat alone never starts
-another request. Literature Review can defer an independent unit to another
+another request, with one exception: Literature Review on a personal key. There
+a stream that carries no model output `START_SECONDS` (25 s) after it was
+accepted is closed and submitted again, at most `RESUBMISSIONS` times per
+attempt; each submission passes budget admission and a closed stream keeps its
+reservation. Under the tester ledger (`SH_DEEPINFRA_QUOTA_FILE`) the exception
+is off, because each closed stream would hold a full-context reservation that
+is never settled. Literature Review can defer an independent unit to another
 wave. That unit still uses its saved phase and job allowances.
 
 Credentials are read from `DEEPINFRA_API_KEY_FILE` (owned private regular file)

@@ -8,10 +8,11 @@
   deletion. Screen up to 100, 250 and 500 candidates, first those linked by
   citation to a paper on the topic, and keep places for recent results. The
   plan situates related works in a sentence each. Planned works that the
-  checked text does not discuss appear as Further reading. A DeepInfra request
-  accepted without an answer is submitted again after 25 seconds. arXiv and the
-  other registries are asked at the same time. The job report shows the time
-  of each step.
+  checked text does not discuss appear as Further reading. On a personal
+  DeepInfra key, a request accepted without an answer is submitted again after
+  25 seconds. Every call of a review reserves only the size of its answer.
+  arXiv and the other registries are asked at the same time. The job report
+  shows the time of each step.
 - Compile mathematical Markdown with the standard symbols and named operators
   supplied by LaTeX and AMS. Write-Up also renders UTF-8 in code listings
   while keeping the downloadable script and figures intact.

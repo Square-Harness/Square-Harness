@@ -29,7 +29,7 @@ from .call_policy import allocate_call, CallContextError
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
-from .model_limits import is_ds4, substantive_output, workflow_budget
+from .model_limits import is_ds4, workflow_budget
 from .deepinfra import (DeepInfraGenerationError, DeepInfraRateLimit, DeepInfraSilentStart, generation_window,
                         rejected_before_inference)
 from .assistant_budget import AssistantBudget
@@ -45,21 +45,21 @@ PHASES = ('scope', 'search', 'screen', 'expand', 'rank', 'read', 'outline', 'wri
 WORK_KINDS = ('survey', 'foundational', 'result', 'technique', 'neighbouring', 'background', 'off_topic')
 RESULT_KINDS = ('theorem', 'proposition', 'corollary', 'conjecture', 'heuristic', 'open_question', 'claim')
 SECTION_KINDS = ('history', 'results', 'techniques', 'neighbouring', 'frontier', 'open_problems', 'other')
-FINDINGS = ('unsupported', 'misattributed', 'wrong_detail', 'missing_work', 'structure')
 VERDICTS = ('supported', 'follows', 'unsupported', 'wrong')
 # Sentences one locating call judges, and located sentences one comparison call verifies.
 CHECK_UNITS, VERIFY_UNITS = 10, 8
 # Characters of labelled source text a section check may consult (twice the writer's allowance).
 WRITE_EVIDENCE, CHECK_EVIDENCE = 24000, 40000
-# A hosted stream that the provider accepted but that stays silent this long is submitted again.
+# A hosted stream that the provider accepted but that stays silent this long is submitted again
+# (on a personal key; never under the tester ledger).
 START_SECONDS, RESUBMISSIONS = 25, 2
 LOOP = re.compile(r'(.{3,40}?)\1{12,}', re.S)
 # Fractions of the working time at which a phase stops admitting new work.
 SHARES = {'search': .16, 'screen': .35, 'expand': .31, 'read': .60, 'outline': .67, 'write': .84, 'check': .99}
 SELECTION_PHASES = ('search', 'screen', 'expand', 'rank')
-# Breadth is an upper bound. A narrow question can finish with fewer papers and sections.
 # Planned works a review may list as further reading when its checked text does not cite them.
 FURTHER_READING = 12
+# Breadth is an upper bound. A narrow question can finish with fewer papers and sections.
 LEVELS = (
     dict(queries=3, newest=2, per_source=12, anchors=2, citing=40, rounds=1, leads=6, cocited=6, full_text=3,
          cards=12, sections=3, keep=(10, 3, 1), check=True, screen=100, requests=55, seconds=360),
@@ -916,7 +916,7 @@ class ReviewRunner(ResearchRunner):
         self._keys, self._indexed, self._title_words, self._counts = {}, 0, {}, {}
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
         self._generation_failure_streak, self._provider_pause = 0, None
-        self._side, self._repository_down = None, False
+        self._side, self._lane, self._repository_down, self._unavailable = None, [], False, False
 
     @property
     def emit(self):
@@ -1162,13 +1162,14 @@ class ReviewRunner(ResearchRunner):
                 time.sleep(3)
 
     def _started(self, role, prompt, **options):
-        """Submit again, at once, a call the hosted provider accepted and never began to answer. Only the
-        last silent start counts as a failed stream; the earlier ones keep their reservation."""
+        """Submit again, at once, a call the hosted provider accepted and never began to answer. Every silent
+        start keeps its reservation and counts towards the pause after three failed streams in a row; only
+        the last one counts as a failed unit."""
         for resubmission in range(RESUBMISSIONS + 1):
             try:
                 return self._ask_once(role, prompt, resubmission=resubmission, **options)
             except DeepInfraSilentStart:
-                if resubmission == RESUBMISSIONS:
+                if resubmission == RESUBMISSIONS or self._provider_pause:
                     raise
                 self._cancel()
                 self._warn(f'A {role} call was accepted by the provider but did not start; it was submitted again.')
@@ -1194,7 +1195,9 @@ class ReviewRunner(ResearchRunner):
             if payload['think'] and hosted and getattr(self.agent.client, 'reasoning_effort', 'high') != 'none':
                 # A short, bounded prompt: a higher effort spends the allowance without a better answer.
                 payload['reasoning_effort'] = 'low'
-            if hosted:
+            if hosted and not os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
+                # Not under the tester ledger: there a stream is never replaced on keep-alives alone,
+                # because every closed stream would keep a full-context reservation.
                 payload['_start_seconds'] = START_SECONDS
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
@@ -1286,15 +1289,15 @@ class ReviewRunner(ResearchRunner):
             with self._mutex:
                 self._interrupt_call(call, exc)
                 call['seconds'] = round(time.monotonic() - began, 1)
-                if isinstance(exc, DeepInfraSilentStart) and resubmission < RESUBMISSIONS:
-                    pass  # submitted again by _started; not yet a failed unit or a sign of an outage
-                elif isinstance(exc, DeepInfraGenerationError):
+                if isinstance(exc, DeepInfraGenerationError):
                     if isinstance(exc, DeepInfraRateLimit) or exc.category in ('quota', 'auth', 'rate_limit'):
                         self._provider_pause = exc
                     else:
-                        failures = self.state.setdefault('generation_failures', {}).setdefault(role, {})
-                        for key in units or (role,):
-                            failures[str(key)] = failures.get(str(key), 0) + 1
+                        if not (isinstance(exc, DeepInfraSilentStart) and resubmission < RESUBMISSIONS):
+                            # A silent start that _started submits again is not yet a failed unit.
+                            failures = self.state.setdefault('generation_failures', {}).setdefault(role, {})
+                            for key in units or (role,):
+                                failures[str(key)] = failures.get(str(key), 0) + 1
                         self._generation_failure_streak += 1
                         if self._generation_failure_streak >= 3:
                             self._provider_pause = exc
@@ -1385,13 +1388,11 @@ class ReviewRunner(ResearchRunner):
             raise (interrupts or provider_errors or errors)[0]
 
     def _wave_cap(self, cap, jobs):
-        """A per-call allowance that lets every call of a wave reserve its output together."""
+        """A per-call allowance that lets every call of a wave reserve its output together. It is the
+        size the controller gave the answer, on a hosted model too: no call of a review reasons at
+        length, and a failed call keeps its reservation."""
         parallel = max(1, min(jobs, self.concurrency))
-        return int(min(substantive_output(self.agent, cap), self._tokens_left() / parallel))
-
-    def _call_cap(self, cap, jobs):
-        """A finite allowance for a call whose answer the controller sized itself (also on a hosted model)."""
-        return int(min(cap, self._tokens_left() / max(1, min(jobs, self.concurrency))))
+        return int(min(cap, self._tokens_left() / parallel))
 
     # -- sources -----------------------------------------------------------------------------
 
@@ -1401,23 +1402,28 @@ class ReviewRunner(ResearchRunner):
             log.append({'source': source, 'query': query[:200], 'results': count, 'error': error,
                         **({} if seconds is None else {'seconds': round(seconds, 1)})})
 
-    def _fetch(self, source, query, call, kind=list):
-        """A source answer, or an empty one: failures are logged as coverage gaps; only the deadline stops the job."""
+    def _fetch(self, source, query, call, kind=list, seconds=None):
+        """A source answer, or an empty one: failures are logged as coverage gaps; only the deadline stops the job.
+        `seconds` is the time of a request that the helper lane already made."""
         self._cancel()
         began = time.monotonic()
+        took = lambda: time.monotonic() - began if seconds is None else seconds
+        self._unavailable = False
         try:
             result = call()
         except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
-            self._log(source, query, error=message[:200], seconds=time.monotonic() - began)
+            # The source itself did not answer (time-out, 5xx, 429): not an empty answer, a refusal or a full allowance.
+            self._unavailable = isinstance(exc, LiteratureError) and exc.code == 'source_unavailable'
+            self._log(source, query, error=message[:200], seconds=took())
             if (isinstance(exc, LiteratureError) and exc.code == 'workflow_budget'
                     or self._elapsed() >= self.state['settings']['max_seconds']):
                 raise ResearchBudget(message) from exc
             return kind()
         if not isinstance(result, kind) or kind is list and any(not isinstance(x, (dict, str)) for x in result):
-            self._log(source, query, error='Malformed provider result')
+            self._log(source, query, error='Malformed provider result', seconds=took())
             return kind()
-        self._log(source, query, len(result) if kind is list else 1, seconds=time.monotonic() - began)
+        self._log(source, query, len(result) if kind is list else 1, seconds=took())
         return result
 
     # arXiv spaces its requests (three seconds for its registry, more for a paper's text), and each
@@ -1437,23 +1443,35 @@ class ReviewRunner(ResearchRunner):
             # One request, with the retries and the redirect or fallback its transport may need.
             side.reset_budget(max_requests=min(4, max(0, lit.max_requests - lit.stats['requests'])), max_chars=lit.max_chars)
             side.deadline = lit.deadline
+            began = time.monotonic()
             try:
-                return call(side), None, side.stats['requests']
+                return call(side), None, side.stats['requests'], time.monotonic() - began
             except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
-                return None, exc, side.stats['requests']
-        return lane.submit(run)
+                return None, exc, side.stats['requests'], time.monotonic() - began
+        future = lane.submit(run)
+        self._lane.append(future)
+        return future
 
     def _counted(self, future):
-        """Wait for a helper request and charge its HTTP requests to the job. Returns (result, error)."""
+        """Wait for a helper request and charge its HTTP requests to the job. Returns (result, error, seconds)."""
         self._cancel()
-        result, error, used = future.result()
+        result, error, used, seconds = future.result()
+        self._lane.remove(future)
         self.literature.stats['requests'] += used
-        return result, error
+        return result, error, seconds
 
     def _joined(self, future, source, query, kind=list):
         """The result of a helper request, logged like _fetch logs this thread's requests."""
-        result, error = self._counted(future)
-        return self._fetch(source, query, lambda: self._raised(error) if error else result, kind)
+        result, error, seconds = self._counted(future)
+        return self._fetch(source, query, lambda: self._raised(error) if error else result, kind, seconds=seconds)
+
+    def _close_lane(self, lane):
+        """Stop the helper and charge the requests of the calls nobody waited for (a pause, a deadline)."""
+        lane.shutdown(wait=True, cancel_futures=True)
+        for future in self._lane:
+            if not future.cancelled() and not future.exception():
+                self.literature.stats['requests'] += future.result()[2]
+        self._lane = []
 
     @staticmethod
     def _raised(error):
@@ -1653,6 +1671,8 @@ class ReviewRunner(ResearchRunner):
                 self.state['outline_fallback'] = True
                 self.state['phase'] = 'write'
             else:
+                if phase == 'check':
+                    self._settle_judged()  # a time or budget stop keeps the sentences already judged
                 self.state['phase'] = 'check' if phase == 'write' else 'assemble'
 
     def _scope(self):
@@ -1884,7 +1904,7 @@ class ReviewRunner(ResearchRunner):
                         for raw in self._joined(recent, 'arxiv', query + ' (newest)'):
                             self._record(raw, 'arxiv', 'recent ' + via)
                 finally:
-                    lane.shutdown(wait=True, cancel_futures=True)
+                    self._close_lane(lane)
             self.state['search_done'] = index + 1
             self._save()
         if not self.state.get('frontier_done') and cats:
@@ -2162,14 +2182,14 @@ class ReviewRunner(ResearchRunner):
                     s['expanded'].append(n)
                     self._save()
                 for n, text in texts:
-                    self._counted(text)
+                    self._counted(text)  # a failed download is asked again, and logged, by _paper
                     lines = self._paper(n)  # from the cache when the helper succeeded
                     if lines:
                         self._trace_bibliography(n, lines)
                     traced.append(n)
                     self._save()
             finally:
-                lane.shutdown(wait=True, cancel_futures=True)
+                self._close_lane(lane)
         if level['leads']:
             attempts = sum(lead['status'] != 'open' for lead in s['leads'].values())
             self._resolve_leads(max(0, level['leads'] - attempts))
@@ -2229,11 +2249,10 @@ class ReviewRunner(ResearchRunner):
         """Match a deposit by DOI, title and author before admitting its abstract or PDF URL."""
         r = self._by_n(n)
         if self._repository_down:
-            return  # The repository index failed once in this run: each further lookup would wait for its time-out.
-        asked = len(self.state['sweep_log'])
+            return  # The repository index did not answer once in this run: each further lookup would wait for its time-out.
         hits = self._fetch('openaire', f'open repository versions of work #{n}',
                            lambda: self.literature.repository_versions(r['doi']))
-        self._repository_down = any(row['error'] for row in self.state['sweep_log'][asked:])
+        self._repository_down = self._unavailable
         authors = {_norm(_surname(a)) for a in r.get('authors', [])}
         for hit in hits:
             if (_full_title(hit.get('title')) != _full_title(r['title'])
@@ -2494,8 +2513,8 @@ class ReviewRunner(ResearchRunner):
         order = lambda numbers: sorted(numbers, key=lambda n: -scored[n])
         keep_core, keep_related, keep_classics = self._level()['keep']
         core = order([n for n in scored if s['screened'][str(n)]['relevance'] == 3])
-        # Give each facet with directly relevant papers an early primary source. Also reserve one
-        # recent primary result, which may have no citation count yet. The remaining slots follow
+        # Give each facet with directly relevant papers an early primary source, and recent primary
+        # results, which have no citation count yet, their share. The remaining slots follow
         # importance. This order is shared with full-text allocation, not just the reading list.
         priority = []
         if core:
@@ -2775,12 +2794,24 @@ class ReviewRunner(ResearchRunner):
 
     def _printed_abstract(self, n, lines):
         """Registries return the first 900 characters of an abstract, and the result is often stated after
-        them. Use the abstract printed in the verified paper when it is the longer one."""
+        them. Complete a clipped or missing abstract from the one printed in the verified paper."""
         record = self._by_n(n)
+        known = _intact_abstract(record.get('abstract'))
         printed = _abstract_lines(lines, _paper_bibliography(lines)[0])
-        text = ' '.join(' '.join(lines[printed[0] + 1:printed[1]]).split()) if printed else ''
-        if 200 <= len(text) <= 4000 and len(text) > len(_intact_abstract(record.get('abstract'))) + 40 and _intact_abstract(text):
-            record['abstract'], record['abstract_source'] = text[:2500], 'paper'
+        if not printed or known and not 890 <= len(known) <= 900:
+            return
+        kept = []
+        for line in lines[printed[0] + 1:printed[1]]:
+            if re.match(r'^\s*(?:(?:\d+|[IVX]+)\.?\s+)?(?:introduction|einleitung|contents|table des mati[eè]res)\b', line, re.I):
+                break  # a numbered or bare first heading the abstract ran into
+            kept.append(line)
+        text = ' '.join(' '.join(kept).split())
+        if len(text) > 2500:
+            text = text[:2500].rsplit('. ', 1)[0] + '.'
+        # The same abstract, not another block of the first page: it starts as the registry's copy does.
+        if (200 <= len(text) and len(text) > len(known) + 40 and _intact_abstract(text)
+                and _squash(text).startswith(_squash(known)[:60])):
+            record['abstract'], record['abstract_source'] = text, 'paper'
 
     def _record_card(self, n):
         record = self._by_n(n)
@@ -3102,10 +3133,12 @@ class ReviewRunner(ResearchRunner):
             explained.update(section['context'])
         target = _int(value.get('word_target')) or 650 * len(sections)
         length_request = str(value.get('length_request') or '').strip()
-        ceiling = 16000 if length_request and length_request in self._review_question() else 4000
+        requested = bool(length_request and length_request in self._review_question())
+        ceiling = 16000 if requested else 4000
         answers = list(dict.fromkeys(n for n in (_int(w) for w in _list(value.get('answer_works'))) if n in selected))[:4]
         return {'title': ' '.join(_math_commands(value.get('title') or self.state['scope']['title']).split())[:150],
-                'word_target': min(ceiling, max(1, target)), 'sections': sections, 'answer_works': answers}
+                'word_target': min(ceiling, max(1, target)), 'sections': sections, 'answer_works': answers,
+                'length_requested': requested}
 
     def _include_followups(self, sections):
         """Recover a few pivotal sources overlooked by the planner, using their own statements and citation links."""
@@ -3310,7 +3343,7 @@ class ReviewRunner(ResearchRunner):
         def failed(i, reason):
             s['sections'][str(i)] = {'text': '', 'failed': reason}
         def write(i):
-            target = substantive_output(self.agent, 350 + 4 * self._section_words(i))
+            target = 350 + 6 * self._section_words(i)  # prose with formulas: up to six tokens a word
             self._write_section(i, min(per_call, target))
         self._wave([(i, lambda i=i: write(i)) for i in batch], failed)
 
@@ -3324,7 +3357,8 @@ class ReviewRunner(ResearchRunner):
         cards = s['cards']
         room = 100 + sum(150 if (cards.get(str(n)) or {}).get('passages') else 80 if self._has_source_text(n) else 0
                          for n in section['works']) + 40 * sum(n not in section['works'] and n not in context for n in works)
-        words = min(self._section_words(i), room) + 25 * len(context)
+        words = (self._section_words(i) if s['outline'].get('length_requested') else
+                 min(self._section_words(i), room)) + 25 * len(context)
         table = i == self._table_section()
         other_topics = ' / '.join(sec['heading'] for j, sec in enumerate(s['outline']['sections']) if j != i)
         directions = [
@@ -3406,7 +3440,7 @@ class ReviewRunner(ResearchRunner):
             directions.append('Use prose, without a table.')
         prompt = ('\n'.join(directions) + f'\n\nREQUEST:\n{self._review_question()}\n\nSECTION: {section["heading"]}\n'
                   + f'Other sections (avoid repeating them): {other_topics}\n\n'
-                  + 'SOURCES FOR THIS SECTION:\n' + self._pack(works))
+                  + 'SOURCES FOR THIS SECTION:\n' + self._pack(works, budget=self._evidence_room(WRITE_EVIDENCE)))
         text = cut = ''
         for attempt in range(2):
             result = self._ask('write', prompt, cap=cap, temperature=.3, units=[i])
@@ -3502,31 +3536,55 @@ class ReviewRunner(ResearchRunner):
                     s['core_recovery'] = {'complete': False, 'error': str(exc)}
             s['phase'] = 'assemble'
             return
-        frames = {i: self._check_frame(i) for i in unchecked}
         if self._late('check'):
             self._cut('check', 'Time was short: some sections were not checked against their evidence.')
-            for i in unchecked:  # sentences already judged are not lost with the unfinished ones
-                if self._check_work(i)['verdicts']:
-                    self._settle_check(i, frames[i])
+            self._settle_judged()
             s['phase'] = 'assemble'
             return
-        jobs = self._locating_jobs(frames)
-        stage = 'Locating the evidence of'
+        frames = {i: self._check_frame(i) for i in unchecked}
+        locating = self._locating_jobs(frames)
+        busy = {key[1] for key, _ in locating}
+        # A section whose sentences are all located is compared while the others are still located.
+        comparing = self._verifying_jobs({i: frame for i, frame in frames.items() if i not in busy})
+        busy.update(key[1] for key, _ in comparing)
+        for i in unchecked:
+            if i not in busy:
+                self._settle_check(i, frames[i])  # nothing left to ask: this section is checked
+        jobs = locating + comparing
         if not jobs:
-            jobs, stage = self._verifying_jobs(frames), 'Comparing with their source passages'
-        if not jobs:
-            for i in unchecked:
-                self._settle_check(i, frames[i])
             return
-        self.emit('notice', f'{stage} {sum(len(key[1]) for key, _ in jobs)} sentences in {len(unchecked)} sections')
+        self.emit('notice', f'Checking {sum(len(key[2]) for key, _ in jobs)} sentences of {len(busy)} sections '
+                            'against their source passages')
 
         def failed(key, reason):
-            i, numbers = key
+            stage, i, numbers = key
             work = self._check_work(i)
-            field = 'misses' if stage.startswith('Locating') else 'unverified'
             for j in numbers:  # a second failed stream: these sentences keep no verdict
-                work[field][str(j)] = 2
+                work['misses' if stage == 'locate' else 'unverified'][str(j)] = 2
         self._wave(jobs, failed)
+
+    def _settle_judged(self):
+        """Apply the verdicts collected so far when the check stops early (time, budget): a section whose
+        sentences were judged is published as an incomplete check, not lost with the unfinished ones."""
+        s = self.state
+        for key, work in list((s.get('check_work') or {}).items()):
+            if work['verdicts'] and key not in s['checks'] and s['sections'].get(key, {}).get('text'):
+                self._settle_check(int(key), self._check_frame(int(key)))
+
+    def _evidence_room(self, limit):
+        """Characters of source text one prompt can carry: a 16k local context holds less than a hosted one."""
+        return int(min(limit, max(6000, 1.1 * self.agent.ctx)))
+
+    def _referee(self, role, prompt, **options):
+        """A referee answer, or {} when the request does not fit the model context: its sentences then
+        stay without a verdict (an incomplete check) instead of ending the job."""
+        try:
+            return self._ask(role, prompt, **options).get('value') or {}
+        except WorkerInputError as exc:
+            if exc.code != 'context_overflow':
+                raise
+            self._warn(f'A {role} request did not fit the model context; its sentences were left unchecked.')
+            return {}
 
     def _check_work(self, i):
         """Verdicts collected for a section until its check is settled (kept across waves and Resume)."""
@@ -3546,11 +3604,12 @@ class ReviewRunner(ResearchRunner):
                 paragraph += 1
         works = self._cited_works(text, self._section_works(i))
         spans = {}
-        evidence = self._pack(works, focus=text, sources_only=True, source_spans=spans, budget=CHECK_EVIDENCE)
+        room = self._evidence_room(CHECK_EVIDENCE)
+        evidence = self._pack(works, focus=text, sources_only=True, source_spans=spans, budget=room)
         rivals = self._question_evidence(text, works)
         if rivals:
             evidence += ('\n\nRELATED PAPERS FOR CHECKING CLAIMS OF OPEN STATUS (they can disprove a claim, not support it):\n'
-                         + self._pack(rivals, focus=text, sources_only=True, budget=CHECK_EVIDENCE // 4))
+                         + self._pack(rivals, focus=text, sources_only=True, budget=room // 4))
         todo = [j for j, body in enumerate(units, 1) if self._needs_judgment(body, units[j] if j < len(units) else '')]
         return {'text': text, 'units': units, 'paragraphs': paragraphs, 'works': works, 'spans': spans,
                 'evidence': evidence, 'todo': todo}
@@ -3571,8 +3630,9 @@ class ReviewRunner(ResearchRunner):
                 groups.append((i, chunk))
             again = [j for j in pending if work['misses'].get(str(j))]  # asked once without an answer: smaller groups
             groups += [(i, again[a:a + CHECK_UNITS // 2]) for a in range(0, len(again), CHECK_UNITS // 2)]
-        cap = self._call_cap(600 + 280 * CHECK_UNITS, len(groups))
-        return [((i, tuple(chunk)), lambda i=i, chunk=chunk: self._locate(i, chunk, frames[i], cap)) for i, chunk in groups]
+        cap = self._wave_cap(600 + 280 * CHECK_UNITS, len(groups))
+        return [(('locate', i, tuple(chunk)), lambda i=i, chunk=chunk: self._locate(i, chunk, frames[i], cap))
+                for i, chunk in groups]
 
     def _locate(self, i, chunk, frame, cap):
         """One verdict per sentence of the chunk, with the evidence sentences that carry it."""
@@ -3584,21 +3644,27 @@ class ReviewRunner(ResearchRunner):
                   + (f'units {chunk[0]} to {chunk[-1]}' if run and len(chunk) > 1 else
                      ('units ' if len(chunk) > 1 else 'unit ') + ', '.join(map(str, chunk)))
                   + f', in this order: {len(chunk)} verdict' + 's' * (len(chunk) > 1) + '.'
-                  + (' The labels given before for these units were not evidence of the named work: copy them '
-                     'from the square brackets in SOURCE EVIDENCE.' if any(self._check_work(i)['misses'].get(str(j)) for j in chunk) else ''))
-        result = self._ask('check', prompt, cap=cap, schema=_check_schema(len(chunk)), units=[f'{i}:{j}' for j in chunk])
+                  + (' The support given before for these units was incomplete: every work a unit cites needs '
+                     'an entry of its own, with labels copied from the square brackets in that work\'s evidence.'
+                     if any(self._check_work(i)['misses'].get(str(j)) for j in chunk) else ''))
+        answer = self._referee('check', prompt, cap=cap, schema=_check_schema(len(chunk)), units=[f'{i}:{j}' for j in chunk])
         work = self._check_work(i)
         with self._mutex:
-            for item in _items((result.get('value') or {}).get('verdicts')):
+            for item in _items(answer.get('verdicts')):
                 j = _int(item.get('unit'))
                 if j not in chunk or item.get('verdict') not in VERDICTS or str(j) in work['verdicts']:
                     continue
                 anchors = [{'source': _int(x.get('source')), **{k: str(x.get(k) or '').strip('[] ') for k in ('condition', 'conclusion')}}
                            for x in _items(item.get('support'))]
                 spans = frame['spans']
-                found = [x for x in anchors if all((spans.get(x[k]) or (None,))[0] == x['source'] for k in ('condition', 'conclusion'))]
-                if item['verdict'] == 'supported' and not found and not work['misses'].get(str(j)):
-                    continue  # labels that are not evidence of the named work: asked once more, like a missing answer
+                found = [x for x in anchors if x['source'] is not None
+                         and all(x[k] in spans and spans[x[k]][0] == x['source'] for k in ('condition', 'conclusion'))]
+                named = {x['source']: {k: spans[x[k]][2] for k in ('condition', 'conclusion')} for x in found}
+                if (item['verdict'] == 'supported' and not work['misses'].get(str(j))
+                        and not (found and self._anchored(frame['units'][j - 1], named, spans))):
+                    # Labels that are not evidence of the named work, or a cited work left without an
+                    # entry: asked once more, like a missing answer.
+                    continue
                 work['verdicts'][str(j)] = {
                     'verdict': item['verdict'], 'reading': ' '.join(str(item.get('reading') or '').split())[:260],
                     'support': found[:4],
@@ -3696,8 +3762,8 @@ class ReviewRunner(ResearchRunner):
                        if str(j) not in work['verified'] and work['unverified'].get(str(j), 0) < 2
                        and self._anchored(located['current'][j], located['support'][j], frame['spans'])]
             groups += [(i, pending[a:a + VERIFY_UNITS], located) for a in range(0, len(pending), VERIFY_UNITS)]
-        cap = self._call_cap(600 + 320 * VERIFY_UNITS, len(groups))
-        return [((i, tuple(batch)), lambda i=i, batch=batch, located=located: self._verify(i, batch, frames[i], located, cap))
+        cap = self._wave_cap(600 + 320 * VERIFY_UNITS, len(groups))
+        return [(('verify', i, tuple(batch)), lambda i=i, batch=batch, located=located: self._verify(i, batch, frames[i], located, cap))
                 for i, batch, located in groups]
 
     def _verify(self, i, batch, frame, located, cap):
@@ -3721,10 +3787,10 @@ class ReviewRunner(ResearchRunner):
         evidence = '\n\n'.join(f'[@{n}] {self._card_header(n)}\n' + '\n'.join(f'{tag}: {body}' for tag, body in blocks.items())
                                 for n, blocks in passages.items())
         prompt = VERIFY + '\nSOURCE PASSAGES\n' + evidence + '\n\nUNITS\n' + '\n\n'.join(lines)
-        result = self._ask('verify', prompt, cap=cap, schema=_verify_schema(len(batch)), units=[f'{i}:{j}' for j in batch])
+        answer = self._referee('verify', prompt, cap=cap, schema=_verify_schema(len(batch)), units=[f'{i}:{j}' for j in batch])
         work = self._check_work(i)
         with self._mutex:
-            for item in _items((result.get('value') or {}).get('checks')):
+            for item in _items(answer.get('checks')):
                 j = _int(item.get('unit'))
                 if j in batch and type(item.get('faithful')) is bool and str(j) not in work['verified']:
                     work['verified'][str(j)] = {
@@ -3757,10 +3823,20 @@ class ReviewRunner(ResearchRunner):
                 found.append({'type': 'wrong_detail', 'unit': j, 'quote': quote, 'problem': problem,
                               'replacement': replacement, 'source': 0, 'evidence': ''})
                 if corrected:
-                    current[j] = corrected
-                else:
-                    support.pop(j)
-                    rejected[j] = problem
+                    # The corrected sentence is a new sentence: the controller's own rules (strict endpoints,
+                    # explicit values, hypothesis-only anchors) apply to it as they did to the draft.
+                    saved = work['verdicts'].get(str(j)) or {'support': [], 'depends_on': []}
+                    again = self._support(
+                        [{'units': [j], 'source': x['source'], 'condition': x['condition'], 'conclusion': x['conclusion'],
+                          'depends_on': [d for d in saved['depends_on'] if d < j]} for x in saved['support']],
+                        [corrected if k == j else current[k] for k in range(1, len(frame['units']) + 1)], works,
+                        source_spans=frame['spans'])
+                    if j in again:
+                        current[j], support[j] = corrected, again[j]
+                        continue
+                    found[-1].update(quote='', replacement='')
+                support.pop(j)
+                rejected[j] = problem
         named = {j: self._named_works(current[j], anchors, frame['spans']) for j, anchors in support.items()}
         revised, withheld = self._apply_findings(i, found, support=support, follows=follows, named=named)
         substantive = set(frame['todo'])
@@ -3979,7 +4055,7 @@ class ReviewRunner(ResearchRunner):
                       question + '\n\n' + '\n\n'.join(prompts))
             s['core_recovery'] = {'stage': 'drafting'}
             self._save()
-            response = self._ask('recover-write', prompt, cap=int(min(substantive_output(self.agent, 3800), self._tokens_left() * .44)),
+            response = self._ask('recover-write', prompt, cap=int(min(3800, self._tokens_left() * .44)),
                                  schema=RECOVERY_SCHEMA, temperature=.15)
             rows = _items((response.get('value') or {}).get('statements')) if response.get('complete') else []
             candidates = []
@@ -4174,8 +4250,7 @@ class ReviewRunner(ResearchRunner):
                 continue
             evidence = []
             for field in ('condition', 'conclusion'):
-                ref = _int(item.get(field + '_id'))
-                value = f'E{ref}' if ref is not None else ' '.join(str(item.get(field) or '').split())
+                value = ' '.join(str(item.get(field) or '').split())  # a printed label, or the sentence itself
                 if re.fullmatch(r'\[?E\d+\]?', value):
                     span = (source_spans or {}).get(value.strip('[]'))
                     value = span[2] if span and span[0] == n else ''
@@ -4315,8 +4390,6 @@ class ReviewRunner(ResearchRunner):
                 continue
             k = units[unit - 1]
             quote, replacement = finding.get('quote', ''), finding.get('replacement', '')
-            if finding['type'] in ('structure', 'missing_work') and not quote:
-                continue
             if quote and replacement and pieces[k].count(quote) == 1:
                 pieces[k] = pieces[k].replace(quote, replacement, 1)
             else:
@@ -4325,10 +4398,19 @@ class ReviewRunner(ResearchRunner):
             pieces[k] = self._independent_sentences(pieces[k], quotes) if support is None else ''
         if support is not None:
             follows = follows or {}
-            kept_claim = False
-            visible = set()
-            announced = {}
+            visible, claims, connecting, needs = set(), set(), set(), {}
             lost_premise = False
+
+            def withhold(j):
+                pieces[units[j - 1]] = ''
+                withheld[units[j - 1]] = []
+                visible.discard(j)
+
+            def linked(j):
+                """A sentence that only connects other sentences needs every earlier one it refers to
+                and at least one anchored sentence among those it connects."""
+                return (all(d in visible for d in follows[j] if d < j)
+                        and any(d in claims and d in visible for d in follows[j]))
             for j, k in enumerate(units, 1):
                 if j > 1 and any('\n\n' in sep for sep in pieces[units[j - 2] + 1:k]):
                     lost_premise = False
@@ -4339,18 +4421,15 @@ class ReviewRunner(ResearchRunner):
                 citations = self._cited_works(body, [])
                 anchors = support.get(j, {})
                 if j in follows and not anchors:
-                    # A sentence that only connects other sentences stands with all of them, needs an
-                    # anchored one among them, and can cite only works anchored there.
-                    linked = follows[j]
-                    if (any(d in support for d in linked) and all(d in visible for d in linked if d < j)
-                            and all(any(n in support.get(d, {}) for d in linked) for n in citations)
+                    # It can cite only works anchored in the sentences it connects, and asserts no open status.
+                    if (any(d in support for d in follows[j]) and all(d in visible for d in follows[j] if d < j)
+                            and all(any(n in support.get(d, {}) for d in follows[j]) for n in citations)
                             and not OPEN_STATUS.search(body)):
                         visible.add(j)
-                        announced[j] = [d for d in linked if d > j]
+                        connecting.add(j)
                         lost_premise = False
                     else:
-                        pieces[k] = ''
-                        withheld[k] = []
+                        withhold(j)
                         lost_premise = True
                     continue
                 # Missing an endpoint in an excerpt does not establish the paper or field
@@ -4365,15 +4444,15 @@ class ReviewRunner(ResearchRunner):
                                                      [p for p in (a['condition'], a['conclusion'])
                                                       if not self._damaged_pdf_math(n, p)]) for n, a in anchors.items())
                         or not all(self._scope_preserved(n, a, body, prerequisites) for n, a in anchors.items())):
-                    pieces[k] = ''
-                    withheld[k] = []
+                    withhold(j)
                     lost_premise = True
                     continue
                 credited = (named or {}).get(j, ())  # cited on the authority of another cited work's own text
                 if (anchors and all(n in anchors or n in credited for n in citations)
                         and (not status_claim or status_supported)):
-                    kept_claim = True
                     visible.add(j)
+                    claims.add(j)
+                    needs[j] = dependencies
                     lost_premise = False  # only the sentence right after a removed one can have lost its premise
                     if not citations:
                         cite = ' [@' + '; @'.join(map(str, anchors)) + ']'
@@ -4387,15 +4466,18 @@ class ReviewRunner(ResearchRunner):
                 if not self._needs_judgment(body, pieces[units[j]] if j < len(units) else ''):
                     visible.add(j)
                     continue
-                pieces[k] = ''
-                withheld[k] = []
+                withhold(j)
                 lost_premise = True
-            for j in sorted(announced, reverse=True):  # an announcement goes with the sentences it announced
-                if any(d not in visible for d in announced[j]):
-                    pieces[units[j - 1]] = ''
-                    withheld[units[j - 1]] = []
-                    visible.discard(j)
-            if not kept_claim:
+            # A connecting sentence was admitted before the sentences it announces were judged, and a claim
+            # before a connecting sentence it depends on was settled: withdraw until nothing changes.
+            changed = True
+            while changed:
+                changed = False
+                for j in sorted(visible):
+                    if j in connecting and not linked(j) or j in claims and not needs[j] <= visible:
+                        withhold(j)
+                        changed = True
+            if not claims & visible:
                 return '', len(withheld)
         section = self.state['outline']['sections'][i]
         allowed = self._cited_works(original, self._section_works(i))
@@ -4579,23 +4661,31 @@ class ReviewRunner(ResearchRunner):
         return ''.join(output)
 
     def _without_repeats(self, parts):
-        """Drop a later paragraph that says again what an earlier one said about the same works. The opening
-        answers the question and later sections explain it, so a model can restate a theorem in both."""
-        seen, out = [], []
+        """Drop a later paragraph that only says again what an earlier one said about the same works: the
+        opening answers the question and later sections explain it, so a model can restate a sentence in
+        both. A paragraph that adds a formula, a theorem number, a table or a display is never a repeat."""
+        def content(paragraph):
+            formulas = {_squash(m.group()) for m in MATH_SPANS.finditer(paragraph)}
+            locators = {(n, _squash(label)) for m in TOKENS.finditer(paragraph)
+                        for n, label in _citation(m.group(2) or '') or [] if label}
+            return _words(MATH_SPANS.sub(' ', paragraph)), set(self._cited_works(paragraph, [])), formulas, locators
+        seen, out, dropped = [], [], 0
         for heading, body in parts:
             kept = []
             for paragraph in re.split(r'\n\s*\n', body):
-                words, cited = _words(MATH_SPANS.sub(' ', paragraph)), set(self._cited_works(paragraph, []))
-                table = paragraph.lstrip().startswith(('|', '>'))
-                if (not table and len(words) >= 12 and cited and any(
-                        cited <= earlier_cited and len(words & earlier) >= .8 * len(words)
-                        for earlier, earlier_cited in seen)):
+                words, cited, formulas, locators = content(paragraph)
+                plain = not re.search(r'(?m)^\s*[|>]|\$\$|\\\[', paragraph)
+                if plain and len(words) >= 12 and cited and any(
+                        cited <= other[1] and formulas <= other[2] and locators <= other[3]
+                        and len(words & other[0]) >= .8 * len(words) for other in seen):
+                    dropped += 1
                     continue
                 kept.append(paragraph)
-                if not table:
-                    seen.append((words, cited))
+                if plain:
+                    seen.append((words, cited, formulas, locators))
             if kept:
                 out.append((heading, '\n\n'.join(kept)))
+        self.state['repeats'] = dropped
         return out
 
     def _compose(self):
@@ -4717,8 +4807,11 @@ class ReviewRunner(ResearchRunner):
         if order:
             provisional = s.get('phase') in SELECTION_PHASES
             out += ['## Provisional references' if provisional else '## References', '']
+            legend = '† Abstract or bibliographic record only. Unmarked entries used passages from the paper.'
             for k, n in enumerate(order, 1):
                 if parts and k == discussed + 1:
+                    if any(row['read'] != 'full_text' for row in s['references']):
+                        out += ['', legend]
                     out += ['', '**Further reading.** Works on the topic that the text above does not discuss.', '']
                 r, card = _publication_record(self._by_n(n)), s['cards'].get(str(n)) or {}
                 read = card.get('mode') or ('abstract' if r.get('abstract') else 'metadata')
@@ -4749,8 +4842,8 @@ class ReviewRunner(ResearchRunner):
                                         'venue': venue or None, 'doi': r.get('doi'), 'arxiv': r.get('arxiv'), 'zbl': r.get('zbl'),
                                         'url': r.get('url'), 'preprint': self._preprint(r), 'read': read,
                                         'cited': not parts or k <= discussed})
-            if any(r['read'] != 'full_text' and r['cited'] for r in s['references']):
-                out += ['', '† Abstract or bibliographic record only. Unmarked entries used passages from the paper.', '']
+            if len(order) == discussed and any(row['read'] != 'full_text' for row in s['references']):
+                out += ['', legend, '']
         out += [self._about(len(order)), '']
         return '\n'.join(out).strip() + '\n'
 
@@ -4811,7 +4904,8 @@ class ReviewRunner(ResearchRunner):
             else:
                 item['answered'] += 1
         coverage = {'sources': sources, 'candidates': len(s['pool']), 'screened': len(s['screened']),
-                    'selected': len(s['selected']), 'cited': len(s['bibliography']),
+                    'selected': len(s['selected']),
+                    'cited': sum(1 for r in s.get('references') or [] if r.get('cited', True)),
                     'full_text': sum(1 for c in s['cards'].values() if c.get('mode') in ('full_text', 'primary_passages'))}
         s['coverage'] = coverage
         return coverage
@@ -4823,7 +4917,7 @@ class ReviewRunner(ResearchRunner):
             issues.append('no work was retained after screening and bibliographic confirmation')
         elif not any(self._has_source_text(n) for n in s['selected']):
             issues.append('only bibliographic metadata was available')
-        elif not any(r.get('read') == 'full_text' for r in s.get('references', [])):
+        elif not any(r.get('read') == 'full_text' and r.get('cited', True) for r in s.get('references', [])):
             issues.append('the cited results could only be checked against abstracts')
         if s['outline_fallback']:
             issues.append('the plan was made by code, not by the model')
@@ -4931,9 +5025,11 @@ class ReviewRunner(ResearchRunner):
                 f'#{d["n"]} {self._authors(d["n"])} ({self._year(d["n"]) or "n.d."}), {d["reason"]}' for d in s['dropped'][:25]) + '.')
         for warning in dict.fromkeys(s.get('warnings_at_start', []) + s['warnings']):
             footer.append(f'- {warning}')
-        if s.get('timings'):
-            footer.append('- Active time by step: ' + ', '.join(
-                f'{phase} {round(seconds)} s' for phase, seconds in s['timings'].items() if seconds >= 1) + '.')
+        if s.get('repeats'):
+            footer.append(f'- {s["repeats"]} paragraphs that only repeated an earlier one were printed once.')
+        timed = [f'{phase} {round(seconds)} s' for phase, seconds in (s.get('timings') or {}).items() if seconds >= 1]
+        if timed:
+            footer.append('- Active time by step: ' + ', '.join(timed) + '.')
         footer += ['', '### Requests', ''] + [f'- {e["source"]}: {e["query"]} → ' + (f'error: {e["error"]}' if e['error'] else f'{e["results"]} results')
                                               for e in s.get('sweep_log', [])]
         footer += ['', usage_footer(s), '']
