@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, type ResearchDetail, type StyleChoice, type StyleProfile } from '../api'
+import { api, type ResearchDetail, type StyleChoice, type StyleDescription, type StyleProfile } from '../api'
 import { Collapse, ErrorNote, FilePicker, Loading, NumberField, OptionalNumberField, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { PauseIcon, PlayIcon } from '../components/Icons'
@@ -19,8 +19,14 @@ import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, que
 
 const NAME = /^[\w][\w .-]{0,59}$/u
 const TEMPLATE = ['.tex', '.sty', '.cls', '.bib']
-const STEPS = ['scan', 'classify', 'observe', 'condense', 'save'] as const
-const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', save: 'Save', done: 'Done' }
+const STEPS = ['scan', 'classify', 'observe', 'condense', 'macros', 'save'] as const
+const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', macros: 'Macros', save: 'Save', done: 'Done' }
+/** The questions a style answers about how the author explains (mathagent/style.py QUESTIONS). */
+const QUESTIONS = [
+  ['definitions', 'Definitions'], ['motivation', 'Motivation and the results put forward'],
+  ['proof_motivation', 'Motivating the proof strategy'], ['proof_organisation', 'Organising proofs'],
+  ['omissions', 'What is left out'], ['contribution', 'Pointing to the contribution'], ['tone', 'Tone and voice'],
+] as const
 
 /** Learn from earlier articles or screenshots; exact macros require LaTeX sources. */
 export function StyleNew() {
@@ -98,11 +104,19 @@ export function StyleNew() {
             <h1 className="page-title">Learn your writing style</h1>
             <p className="lede">
               Give TeX articles, source archives or screenshots of your writing. Screenshots provide visible wording and layout; exact macros can only be learned from .tex sources. The harness sorts the articles
-              by domain (a numerics paper is not written like a geometry paper), and describes for each domain what your
-              papers set out to do, how you structure them and how you explain. Quotations are kept only when they occur
-              word for word in your articles. The result is a small file a write-up can follow.
+              by domain and readership (a numerics paper is not written like a geometry paper), and describes for each domain
+              who your papers are written for and how you explain: how you introduce definitions, motivate the work and
+              your proof strategies, organise proofs, what you leave out and how you point to the contribution. It also
+              keeps your names for results, your typesetting habits, your phrasings, and your macros with what you use
+              them for and the packages they need. Quotations are kept only when they occur word for word in your
+              articles. The result is a style guide a write-up follows.
             </p>
           </div>
+        </div>
+
+        <div className="entry">
+          <span className="in-margin" />
+          <ActiveStyle styles={saved} choice={choice} onChange={setChoice} />
         </div>
 
         <div className="entry">
@@ -171,7 +185,7 @@ export function StyleNew() {
               <div className="field-grid">
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
-                <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Each article is read once, then each domain is merged." />
+                <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Each article is read once, then each domain is merged and the macros are described." />
               </div>
             </Collapse>
           </div>
@@ -190,13 +204,6 @@ export function StyleNew() {
             {selected.length > 0 && !validName && <p className="field-hint">Name the style.</p>}
           </div>
         </div>
-
-        {saved.length > 0 && (
-          <div className="entry">
-            <span className="in-margin" />
-            <WriteupStyle styles={saved} choice={choice} onChange={setChoice} />
-          </div>
-        )}
 
         {saved.length > 0 && (
           <div className="entry">
@@ -234,8 +241,10 @@ function parseChoice(value: string): StyleChoice {
   return { mode: value as 'auto' | 'none' }
 }
 
-/** Which saved style @writeup, @summarize and the Write-up form use; saved as soon as it changes. */
-function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; choice: StyleChoice; onChange: (choice: StyleChoice) => void }) {
+/** The style write-ups use (@writeup, @summarize and the Write-up form), saved as soon as it changes: the default style
+ * (no rules of its own: the write-up guidelines as they are), a learned style or one of its domains, or the learned style
+ * that fits the material. The default style is always there, in case a learned style does not suit. */
+function ActiveStyle({ styles, choice, onChange }: { styles: StyleProfile[]; choice: StyleChoice; onChange: (choice: StyleChoice) => void }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const choose = async (value: string) => {
@@ -249,12 +258,15 @@ function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; ch
       setBusy(false)
     }
   }
+  const learned = choice.mode === 'style' || choice.mode === 'domain' ? styles.find((profile) => profile.name === choice.style) : undefined
+  const domains = learned ? learned.domains.filter((domain) => choice.mode !== 'domain' || domain.name === choice.domain) : []
+  const departures = domains.flatMap((domain) => (domain.departures || []).map((departure) => ({ ...departure, domain: domain.name })))
   return (
-    <label className="field">
-      <span className="field-label">Style used by write-ups</span>
-      <select value={choiceValue(choice)} disabled={busy} onChange={(event) => choose(event.target.value)}>
-        <option value="auto">Choose automatically: the saved style that fits the material, or none</option>
-        <option value="none">None: the usual style of the material's field</option>
+    <div className="field">
+      <label className="field-label" htmlFor="active-style">Active style</label>
+      <select id="active-style" value={choiceValue(choice)} disabled={busy} onChange={(event) => choose(event.target.value)}>
+        <option value="none">Default style: the write-up guidelines as they are</option>
+        <option value="auto">Automatic: the learned style that fits the material, else the default style</option>
         {styles.map((profile) => (
           <optgroup key={profile.name} label={profile.name}>
             <option value={`style:${profile.name}`}>{profile.name}{profile.domains.length > 1 ? ': the domain that fits best' : ''}</option>
@@ -264,9 +276,28 @@ function WriteupStyle({ styles, choice, onChange }: { styles: StyleProfile[]; ch
           </optgroup>
         ))}
       </select>
-      <span className="field-hint">Used by @writeup, @summarize and the Write-up form. Saved for every folder you open in this interface.</span>
+      <span className="field-hint">
+        {choice.mode === 'none' ? 'The default style has no rules of its own: write-ups follow the write-up guidelines as they are. It is always here, if a learned style does not suit you.'
+          : choice.mode === 'auto' ? (styles.length ? 'Each write-up uses the learned style whose domain fits its material, or the default style when none fits.'
+            : 'No style is learned yet: write-ups use the default style.')
+          : learned ? (departures.length ? 'Write-ups follow this style before the write-up guidelines. It sets these rules aside:'
+            : 'Write-ups follow this style before the write-up guidelines. It sets no rule aside (a style learned before this version was not compared with the guidelines: learn it again).')
+          : 'This style is no longer saved: write-ups choose automatically.'}
+      </span>
+      {departures.length > 0 && (
+        <ul className="style-departures small">
+          {departures.map((departure) => (
+            <li key={departure.domain + departure.rule}><strong>{departure.rule}</strong> {departure.habit}
+              {domains.length > 1 && <span className="muted"> ({departure.domain})</span>}</li>
+          ))}
+        </ul>
+      )}
+      <span className="field-hint">
+        What you ask in so many words in a request comes first (for example “list the contributions as bullet points”).
+        The active style is used by @writeup, @summarize and the Write-up form, in every folder you open here.
+      </span>
       <ErrorNote>{error}</ErrorNote>
-    </label>
+    </div>
   )
 }
 
@@ -304,6 +335,32 @@ function StyleTemplate({ profile, onSaved }: { profile: StyleProfile; onSaved: (
   )
 }
 
+/** One kind of paper: who it is for, how the author explains, names, typesetting and phrasings. */
+function Description({ style }: { style: StyleDescription }) {
+  const list = (label: string, items: string[] | undefined) => items && items.length > 0 &&
+    <><p className="detail-label">{label}</p><ul>{items.map((item, i) => <li key={i}>{item}</li>)}</ul></>
+  return (
+    <>
+      {style.audience && <><p className="detail-label">Written for</p><p>{style.audience}</p></>}
+      {style.aim && <><p className="detail-label">Aim</p><p>{style.aim}</p></>}
+      {style.structure.length > 0 && <><p className="detail-label">Typical structure</p><ol>{style.structure.map((item, i) => <li key={i}>{item}</li>)}</ol></>}
+      {QUESTIONS.map(([key, label]) => <div key={key}>{list(label, style[key])}</div>)}
+      {list('How you explain', style.habits)}
+      {list('Names you use', style.names?.map((item) => `${item.term}: ${item.note}`))}
+      {style.typesetting && style.typesetting.length > 0 && <><p className="detail-label">Typesetting habits</p>
+        <ul>{style.typesetting.map((item, i) => <li key={i}>{item.habit} <code>{item.example}</code></li>)}</ul></>}
+      {style.phrases.length > 0 && <><p className="detail-label">Your phrasings</p><ul className="style-phrases">{style.phrases.map((item, i) => <li key={i}>“{item}”</li>)}</ul></>}
+      {style.departures && style.departures.length > 0 && <><p className="detail-label">Where you depart from the write-up guidelines</p>
+        <ul className="style-departures">{style.departures.map((item) => {
+          const example = item.examples?.[0] ?? item.example
+          return <li key={item.rule}><strong>{item.rule}</strong> {item.habit}
+            {item.of && item.of > 1 && <span className="muted"> (in {item.articles} of {item.of} articles)</span>}
+            {example && <> <code>{example}</code></>}</li>
+        })}</ul></>}
+    </>
+  )
+}
+
 /** A saved style as a write-up will read it: per domain, then the macros. */
 export function Profile({ profile }: { profile: StyleProfile }) {
   return (
@@ -313,19 +370,18 @@ export function Profile({ profile }: { profile: StyleProfile }) {
           <h3>{domain.name}</h3>
           {domain.description && <p className="muted small">{domain.description}</p>}
           <p className="muted small">From {domain.articles.join(', ')}.</p>
-          {domain.aim && <><p className="detail-label">Aim</p><p>{domain.aim}</p></>}
-          {domain.structure.length > 0 && <><p className="detail-label">Typical structure</p><ol>{domain.structure.map((item, i) => <li key={i}>{item}</li>)}</ol></>}
-          {domain.habits.length > 0 && <><p className="detail-label">How you explain</p><ul>{domain.habits.map((item, i) => <li key={i}>{item}</li>)}</ul></>}
-          {domain.phrases.length > 0 && <><p className="detail-label">Your phrasings</p><ul className="style-phrases">{domain.phrases.map((item, i) => <li key={i}>“{item}”</li>)}</ul></>}
+          <Description style={domain} />
         </section>
       ))}
+      {profile.packages && profile.packages.length > 0 && <p className="muted small">Packages your articles load: {profile.packages.map((item) => item.name).join(', ')}.</p>}
       {profile.template && profile.template.length > 0 && <p className="muted small">LaTeX template: {profile.template.map((file) => file.name).join(', ')}.</p>}
       <Collapse summary={`${profile.macros.length} macros you use${profile.environments.length ? `, ${profile.environments.length} theorem environments` : ''}`}>
         <table className="style-macros">
           <tbody>
             {profile.macros.map((macro) => (
               <tr key={macro.name}>
-                <td><code>{macro.definition}</code></td>
+                <td><code>{macro.definition}</code>{macro.usage && <span className="muted"> · {macro.usage}</span>}
+                  {macro.packages && macro.packages.length > 0 && <span className="muted"> · needs {macro.packages.join(', ')}</span>}</td>
                 <td className="muted">{macro.uses}×</td>
                 <td className="muted">{macro.articles.length} article{macro.articles.length === 1 ? '' : 's'}</td>
               </tr>
@@ -471,9 +527,7 @@ function Articles({ data }: { data: ResearchDetail }) {
               {article.inputs.length > 0 && ` Includes ${article.inputs.join(', ')}, which was not read.`}</p>
             {seen ? (
               <Collapse summary="What the model noticed">
-                {seen.aim && <p>{seen.aim}</p>}
-                {seen.structure.length > 0 && <ol>{seen.structure.map((item, i) => <li key={i}>{item}</li>)}</ol>}
-                {seen.habits.length > 0 && <ul>{seen.habits.map((item, i) => <li key={i}>{item}</li>)}</ul>}
+                <Description style={seen} />
               </Collapse>
             ) : <p className="muted small">Not read yet.</p>}
           </li>

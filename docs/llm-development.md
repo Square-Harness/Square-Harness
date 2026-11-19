@@ -194,7 +194,21 @@ Version 1.1.0. The source of truth for the machine-readable version is
   distribution tree is unavailable. Custom commands are preserved in the source.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
-  (`writeup._request_preamble`). A written document is always assembled,
+  (`writeup._request_preamble`). A saved style's macro brings the macros its
+  definition uses and the packages it needs, unless the preamble already loads
+  them or TeX lacks them (`writeup._style_preamble`). Beyond notation, the order
+  is the request, then the active style, then the guideline sheets
+  (`writeup._set_aside`): a rule the request breaks in its own words (the
+  outline's `rules`, quote checked against the message), or the style departs
+  from (unless the request keeps it, and only while the rule's text is the one
+  the style was learnt against), is set aside. `FIXED_RULES` (P4, P7, P15) are
+  never set aside; the rules of `REQUEST_ONLY_SHEETS` (the introduction's) only
+  by the request (`style_may_set_aside`). The outline call reads
+  every rule in full (`rule_index`). Every reader of the rules goes
+  through `_rules()`; code findings of a set-aside rule are dropped by
+  `_in_force`, prose only (blockers, references and layout stay); the writer and
+  every reviewer, reviser and judge get `_priorities()`. Fidelity, references
+  and output are never set aside. A written document is always assembled,
   compiled and offered, even when time ran out while writing
   (`WriteupRunner._check_time`). `tidy_numbering` never touches labels or
   displays that come from the material: the rest of the author's paper may refer
@@ -597,7 +611,7 @@ documented together when releasing these features.
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
-| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and renders a style digest for write-ups |
+| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
 | | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; retries and the provider breaker (`down`); a wider CA-bundle fallback for TLS |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
@@ -725,6 +739,28 @@ ranges, then reassess the quoted previous comments against those passages.
 Unsupported quotes remain unresolved. Keep the original report, the existing
 budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
+
+Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
+`classify` (domains by field and readership) → `observe` (one call per article,
+answering `QUESTIONS` about how the author explains; the whole body when it fits
+`style_packet`) → `condense` (one call per domain of several articles, on the
+prose answers only: names, typesetting and phrasings are merged by counting) →
+`macros` (one call: what each macro is used for, and its packages) → `save`.
+Each `observe` call also lists the article's departures from the write-up
+rules (`style.guideline_rules`: the paper, abstract and numerics sheets, without
+the rules `writeup.style_may_set_aside` refuses), each with an example;
+`condense` keeps, by counting, those seen in a strict majority of a domain's
+articles, with the rule's text at that time.
+Names and phrasings must occur in the articles, typesetting and departure
+examples in their LaTeX, and a macro's packages among those its files load (or
+`KNOWN_PACKAGES`); the rest is dropped and counted in the warnings. Models drop
+backslashes when they quote LaTeX inside JSON, so a quotation not found as it is
+counts when its letters and digits occur in order (`style.Quoted`), and the
+article's own text for that span is kept. Profiles are
+version 2; version 1 files, with `habits` and no packages, and version 2 files
+without departures stay readable and usable. The active style is
+`style-choice.json`: mode `none` is the default style (the guidelines alone),
+always offered.
 
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of

@@ -44,6 +44,29 @@
   after a short wait. A persistent rejection pauses the literature review
   with completed work saved and the rejected step available on Resume.
 
+- Learn writing styles as explanation guides: per kind of paper, who it is
+  written for and how the author introduces definitions, motivates the work and
+  proof strategies, organises proofs, leaves things out and points to the
+  contribution, with tone, field-dependent names and typesetting habits. Names,
+  typesetting examples and phrasings must occur in the articles. Read whole
+  articles with DS4. Keep the packages articles load and, per macro, what it is
+  used for and the packages it needs; write-ups load those packages, bring the
+  macros a definition uses and follow the full guide. Ignore layout settings
+  redefined by classes; count macro uses across pinned files. Saved version 1
+  styles remain readable.
+- Give write-ups an order of priority: the request, then the active style, then
+  the guidelines. A request that asks in so many words to break a rule, or to
+  keep one, is recorded by the plan with its words (checked against the
+  message); a learnt style records the rules most of its articles deliberately
+  depart from, with examples. Rules set aside are neither applied nor checked,
+  by the writer, the reviewers, the code checks or the gates, and the report
+  lists them; fidelity, references and output never are, nor P4, P7 and P15
+  (whole statements, a text about the mathematics, no contradiction); the
+  introduction's rules only by the request.
+  Quotations of LaTeX that the model gave without backslashes are matched by
+  their letters and kept as the article writes them. Put an Active style
+  selector at the top of Learn my writing style, with a Default style (the
+  guidelines unchanged) that is always available.
 - Upgrade Literature review for research mathematicians. Resolve citation leads
   in primary bibliographies, reconsider records linked by later papers, and use
   the original mathematical question throughout. A compact plan selects the
