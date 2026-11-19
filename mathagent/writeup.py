@@ -607,11 +607,18 @@ CODE_RULES = {'P22': ('section-length',), 'P1': ('positional', 'hand-number', 's
               'P20': ('title-length',), 'I6': ('frame-links',), 'I12': ('frame-links',), 'I7': ('intro-statements',),
               'I8': ('intro-sections',), 'I11': ('intro-list',), 'A2': ('abstract-length',), 'A3': ('abstract-cite', 'abstract-ref')}
 CODE_CHECKED = set(CODE_RULES)
-# Rules that neither the request nor a style sets aside. P4 keeps each statement whole (all its hypotheses, what its
-# constants depend on): a human author may choose otherwise for their own text, generated mathematics may not.
-FIXED_RULES = frozenset({'P4'})
-# Rules only the request sets aside, never a style: how much a proof explains depends on the topic, not on the author.
-REQUEST_ONLY_RULES = frozenset({'P5'})
+# Rules that neither the request nor a style sets aside, with what each protects: a human author may choose otherwise
+# for their own text, generated mathematics may not.
+FIXED_RULES = {'P4': 'each statement keeps all its hypotheses', 'P7': 'the text states mathematics, never its notes or source',
+               'P15': 'no two passages contradict each other'}
+# Sheets whose rules only the request sets aside, never a style: an introduction is written for this document's readers.
+REQUEST_ONLY_SHEETS = frozenset({'introduction'})
+
+
+def style_may_set_aside(rule):
+    """Whether a learnt style may set this rule ({id, sheet}) aside: neither fixed nor of a request-only sheet. Every
+    other rule follows the order request, style, guidelines."""
+    return rule['id'] not in FIXED_RULES and rule['sheet'] not in REQUEST_ONLY_SHEETS
 _ANNOUNCE = re.compile(r"^\s*(?:I(?:'ll| will| need to| am going to| must| should)|Let me|First,? I|Before (?:writing|fixing)|"
                        r"To (?:fix|write|verify)|I'm going to)\b", re.I)
 
@@ -3615,8 +3622,8 @@ class WriteupRunner(ResearchRunner):
         A statement of the outline counts only when its rule exists and its quote occurs in the user's message, in its
         own words (case and spacing aside): 'break' sets the rule aside, 'keep' holds it against the style. The active
         style sets aside the rules it departs from (style._departures), unless the request keeps them, and only while
-        the rule reads as it did when the style was learnt. FIXED_RULES are never set aside; REQUEST_ONLY_RULES only
-        by the request."""
+        the rule reads as it did when the style was learnt. FIXED_RULES are never set aside; the rules of
+        REQUEST_ONLY_SHEETS only by the request (style_may_set_aside)."""
         known = all_rules()
         message = ' '.join(self.state['goal'].split()).casefold()
         requests = []
@@ -3633,7 +3640,7 @@ class WriteupRunner(ResearchRunner):
         set_aside, stale = {}, []
         for departure in style.get('departures') or []:
             rule = known.get(departure.get('rule'))
-            if rule is None or rule['id'] in kept | FIXED_RULES | REQUEST_ONLY_RULES:
+            if rule is None or rule['id'] in kept or not style_may_set_aside(rule):
                 continue
             if ' '.join(str(departure.get('rule_text') or '').split()) != rule['text']:
                 stale.append(rule['id'])
@@ -3645,8 +3652,8 @@ class WriteupRunner(ResearchRunner):
                 set_aside[item['rule']] = {'by': 'request', 'reason': item['quote']}
         refused = [item['rule'] for item in requests if item['stance'] == 'break' and item['rule'] in FIXED_RULES]
         if refused:
-            note = (f'Write-ups always follow {", ".join(refused)}, which keeps each statement whole, even when the request '
-                    'asks otherwise.')
+            note = ('Write-ups always follow ' + '; '.join(f'{rule} ({FIXED_RULES[rule]})' for rule in refused)
+                    + ', even when the request asks otherwise.')
             if note not in self.state['warnings']:
                 self.state['warnings'].append(note)
         note = (f'The style "{style.get("profile")}" departs from {", ".join(stale)}, but '

@@ -190,8 +190,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   (`writeup._set_aside`): a rule the request breaks in its own words (the
   outline's `rules`, quote checked against the message), or the style departs
   from (unless the request keeps it, and only while the rule's text is the one
-  the style was learnt against), is set aside. `FIXED_RULES` (P4) are never set
-  aside; `REQUEST_ONLY_RULES` (P5) only by the request. The outline call reads
+  the style was learnt against), is set aside. `FIXED_RULES` (P4, P7, P15) are
+  never set aside; the rules of `REQUEST_ONLY_SHEETS` (the introduction's) only
+  by the request (`style_may_set_aside`). The outline call reads
   every rule in full (`rule_index`). Every reader of the rules goes
   through `_rules()`; code findings of a set-aside rule are dropped by
   `_in_force`, prose only (blockers, references and layout stay); the writer and
@@ -705,8 +706,8 @@ answering `QUESTIONS` about how the author explains; the whole body when it fits
 prose answers only: names, typesetting and phrasings are merged by counting) →
 `macros` (one call: what each macro is used for, and its packages) → `save`.
 Each `observe` call also lists the article's departures from the write-up
-rules (`style.guideline_rules`: the paper, introduction, abstract and numerics
-sheets, without `FIXED_RULES` and `REQUEST_ONLY_RULES`), each with an example;
+rules (`style.guideline_rules`: the paper, abstract and numerics sheets, without
+the rules `writeup.style_may_set_aside` refuses), each with an example;
 `condense` keeps, by counting, those seen in a strict majority of a domain's
 articles, with the rule's text at that time.
 Names and phrasings must occur in the articles, typesetting and departure

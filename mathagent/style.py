@@ -12,12 +12,13 @@ tone), which names the author uses for objects with several names, their typeset
 habits, and what a macro is used for when its definition does not say it.
 
 Each article is also compared with the write-up rules (`guideline_rules`: the paper,
-introduction, abstract and numerics sheets of skills/writeup/guidelines). A rule the
+abstract and numerics sheets of skills/writeup/guidelines, without the rules no style
+sets aside). A rule the
 article does not follow, deliberately, is a departure: the rule, the author's habit
 instead and an example. A domain keeps the departures seen in a strict majority of its
 articles; a write-up in that style sets those rules aside (writeup._set_aside), because
 the author's style comes before the guidelines and the user's request before both. Some
-rules no style sets aside (writeup.FIXED_RULES, REQUEST_ONLY_RULES).
+rules no style sets aside: the fixed ones and the introduction's (writeup.style_may_set_aside).
 
 Model output is checked against the articles: phrasings and names are kept only when
 they occur in the text, typesetting habits and departures only when their example occurs
@@ -453,18 +454,19 @@ def blank_style():
 
 def guideline_rules():
     """The write-up rules a paper is held to that a style may set aside, [{id, type, text, sheet}]: the paper,
-    introduction, abstract and numerics sheets, at the size of a whole paper, without the rules write-ups always
-    follow or that only a request sets aside (see settable). A learnt style is compared with them."""
-    from .writeup import FIXED_RULES, REQUEST_ONLY_RULES, load_guidelines  # writeup imports this module
-    return [r for r in load_guidelines('paper_part', ('introduction', 'abstract'), 'paper', numerics=True)
-            if r['id'] not in FIXED_RULES | REQUEST_ONLY_RULES]
+    abstract and numerics sheets at the size of a whole paper, without the rules write-ups always follow
+    (writeup.style_may_set_aside). The introduction's rules only a request sets aside. A learnt style is compared
+    with these."""
+    from .writeup import load_guidelines, style_may_set_aside  # writeup imports this module
+    return [r for r in load_guidelines('paper_part', ('abstract',), 'paper', numerics=True) if style_may_set_aside(r)]
 
 
 def settable(departures):
-    """The departures a style may act on: none from a rule write-ups always follow (writeup.FIXED_RULES) or that
-    only a request sets aside (writeup.REQUEST_ONLY_RULES). Styles learnt before these sets keep their others."""
-    from .writeup import FIXED_RULES, REQUEST_ONLY_RULES
-    return [d for d in departures or [] if d.get('rule') not in FIXED_RULES | REQUEST_ONLY_RULES]
+    """The departures a style may act on (writeup.style_may_set_aside). A style learnt before the rules were split
+    this way may hold others: they are left out."""
+    from .writeup import all_rules, style_may_set_aside
+    rules = all_rules()
+    return [d for d in departures or [] if d.get('rule') in rules and style_may_set_aside(rules[d['rule']])]
 
 
 def clean_style(value, sources, typeset=None, rules=None):

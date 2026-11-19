@@ -961,11 +961,14 @@ then the guidelines. A rule your active style departs from is set aside: it is
 not applied and not checked, and the report lists it. Your request comes before
 both: ask in so many words to break a rule ("list the contributions as bullet
 points") or to keep one your style departs from ("no sentence that only
-announces a section"), and the write-up does so. Some rules are never set
-aside: a statement always keeps all its hypotheses (P4). Whether a proof says how
-it goes (P5) depends on the topic, so only your request sets that rule aside,
-never a style. Neither the request nor the style changes the mathematics, its
-fidelity to your material, or the citations.
+announces a section"), and the write-up does so. Three rules are never set
+aside: a statement keeps all its hypotheses (P4), the text states mathematics and
+never talks about its notes or source (P7), and no two passages contradict each
+other (P15). The introduction's rules (I1 to I12) are set aside only by your
+request, never by a style: an introduction is written for this document's
+readers. Every other rule follows the order above, at your responsibility.
+Neither the request nor the style changes the mathematics, its fidelity to your
+material, or the citations.
 A write-up also uses your macros for what you use them for and loads the
 packages they need. Styles learnt with earlier versions keep their shorter
 description, have no departures and still work; learn them again to get the
