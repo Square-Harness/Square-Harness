@@ -473,7 +473,9 @@ separate budget permits at most 4,096 conservatively counted input tokens,
 reads the first message's own words (1,400 bytes) and, of the LaTeX documents
 it pastes or attaches, only their title and abstract (`store.title_material`):
 a preamble sent alone made DeepSeek write titles in Chinese. The first 1,400
-bytes of the message are sent only when there is nothing else. Title
+bytes of the message are sent only when there is nothing else. The title is in
+the language the user writes in, English when there is none (code, LaTeX,
+formulas). Title
 updates use the existing chat lock and cannot overwrite a manual rename or
 transcript. Foreground work cancels cosmetic inference. The DeepInfra adapter
 validates a strict internal bounded-title payload before reducing its hosted
