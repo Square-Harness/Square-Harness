@@ -10,6 +10,7 @@ export type OutputKind = 'investigation' | 'answer' | 'proof' | 'report' | 'chec
 export type WorkOutput = {
   id: string; aliases: string[]; job: string; kind: OutputKind; name: string; producer: string; mode: string
   status: string; time: string; objective: string; text?: string; page?: string; url?: string; download?: string; file?: Artifact
+  synthesis?: string; synthesis_steps?: string[]
 }
 
 export function modeLabel(mode?: string) {
@@ -93,7 +94,8 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
       const id = item.investigation_id
       const plan = chat.investigation?.id === id ? chat.investigation : null
       outputs.set(id, { id, job: id, aliases: [], kind: 'investigation', name: 'Investigation report',
-        mode: 'investigate', producer: 'Investigate', status: 'saved', time: item.time, objective: plan?.statement || '', text: item.content })
+        mode: 'investigate', producer: 'Investigate', status: 'saved', time: item.time, objective: plan?.statement || '', text: item.content,
+        synthesis: item.synthesis, synthesis_steps: item.synthesis_steps })
       continue
     }
     const agent = chat.agents?.find(worker => worker.card_index === card || (item.child_id && worker.id === item.child_id))

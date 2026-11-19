@@ -23,7 +23,7 @@ import { ago } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
-import { ConversationPlan, InvestigationReport } from '../components/InvestigationReading'
+import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
 import { go, href } from '../router'
 import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
@@ -411,6 +411,10 @@ function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptIte
     if (owner !== undefined) owners.set(lane.turn_id, owner)
   }
   const unstarted = new Map<number, AgentLane[][]>()
+  const finalTurn = plan ? turns.findIndex(turn => turn.steps.some(({ item }) => item.investigation_id === plan.id)) : -1
+  const planLane = plan && lanes.find(lane => owners.has(lane.turn_id) &&
+    plan.tasks.some(task => task.child_id === lane.id || (!!task.job_id && task.job_id === (lane.job_id || lane.answer_id))))
+  const planTurn = finalTurn >= 0 ? finalTurn : plan?.current ? (planLane && owners.get(planLane.turn_id)) ?? turns.length - 1 : -1
   for (const batch of groups) {
     const cards = batch.flatMap(lane => lane.card_index == null ? [] : [lane.card_index])
     if (cards.length) {
@@ -434,10 +438,10 @@ function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptIte
       {turns.map((turn, index) => (
         <div key={index} className="turn">
           {turn.user && <UserMessage item={turn.user} />}
-          {plan && (turn.steps.some(({ item }) => item.investigation_id === plan.id) || (plan.current && index === turns.length - 1)) &&
-            <ConversationPlan key={plan.id} plan={plan} finished={turn.steps.some(({ item }) => item.investigation_id === plan.id)} />}
+          {plan && index === planTurn && <ConversationPlan key={plan.id} plan={plan} finished={finalTurn >= 0} />}
           <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
           {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} />)}
+          {plan && index === planTurn && finalTurn < 0 && <WorkingAnswer plan={plan} chatId={chatId} />}
         </div>
       ))}
     </>
@@ -500,7 +504,7 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
               <pre className="plain">{results[n]?.content ?? 'No result was recorded.'}</pre>
             </Collapse>
           ))}
-          {item.content && (item.investigation_id ? <InvestigationReport content={item.content} chatId={chatId} />
+          {item.content && (item.investigation_id ? <InvestigationReport content={item.content} chatId={chatId} synthesis={item.synthesis} covered={item.synthesis_steps} />
             : <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>)}
           {final && item.stats?.done_reason === 'length' && (
             <span className="message-time">The answer reached its length limit.</span>
@@ -624,7 +628,9 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
             {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(item.job_id)} download>References (.bib)</a>}
           </>}
-          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
+            ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
+            : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}

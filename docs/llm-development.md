@@ -701,6 +701,21 @@ statement is registered as a distinct variant. Always preserve the target
 hash when checking a Proof result against a claim. The stop route reads saved
 evidence and must work with the model offline.
 
+The dependency scheduler protects planned Proof slots and their prerequisites
+from discretionary skips. Select a restricted claim when its prerequisites have
+settled. Keep it distinct from the general target in the record and the worker.
+Independent deliverables in an ordinary DS4 turn use a validated batch through
+the native adapters. Each branch receives its own objective. Python Lab requires
+a scoped execution request from the current turn.
+
+An investigation has one background writer. It reads the native results of
+settled tasks through the scoped research index and saves a revised Markdown
+answer with the IDs of the steps it actually read. Revisions share the inference
+pool and are budgeted after the workers. Coalesce simultaneous completions,
+keep the last complete draft across interruptions, and append the final answer
+once to the originating chat. The GUI can display a newly completed finding
+before its revision is available.
+
 Worker execution lives in `workers.py`. The host supplies workspace and
 interface services. A mode maintainer can change a solver, reviewer or prompt
 inside its existing runner. Changes to its start/resume arguments, status

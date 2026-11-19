@@ -18,7 +18,7 @@ from .call_policy import CallContextError
 from .deepinfra import DeepInfraGenerationError, TesterAllowanceInsufficient
 from .ledger import ProofStore, _ID, _atomic_write, _bytes, _directory, _now, _read, _regular
 from .litreview import ReviewRunner, review_outcome
-from .mode_calls import USER_MODES
+from .mode_calls import USER_MODES, routed_python_task
 from .model_limits import input_limit as model_input_limit, output_limit, is_ds4
 from .numerics import SandboxUnavailable
 from .orchestrator import FINAL_PREDICT
@@ -70,7 +70,7 @@ def _answer_path(root, chat_id, ident, *, create=False):
 
 
 def _save_answer(root, chat_id, child, result, agent, ident):
-    experiments, checks, trail = [], [], []
+    experiments, checks, trail = list(child.get('experiment_ids', [])), [], []
     for message in agent.history:
         if message.get('role') != 'tool':
             continue
@@ -89,10 +89,30 @@ def _save_answer(root, chat_id, child, result, agent, ident):
                   request=child['action']['request'], original_request=child['context']['query'],
                   status=result['status'], answer=result['answer'], answer_sha256=hashlib.sha256(result['answer'].encode()).hexdigest(),
                   created=_now(), warnings=result.get('warnings', []),
-                  experiments=experiments, checks=checks, trail=trail,
-                  result_fields={k: result[k] for k in ('source_excerpt', 'shown_files') if k in result})
+                  experiments=list(dict.fromkeys(experiments)), checks=checks, trail=trail,
+                  result_fields={k: result[k] for k in ('source_excerpt', 'shown_files', 'recorded_measurements') if k in result})
     data = _bytes(json.dumps(record, ensure_ascii=False, allow_nan=False))
     _atomic_write(_answer_path(root, chat_id, ident, create=True), data)
+
+
+def _sandbox_observations(session, child):
+    """Bounded evidence from this worker's own durable, successful experiments."""
+    observations = []
+    for ident in child.get('experiment_ids', []):
+        record = session.store.load(ident)
+        if record['status'] != 'ok':
+            continue
+        lines = [f"Recorded Python experiment {ident}: {record.get('purpose') or 'calculation'}"]
+        for label, value, limit in (('Result', json.dumps(record['result'], ensure_ascii=False)
+                                     if record.get('result') is not None else '', 4000),
+                                    ('Output', record.get('stdout') or '', 2000)):
+            if value:
+                excerpt = value if len(value) <= limit else value[:limit] + ' … [excerpt; full experiment saved]'
+                lines.append(label + ': ' + excerpt)
+        if record.get('artifacts'):
+            lines.append('Saved files: ' + ', '.join(item['path'] for item in record['artifacts']))
+        observations.append('\n'.join(lines))
+    return '\n\n'.join(observations)
 
 
 def run_worker(host, parent, budget, action, child, save):
@@ -175,8 +195,10 @@ def run_worker(host, parent, budget, action, child, save):
             host.update_card(child, status='done', outcome='Worker answer restored.', answer_id=answer_id,
                              answer_sha256=answer_sha)
             host.saved()
-            return dict(job_id=answer_id, status=saved['status'], answer=saved['answer'],
-                        warnings=saved['warnings'], **saved.get('result_fields', {}))
+            fields = dict(saved.get('result_fields', {}))
+            answer = fields.pop('recorded_measurements', None) or saved['answer']
+            return dict(job_id=answer_id, status=saved['status'], answer=answer,
+                        warnings=saved['warnings'], **fields)
     elif native and not child.get('job_id'):
         folder = 'proofs' if mode == 'prove' else 'checks' if mode == 'check' else 'research'
         directory = Path(root) / '.mathagent' / folder / native
@@ -195,9 +217,8 @@ def run_worker(host, parent, budget, action, child, save):
     agent.workspace.pin_files([f for f in files if f not in docs])
     sandbox_error = None
     if mode in USER_MODES:
-        # The user typed @python_lab or @sanity_check for this turn: an explicit invocation.
         # Failures are raised inside the worker's try below, so the card reports them.
-        if parent.state.get('required_mode') != mode:
+        if parent.state.get('required_mode') != mode and not routed_python_task(parent.state, action):
             sandbox_error = f'@{mode} runs only when you select it yourself'
         else:
             skill = 'python-lab' if mode == 'python_lab' else 'numerical-sanity-check'
@@ -229,11 +250,38 @@ def run_worker(host, parent, budget, action, child, save):
         if mode == 'explore' and (child.get('brief') or {}).get('text'):
             agent.optional_leads = child['brief']['text']
     host.show_experiments(agent.workspace)
+    numerical_assignment = routed_python_task(parent.state, action)
+    if mode in USER_MODES and agent.workspace.numerics is not None:
+        session = agent.workspace.numerics
+        show_record = session.on_record
+        def record_experiment(record):
+            # Commit the link before notifying the GUI. The next model call can
+            # time out or exhaust its budget after Docker has returned real data.
+            with state_lock:
+                ids = child.setdefault('experiment_ids', [])
+                if record['id'] not in ids:
+                    ids.append(record['id'])
+                    save()
+            if show_record:
+                show_record(record)
+        session.on_record = record_experiment
+        if child.get('experiment_ids'):
+            session.runs = len(child['experiment_ids'])
+            goal += ('\nUse these saved results from your interrupted attempt. Repeat a run only if '
+                     'its outcome cannot satisfy the objective:\n' + _sandbox_observations(session, child))
     if mode in ('explore',) + USER_MODES:
         # These workers return analysis; file mutation belongs to Write-up,
         # whose durable runner already checkpoints approved tool actions.
         schemas = agent.workspace.schemas
-        agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] not in ('write_file', 'run_python')]
+        if numerical_assignment:
+            allowed = {'execute_python', 'read_experiment', 'read_skill_reference', 'list_files', 'read_file', 'search_text'}
+            agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] in allowed]
+            goal += ('\nStart the delegated calculation by calling execute_python. Use the saved experiment '
+                     'output for your numerical answer. Report finite-sample averages as sample statistics. '
+                     'Do not infer moment existence or an asymptotic law from a simulation. If a run errors, '
+                     'correct it or report its limitation.')
+        else:
+            agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] not in ('write_file', 'run_python')]
         if action['effort'] == 'low':
             agent.think = False
     level = effort.level(mode, action['effort'], host.args)
@@ -378,9 +426,11 @@ def run_worker(host, parent, budget, action, child, save):
             else:
                 if allocation is not None and allocation < 256:
                     raise AssistantBudget('No budget remains for a literature check.')
+                objective = (action['request'] if (parent.state.get('proof_routing') or {}).get('route') == 'workers'
+                             else parent.state['query'])
                 result = runner.start(action['request'], effort=action['effort'], reference_context=child['context'],
                     job_id=native, max_requests=limits.get('requests'),
-                    lookup='precise' if precise_reference_request(parent.state['query']) else 'standard',
+                    lookup='precise' if precise_reference_request(objective) else 'standard',
                     max_tokens=allocation,
                     max_input_tokens=input_limit,
                     max_seconds=seconds)
@@ -454,7 +504,7 @@ def run_worker(host, parent, budget, action, child, save):
                         'images': copy.deepcopy(context.get('images', [])),
                         **({key: copy.deepcopy(context[key]) for key in ('project_snapshot', 'project_note_status')}
                            if context.get('project_snapshot') is not None else {})}
-                use_original = mode in ('writeup', 'summarize') or (
+                use_original = (mode in ('writeup', 'summarize') and (parent.state.get('proof_routing') or {}).get('route') != 'workers') or (
                     mode == 'literature' and parent.state.get('required_mode') == 'literature')
                 request = context['query'] if use_original else action['request']
                 result = runner.start(request, job_id=native, **kwargs)
@@ -510,19 +560,45 @@ def run_worker(host, parent, budget, action, child, save):
             output_cap = output_limit(agent, 'assistant_final', fallback)
             agent.predict = min(output_cap, agent.document_output_cap or output_cap)
             agent.max_rounds = 0 if article_overview else USER_MODE_ROUNDS.get(mode, level['tries'])
-            answer = agent.run(goal, emit, fresh=True, recover_empty_tool_answer=bool(child.get('investigation_limits')))
-            complete = (agent.last_stats.get('done_reason') in ('stop', 'tool_calls') and bool(answer.strip())
-                        and not agent.last_stop_reason
+            narration_error = None
+            try:
+                answer = agent.run(goal, emit, fresh=True, recover_empty_tool_answer=bool(child.get('investigation_limits')))
+            except (AgentError, OSError, ValueError) as exc:
+                if not child.get('experiment_ids') or not _sandbox_observations(agent.workspace.numerics, child):
+                    raise
+                # Execution and its interpretation are separate outcomes.
+                answer = ''
+                narration_error = str(exc)
+            complete = (not narration_error and agent.last_stats.get('done_reason') in ('stop', 'tool_calls')
+                        and bool(answer.strip()) and not agent.last_stop_reason
                         and all(type(agent.last_stats.get(key)) is int and agent.last_stats[key] >= 0
                                 for key in ('eval_count', 'prompt_eval_count')))
             result = {'status': 'complete' if complete else 'incomplete', 'answer': answer,
-                      'job_id': answer_id, 'warnings': [] if complete else [agent.last_stop_reason or 'The worker answer is incomplete.']}
+                      'job_id': answer_id, 'warnings': [] if complete else [
+                          narration_error or agent.last_stop_reason or 'The worker answer is incomplete.']}
+            if numerical_assignment or child.get('experiment_ids'):
+                observations = _sandbox_observations(agent.workspace.numerics, child)
+                if numerical_assignment and not observations:
+                    complete = False
+                    result.update(status='incomplete', answer='The simulation produced no successful sandbox run.',
+                                  warnings=[*result['warnings'], 'No successful numerical experiment was recorded.'])
+                elif observations and not complete:
+                    result.update(status='partial', answer=observations + '\n\nThe numerical output was saved. '
+                                  'The worker did not finish interpreting it.')
+                else:
+                    result['experiments'] = list(child['experiment_ids'])
+                    if numerical_assignment and observations:
+                        # The notebook keeps the worker's interpretation. The parent
+                        # receives measurements directly so speculation by one child
+                        # cannot become a premise for another branch's final answer.
+                        result['recorded_measurements'] = observations
             if agent.workspace.numerics is not None and agent.workspace.numerics.runs:
                 result['shown_files'] = ('The figures and files of its sandbox runs are already displayed in '
                                          'the conversation: refer to them, never insert image links.')
             if article_overview:
                 result['source_excerpt'] = child['source_overview']
-            outcome = 'Worker finished.' if complete else (agent.last_stop_reason or 'The worker answer is incomplete.')
+            outcome = ('Worker finished.' if complete else 'Numerical results saved.' if result['status'] == 'partial'
+                       else (agent.last_stop_reason or 'The worker answer is incomplete.'))
         if result['status'] == 'paused' and not host.cancel.is_set():
             result.setdefault('error', {'code': 'worker_operation_failed', 'message': outcome,
                                         'retryable': True, 'scope': 'operation', 'details': {'mode': mode}})
@@ -545,6 +621,8 @@ def run_worker(host, parent, budget, action, child, save):
                           **({'outputs': runner.state.get('outputs') or {}}
                              if mode in ('writeup', 'summarize', 'literature') and runner and runner.state else {}))
         host.saved()
+        if result.get('recorded_measurements'):
+            result['answer'] = result.pop('recorded_measurements')
         return result
     except KeyboardInterrupt:
         with state_lock:

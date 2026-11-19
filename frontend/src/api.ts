@@ -523,6 +523,8 @@ export type RouteMode = 'investigate' | 'prove' | 'explore' | 'check' | 'literat
 
 export type TranscriptItem = AgentOrigin & {
   investigation_id?: string
+  synthesis?: string
+  synthesis_steps?: string[]
   status_time?: string
   started_at?: string
   ended_at?: string
@@ -582,6 +584,7 @@ export type Chat = {
   math_macros?: Record<string, string>
   assistant_status?: 'queued' | 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted' | 'failed'
   investigation?: { id: string; phase: string; statement: string; reading?: string; approved: boolean; can_stop: boolean; current: boolean; usage?: AssistantBudget | null
+    synthesis?: string; synthesis_steps?: string[]; target_reviews?: string[]
     ceiling: { tokens?: number; input_tokens?: number; seconds?: number; requests?: number; chars?: number } | null
     tasks: { id: string; mode: string; objective: string; after: string[]; status: string
       effort?: string; claim?: string; child_id?: string | null; job_id?: string | null; reason?: string | null }[]

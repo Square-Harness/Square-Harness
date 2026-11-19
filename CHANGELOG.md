@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- DS4 can launch independent requests together, including a reference search
+  and an explicitly requested Python simulation. In Investigate, Proof waits
+  for its planned evidence and can take up a precise special case.
+- Investigations begin answering as specialist results arrive and revise the
+  same answer with later findings. Read the review or exploration alongside it
+  in the research notebook. The answer and its supporting steps survive reload.
+
 - Follow parallel work in the right-hand research notebook. Open the literature
   review, proof or experiment from its task. Plans and saved investigation reports
   show mathematical statements, findings and readable source references.

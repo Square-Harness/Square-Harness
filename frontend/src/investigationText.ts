@@ -27,7 +27,7 @@ export function readInvestigationReport(content: string) {
   const head = '## Investigation report'
   if (!content.startsWith(head + '\n')) return null
   const sections = new Map<string, string>()
-  const names = /\n### (Original request|Confirmed statement|Proposed statement|Model-declared variants|Work and evidence|Status of the (?:confirmed|proposed) target)\n/g
+  const names = /\n### (Research answer|Original request|Confirmed statement|Proposed statement|Model-declared variants|Work and evidence|Status of the (?:confirmed|proposed) target)\n/g
   let start = head.length, section = 'reason'
   for (const m of content.matchAll(names)) {
     sections.set(section, content.slice(start, m.index).trim())
@@ -63,6 +63,6 @@ export function readInvestigationReport(content: string) {
   const verdict = sections.get('Status of the ' + (approved ? 'confirmed' : 'proposed') + ' target') || ''
   const reviewed = verdict.split('\n').filter(line => line.startsWith('• ')).map(line => finding(line.slice(2))).filter(entry => entry !== null)
   const variants = (sections.get('Model-declared variants') || '').replace(/^\*\*v(\d+)\*\* \((.*?)\) · [0-9a-f]{64}$/gm, '**Special case $1** ($2)\n')
-  return { statement, approved, reason: sections.get('reason') || '', work, reviewed, variants,
+  return { statement, approved, synthesis: sections.get('Research answer') || '', reason: sections.get('reason') || '', work, reviewed, variants,
     unresolved: verdict.startsWith('No indexed model-reviewed proof'), original: sections.get('Original request') || '' }
 }

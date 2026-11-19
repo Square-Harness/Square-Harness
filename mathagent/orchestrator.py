@@ -1275,7 +1275,8 @@ class Orchestrator:
     def _reference_only_request(self):
         from .source_tasks import _instruction_text
         query = self.state['query']
-        return (not self.state['files']
+        return ((self.state.get('proof_routing') or {}).get('route') != 'workers'
+                and not self.state['files']
                 and not re.search(r'https?://|www\.|(?<![\w.])\S+\.(?:pdf|tex|md|txt)\b', query, re.I)
                 and (self.state.get('automatic_reference_mode') is True
                      or standalone_reference_request(_instruction_text(query))))
@@ -1338,6 +1339,8 @@ class Orchestrator:
         only work of the turn and every review was written, the reviews are the
         reply verbatim: a second pass could re-list them or add recalled works.
         """
+        if (self.state.get('proof_routing') or {}).get('route') == 'workers':
+            return None  # The parent must account for every branch, including a request for clarification.
         reviews = self._reviews()
         if reviews and len(reviews) == len(self.state['children']):
             return self._worker_reply(reviews[-1][0], '\n\n---\n\n'.join(review for _, review in reviews))

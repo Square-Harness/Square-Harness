@@ -5,7 +5,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { api, type Chat, type RouteMode } from '../api'
 import { readInvestigationReport, type Finding, type ReportStep } from '../investigationText'
 import { coverOf } from '../modeCalls'
-import { nativeResultPage, researchModeName, taskReference } from '../outputs'
+import { researchModeName, taskReference } from '../outputs'
 import { href, openWorkPanel } from '../router'
 import { useApp } from '../store'
 import { taskNotice } from '../workNotice'
@@ -38,13 +38,13 @@ export function PlanSteps({ tasks, renderAfter }: { tasks: PlanStep[]; renderAft
 }
 
 export function ConversationPlan({ plan, finished }: { plan: Plan; finished: boolean }) {
-  const [choice, setChoice] = useState<{ finished: boolean; open: boolean } | null>(null)
-  const open = choice?.finished === finished ? choice.open : !finished
+  const [choice, setChoice] = useState<boolean | null>(null)
+  const open = choice ?? (!finished && !plan.tasks.some(task => task.status === 'complete'))
   if (!plan.statement && !plan.tasks.length && finished) return null
   return <div className="entry message message-model investigation-plan-entry">
     <span className="in-margin speaker speaker-model mode-investigate" title="Investigation"><Glyph mode="investigate" /></span>
     <div className="message-body investigation-reading investigation-plan">
-      <button type="button" className="investigation-plan-toggle" aria-expanded={open} onClick={() => setChoice({ finished, open: !open })}>
+      <button type="button" className="investigation-plan-toggle" aria-expanded={open} onClick={() => setChoice(!open)}>
         <span className="investigation-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
         <strong>Research plan</strong>
         {plan.tasks.length > 0 && <small>{plan.tasks.length} {plan.tasks.length === 1 ? 'step' : 'steps'}</small>}
@@ -139,7 +139,7 @@ function numericalObservation(source: string) {
   return ''
 }
 
-function ResultExcerpt({ chatId, step }: { chatId: string; step: ReportStep }) {
+function ResultExcerpt({ chatId, step }: { chatId: string; step: Pick<ReportStep, 'mode' | 'job'> & { excerpt?: string } }) {
   const region = useRef<HTMLDivElement>(null)
   const [text, setText] = useState<string | null>(null)
   const [observation, setObservation] = useState('')
@@ -187,6 +187,59 @@ function linkedResult(chat: string, job: string) {
   return href('free', chat, null, null, { tab: 'outputs', selected: job })
 }
 
+type ReadingStep = { id: string; mode: string; job?: string | null }
+
+// The reader supplies the title and a separate assessment of the exact statement.
+function answerProse(text?: string) {
+  return (text || '').trim().replace(/^#{1,2}\s+(?:Research answer|Working answer|Answer)\s*\n+/i, '')
+    .replace(/\s*\(`exact_target_review: true`\)/g, '')
+}
+
+function FindingLinks({ steps, chat, covered }: { steps: ReadingStep[]; chat: string; covered?: string[] }) {
+  const results = steps.filter(step => step.job)
+  if (!results.length) return null
+  return <nav className="investigation-readings" aria-label="Read supporting work">
+    {results.map(step => <a key={step.id} href={linkedResult(chat, step.job!)}>
+      <ModeMark mode={step.mode as RouteMode} /><span>{taskReference(steps, step.id)}</span>
+      {covered && !covered.includes(step.id) && <small>New</small>}
+      <span aria-hidden="true" className="reading-arrow">→</span>
+    </a>)}
+  </nav>
+}
+
+export function WorkingAnswer({ plan, chatId }: { plan: Plan; chatId: string }) {
+  const complete = plan.tasks.filter(task => task.status === 'complete')
+  const text = answerProse(plan.synthesis)
+  if (!text && !complete.length) return null
+  const covered = plan.synthesis_steps || []
+  const names = plan.tasks.filter(task => covered.includes(task.id)).map(task => taskReference(plan.tasks, task.id))
+  const waiting = complete.some(task => !covered.includes(task.id))
+  const reviews = plan.target_reviews || []
+  const reviewStatus = reviews.length > 1 ? 'The saved proof reviews disagree on the original statement.'
+    : reviews[0] === 'model-reviewed refutation' ? 'Proof returned a reviewed refutation of the original statement.'
+    : reviews[0] === 'model-reviewed proof' ? 'Proof returned a reviewed argument for the original statement.'
+    : plan.tasks.some(task => task.mode === 'prove') ? 'No proof review of the original statement has been recorded yet.' : ''
+  const first = !text && complete.find(task => task.job_id && ['explore', 'literature'].includes(task.mode))
+  return <div className="entry message message-model investigation-draft-entry">
+    <span className="in-margin speaker speaker-model mode-investigate" title="Investigation"><Glyph mode="investigate" /></span>
+    <article className="message-body investigation-reading investigation-report" aria-label="Working answer">
+      <div className="investigation-answer-head"><h2>Working answer</h2>
+        <small role="status"><Square variant={plan.can_stop ? 'paused' : 'running'} size={13} />{plan.can_stop ? 'Paused' : 'In progress'}</small></div>
+      {text && <Markdown className="investigation-synthesis" mathProse>{text}</Markdown>}
+      {first && <section className="investigation-first-reading"><h3>From the {researchModeName(first.mode).toLowerCase()}</h3>
+        <ResultExcerpt chatId={chatId} step={{ mode: first.mode as RouteMode, job: first.job_id! }} /></section>}
+      <p className="investigation-coverage" aria-live="polite">{[
+        names.length && text ? 'Based on ' + names.join(', ') + '.' : '',
+        reviewStatus,
+        plan.can_stop ? '' : !text ? 'The first findings are ready to read while the investigation brings them together.'
+          : waiting ? 'Another finding is ready to read below.' : '',
+      ].filter(Boolean).join(' ')}</p>
+      <FindingLinks steps={plan.tasks.map(task => ({ ...task, job: task.status === 'complete' ? task.job_id || task.child_id : null }))}
+        chat={chatId} covered={text ? covered : undefined} />
+    </article>
+  </div>
+}
+
 function Sources({ evidence, more }: { evidence: Finding[]; more?: string }) {
   return <details className="investigation-sources"><summary>{evidence.length} {evidence.length === 1 ? 'source' : 'sources'} listed</summary>
     <ul>{evidence.map((e, i) => <li key={i}><span>{e.summary || 'Source details unavailable'}</span>
@@ -206,7 +259,7 @@ function EvidenceStep({ step, chat, tasks, anchor }: { step: ReportStep; chat: s
   return <li className="investigation-finding" id={anchor} tabIndex={-1}>
     <ModeMark mode={step.mode} />
     <div><header><strong>{researchModeName(step.mode)}</strong><span>{partialReview ? 'Partial review' : stateLabel[step.state] || step.state}</span>
-      {step.job && <a className="investigation-result-link" href={nativeResultPage(step.mode, step.job, chat) || linkedResult(chat, step.job)}>{step.mode === 'prove' ? 'Read proof attempt' :
+      {step.job && <a className="investigation-result-link" href={linkedResult(chat, step.job)}>{step.mode === 'prove' ? 'Read proof attempt' :
         step.mode === 'literature' ? 'Read literature review' : step.mode === 'explore' ? 'Read exploration' : 'Read result'} <span aria-hidden="true">→</span></a>}</header>
       {step.claim && step.claim !== 'target' && <small className="investigation-timing">Special case</small>}
 
@@ -226,7 +279,7 @@ function EvidenceStep({ step, chat, tasks, anchor }: { step: ReportStep; chat: s
   </li>
 }
 
-export function InvestigationReport({ content, chatId }: { content: string; chatId: string }) {
+export function InvestigationReport({ content, chatId, synthesis, covered }: { content: string; chatId: string; synthesis?: string; covered?: string[] }) {
   const reportKey = useId()
   const report = useMemo(() => readInvestigationReport(content), [content])
   if (!report) return <Markdown className="answer">{content}</Markdown>
@@ -235,15 +288,23 @@ export function InvestigationReport({ content, chatId }: { content: string; chat
   const skipped = report.work.filter(step => step.state === 'skipped').length
   const activeSteps = report.work.filter(step => step.job)
   const outcome = [...new Set(reviewed.map(e => evidenceLabel[e.label] || e.label))].join(' · ')
+  const narrative = answerProse(synthesis || report.synthesis)
+  const partial = !!covered && report.work.some(step => step.state === 'complete' && !covered.includes(step.id))
+  const evidence = <ul className="investigation-steps">{report.work.map(step => <EvidenceStep key={step.id} step={step} chat={chatId}
+    tasks={report.work} anchor={reportKey + step.id} />)}</ul>
   return <article className="investigation-reading investigation-report" aria-label="Investigation report">
-    <h2>Investigation report</h2>
-    {statement && <Markdown mathProse className="investigation-report-statement">{statement}</Markdown>}
+    <h2>{narrative ? 'Research answer' : 'Investigation report'}</h2>
+    {narrative ? <>
+      {partial && <p className="investigation-coverage">This answer covers part of the investigation. The other findings are available below.</p>}
+      <Markdown className="investigation-synthesis" mathProse>{narrative}</Markdown>
+      <FindingLinks steps={report.work} chat={chatId} />
+    </> : statement && <Markdown mathProse className="investigation-report-statement">{statement}</Markdown>}
     {(outcome || unresolved) && <div className="investigation-conclusion">
       <Square variant={unresolved ? 'uncertain' : 'reviewed'} size={18} />
       <div><strong>{outcome || 'Full statement unresolved here'}</strong>
         <p>{unresolved ? [(finished === 1 ? '1 step finished' : finished + ' steps finished'), skipped ? skipped + ' skipped' : ''].filter(Boolean).join(' · ') : 'The model reviewed this exact statement. Formal verification is separate.'}</p></div>
     </div>}
-    {activeSteps.length > 1 && <nav className="investigation-jumps" aria-label="Jump to a finding">
+    {!narrative && activeSteps.length > 1 && <nav className="investigation-jumps" aria-label="Jump to a finding">
       {activeSteps.map(step => <button key={step.id} type="button" onClick={() => {
         const finding = document.getElementById(reportKey + step.id)
         finding?.focus({ preventScroll: true }); finding?.scrollIntoView({ block: 'start' })
@@ -251,8 +312,9 @@ export function InvestigationReport({ content, chatId }: { content: string; chat
     </nav>}
     {reason && !/^The (?:approved )?research plan finished\.$/.test(reason) && <Markdown>{taskNotice(humanReason(reason), report.work)}</Markdown>}
     {report.variants && <section><h3 className="investigation-subhead">Special cases</h3><Markdown mathProse>{report.variants}</Markdown></section>}
-    {report.work.length > 0 && <section><h3 className="investigation-subhead">Findings</h3>
-      <ul className="investigation-steps">{report.work.map((step, i) => <EvidenceStep key={i} step={step} chat={chatId} tasks={report.work} anchor={reportKey + step.id} />)}</ul></section>}
+    {report.work.length > 0 && (narrative ? <details className="investigation-sources"><summary>Evidence and scope</summary>
+      {statement && <Markdown mathProse className="investigation-report-statement">{statement}</Markdown>}{evidence}</details>
+      : <section><h3 className="investigation-subhead">Findings</h3>{evidence}</section>)}
     {report.original && <details className="investigation-sources"><summary>Original question</summary><Markdown mathProse>{report.original}</Markdown></details>}
     {!approved && !reason && <p>The proposed question was not approved.</p>}
   </article>

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, type Chat, type ProofDetail, type ResearchDetail } from '../api'
 import { displayOf } from '../artifacts'
 import { ago, plural } from '../format'
+import type { PaperLinks } from '../mathtext'
 import { coverOf, MODE_CALLS } from '../modeCalls'
 import { Glyph } from './Glyph'
 import { InvestigationReport } from './InvestigationReading'
@@ -69,6 +70,9 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
   const panel = useRef<HTMLDivElement>(null)
   const restore = useRef<string | null>(null)
   const focusPending = useRef(false)
+  useEffect(() => {
+    if (chosen) panel.current?.closest('.work-panel-scroll')?.scrollTo({ top: 0 })
+  }, [chosen?.id])
   useEffect(() => {
     if (!focusPending.current || !panel.current) return
     const target = selected ? panel.current.querySelector<HTMLElement>('.work-back') :
@@ -226,6 +230,40 @@ function CitedPassage({ data, cite, onClose }: { data: ResearchDetail; cite: str
     sources={sources.data?.sources || null} onClose={onClose} /></>
 }
 
+function LiteratureReading({ output, data, error }: { output: WorkOutput; data?: ResearchDetail; error: string }) {
+  const papers = useMemo(() => {
+    const links: PaperLinks = new Map()
+    for (const ref of data?.references || []) {
+      const url = ref.doi ? 'https://doi.org/' + ref.doi : ref.arxiv ? 'https://arxiv.org/abs/' + ref.arxiv
+        : ref.zbl ? 'https://zbmath.org/?q=an:' + encodeURIComponent(ref.zbl) : ref.url
+      if (url && /^https?:\/\//i.test(url)) links.set(ref.k, { url, title: ref.title })
+    }
+    return links
+  }, [data?.references])
+  const [cite, setCite] = useState('')
+  const issues = data ? [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])] : []
+  const status = data?.status || output.status
+  return <article className="work-output-preview literature-reading" aria-label="Literature review">
+    <div className="literature-reading-head"><ResultMark mode="literature" /><h3>Literature review</h3>
+      <small>{resultState(status)}</small></div>
+    {output.page && <a className="btn btn-small literature-full-link" href={output.page}>Open full review <span aria-hidden="true">→</span></a>}
+    <ErrorNote>{error}</ErrorNote>
+    {data?.draft ? <Markdown mathProse className="literature-text" papers={papers} onCite={setCite}
+      flagged={flaggedCitations(data)}>{data.draft}</Markdown>
+      : !error && <p role="status" className="muted">{!data ? 'Loading the review…' : data.running
+        ? 'The literature search is underway. Its review will appear here as soon as a draft is saved.'
+        : 'This review has no saved draft.'}</p>}
+    {data && cite && <CitedPassage data={data} cite={cite} onClose={() => setCite('')} />}
+    {(issues.length > 0 || output.objective) && <details className="work-fold"><summary>Scope and source checks</summary>
+      {output.objective && <Markdown mathProse>{output.objective}</Markdown>}
+      {issues.length > 0 && <ul>{issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+    </details>}
+    <div className="work-tab-actions">
+      {data?.outputs?.review && <a className="btn btn-small" href={api.researchReviewDownloadUrl(data.id)} download>Download review</a>}
+    </div>
+  </article>
+}
+
 function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   const tick = useTick(output.job)
   const isText = ['conversation', 'experiment', 'answer', 'check', 'proof', 'report', 'tex', 'body', 'bib'].includes(output.kind)
@@ -249,7 +287,8 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   }, [text, output.download, output.kind])
   const display = output.file ? displayOf(output.file.mime_type) : null
   const download = output.download || localDownload
-  if (output.kind === 'investigation') return <InvestigationReport content={output.text || ''} chatId={chat} />
+  if (output.kind === 'investigation') return <InvestigationReport content={output.text || ''} chatId={chat} synthesis={output.synthesis} covered={output.synthesis_steps} />
+  if (output.kind === 'report' && output.mode === 'literature') return <LiteratureReading output={output} data={research} error={error} />
   return <section className="work-output-preview" aria-label={output.name}>
     <div className="work-section-head"><h3>{output.name}</h3></div>
     <p className="work-result-byline">{output.producer} · {resultState(output.status)}</p>

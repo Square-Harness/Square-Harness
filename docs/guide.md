@@ -549,11 +549,18 @@ from an ordinary Assistant question that calls for several lines of research.
 A simple question can receive a direct answer. Selecting **@prove** still
 starts the usual proof workflow.
 
+You can also ask DS4 for independent pieces of work in one Assistant message.
+For example, ask for a reference on Markov chains and, in the same message,
+ask Python Lab to simulate a specified chain. The workers can start together.
+When one objective needs clarification, the other can still proceed. A Python
+result identifies whether the computation actually ran in the enabled sandbox.
+
 Up to six tasks can draw on Explore, Check, Literature,
 Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
 effort. Independent tasks can run together when the model server supports it.
-As results arrive, the controller can start a newly eligible task, skip further work, or fill a planned slot for
-a variant. A change in hypotheses gets its own statement and hash. Numerical
+Proof waits for the preceding steps listed in its plan. When the plan calls
+for a special case, the controller selects a precise statement from the evidence
+or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
 experiments are available through Explore when the numerical sandbox is enabled.
 
 Pause saves the investigation. **Resume** continues the saved plan. **Stop and
@@ -561,8 +568,12 @@ report** finishes a paused run using its existing evidence, even when the model
 is offline. The report identifies the statements examined, the worker records,
 and work that failed or remains open. A model-reviewed proof is evidence about
 its exact statement. An exploration or a numerical observation can suggest a
-direction for later work. Open a Proof card or select **Read worker answer** on
-an Explore card to inspect its mathematics. Select **@summarize** for a separate LaTeX write-up.
+direction for later work. As findings arrive, the investigation drafts an answer
+in the conversation and revises it using the newer evidence. Finished findings
+are readable immediately, including while a revision is being written. The
+right-hand notebook lets you read a literature review or an exploration alongside
+the answer. If the writing allowance runs out, the completed findings and the
+latest saved answer remain available. Select **@summarize** for a separate LaTeX write-up.
 
 In the terminal, use `/investigate <question>`, `/investigations`,
 `/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations

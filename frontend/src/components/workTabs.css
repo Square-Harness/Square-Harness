@@ -77,6 +77,14 @@
 .work-entry-arrow { color: var(--text-3); font: 21px/1 var(--font-ui); }
 .work-back { display: inline-flex; align-items: center; gap: 2px; margin: 0 0 14px -3px; }
 .work-output-preview, .work-result-byline { min-width: 0; }
+.literature-reading-head { display: flex; align-items: center; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--line-strong); }
+.literature-reading-head h3 { margin: 0; font: 600 15px/1.35 var(--font-ui); }
+.literature-reading-head small { margin-inline-start: auto; color: var(--text-2); font: 500 13px/1.4 var(--font-ui); }
+.literature-full-link { margin-top: 9px; }
+.literature-reading .literature-text { margin-block: 16px; font: 16px/1.56 var(--font-text); }
+.literature-text h1 { font: 700 clamp(22px, 2.6vw, 27px)/1.15 var(--font-text); }
+.literature-text h2 { margin-top: 1.2em; font: 700 19px/1.25 var(--font-text); }
+.literature-text li + li { margin-top: .55em; }
 .work-output-objective { margin: 10px 0 12px; color: var(--text-2); }
 .work-tab-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 14px; }
 .work-output-source { overflow: auto; max-height: 26rem; font: 13px/1.5 var(--font-mono); padding: 10px; background: var(--code-bg); }

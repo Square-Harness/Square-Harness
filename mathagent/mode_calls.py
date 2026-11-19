@@ -27,7 +27,7 @@ _SEARCH_ALLOWED = re.compile(
     r'cherche(?:z)? (?:en ligne|sur internet))\b')
 
 
-# Selectable with @ by the user only: not JOB_MODES, so the Assistant cannot delegate to them.
+# Sandbox modes stay out of general delegation. A scoped, routed execution can also start Python Lab.
 USER_MODES = ('python_lab', 'sanity_check')
 PROOF_PREP_OUTPUT = 2048
 PROOF_PREP_CALLS = 2
@@ -102,6 +102,14 @@ def automatic_reference_action(query, files=(), history=()):
         return None
     return {'mode': 'check', 'request': query, 'files': [], 'effort': 'low',
             'reason': 'Find an appropriate scholarly reference for the exact request and verify its bibliographic metadata.'}
+
+
+def routed_python_task(state, args):
+    decision = (state or {}).get('proof_routing') or {}
+    return (args.get('mode') == 'python_lab' and decision.get('status') == 'complete'
+            and decision.get('route') == 'workers' and any(
+                task['mode'] == 'python_lab' and task['request'] == args.get('request')
+                for task in decision['tasks']))
 
 
 def _word(char):
@@ -180,8 +188,8 @@ class ModeOrchestrator(Orchestrator):
                 raise ValueError(f'{selected_note} and its worker did not finish. Retry @{selected} with a '
                                  'narrower objective, or answer with what it saved and say that it did not finish.')
         if mode in USER_MODES:
-            # Only this turn's own @ selection (saved in the state for resume) may start them.
-            if mode != (self.required_mode or (self.state or {}).get('required_mode')):
+            if (mode != (self.required_mode or (self.state or {}).get('required_mode'))
+                    and not routed_python_task(self.state, args)):
                 raise ValueError('Unknown worker mode')
             return super()._validate_delegate({**args, 'mode': 'explore'})
         return super()._validate_delegate(args)
@@ -247,6 +255,24 @@ class ModeOrchestrator(Orchestrator):
 
     def _payload(self, tools):
         if not self._proof_pending():
+            decision = self.state.get('proof_routing', {})
+            if decision.get('route') == 'workers':
+                instruction = ('Answer each independent objective from its own worker result. Distinguish actual '
+                               'sandbox measurements from proposed code. Never invent a measurement or a link. '
+                               'Use empirical sample mean or median for simulated values. A finite sample does '
+                               'not establish a finite population expectation, a growth law or an almost-sure '
+                               'statement. Do not use expectation notation for a sample average, even if a '
+                               'worker does. Distinguish rigorous results from observed patterns. Preserve '
+                               'verified source qualifications and report unfinished branches explicitly.')
+                if decision.get('question'):
+                    instruction += ('\nThis branch is waiting for the user to specify its subject. Ask the '
+                                    'following question directly. Do not guess titles or make claims about '
+                                    'network or file access on the basis of a deferred lookup. ' + decision['question'])
+                if self.state.get('children'):
+                    # All requested branches have run. The parent can read full results
+                    # for synthesis without spending another worker invocation.
+                    tools = [tool for tool in tools if tool['function']['name'] in ('read_result', 'read_experiment')]
+                return super()._payload(tools, instruction=instruction)
             return super()._payload(tools)
         if not tools:
             raise AgentError('Proof needs a prepared delegation, but further actions are unavailable; saved work is unchanged')
@@ -363,6 +389,11 @@ class ModeOrchestrator(Orchestrator):
                       'reason': 'Convert the previous answer to LaTeX.' if previous else 'Convert the supplied Markdown file to LaTeX.'}
         else:
             action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
+            if action and getattr(self.agent.client, 'profile', 'default') == 'deepinfra':
+                # A source/reference match may describe only one clause. Ask the normal
+                # whole-turn router whether it covers every requested deliverable.
+                self.state['suggested_specialist'] = action
+                return
         if action is None:
             return
         self._validate_delegate(action)
@@ -421,13 +452,40 @@ class ModeOrchestrator(Orchestrator):
                 current = next(message for message in reversed(state['messages']) if message.get('role') == 'user')
                 decision = route_request(self.agent.client, self.agent.model, state['query'],
                                          history=state['history'], files=state['files'], ctx=self.agent.ctx,
-                                         current_images=current.get('images'))
+                                         current_images=current.get('images'),
+                                         suggested_mode=(state.get('suggested_specialist') or {}).get('mode'))
             except AgentError as exc:
                 state['proof_routing'] = {'status': 'error', 'error': str(exc)}
                 self._save()
                 raise
             state['proof_routing'] = decision = {'status': 'complete', **decision}
             self._save()
+        if decision['route'] in ('suggested', 'workers'):
+            if any(call.get('id') == state['id'] + '_routed_0' for message in state['messages']
+                   for call in message.get('tool_calls', [])):
+                return  # Even if admission failed, its saved result belongs to this turn.
+            if not allow_tools:
+                raise AgentError('Workers were selected but further actions are disabled.')
+            if decision['route'] == 'suggested':
+                actions = [state['suggested_specialist']]
+            else:
+                actions = [dict(mode=task['mode'], request=task['request'], files=list(state['files']),
+                                effort=decision['effort'], reason='An independent objective from the current request.')
+                           for task in decision['tasks']]
+            if not actions:
+                state['force_final'] = True
+                self._save()
+                return
+            for action in actions:
+                self._validate_delegate(action)
+            if decision['route'] == 'suggested':
+                state['automatic_source_mode'] = actions[0]['mode']
+                state['automatic_reference_mode'] = actions[0]['mode'] == 'check'
+            self._prepare_calls({'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': f"{state['id']}_routed_{i}", 'type': 'function',
+                 'function': {'name': 'delegate', 'arguments': action}} for i, action in enumerate(actions)]})
+            super()._complete_pending(allow_tools=allow_tools)
+            return
         if decision['route'] == 'investigate':
             if not allow_tools:
                 raise AgentError('Investigation was selected but further actions are disabled.')

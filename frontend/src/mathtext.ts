@@ -98,16 +98,32 @@ function splitCitations(node: MdNode): MdNode[] {
   return out
 }
 
-function walk(node: MdNode) {
+function walk(node: MdNode, split: (node: MdNode) => MdNode[]) {
   if (!node.children) return
   node.children = node.children.flatMap((child) => {
-    if (child.type === 'text') return splitCitations(child)
-    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link'].includes(child.type)) walk(child)
+    if (child.type === 'text') return split(child)
+    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link', 'linkReference', 'citation'].includes(child.type)) walk(child, split)
     return [child]
   })
 }
 
-export const remarkCitations = () => (tree: MdNode) => walk(tree)
+export const remarkCitations = () => (tree: MdNode) => walk(tree, splitCitations)
+
+export type PaperLinks = Map<number, { url: string; title: string }>
+/** Only link numbers that the saved review assigns to an actual paper. */
+export const remarkPaperLinks = (papers: PaperLinks) => (tree: MdNode) => walk(tree, node => {
+  const text = node.value || ''
+  const children: MdNode[] = []
+  let start = 0
+  for (const match of text.matchAll(/\[(\d+)\]/g)) {
+    const paper = papers.get(Number(match[1]))
+    if (!paper) continue
+    children.push({ type: 'text', value: text.slice(start, match.index) },
+      { type: 'link', ...paper, children: [{ type: 'text', value: match[0] }] })
+    start = match.index + match[0].length
+  }
+  return start ? [...children, { type: 'text', value: text.slice(start) }] : [node]
+})
 
 /** Split streaming text into stable blocks so only the growing tail re-renders. */
 /** A user's message as typed: underscores outside mathematics and code are letters (a_n, b_{n+1}), never Markdown emphasis. */

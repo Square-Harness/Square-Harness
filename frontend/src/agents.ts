@@ -62,8 +62,9 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
     // A missing legacy job stays in the activity view. Only link to a native notebook that exists.
     const book = proof ? 'prove' : job?.kind
     const notebook = book && agent.job_id ? {
-      url: href(book, agent.job_id, null, chat.id),
-      label: 'Open ' + skillName(agent.mode).toLowerCase(),
+      url: book === 'literature' ? href(chat.mode, chat.id, null, null, { tab: 'outputs', selected: agent.job_id })
+        : href(book, agent.job_id, null, chat.id),
+      label: book === 'literature' ? 'Read literature review' : 'Open ' + skillName(agent.mode).toLowerCase(),
     } : null
     return { ...agent, step, notebook, stateLabel: agentLabels[status], result: { ...look, outputId } }
   })

@@ -1039,7 +1039,9 @@ def checkpoint_investigation(root, chat_id, state):
         user = next((item for item in state.get('messages', [])[prefix:] if item['role'] == 'user'),
                     {'role': 'user', 'content': state['query']})
         chat['history'] = list(state.get('history', ())) + [user, answer]
-        chat['transcript'].append({**answer, 'mode': 'free', 'investigation_id': record_id, 'time': _now()})
+        inv = state['investigation']
+        chat['transcript'].append({**answer, 'mode': 'free', 'investigation_id': record_id, 'time': _now(),
+                                   'synthesis': inv.get('synthesis', ''), 'synthesis_steps': inv.get('synthesis_steps', [])})
         if not chat['title']:
             chat['title'] = one_line(state['query'], 80)
     _save_chat(root, chat)
