@@ -36,7 +36,7 @@ from urllib.parse import unquote
 import zipfile
 
 from .jsonutil import loads as json_loads
-from .format_request import conversion_source
+from .format_request import can_recover_previous_markdown, conversion_source
 from .ledger import _atomic_write, _bytes, _directory, _now, _regular
 from . import texcheck
 from .texcheck import POSITIONAL as _POSITIONAL
@@ -2576,6 +2576,9 @@ class WriteupRunner(ResearchRunner):
 
     def _recover(self):
         super()._recover()
+        previous = getattr(self, 'previous_markdown', None)
+        if can_recover_previous_markdown(self.state, previous):
+            self.state['sources'].extend(self._previous_sources(previous))
         # A paused writer may already have paid for an outline and partial drafts.
         # The pinned source is authoritative. Keep the old parts, streams and ledger.
         if (self.state['phase'] in ('outline', 'skeleton', 'draft') and 'parts' in self.state
@@ -2586,8 +2589,9 @@ class WriteupRunner(ResearchRunner):
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
               conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
-              explain_templates=False, experiment_ids=(), reference_records=(), waive_needs=False, **budgets):
+              explain_templates=False, experiment_ids=(), reference_records=(), previous_markdown=None, waive_needs=False, **budgets):
         self._waive_needs = bool(waive_needs)
+        self.previous_markdown = previous_markdown
         source_files = images.capture(self.agent, source_files)
         if variant not in (None, 'summary'):
             raise ValueError('Unknown write-up variant')
@@ -2623,7 +2627,7 @@ class WriteupRunner(ResearchRunner):
         # Notes pasted under the request (a second paragraph, or a long message) are the material themselves,
         # unless the request names a file that is pinned instead (a name inside the notes need not exist).
         self._inline_material = ''
-        if not source_files and not notes.strip() and not conversation.strip() and not getattr(self.agent, 'image_refs', None):
+        if not source_files and not notes.strip() and not conversation.strip() and not previous_markdown and not getattr(self.agent, 'image_refs', None):
             pasted = re.search(r'\n[ \t]*\n', goal.strip()) or len(goal.strip()) > 400
             if pasted and not (found and self._inferred_sources(goal)):
                 self._inline_material = goal.strip()
@@ -2689,8 +2693,17 @@ class WriteupRunner(ResearchRunner):
     def _skill_folder(self, kind):
         return 'summarize' if self._variant == 'summary' else kind
 
+    @staticmethod
+    def _previous_sources(snapshot):
+        sources = [dict(snapshot['source'])]
+        bib = snapshot.get('bibliography')
+        if bib:
+            sources.append({'id': 'B1', 'path': 'references.bib', 'content': bib, 'catalog': True,
+                            'conversion_bibliography': True, 'sha256': hashlib.sha256(bib.encode()).hexdigest()})
+        return sources
+
     def _extra_sources(self):
-        sources = []
+        sources = self._previous_sources(self.previous_markdown) if self.previous_markdown else []
         for path, text in (('typed-notes.md', self._notes), ('conversation.md', self._conversation),
                            ('request-notes.md', self._inline_material)):
             if text.strip():
@@ -6742,6 +6755,10 @@ class WriteupRunner(ResearchRunner):
         archive = io.BytesIO()
         assets = [(source['name'], self._source_bytes(source)) for source in self.state.get('source_files', [])]
         contents = _compile_files(self.state['document'], (), assets)
+        if self.state.get('conversion_source'):
+            for source in self.state['sources']:
+                if source.get('conversion_bibliography'):
+                    contents['references.bib'] = source['content'].encode('utf-8')
         body = (self.state['body'] if self.state.get('conversion_source') else self._body_file()).encode('utf-8')
         contents['document-body.tex'] = body
         _atomic_write(self.directory / 'artifacts' / 'body.tex', body)
@@ -6803,7 +6820,9 @@ class WriteupRunner(ResearchRunner):
         if self.state.get('conversion_source'):
             outcome = ('The PDF compiled successfully.' if ready else
                        ' '.join(g['message'][:1].upper() + g['message'][1:].rstrip('.') + '.' for g in gates))
-            self.state['stop_reason'] = ('Converted the Markdown file to LaTeX. ' + outcome).rstrip()
+            src = next(item for item in self.state['sources'] if item['id'] == self.state['conversion_source'])
+            label = 'the previous answer' if src.get('origin') else 'the Markdown file'
+            self.state['stop_reason'] = (f'Converted {label} to LaTeX. ' + outcome).rstrip()
             return
         self.state['stop_reason'] = ('Ready: written, compiled and checked; read it before using it.' if ready else
                                      'Draft: ' + '; '.join(g['message'] for g in gates) + '.' if gates else

@@ -297,16 +297,22 @@ class OpenAICompatible:
         data = self._payload(payload)
         yield from self._stream(data, output_char_limit=payload.get('_output_char_limit'))
 
-    def _stream_failure(self, exc, category, progress, final_usage):
+    def _stream_failure(self, exc, category, progress, final_usage, output_started):
         return exc
+
+    def _first_model_output(self):
+        """Transport hook for an observer monitoring a silent, accepted stream."""
+
+    def _stream_deadline(self):
+        return time.monotonic() + self.timeout
 
     def _stream(self, data, output_char_limit=None):
         calls, finish, usage = {}, None, None
-        accepted, final_usage = False, None
+        accepted, output_started, final_usage = False, False, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
         generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
-        deadline = time.monotonic() + self.timeout
+        deadline = self._stream_deadline()
         try:
             with self.request('/chat/completions', data) as response:
                 accepted = True
@@ -343,6 +349,17 @@ class OpenAICompatible:
                     chunk = json.loads(raw)
                     if not isinstance(chunk, dict):
                         raise AgentError('Malformed SSE model event')
+                    # A tool ID or an unfinished function fragment is model output
+                    # even if no complete tool call has reached the caller. Inspect
+                    # co-located deltas before an error in that same frame.
+                    if not output_started:
+                        for choice in chunk.get('choices') or []:
+                            delta = choice.get('delta') if isinstance(choice, dict) else None
+                            if isinstance(delta, dict) and any(delta.get(field) for field in
+                                    ('content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call')):
+                                output_started = True
+                                self._first_model_output()
+                                break
                     current = chunk.get('usage')
                     if current is not None:
                         if not isinstance(current, dict) or any(type(current.get(key)) is not int or current[key] < 0 for key in ('prompt_tokens', 'completion_tokens')):
@@ -433,12 +450,12 @@ class OpenAICompatible:
         except AgentError as exc:
             if not accepted:
                 raise
-            raise self._stream_failure(exc, 'protocol', progress, final_usage) from None
+            raise self._stream_failure(exc, 'protocol', progress, final_usage, output_started) from None
         except (ValueError, UnicodeError, TypeError, KeyError, AttributeError, OSError, HTTPException) as exc:
             error = AgentError(f'Malformed or interrupted model stream: {exc}')
             category = 'interrupted' if isinstance(exc, (OSError, HTTPException)) else 'protocol'
-            raise self._stream_failure(error, category, progress, final_usage) from None
-        raise self._stream_failure(error, 'interrupted', progress, final_usage)
+            raise self._stream_failure(error, category, progress, final_usage, output_started) from None
+        raise self._stream_failure(error, 'interrupted', progress, final_usage, output_started)
 
 
 class LlamaCpp(OpenAICompatible):

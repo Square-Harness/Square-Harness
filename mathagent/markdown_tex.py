@@ -23,7 +23,7 @@ _PREVIEW_COMMANDS = frozenset((
     'rho varrho sigma varsigma tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Upsilon '
     'Phi Psi Omega mathbb mathcal mathfrak mathrm mathbf mathit mathsf mathtt operatorname text frac dfrac tfrac '
     'sqrt overline underline hat widehat tilde widetilde bar dot ddot vec subset subseteq supset supseteq in '
-    'notin ni le leq ge geq ne neq approx sim simeq equiv cong to mapsto rightarrow leftarrow leftrightarrow '
+    'notin ni le leq ge geq ll gg ne neq approx sim simeq equiv cong to mapsto rightarrow leftarrow leftrightarrow '
     'implies iff times otimes oplus cdot cdots ldots vdots ddots dots ast star circ pm mp partial nabla infty '
     'ell hbar Re Im sum prod int iint iiint oint lim limsup liminf sup inf max min det ker dim exp log ln '
     'sin cos tan pi cap cup bigcap bigcup wedge vee emptyset varnothing langle rangle lvert rvert lVert rVert '

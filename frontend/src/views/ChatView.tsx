@@ -6,7 +6,7 @@ import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
-import { Collapse, ErrorNote, Loading, Toggle, WorkProgressNote, useLoad } from '../components/common'
+import { Collapse, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
@@ -259,7 +259,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               <p className="muted routing"><Square variant="running" size={12} /> Reading your request…</p>
             </div>
           )}
-          {live && <LiveTurnView live={live} mode={mode} />}
+          {live && <LiveTurnView live={live} mode={mode} waitingForOutput={!!task?.waiting_model_calls} />}
           {free && data?.assistant_progress && <div className="entry">
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
@@ -326,6 +326,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           )}
           {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
+        <ModelWaitNote taskId={task?.id} />
         {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
@@ -640,7 +641,7 @@ function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: str
   )
 }
 
-function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
+function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: ChatMode; waitingForOutput: boolean }) {
   const glyph: ChatMode | 'check' = live.mode ?? mode
   return (
     <div className="turn turn-live">
@@ -653,8 +654,8 @@ function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
             <div key={index} className="step">
               <Thinking text={step.thinking} live={!step.text} />
               {step.text && <StreamingMarkdown text={step.text} className="answer" />}
-              {!step.text && !step.thinking && index === live.steps.length - 1 && (
-                <p className="muted small">Waiting for the first tokens. The model may still be loading into memory.</p>
+              {!step.text && !step.thinking && !waitingForOutput && index === live.steps.length - 1 && (
+                <p className="muted small">Waiting for the first tokens.</p>
               )}
             </div>
           ) : step.type === 'tool' ? (
@@ -666,7 +667,7 @@ function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
           ) : (
             <p key={index} className="notice">{step.text}</p>
           ))}
-          {!live.steps.length && <p className="muted small">Waiting for the model…</p>}
+          {!live.steps.length && !waitingForOutput && <p className="muted small">Waiting for the model…</p>}
         </div>
       </div>
     </div>

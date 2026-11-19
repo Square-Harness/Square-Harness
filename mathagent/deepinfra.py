@@ -13,13 +13,17 @@ import json
 import os
 import stat
 import time
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from functools import wraps
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request
 
-from .agent import AgentError
+from .agent import AgentError, ModelNotDispatched
 from .backends import MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, ToolCallError
 from .model_limits import MODEL_OUTPUT_TOKENS
 
@@ -35,12 +39,111 @@ MAX_OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
 class DeepInfraGenerationError(AgentError):
     """Provider failure that must reach the workflow before it dispatches more work."""
 
-    def __init__(self, message, *, category='unknown', stream_progress=None, stats=None):
+    def __init__(self, message, *, category='unknown', stream_progress=None, stats=None,
+                 confirmed_terminal=False, output_started=False, retry_spent=False):
         super().__init__(message)
         self.category = category
         self.retryable = category in {'interrupted', 'service_unavailable', 'server_error'}
         self.stream_progress = dict(stream_progress or {})
         self.stats = dict(stats or {})
+        self.confirmed_terminal = confirmed_terminal
+        self.output_started = output_started
+        self.retry_spent = retry_spent
+
+    @property
+    def retry_before_output(self):
+        return (self.confirmed_terminal and not self.retry_spent and self.category in {'server_error', 'service_unavailable'}
+                and not self.output_started and not any(self.stream_progress.values())
+                and not self.stats.get('eval_count'))
+
+
+@dataclass
+class _GenerationWindow:
+    deadline: float
+    retry_spent: bool
+
+
+_generation_window = ContextVar('deepinfra_generation_window', default=None)
+
+
+def generation_deadline(timeout):
+    """Do not give a replacement attempt a new per-call time allowance."""
+    end = time.monotonic() + timeout
+    window = _generation_window.get()
+    return end if window is None else min(end, window.deadline)
+
+
+@contextmanager
+def generation_window(client, *, replacement=False, deadline=None):
+    """Share one replacement across HTTP rejections, terminal SSE errors and nested callers."""
+    if getattr(client, 'profile', None) != 'deepinfra' or _generation_window.get() is not None:
+        yield
+        return
+    end = generation_deadline(client.timeout)
+    previous = _generation_window.set(_GenerationWindow(end if deadline is None else min(end, deadline), replacement))
+    try:
+        yield
+    finally:
+        _generation_window.reset(previous)
+
+
+@contextmanager
+def generation_attempts(client, emit, *, before_retry=None):
+    """One owner retries outside all its admission, reservation and journal steps."""
+    if getattr(client, 'profile', None) != 'deepinfra' or _generation_window.get() is not None:
+        yield (nullcontext(),)
+        return
+    retry = None
+
+    @contextmanager
+    def first():
+        nonlocal retry
+        try:
+            yield
+        except DeepInfraGenerationError as exc:
+            cancel = getattr(client, 'cancel', None)
+            if cancel is not None and cancel.is_set():
+                raise KeyboardInterrupt from None
+            window = _generation_window.get()
+            if (not exc.retry_before_output or window.retry_spent or time.monotonic() >= window.deadline
+                    or (before_retry and not before_retry(exc))):
+                raise
+            retry = exc
+            window.retry_spent = True
+
+    def attempts():
+        yield first()
+        if retry:
+            emit('notice', 'The provider ended the request before producing output. Retrying once within the remaining budget.')
+            cancel = getattr(client, 'cancel', None)
+            if cancel is not None and cancel.is_set():
+                raise KeyboardInterrupt
+            if time.monotonic() >= _generation_window.get().deadline:
+                raise retry
+            yield nullcontext()
+
+    with generation_window(client):
+        yield attempts()
+
+
+def retry_generation_call(method):
+    """Retry the entire worker call, including its durable accounting."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with generation_attempts(self.agent.client, self.emit) as attempts:
+            for attempt in attempts:
+                with attempt:
+                    return method(self, *args, **kwargs)
+    return wrapped
+
+
+def generation_stream(client, payload, emit):
+    """Plain Agent turns have no separate worker journal; re-enter the budgeted client."""
+    with generation_attempts(client, emit) as attempts:
+        for attempt in attempts:
+            with attempt:
+                yield from client.stream(payload)
+                return
 
 
 class DeepInfraRateLimit(DeepInfraGenerationError):
@@ -68,7 +171,7 @@ class _RejectedRetryCancelled(KeyboardInterrupt):
 
 
 def rejected_before_inference(exc):
-    return isinstance(exc, TesterAllowanceInsufficient) or (
+    return isinstance(exc, (TesterAllowanceInsufficient, ModelNotDispatched)) or (
         isinstance(exc, (DeepInfraRateLimit, _RejectedRetryCancelled)) and exc.completion_rejected)
 
 
@@ -260,8 +363,10 @@ class DeepInfra(OpenAICompatible):
                  405: 'This endpoint does not support the requested operation.',
                  422: 'Check the model request and supported parameters.'}
         completion = parsed.path.endswith('/chat/completions')
-        deadline = time.monotonic() + self.timeout
-        timeout = self.timeout
+        deadline = generation_deadline(self.timeout)
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            raise ModelNotDispatched('The DeepInfra request time allowance elapsed before dispatch.')
         cancel = getattr(self, 'cancel', None)
         for attempt in (0, 1):
             if attempt and cancel is not None and cancel.is_set():
@@ -278,8 +383,11 @@ class DeepInfra(OpenAICompatible):
                     hint, transient = _rate_limit(exc, deadline)
                     delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None)
                 rejection = DeepInfraRateLimit(hint, completion_rejected=completion)
-                if attempt or not transient or delay is None or time.monotonic() + delay >= deadline:
+                window = _generation_window.get() if completion else None
+                if attempt or (window and window.retry_spent) or not transient or delay is None or time.monotonic() + delay >= deadline:
                     raise rejection from None
+                if window:
+                    window.retry_spent = True
                 try:
                     if cancel is None:
                         time.sleep(delay)
@@ -434,7 +542,10 @@ class DeepInfra(OpenAICompatible):
         self.input_token_count_method = 'DeepInfra UTF-8 byte and framing estimate (tokenizer unavailable)' + image_method
         return self._bytes(data['messages']) + framing + extra_allowance + image_allowance
 
-    def _stream_failure(self, exc, category, progress, final_usage):
+    def _stream_deadline(self):
+        return generation_deadline(self.timeout)
+
+    def _stream_failure(self, exc, category, progress, final_usage, output_started):
         if str(exc) in {'Proof preparation exceeded its short text allowance', 'Proof preparation exceeded its short tool-argument allowance'}:
             return exc
         if isinstance(exc, ProviderStreamError):
@@ -445,9 +556,16 @@ class DeepInfra(OpenAICompatible):
             message = str(exc)
         else:
             message = 'DeepInfra returned an invalid completion stream.'
-        return DeepInfraGenerationError(message, category=category, stream_progress=progress, stats=final_usage)
+        window = _generation_window.get()
+        return DeepInfraGenerationError(message, category=category, stream_progress=progress, stats=final_usage,
+                                        confirmed_terminal=isinstance(exc, ProviderStreamError), output_started=output_started,
+                                        retry_spent=bool(window and window.retry_spent))
 
     def stream(self, payload):
+        with generation_window(self):
+            yield from self._generation(payload)
+
+    def _generation(self, payload):
         quota = None
         if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
             from contextlib import closing

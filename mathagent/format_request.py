@@ -17,13 +17,20 @@ _POLITE = re.compile(r"^(?:(?:please|can you|could you|would you|s'il (?:te|vous
 _QUALIFIER = r'(?:juste?|only|simply|entirely|directly|verbatim|integralement|simplement)'
 _SOURCE = (r'(?:the|this|my|ce|cet|mon|le|la|son|attached|uploaded|following|original|whole|entire|full|'
            r'from|markdown|\.?md|document|file|review|survey|manuscript|text|notes|fichier|revue|texte|'
-           r'joint|ci-joint|it|sourcefile)')
+           r'joint|ci-joint|it|that|your|last|previous|preceding|above|answer|response|result|literature|'
+           r'just|gave|wrote|tu|viens|de|reponse|precedente?|sourcefile)')
+_TARGET = r'(?:(?:a|an|un|standalone|complete|full) ){0,3}(?:latex|tex|\.tex)'
+_SOURCE_PHRASE = rf'{_SOURCE}(?: {_SOURCE}){{0,9}}'
 _INSTRUCTION = re.compile(
-    rf'(?:{_QUALIFIER} )?(?:convert|rewrite|transcribe|typeset|render|turn|put|translate|'
+    rf'(?:{_QUALIFIER} )?(?:convert|export|rewrite|write|transcribe|typeset|render|turn|put|translate|'
     rf'convertis(?:sez)?|convertir|reecris|reecrire|reecrivez|transcris|transcrivez|mets|mettez) '
     rf'(?:(?:{_SOURCE}|{_QUALIFIER}) ){{0,10}}(?:in|into|to|as|en|au format|au) '
-    r'(?:(?:a|an|un|standalone|complete|full) ){0,3}(?:latex|tex|\.tex)'
+    rf'{_TARGET}'
     r'(?: (?:file|document|format|source))?\b')
+_VERSION_REQUEST = re.compile(
+    rf'(?:give me|(?:can|could|may) i (?:have|get)) (?:'
+    rf'{_TARGET} (?:version|copy|file|document) of {_SOURCE_PHRASE}|'
+    rf'{_SOURCE_PHRASE} (?:in|as) {_TARGET}(?: (?:file|document|format|source))?)\b')
 _MATERIAL = (r"(?:(?:the|its|my|original|all|any|of|le|la|les|aux|mes|a la|l') ?){0,4}"
              r'(?:math(?:s|ematics)?|equations?|formul(?:as?|ae|es?)|mathematiques?|wording|text|texte|'
              r'contents?|contenu|prose|notation|structure|everything|anything|rien)')
@@ -57,7 +64,10 @@ def markdown_conversion_request(query, files, *, style_mode='auto'):
         text = re.sub(r'(?<![\w./-])(?:`' + literal + r'`|"' + literal + r'"|' + literal
                       + r')(?![\w/-]|\.\w)', 'sourcefile', text)
     text = _POLITE.sub('', ' '.join(text.split()))
-    conversion = _INSTRUCTION.match(text) or re.match(r'(?:markdown|\.?md|sourcefile) to (?:latex|tex)\b', text)
+    text = re.sub(r"[ ,]+(?:please|s'il (?:te|vous) plait)[.!?\s]*$", '', text)
+    if re.match(r'(?:write|rewrite) (?:in|as|into|to) ', text):
+        return False  # A new document in LaTeX needs an objective or an identified source.
+    conversion = _INSTRUCTION.match(text) or _VERSION_REQUEST.match(text) or re.match(r'(?:markdown|\.?md|sourcefile) to (?:latex|tex)\b', text)
     if conversion is None:
         return False
     end = conversion.end()
@@ -75,6 +85,17 @@ def markdown_conversion_request(query, files, *, style_mode='auto'):
     return True
 
 
+def previous_markdown_request(query, *, style_mode='auto'):
+    """A pure conversion specifically pointing to an existing answer, independent of any filenames."""
+    if not markdown_conversion_request(query, ['previous-answer.md'], style_mode=style_mode):
+        return False
+    text = _fold(query)
+    return (not re.search(r'\b(?:attached|uploaded|fichier|joint)\b|\bfile\b.*?\b(?:in|into|to|as|en)\b', text)
+            and bool(re.search(r'\b(?:it|(?:version|copy|file|document) of (?:this|that)(?=[.!?\s]*$)|'
+                               r'(?:this|that)(?=\s+(?:in|into|as|to)\b)|(?:the|your|previous|last|preceding|above|this|that) '
+                               r'(?:answer|response|result|(?:literature )?review|survey|text)|(?:la|ta) reponse)\b', text)))
+
+
 def conversion_source(state):
     """Look through the pinned job inputs, ignoring the automatically added chat and reference catalog."""
     if state.get('variant') or state.get('images') or state.get('inline_material'):
@@ -88,3 +109,15 @@ def conversion_source(state):
         return None
     style = (state.get('style_choice') or {}).get('mode', 'auto')
     return source['id'] if markdown_conversion_request(state['goal'], [source['path']], style_mode=style) else None
+
+
+def can_recover_previous_markdown(state, snapshot):
+    """An old conversation-only job must already contain the exact selected answer in its pinned record."""
+    if (not snapshot or state.get('kind') != 'writeup' or state.get('phase') not in ('outline', 'skeleton', 'draft')
+            or state.get('variant') or state.get('images') or state.get('inline_material')
+            or state.get('document') or state.get('body') or state.get('outputs')
+            or not previous_markdown_request(state['goal'], style_mode=(state.get('style_choice') or {}).get('mode', 'auto'))):
+        return False
+    inputs = [s for s in state['sources'] if not s.get('catalog')]
+    return (len(inputs) == 1 and inputs[0]['id'] == 'M0' and inputs[0]['path'] == 'conversation.md'
+            and '\n\n' + snapshot['source']['content'].strip() + '\n\n' in '\n\n' + inputs[0]['content'].strip() + '\n\n')

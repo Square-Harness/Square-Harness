@@ -30,7 +30,8 @@ from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
 from .model_limits import is_ds4, substantive_output, workflow_budget
-from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, generation_window, rejected_before_inference
+from .assistant_budget import AssistantBudget
 from .reporting import usage_footer
 from .research import (ResearchRunner, ResearchBudget, _job_directory, _read_state, _reference_prompt,
                        announces_only, remaining_limit, usable_completion)
@@ -1007,14 +1008,23 @@ class ReviewRunner(ResearchRunner):
     def _ask(self, role, prompt, *, cap, schema=None, temperature=.3, units=()):
         """Retry critical work once, defer failed independent units, and preserve every call's accounting."""
         answer_only = False
+        last_provider_error = None
+        # Immediate replacements share a deadline. A deferred unit in a later
+        # wave is separately admitted work under the saved phase and job limits.
+        deadline = None
+        if getattr(self.agent.client, 'profile', None) == 'deepinfra':
+            deadline = time.monotonic() + min(self.agent.client.timeout, self._seconds_for_phase(self.state['phase']))
         for attempt in (0, 1):
             self._cancel()
             if self._provider_pause:
                 raise self._provider_pause
+            if deadline is not None and time.monotonic() >= deadline and last_provider_error is not None:
+                raise last_provider_error
             if self._seconds_for_phase(self.state['phase']) <= 0:
                 raise ResearchBudget(f'The {role} phase deadline was reached')
             try:
-                with self._timeout():
+                replacement = any(self._failure_count(role, key) for key in units or (role,))
+                with self._timeout(), generation_window(self.agent.client, replacement=replacement, deadline=deadline):
                     options = {'answer_only': True} if answer_only else {}
                     result = self._ask_once(role, prompt, cap=cap, schema=schema, temperature=temperature,
                                             units=units, **options)
@@ -1036,7 +1046,7 @@ class ReviewRunner(ResearchRunner):
                         elif role == 'recover-check':
                             self.state['core_recovery']['stage'] = 'proposed'
                         raise
-                    may_recover = exc.retryable or exc.category == 'unknown'
+                    may_recover = exc.retry_before_output
                     first_failure = all(self._failure_count(role, key) == 1 for key in units or (role,))
                     if units:
                         # Prefer unaffected work before a single fresh, separately admitted request.
@@ -1046,13 +1056,15 @@ class ReviewRunner(ResearchRunner):
                         raise _UnitGenerationFailure(str(exc), deferred=deferred) from None
                     if role == 'outline':
                         raise _UnitGenerationFailure(str(exc)) from None
-                    if attempt == 0 and first_failure and may_recover:
-                        self._warn(f'A {role} model stream stopped. The saved inputs were submitted once more.')
+                    if attempt == 0 and first_failure and may_recover and (deadline is None or time.monotonic() < deadline):
+                        last_provider_error = exc
+                        self._warn(f'A {role} model stream stopped. Retrying once within the remaining time and token allowance.')
                         continue
                     if role == 'scope':
                         raise
                     raise _UnitGenerationFailure(str(exc)) from None
-                if attempt or isinstance(exc, (ResearchBudget, TokenBudgetError, KeyboardInterrupt)) or type(exc).__name__ == 'AssistantBudget':
+                if (attempt or getattr(self.agent.client, 'profile', None) == 'deepinfra'
+                        or isinstance(exc, (ResearchBudget, TokenBudgetError, KeyboardInterrupt, AssistantBudget))):
                     raise
                 self._warn(f'The model server failed on a {role} call ({str(exc)[:120]}); it was asked again.')
                 time.sleep(3)
@@ -1216,10 +1228,11 @@ class ReviewRunner(ResearchRunner):
                 # Preserve this unit for Resume while already-running siblings checkpoint.
                 provider_failed.set()
                 raise
-            except (ResearchBudget, TokenBudgetError, WorkerInputError, KeyboardInterrupt):
+            except (ResearchBudget, TokenBudgetError, WorkerInputError, KeyboardInterrupt, AssistantBudget):
                 raise
             except Exception as exc:  # isolate a malformed unit or an exhausted transport retry
-                if type(exc).__name__ == 'AssistantBudget':
+                if isinstance(exc, AgentError) and getattr(self.agent.client, 'profile', None) == 'deepinfra':
+                    provider_failed.set()
                     raise
                 reason = f'{type(exc).__name__}: {str(exc)[:120]}'
                 with self._mutex:
@@ -1452,7 +1465,7 @@ class ReviewRunner(ResearchRunner):
                 raise ResearchBudget('The working time or the output budget is used up')
             steps[phase]()
         except AgentError as exc:
-            if not (isinstance(exc, ResearchBudget) or type(exc).__name__ == 'AssistantBudget'):
+            if not isinstance(exc, (ResearchBudget, AssistantBudget)):
                 raise
             self._cut(phase, f'{str(exc).rstrip(".")} during the {phase} step.')
             if phase in ('search', 'screen', 'expand'):

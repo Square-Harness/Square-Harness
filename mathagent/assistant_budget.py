@@ -8,13 +8,17 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 
-from .agent import AgentError
+from .agent import AgentError, ModelNotDispatched
 from .backends import MeasuredStreamCancellation, TokenBudgetError, ToolCallError
-from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, generation_deadline, rejected_before_inference
 from .proof import count_input
 
 
 class AssistantBudget(AgentError):
+    pass
+
+
+class AssistantAdmissionRefused(AssistantBudget, ModelNotDispatched):
     pass
 
 
@@ -158,7 +162,7 @@ class BudgetClient:
         if cancel is not None and cancel.is_set():
             raise KeyboardInterrupt
         if self.remaining_seconds <= 0:
-            raise AssistantBudget('Assistant time budget exhausted before inference admission.')
+            raise AssistantAdmissionRefused('Assistant time budget exhausted before inference admission.')
         exempt = deadline is None
         if exempt:
             self._admitted.waiting_since = time.monotonic()
@@ -196,21 +200,28 @@ class BudgetClient:
                 self.pool.slots.release()
 
     def stream(self, payload):
+        admitted = False
+        deadline = generation_deadline(self.remaining_seconds)
         try:
-            with self.inference_slot(deadline=time.monotonic() + self.remaining_seconds):
+            with self.inference_slot(deadline=deadline):
+                if time.monotonic() >= deadline:
+                    raise AssistantAdmissionRefused('The time allowance elapsed before model dispatch.')
+                admitted = True
                 yield from self._stream(payload)
         except TimeoutError as exc:
-            raise AssistantBudget('Assistant time budget exhausted while waiting for inference.') from exc
+            if admitted:
+                raise AssistantBudget('Assistant inference timed out during generation.') from exc
+            raise AssistantAdmissionRefused('Assistant time budget exhausted while waiting for inference.') from exc
 
     def _stream(self, payload):
         cap = payload.get('options', {}).get('num_predict')
         if type(cap) is not int or cap <= 0:
-            raise AssistantBudget('Model generation needs a positive output cap.')
+            raise AssistantAdmissionRefused('Model generation needs a positive output cap.')
         if self.remaining_seconds <= 0:
-            raise AssistantBudget('Assistant time budget exhausted.')
+            raise AssistantAdmissionRefused('Assistant time budget exhausted.')
         count, method = count_input(self.client, payload)
         if count + cap + 1 > payload['options']['num_ctx']:
-            raise AgentError('The complete Assistant context does not fit. No hypotheses or worker results were clipped.')
+            raise ModelNotDispatched('The complete Assistant context does not fit. No hypotheses or worker results were clipped.')
         with self.pool.lock:
             # Older saved adaptive turns may have reached their initial cap
             # through source reads before delegating. Honor only their saved
@@ -218,10 +229,10 @@ class BudgetClient:
             self.ensure_limits(max_tokens=self.pool.state['tokens'] + cap,
                                max_input_tokens=self.pool.state['input_tokens'] + count)
             if type(cap) is not int or cap <= 0 or cap > self.remaining_tokens:
-                raise AssistantBudget('Assistant output budget cannot cover the next model call.')
+                raise AssistantAdmissionRefused('Assistant output budget cannot cover the next model call.')
             input_limit = self.pool.state['max_input_tokens']
             if input_limit is not None and self.pool.state['input_tokens'] + count > input_limit:
-                raise AssistantBudget('Assistant input budget exhausted; no mathematical context was clipped.')
+                raise AssistantAdmissionRefused('Assistant input budget exhausted; no mathematical context was clipped.')
             # Reserve before dispatch. Interrupted or unaccounted calls retain
             # their allowance, so a resume cannot spend those tokens twice.
             self.pool.state['tokens'] += cap

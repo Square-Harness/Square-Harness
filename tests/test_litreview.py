@@ -30,8 +30,7 @@ class LiteratureReviewTests(unittest.TestCase):
             ids = [int(n) for n in re.findall(r'^#?(\d+)\s*\|', candidates, re.M)]
             groups.append(ids)
             if ids == list(range(1, 33)):
-                yield {'message': {'content': 'incomplete classifications'}}
-                raise DeepInfraGenerationError('Model generation failed.', stream_progress={'content_chars': 26})
+                raise DeepInfraGenerationError('Model generation failed.', category='server_error', confirmed_terminal=True)
             yield from response(json.dumps({'items': [
                 {'n': n, 'kind': 'result', 'relevance': 3, 'facet': 0} for n in ids]}))
         def step(phase):
@@ -52,7 +51,7 @@ class LiteratureReviewTests(unittest.TestCase):
         self.assertEqual(sorted(groups), sorted([list(range(1, 33)), list(range(33, 46)), list(range(1, 11)),
                                                  list(range(11, 21)), list(range(21, 31)), [31, 32]]))
         failed, = [row for row in runner.state['calls'] if row['status'] == 'generation_failed']
-        self.assertEqual((failed['units'], failed['stream_progress']), (list(range(1, 33)), {'content_chars': 26}))
+        self.assertEqual((failed['units'], failed['stream_progress']), (list(range(1, 33)), {}))
         self.assertEqual(runner.state['tokens_charged'], failed['reserved_tokens'] + 5 * 20)
 
     def test_outline_failure_and_interrupted_check_still_deliver_only_source_checked_prose(self):
@@ -63,8 +62,10 @@ class LiteratureReviewTests(unittest.TestCase):
                  'findings': []}
         measured = DeepInfraGenerationError('Stream interrupted.', category='interrupted',
                                             stats={'eval_count': 12, 'prompt_eval_count': 130})
+        empty = DeepInfraGenerationError('Model generation failed.', category='server_error', confirmed_terminal=True,
+                                        stats={'eval_count': 0, 'prompt_eval_count': 130})
         transport = FakeClient([[measured], response(fact[:-1] + ' [@1].\n\n' + unsupported[:-1] + ' [@1].'),
-                                [measured], response(json.dumps(check))])
+                                [empty], response(json.dumps(check))])
         runner = ReviewRunner(Agent(transport, Workspace(self.root)))
         default_step = runner._step
         def step(phase):
@@ -88,10 +89,10 @@ class LiteratureReviewTests(unittest.TestCase):
         self.assertNotIn(unsupported[:-1], markdown)
         self.assertEqual([row['status'] for row in runner.state['calls']],
                          ['generation_failed', 'complete', 'generation_failed', 'complete'])
-        self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (64, 460))
+        self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (52, 460))
 
     def test_outage_stops_before_a_fourth_unknown_charge_and_resume_keeps_the_failed_units(self):
-        outage = DeepInfraGenerationError('The model stream stopped.', category='interrupted')
+        outage = DeepInfraGenerationError('Provider ended the stream.', category='server_error', confirmed_terminal=True)
         transport = FakeClient([[outage]] * 3 + [response(str(n)) for n in range(4)])
         runner = ReviewRunner(Agent(transport, Workspace(self.root)))
         def step(phase):
@@ -124,13 +125,25 @@ class LiteratureReviewTests(unittest.TestCase):
     def test_critical_scope_is_retried_only_once_and_an_account_error_stops_immediately(self):
         for category, tries in [('server_error', 2), ('quota', 1)]:
             with self.subTest(category=category):
-                error = DeepInfraGenerationError('The provider stopped generation.', category=category)
+                error = DeepInfraGenerationError('The provider stopped generation.', category=category, confirmed_terminal=True)
                 runner = ReviewRunner(Agent(FakeClient([[error]] * 2), Workspace(self.root)))
                 result = runner.start('Review observation times.', max_tokens=20000)
                 self.assertEqual(result['status'], 'paused')
                 self.assertEqual(result['worker_error']['details'], {'phase': 'scope', 'provider_category': category})
                 self.assertEqual(len(runner.state['calls']), tries)
                 self.assertIsNone(runner.state['scope'])
+        # The phase still has ample working time, but the original provider
+        # request window has elapsed when the first terminal error arrives.
+        client = FakeClient([])
+        client.profile, client.reasoning_effort, client.timeout = 'deepinfra', 'none', 5
+        runner = ReviewRunner(Agent(client, Workspace(self.root)))
+        with patch('mathagent.litreview.time.monotonic', return_value=100) as clock:
+            def late_failure(payload):
+                clock.return_value = 106
+                raise DeepInfraGenerationError('Provider ended the stream.', category='server_error', confirmed_terminal=True)
+            with patch.object(client, 'stream', side_effect=late_failure) as requests:
+                stopped = runner.start('Review observation times.', max_tokens=20000)
+        self.assertEqual((stopped['status'], requests.call_count), ('paused', 1))
 
     def test_local_allowance_refusal_and_measured_cancellation_pause_without_an_automatic_retry(self):
         cases = [(TesterAllowanceInsufficient(), 0, 0), (MeasuredStreamCancellation({'eval_count': 18, 'prompt_eval_count': 70}), 18, 70)]

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Export a review or the previous written answer to LaTeX from its conversation.
+  Write-up converts the saved Markdown locally and includes a matching review
+  bibliography in the source ZIP. Existing paused conversions can use the
+  original turn on Resume.
+- Show when DeepInfra has accepted a request and is still preparing its first
+  output. Recover once from a terminal transient error before the first output
+  when time and allowance permit. Each attempt has its own usage reservation.
+
 - Continue a literature review when one model stream fails during screening,
   reading, writing or checking. Keep completed work, retry eligible units within
   the saved budget and pause on a sustained outage. Before selection finishes,

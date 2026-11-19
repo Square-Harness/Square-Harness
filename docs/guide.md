@@ -59,6 +59,12 @@ each Proof job's existing solve/review budgets.
 The account menu separates used, reserved and available amounts, with actual
 input/output counts and the same output-equivalent token meter.
 
+If DeepInfra accepts a request and takes time to produce its first output, the
+interface shows that it is waiting. If DeepInfra then reports a temporary
+internal error before producing any output, Square Harness can try the call
+once more within the remaining time and allowance. A reservation with unknown
+usage still counts toward that allowance.
+
 The DS4 launcher uses Standard service by default. Add
 `--service-tier priority` to request DeepInfra's Priority service for all model
 calls, at a 50% per-token premium. Priority can improve response time during
@@ -673,9 +679,13 @@ introduction, exercises, solutions, exam questions) is written in sections of
 its own, and any new mathematics in them is marked as generated: a document
 that contains some is a draft until it has been checked.
 
-To convert a finished Markdown file, attach it and ask “Convert this file to LaTeX”.
-Write-up converts the document locally and keeps its equations, headings and references
-in source order. The card provides the LaTeX source and a PDF when compilation succeeds.
+To convert a finished review, ask “Write it in a LaTeX document please” directly
+after the review in the same conversation. You can also ask this after a written
+Markdown answer, or attach a Markdown file and ask to convert it. Write-up uses
+the saved text directly, including any coverage warnings in a partial review,
+and keeps its equations, headings and references in source order. The card
+provides the LaTeX source and a PDF when compilation succeeds. When the review
+has a matching saved BibTeX file, the source ZIP includes it.
 A formula that needs a user-defined command stays in the source for compilation with your
 own preamble. Requests for editing or a selected template use the writing workflow.
 

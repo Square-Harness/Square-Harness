@@ -181,10 +181,14 @@ Version 1.1.0. The source of truth for the machine-readable version is
   transcript and retained for continued discussion and explicit review requests.
   Re-run document cards retain their previous download job IDs until chat
   deletion, so cleanup includes old copies without deleting work during retry.
-- **Markdown conversion.** A formatting-only request for one pinned Markdown file
-  uses the parser in `markdown_tex.py`. Conversion compiles and exports the literal
-  source directly. A paused pre-conversion writer can use its original pinned
-  Markdown on resume while retaining its call ledger and previously written parts.
+- **Markdown conversion.** A formatting-only chat request pins the source for
+  Write-up before model routing. An attached Markdown file takes precedence.
+  A request referring to the previous written answer can use its exact Markdown
+  and the matching literature review's saved BibTeX. Write-up uses the parser
+  in `markdown_tex.py` and packages the source dependencies. On resume, resolve
+  a legacy conversation source against the original turn. Preserve its call
+  ledger and any previously written parts. Requests for substantive changes
+  continue through the writer.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
   request, then the template's, then the saved style's, then the model's
   (`writeup._request_preamble`). A written document is always assembled,
@@ -924,6 +928,14 @@ credential migration must not silently grant an additional spending allowance.
 field; Priority adds `service_tier: "priority"` centrally in `_payload`, so
 Assistant, preparation, solver and review calls use the same selection. This
 transport setting must not change prompts, Proof budgets or saved allowances.
+
+An accepted stream can carry heartbeats for minutes. The GUI shows a waiting
+message after twelve seconds without model output. A terminal transient
+provider error before any reasoning, text or tool output permits one new
+attempt within the original deadline. Each new attempt goes through budget
+admission again. Keep unknown usage reserved. A heartbeat alone never starts
+another request. Literature Review can defer an independent unit to another
+wave. That unit still uses its saved phase and job allowances.
 
 Credentials are read from `DEEPINFRA_API_KEY_FILE` (owned private regular file)
 or `DEEPINFRA_API_KEY`, and are sent only to approved DeepInfra HTTPS routes.

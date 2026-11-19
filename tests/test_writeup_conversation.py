@@ -3,6 +3,7 @@
 
 """Compile a conversation write-up with figures, a table, citations and honest draft status."""
 import base64
+import hashlib
 import io
 import json
 import re
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from mathagent.gui import store
-from mathagent.format_request import conversion_source, markdown_conversion_request
+from mathagent.format_request import conversion_source, markdown_conversion_request, previous_markdown_request
 from mathagent.writeup import WriteupRunner
 
 try:
@@ -51,7 +52,8 @@ class ConversationWriteupTests(GuiCase):
         request = "Please rewrite this md document in latex (don't touch the math, juste rewrite it entirely in latex)"
         (self.root / 'survey.md').write_text('# Results\n\nUnder assumption **A**, the bound is $a_n \\leq 2^n$.\n')
         chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        store.append_items(self.root, chat, [{'role': 'assistant', 'content': 'This earlier discussion is unrelated.'}])
+        store.append_items(self.root, chat, [{'role': 'user', 'content': 'An unrelated earlier question.'},
+                                            {'role': 'assistant', 'content': 'This earlier discussion is unrelated.'}])
         with patch.object(self.hub, '_ensure_model', side_effect=AssertionError('model catalogue unavailable')):
             self.ok('POST', f'/api/chats/{chat}/route', {'content': request, 'files': ['survey.md']})
             task = self.wait_task()
@@ -74,6 +76,76 @@ class ConversationWriteupTests(GuiCase):
             self.assertEqual(bundle.read('document.tex'), converted['document'].encode())
         self.assertEqual(converted['stop_reason'], 'Converted the Markdown file to LaTeX. The PDF compiled successfully.')
         self.assertIsNone(store.claim_auto_title(self.root, chat))
+
+        # The finished survey is a visible answer and an artifact in this chat,
+        # even when the user attaches nothing on the next turn.
+        jobs = self.root / '.mathagent' / 'research'
+        survey_job = str(uuid4())
+        survey_dir = jobs / survey_job
+        (survey_dir / 'artifacts').mkdir(parents=True)
+        survey = '# Small windows\n\nThe estimate [1] is $a_n \\leq 2^n$.\n\n## Coverage\n\nOnly the abstract was available.\n'
+        bib = '@article{sample, title={Small windows}, year={2004}}\n'
+        prior = json.loads((jobs / card['job_id'] / 'state.json').read_text())
+        prior.update(id=survey_job, kind='literature', scope={'title': 'Small windows'}, draft=survey,
+                     status='partial', phase='done', outputs={'review': 'review.md', 'bib': 'references.bib'})
+        (survey_dir / 'state.json').write_text(json.dumps(prior))
+        (survey_dir / 'review.md').write_text(survey)
+        (survey_dir / 'references.bib').write_text(bib)
+        followup = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        store.append_items(self.root, followup, [
+            {'role': 'user', 'content': 'Write the survey', 'files': ['survey.md']},
+            {'role': 'route', 'mode': 'literature', 'status': 'done', 'job_id': survey_job},
+            {'role': 'assistant', 'mode': 'free', 'content': survey}])
+        query = 'write it in latex document please'
+        for q in (query, 'Export the previous review as a LaTeX document.', 'Convert your last answer to LaTeX.',
+                  'Export the literature review as a standalone LaTeX document.',
+                  'Give me a LaTeX version of this review.', 'Can I have that as a .tex file?'):
+            self.assertTrue(previous_markdown_request(q), q)
+        for q in ('Write a new survey in LaTeX.', 'Convert the attached survey to LaTeX.',
+                  'Rewrite your previous answer in LaTeX and fix the proof.',
+                  'Give me a shorter LaTeX version of this review.',
+                  'Can I have that as a .tex file with a new introduction?'):
+            self.assertFalse(previous_markdown_request(q), q)
+        plain = {'id': followup, 'transcript': [{'role': 'user', 'content': 'Explain compactness.'},
+                                               {'role': 'assistant', 'content': 'Here is the exact answer.'}]}
+        self.assertEqual(store.previous_markdown(self.root, plain)['source']['content'], 'Here is the exact answer.')
+        plain['transcript'].append({'role': 'assistant', 'content': 'A second deliverable.'})
+        self.assertIsNone(store.previous_markdown(self.root, plain))
+        with patch.object(self.hub, '_ensure_model', side_effect=AssertionError('unexpected catalogue lookup')):
+            self.ok('POST', f'/api/chats/{followup}/route', {'content': query})
+            self.assertEqual(self.wait_task()['state'], 'done')
+        refreshed = store.load_chat(self.root, followup)
+        worker = refreshed['assistant_state']['children'][0]['job_id']
+        result = store.research_state(self.root, worker)
+        source = next(s for s in result['sources'] if s['id'] == result['conversion_source'])
+        self.assertEqual((source['content'], source['origin']['job_id']), (survey, survey_job))
+        self.assertEqual((result['status'], result['calls'], self.fake.requests), ('complete', [], []))
+        self.assertIn('Only the abstract was available.', result['document'])
+        with zipfile.ZipFile(io.BytesIO(store.research_source(self.root, worker)[1])) as bundle:
+            self.assertEqual(bundle.read('references.bib'), bib.encode())
+        # Historical user rows have no local conversion marker. Their restored
+        # Assistant state still prevents an idle conversation-title request.
+        index = next(i for i, item in enumerate(refreshed['transcript']) if item.get('content') == query)
+        store.update_item(self.root, followup, index, local_conversion=False)
+        self.assertIsNone(store.claim_auto_title(self.root, followup))
+
+        # Pre-upgrade jobs held a dossier and the failed call's allowance.
+        # Opening the same card's Resume must preserve both and pin the exact answer.
+        dossier = 'Older chat context.\n\n' + survey + '\nMore chat context.'
+        result.update(phase='outline', status='paused', body='', document='', outputs={},
+                      calls=[{'role': 'plan', 'status': 'generation_failed', 'reserved_tokens': 4096}],
+                      tokens_charged=4096, sources=[{'id': 'M0', 'path': 'conversation.md', 'content': dossier,
+                                                   'sha256': hashlib.sha256(dossier.encode()).hexdigest()}])
+        del result['conversion_source']
+        (jobs / worker / 'state.json').write_text(json.dumps(result))
+        self.ok('POST', f'/api/research/{worker}/resume')
+        self.assertEqual(self.wait_task()['state'], 'done')
+        restored = store.research_state(self.root, worker)
+        self.assertEqual((restored['status'], restored['tokens_charged'], len(restored['calls'])), ('complete', 4096, 1))
+        self.assertEqual(next(s['content'] for s in restored['sources'] if s['id'] == 'M0'), dossier)
+        self.assertIn('Only the abstract was available.', restored['document'])
+        self.assertNotIn('Older chat context', restored['document'])
+        self.assertEqual(self.fake.requests, [])
         for mixed in ('Convert the Markdown to LaTeX and improve the introduction.',
                       'Convert section 2 of this file to LaTeX.', 'Translate this file into French in LaTeX.',
                       'Use my LaTeX template to rewrite this survey.',

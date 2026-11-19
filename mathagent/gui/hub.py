@@ -22,12 +22,12 @@ import threading
 import time
 import uuid
 
-from ..agent import Agent, AgentError, Ollama
+from ..agent import Agent, AgentError, ModelNotDispatched, Ollama
 from ..assistant_budget import AssistantBudget, BudgetClient
 from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources, references_previous_pdf
-from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
-from ..format_request import markdown_conversion_request
+from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, generation_deadline
+from ..format_request import can_recover_previous_markdown, markdown_conversion_request, previous_markdown_request
 from ..source_tasks import automatic_source_action, source_overview
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
@@ -125,6 +125,8 @@ class Interruptible:
     already running finish first.
     """
 
+    FIRST_OUTPUT_NOTICE_SECONDS = 12
+
     def __init__(self, host, cancel, timeout=600, *, pool=None, owner=None):
         super().__init__(host, timeout)
         self.cancel = cancel
@@ -132,6 +134,7 @@ class Interruptible:
         self._admitted = threading.local()
         self._response_lock = threading.Lock()
         self._active_responses = {}
+        self.on_model_wait = None
 
     @staticmethod
     def _abort_response(response):
@@ -154,6 +157,7 @@ class Interruptible:
             state = self._active_responses.get(threading.get_ident())
             if state is not None:
                 state['response'] = response
+                state['accepted_at'] = time.monotonic()
         if state is not None and (self.cancel.is_set() or state['expired']):
             self._abort_response(response)
             response.close()
@@ -161,6 +165,12 @@ class Interruptible:
                 raise KeyboardInterrupt
             raise AgentError('Model stream exceeded its elapsed-time guard')
         return response
+
+    def _first_model_output(self):
+        with self._response_lock:
+            state = self._active_responses.get(threading.get_ident())
+            if state is not None:
+                state['received_output'] = True
 
     def _sse(self, response, deadline=None):
         # Tool argument fragments may not yield a native model event. Observe
@@ -176,6 +186,8 @@ class Interruptible:
         if self.pool is None or getattr(self._admitted, 'active', False):
             yield
             return
+        if getattr(self, 'profile', None) == 'deepinfra' and deadline is not None:
+            deadline = min(deadline, generation_deadline(self.timeout))
         with self.pool.slot(self.owner, self.cancel, deadline=deadline):
             previous_timeout = self.timeout
             if deadline is not None:
@@ -203,20 +215,34 @@ class Interruptible:
         if self.cancel.is_set():
             raise KeyboardInterrupt
         owner = threading.get_ident()
-        state = {'response': None, 'expired': False}
-        deadline = time.monotonic() + self.timeout
+        state = {'response': None, 'expired': False, 'accepted_at': None, 'received_output': False}
+        deadline = generation_deadline(self.timeout)
         finished = threading.Event()
         with self._response_lock:
             self._active_responses[owner] = state
 
         def monitor():
-            while not finished.wait(0.05):
-                if self.cancel.is_set() or time.monotonic() >= deadline:
-                    with self._response_lock:
-                        state['expired'] = time.monotonic() >= deadline
-                        response = state['response']
-                    self._abort_response(response)
-                    return
+            showing_wait = False
+            try:
+                while not finished.wait(0.05):
+                    now = time.monotonic()
+                    if self.cancel.is_set() or now >= deadline:
+                        with self._response_lock:
+                            state['expired'] = now >= deadline
+                            response = state['response']
+                        self._abort_response(response)
+                        return
+                    if self.on_model_wait:
+                        with self._response_lock:
+                            accepted = state['accepted_at']
+                            waiting = (accepted is not None and not state['received_output']
+                                       and now - accepted >= self.FIRST_OUTPUT_NOTICE_SECONDS)
+                        if waiting != showing_wait:
+                            self.on_model_wait(waiting)
+                            showing_wait = waiting
+            finally:
+                if showing_wait:
+                    self.on_model_wait(False)
 
         watcher = threading.Thread(target=monitor, daemon=True, name='mathagent-stream-cancel')
         watcher.start()
@@ -241,7 +267,7 @@ class Interruptible:
                 raise KeyboardInterrupt
             if state['expired']:
                 raise AgentError('Model stream exceeded its elapsed-time guard')
-        except (DeepInfraRateLimit, TesterAllowanceInsufficient):
+        except (DeepInfraRateLimit, TesterAllowanceInsufficient, ModelNotDispatched):
             # Preserve confirmed zero usage even when a stop/deadline races the HTTP status.
             raise
         except Exception as exc:
@@ -302,6 +328,7 @@ class Task:
         self.started = time.time()
         self.finished = None
         self.activity = collections.deque(maxlen=200)
+        self.waiting_model_calls = 0
         self.live = None
         self.thread = None
         self.work = None
@@ -312,7 +339,7 @@ class Task:
         return {'id': self.id, 'kind': self.kind, 'target': self.target, 'label': self.label,
                 'title': self.title[:500], 'state': self.state, 'error': self.error,
                 'result_status': self.result_status, 'started': self.started, 'finished': self.finished,
-                'origin_chat': self.origin_chat}
+                'origin_chat': self.origin_chat, 'waiting_model_calls': self.waiting_model_calls}
 
 
 class Approval:
@@ -870,6 +897,13 @@ class Hub:
                             'deepinfra': InterruptibleDeepInfra}[profile]
         client = client_class(args.host, task.cancel, timeout=args.request_timeout,
                               pool=self.inference, owner=task.id)
+        if isinstance(client, InterruptibleDeepInfra) and task.kind != 'title':
+            def update_wait(waiting):
+                with self.bus._cond:
+                    task.waiting_model_calls += 1 if waiting else -1
+                    if task.state in RUNNING:
+                        self.bus.publish('task', task=task.summary())
+            client.on_model_wait = update_wait
         agent = Agent(client, workspace, args.model, ctx or args.ctx, args.predict,
                       (not args.no_think) if think is None else bool(think), mode, args.max_rounds,
                       seed=args.seed, temperature=args.temperature, top_p=args.top_p)
@@ -1132,6 +1166,8 @@ class Hub:
                       if runner_class is ReviewRunner or issubclass(runner_class, ReviewBase)
                       else runner_class(agent, styles_root=self.base) if runner_class in (StyleRunner, WriteupRunner)
                       else runner_class(agent))
+            if runner_class is WriteupRunner:
+                runner.previous_markdown = store.previous_markdown_for_job(self.root, state)
             runner.cancel = task.cancel
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id, additional_seconds=additional_seconds)
@@ -1354,12 +1390,31 @@ class Hub:
                             personalization.context(personalization.load(self.base)))
         review_reference = (copy.deepcopy(saved.get('review_reference')) if resume else
                             self._review_reference(chat, content, files) if required_mode == 'referee' else None)
-        selected = (list(files) if resume else [] if review_reference else
+        previous_markdown = saved.get('previous_markdown') if resume else None
+        selected_mode = required_mode or (saved.get('required_mode') if resume else None)
+        initial_style = saved.get('conversion_style_mode') if resume else None
+        initial_style = initial_style or load_choice(self.base)['mode']
+        if (not previous_markdown and not files and selected_mode in (None, 'writeup')
+                and previous_markdown_request(content, style_mode='auto' if resume else initial_style)):
+            before = self._turn_start(self.root, chat_id) if resume else None
+            snapshot = store.previous_markdown(self.root, chat, before=before)
+            if resume and snapshot:
+                children = saved.get('children') or []
+                child = children[0] if len(children) == 1 else {}
+                if ((child.get('action') or {}).get('mode') != 'writeup' or not child.get('job_id')
+                        or not can_recover_previous_markdown(store.research_state(self.root, child['job_id']), snapshot)):
+                    snapshot = None
+            previous_markdown = snapshot
+        selected = (list(files) if resume else [] if review_reference or previous_markdown else
                     conversation_sources(content, list(files), chat['transcript'], mode=required_mode))
         if not files and not resume:
             selected = [name for name in selected if (self.root / name).is_file()]
+        local_conversion = bool(previous_markdown) or (selected_mode in (None, 'writeup')
+                           and markdown_conversion_request(content, selected, style_mode=initial_style))
         try:
-            if resume:
+            if local_conversion:
+                image_refs, attached_images = [], []  # The selected Markdown is the complete input for this turn.
+            elif resume:
                 if saved.get('images') and not self.image_support():
                     raise ValueError('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
                 image_refs = [images.validate(self.root, ref) for ref in saved.get('images', [])]
@@ -1398,8 +1453,10 @@ class Hub:
                                    'Jobs it started keep their saved work.'}])
                 if not resume:
                     store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files,
+                        **({'local_conversion': True} if local_conversion else {}),
                         'images': attached_images, 'project_snapshot': project_snapshot, 'time': store._now()}])
-                    store.save_chat_images(self.root, chat_id, image_refs)
+                    if not local_conversion:
+                        store.save_chat_images(self.root, chat_id, image_refs)
             except BaseException:
                 self.routing.pop(chat_id, None)
                 raise
@@ -1426,9 +1483,10 @@ class Hub:
             main.turn_image_refs = attached_images
             main.workspace.pin_files([name for name in files if not images.is_image(name)])
             self._show_experiments(main.workspace, root, chat_id, task)
-            selected_mode = required_mode or (previous or {}).get('required_mode')
-            local_conversion = (selected_mode in (None, 'writeup') and not image_refs
-                                and markdown_conversion_request(content, files, style_mode=load_choice(self.base)['mode']))
+            if previous is not None and previous_markdown:
+                previous['previous_markdown'] = previous_markdown
+            main.previous_markdown = previous_markdown
+            main.conversion_style_mode = initial_style if local_conversion else None
             if not local_conversion:
                 self._ensure_model(main)
             checkpoint_lock = threading.RLock()
@@ -1777,6 +1835,9 @@ class Hub:
                           else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=self.review_concurrency()))
                 runner.cancel = task.cancel
                 extra = 0
+                previous_markdown = parent.state.get('previous_markdown') if mode == 'writeup' else None
+                if previous_markdown:
+                    runner.previous_markdown = previous_markdown
                 if mode == 'writeup' and not child.get('job_id') and REPAIR_REQUEST.search(context['query']):
                     # "Fix this error" after a write-up that did not compile repairs that document; it is not rewritten.
                     previous = self._uncompiled_writeup(root, chat_id)
@@ -1800,11 +1861,12 @@ class Hub:
                         kwargs['explain_templates'] = any(f.lower().endswith('.tex') for f in templates)
                         # The results so far, as the user saw them (this turn's finished jobs included, the
                         # request itself left out), in place of the raw history (which would fill the context twice).
-                        kwargs.update(reference_records=store.conversation_references(root, chat_id, skip=self._turn_start(root, chat_id)),
-                                      conversation=store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
-                                      experiment_ids=store.conversation_experiments(root, chat_id),
+                        kwargs.update(previous_markdown=previous_markdown,
+                                      reference_records=[] if previous_markdown else store.conversation_references(root, chat_id, skip=self._turn_start(root, chat_id)),
+                                      conversation='' if previous_markdown else store.conversation_record(root, chat_id, skip=self._turn_start(root, chat_id)),
+                                      experiment_ids=[] if previous_markdown else store.conversation_experiments(root, chat_id),
                                       variant='summary' if mode == 'summarize' else None, scoped=True, deliver='download',
-                                      style_choice=load_choice(self.base),
+                                      style_choice={'mode': parent.state['conversion_style_mode']} if parent.state.get('conversion_style_mode') else load_choice(self.base),
                                       # Asked once already in this turn: this time the document is written with what
                                       # there is, and what is still missing is marked in it.
                                       waive_needs=self._handed_back(root, chat_id))

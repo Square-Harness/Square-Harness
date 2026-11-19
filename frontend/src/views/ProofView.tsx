@@ -122,7 +122,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
         {data.legacy && <span>v0.4 engine</span>}
         <span>Started {ago(data.created_at)}</span>
       </div>
-      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} />
+      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
       {data.legacy && (
         <p className="warning-note">
           This proof was made by the earlier v0.4 engine. Its report, sources and files stay readable here, but v0.5 cannot

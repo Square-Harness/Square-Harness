@@ -324,7 +324,7 @@ export function StreamBody({ stream, role, live, pipeline }: { stream: LiveText 
           {stream.tool_calls.map((call, index) => <li key={index} className="tool-line">{toolLine(call)}</li>)}
         </ul>
       )}
-      {live && !stream.text && !stream.thinking && <p className="muted small">Waiting for the first tokens. The model may still be loading into memory.</p>}
+      {live && !stream.text && !stream.thinking && <p className="muted small">Waiting for the first tokens.</p>}
     </div>
   )
 }

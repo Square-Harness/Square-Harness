@@ -23,7 +23,8 @@ import time
 import uuid
 
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
-from ..format_request import markdown_conversion_request
+from ..format_request import can_recover_previous_markdown, markdown_conversion_request, previous_markdown_request
+from ..worker_errors import WorkerInputError
 from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
@@ -794,6 +795,11 @@ def claim_auto_title(root, chat_id):
         return None
     chat['auto_title_attempted'] = True
     _save_chat(root, chat)
+    latest = next((item for item in reversed(chat['transcript']) if item.get('role') == 'user'), {})
+    saved = chat.get('assistant_state') or {}
+    if latest.get('local_conversion') or ((saved.get('previous_markdown') or saved.get('conversion_style_mode'))
+                                         and saved.get('query') == latest.get('content')):
+        return None
     # The existing prompt preview is enough for a local file conversion.
     query = first['content'].strip()
     return None if markdown_conversion_request(query, first.get('files') or []) else query
@@ -1316,6 +1322,93 @@ def _saved_result(root, mode, job_id):
         return state.get('document') or state.get('draft') or '', state['status']
     except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
         return '', ''
+
+
+def previous_markdown(root, chat, *, before=None):
+    """Pin the single visible final answer/result of the immediately preceding turn."""
+    transcript = chat['transcript'][:before]
+    start = next((i for i in range(len(transcript) - 1, -1, -1) if transcript[i].get('role') == 'user'), -1)
+    turn = list(enumerate(transcript[start + 1:], start + 1))
+    if start < 0 or any(item.get('discarded') for _, item in turn):
+        return None
+    answers = [(i, item['content']) for i, item in turn if item.get('role') == 'assistant'
+               and not item.get('tool_calls') and isinstance(item.get('content'), str) and item['content'].strip()]
+    routes = [(i, item) for i, item in turn if item.get('role') == 'route']
+    if len(answers) > 1 or len(routes) > 1 or any(item.get('status') != 'done' for _, item in routes):
+        return None
+    bibliography = ''
+    origin = {'chat_id': chat['id']}
+    if routes and routes[0][1].get('mode') == 'literature':
+        index, route = routes[0]
+        job = route.get('job_id')
+        try:
+            state = research_state(root, job)
+            content = state.get('draft')
+            if (state.get('kind') != 'literature' or state.get('phase') != 'done'
+                    or state.get('status') not in ('complete', 'reviewed', 'partial') or not content
+                    or (answers and answers[0][1] != content)):
+                return None
+            name = _review_name(state) + '.md'
+            if (state.get('outputs') or {}).get('bib'):
+                try:
+                    _, data = research_review_file(root, job, 'bib')
+                    bibliography = data.decode('utf-8')
+                except NotFound:
+                    # Conversation exports can omit the derived file but retain
+                    # the exact ordered records from which its worker rendered it.
+                    if state.get('pipeline') != ReviewRunner.PIPELINE:
+                        return None
+                    review = ReviewRunner(None)
+                    review.state = state
+                    bibliography = review._bibtex()
+        except (NotFound, OSError, ValueError, TypeError, KeyError):
+            return None
+        origin['job_id'] = job
+    elif answers and not any(item.get('mode') in ('writeup', 'summarize') for _, item in routes):
+        index, content = answers[0]
+        name = 'previous-answer.md'
+    else:
+        return None
+    if len(content.encode()) + len(bibliography.encode()) > 2_000_000:
+        raise WorkerInputError('The selected answer and bibliography exceed Write-Up’s 2 MB pinned-source limit. '
+                               'Split the Markdown into smaller files to convert it.', code='writeup_source_too_large')
+    origin['transcript_index'] = answers[0][0] if answers else index
+    source = {'id': 'M1', 'path': name, 'content': content, 'sha256': hashlib.sha256(content.encode()).hexdigest(),
+              'origin': origin}
+    return {'source': source, 'bibliography': bibliography}
+
+
+def previous_markdown_for_job(root, state):
+    """Resolve a pre-upgrade Write-Up card from the transcript that owns that job."""
+    if (state.get('conversion_source') or state.get('kind') != 'writeup'
+            or state.get('phase') not in ('outline', 'skeleton', 'draft')
+            or not previous_markdown_request(state['goal'], style_mode=(state.get('style_choice') or {}).get('mode', 'auto'))):
+        return None
+    base = _chats(root)
+    if base is None:
+        return None
+    resolved = None
+    for path in base.glob('*.json'):
+        if not _ID.fullmatch(path.stem) or path.is_symlink():
+            continue
+        try:
+            chat = load_chat(root, path.stem)
+        except (OSError, ValueError, NotFound):
+            continue
+        user = None
+        for index, item in enumerate(chat['transcript']):
+            if item.get('role') == 'user':
+                user = index
+            elif (user is not None and item.get('role') == 'route' and item.get('mode') == 'writeup'
+                  and item.get('job_id') == state['id']):
+                request = chat['transcript'][user]
+                if request.get('content') == state['goal'] and not request.get('files'):
+                    snapshot = previous_markdown(root, chat, before=user)
+                    if can_recover_previous_markdown(state, snapshot):
+                        if resolved is not None and snapshot != resolved:
+                            return None
+                        resolved = snapshot
+    return resolved
 
 
 def conversation_experiments(root, chat_id, before=None):

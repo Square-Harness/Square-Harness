@@ -126,7 +126,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
         })}
       </ol>
-      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} />
+      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} taskId={ownTask?.id} />
       <div className="job-facts">
         {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
         {data.unit && <span>{data.unit}</span>}

@@ -17,6 +17,10 @@ class AgentError(Exception):
     pass
 
 
+class ModelNotDispatched(AgentError):
+    """The local admission check refused the request before any generation was sent."""
+
+
 class _NoModelRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward a manuscript or local-only request to a redirect target.
@@ -158,7 +162,8 @@ class Agent:
             emit('start', '')
             assistant = {'role': 'assistant', 'content': ''}
             calls, thinking, done = [], '', False
-            for event in self.client.stream(payload):
+            from .deepinfra import generation_stream
+            for event in generation_stream(self.client, payload, emit):
                 msg = event.get('message', {})
                 if msg.get('thinking'):
                     thinking += msg['thinking']

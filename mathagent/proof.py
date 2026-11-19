@@ -19,7 +19,7 @@ from .jsonutil import loads_single
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, TokenBudgetError
 from .call_policy import CONTEXT_MARGIN, CallContextError, allocate_call, count_input
-from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
 from .ledger import LedgerError, ProofStore
 from .model_limits import is_ds4
@@ -778,6 +778,7 @@ class ProofRunner:
         with self._inference_slot():
             return self._dispatch_call(role, messages, cap, format_schema)
 
+    @retry_generation_call
     def _dispatch_call(self, role, messages, cap, format_schema=None):
         key = self._call_key(role)
         previous = next((c for c in self.state['calls'] if c['key'] == key), None)
@@ -878,6 +879,9 @@ class ProofRunner:
                 call['charged_tokens'] = cap
                 if isinstance(exc, DeepInfraGenerationError):
                     call.update(provider_error=exc.category, stream_progress=exc.stream_progress)
+                    if exc.retry_before_output:
+                        # A fresh admission must never reopen an interrupted call's journal.
+                        pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
                 if isinstance(exc, (DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
                     call.update(stats=exc.stats, charged_tokens=exc.stats['eval_count'])
                     self.state['tokens_charged'] += call['charged_tokens'] - cap

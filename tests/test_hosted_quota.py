@@ -14,7 +14,8 @@ from unittest.mock import patch
 from mathagent.agent import Agent, AgentError
 from mathagent.assistant_budget import BudgetClient
 from mathagent.backends import MeasuredStreamCancellation
-from mathagent.deepinfra import DeepInfra, DeepInfraGenerationError, DeepInfraRateLimit, MODEL, TesterAllowanceInsufficient, rejected_before_inference
+from mathagent.deepinfra import (DeepInfra, DeepInfraGenerationError, DeepInfraRateLimit, MODEL,
+                                 TesterAllowanceInsufficient, generation_stream, rejected_before_inference)
 from mathagent.gui import store
 from mathagent.hosted_quota import HostedQuota, quota_status
 from mathagent.proof import ProofRunner
@@ -25,6 +26,92 @@ from tests.test_research import FakeClient, response
 
 
 class HostedQuotaTests(unittest.TestCase):
+    def test_terminal_failure_reenters_proof_parent_and_hosted_accounting(self):
+        fake = FakeDeepInfra()
+        self.addCleanup(fake.close)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key, 'DEEPINFRA_API_KEY_FILE': '',
+            'SH_DEEPINFRA_QUOTA_FILE': str(Path(directory).resolve() / 'quota.sqlite'), 'SH_DEEPINFRA_QUOTA_USD': '4',
+            'SH_DEEPINFRA_SERVICE_TIER': 'standard',
+        }):
+            client = BudgetClient(DeepInfra(fake.host), max_tokens=11000)
+            runner = ProofRunner(Agent(client, Workspace(directory), model=MODEL, ctx=1048576))
+            failure = {'events': [{'error': {'code': 'internal_server_error'}}]}
+            fake.replies = [failure, (PROOF, '', 37), (json.dumps(APPROVAL), '', 23)]
+            result = runner.start('Prove x=x.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
+            self.assertEqual(result['status'], 'candidate_complete')
+            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 37, 23])
+            self.assertEqual(len(set(c['key'] for c in runner.state['calls'])), 3)
+            self.assertEqual((client.snapshot()['tokens'], client.snapshot()['measured_tokens']), (4156, 60))
+            self.assertEqual((len(fake.completions), quota_status()['output_tokens']), (3, 60))
+            with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
+                self.assertEqual(db.execute('SELECT output_tokens FROM calls ORDER BY rowid').fetchall(),
+                                 [(None,), (37,), (23,)])
+
+            # The worker can afford two calls, but the parent cannot. The first
+            # reservation is unknown and admission refuses the replacement locally.
+            smaller = BudgetClient(DeepInfra(fake.host), max_tokens=4096)
+            runner = ProofRunner(Agent(smaller, Workspace(directory), model=MODEL, ctx=1048576))
+            fake.replies = [failure]
+            stopped = runner.start('Prove y=y.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
+            self.assertEqual(stopped['status'], 'paused')
+            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
+            self.assertEqual(smaller.snapshot()['tokens'], 4096)
+            self.assertEqual(len(fake.completions), 4)
+            # A local context refusal is also a confirmed non-dispatch, even
+            # when the worker already checkpointed its proposed replacement.
+            guarded = BudgetClient(DeepInfra(fake.host), max_tokens=11000)
+            runner = ProofRunner(Agent(guarded, Workspace(directory), model=MODEL, ctx=1048576))
+            fake.replies = [failure]
+            with patch('mathagent.assistant_budget.count_input', side_effect=[(50, 'fixture'), (2000000, 'fixture')]):
+                stopped = runner.start('Prove z=z.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
+            self.assertEqual(stopped['status'], 'paused')
+            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
+            self.assertEqual((guarded.snapshot()['tokens'], len(fake.completions)), (4096, 5))
+
+    def test_recovery_requires_terminal_failure_before_all_model_output_and_shares_one_retry(self):
+        fake = FakeDeepInfra()
+        self.addCleanup(fake.close)
+        with patch.dict(os.environ, {'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key,
+                                     'DEEPINFRA_API_KEY_FILE': '', 'SH_DEEPINFRA_QUOTA_FILE': ''}):
+            client = DeepInfra(fake.host, timeout=5)
+            payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Synthetic example'}],
+                       'options': {'num_predict': 128, 'num_ctx': 16384}, 'think': False}
+            failure = {'error': {'code': 'server_error'}}
+            busy = {'http_status': 429, 'body': {'detail': 'Rate limited'}, 'headers': {'Retry-After': '0'}}
+            ending = {'events': [failure]}
+            for events in ([{'choices': [{'delta': {'content': 'prefix'}}]}, failure],
+                           [{'choices': [{'delta': {'reasoning_content': 'prefix'}}]}, failure],
+                           [{'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'x'}]}}]}, failure],
+                           [{**failure, 'choices': [{'delta': {'content': 'prefix'}}]}],
+                           [{'error': {'code': 'insufficient_quota'}}], [{'error': {'code': 'invalid_request'}}],
+                           [{'error': {'code': 'unclassified'}}], []):
+                with self.subTest(events=events):
+                    before = len(fake.completions)
+                    fake.replies = [{'events': events}]
+                    with self.assertRaises(DeepInfraGenerationError):
+                        list(generation_stream(client, payload, lambda *_: self.fail('Unexpected retry')))
+                    self.assertEqual(len(fake.completions) - before, 1)
+            for sequence in ([busy, ending], [ending, busy], [ending, ending]):
+                before = len(fake.completions)
+                fake.replies = list(sequence)
+                with self.assertRaises(DeepInfraGenerationError):
+                    list(generation_stream(client, payload, lambda *_: None))
+                self.assertEqual(len(fake.completions) - before, 2)
+            before = len(fake.completions)
+            client.cancel = threading.Event()
+            fake.replies = [ending]
+            with self.assertRaises(KeyboardInterrupt):
+                list(generation_stream(client, payload, lambda *_: client.cancel.set()))
+            self.assertEqual(len(fake.completions) - before, 1)
+            client.cancel.clear()
+            before = len(fake.completions)
+            fake.replies = [ending]
+            with patch('mathagent.deepinfra.time.monotonic', return_value=100) as clock:
+                with self.assertRaises(DeepInfraGenerationError):
+                    list(generation_stream(client, payload, lambda *_: setattr(clock, 'return_value', 110)))
+            self.assertEqual(len(fake.completions) - before, 1)
+
     def test_proof_resume_preserves_measured_usage_from_an_incomplete_stream(self):
         with tempfile.TemporaryDirectory() as workspace:
             failed = DeepInfraGenerationError('Stream interrupted.', category='interrupted',

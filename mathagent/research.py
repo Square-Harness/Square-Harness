@@ -28,7 +28,7 @@ from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
-from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
 
 
@@ -867,6 +867,7 @@ class ResearchRunner:
         """The system text of a call: the policy and the saved skill."""
         return self.POLICY + '\n' + self.state['skill']
 
+    @retry_generation_call
     def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
               sampling=None):
         self._check_time()

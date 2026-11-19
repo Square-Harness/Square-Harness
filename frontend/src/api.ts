@@ -149,6 +149,7 @@ export type StyleProfile = {
 export type TaskState = 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'done' | 'error' | 'cancelled'
 
 export type TaskSummary = {
+  waiting_model_calls?: number
   id: string
   kind: 'proof' | 'research' | 'chat'
   target: string | null

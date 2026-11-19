@@ -23,7 +23,7 @@ from .agent import AgentError
 from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
-from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
 from .refcheck import standalone_reference_request
@@ -680,6 +680,25 @@ class Orchestrator:
         return NUMERICS_POLICY  # The skill's full instructions are in the tool description.
 
     def _stream(self, payload, output_char_limit=None):
+        # Bounded Proof preparation has its own reservation and deterministic
+        # handoff when a request fails. Do not replay under that same reservation.
+        if output_char_limit is not None:
+            return self._stream_once(payload, output_char_limit)
+
+        def before_retry(_error):
+            if not self._call_room():
+                return False
+            self.state.setdefault('interrupted_main_calls', []).append({
+                'main_call': self.state['main_calls'], **copy.deepcopy(self.state['last_call'])})
+            self._save()
+            return True
+
+        with generation_attempts(self.agent.client, self.emit, before_retry=before_retry) as attempts:
+            for attempt in attempts:
+                with attempt:
+                    return self._stream_once(payload)
+
+    def _stream_once(self, payload, output_char_limit=None):
         self.agent.last_stats = {}
         assistant = {'role': 'assistant', 'content': ''}
         calls, done = [], False

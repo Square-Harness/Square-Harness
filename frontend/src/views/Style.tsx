@@ -423,7 +423,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{STEP_NAMES[step]}</li>
         })}
       </ol>
-      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} />
+      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
       <div className="job-facts">
         {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path}</span>)}
         <span>{String(data.settings.model)}</span>

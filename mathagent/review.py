@@ -36,7 +36,7 @@ from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
-from .deepinfra import DeepInfraGenerationError
+from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
 
 # 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
@@ -447,7 +447,8 @@ class ReviewBase(ResearchRunner):
             try:
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
             except AgentError as exc:
-                if isinstance(exc, (ResearchBudget, TokenBudgetError, DeepInfraGenerationError)):
+                if (isinstance(exc, (ResearchBudget, TokenBudgetError, DeepInfraGenerationError))
+                        or getattr(self.agent.client, 'profile', None) == 'deepinfra'):
                     raise
                 # Some servers fail on thinking plus structured output for a given input (vLLM answered 500).
                 self._warn(f'The model server failed on a {role} call with thinking ({str(exc)[:120]}); it was asked again without thinking.')
@@ -480,6 +481,7 @@ class ReviewBase(ResearchRunner):
                 raise
             return result
 
+    @retry_generation_call
     def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None):
         """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact."""
         with self._mutex:

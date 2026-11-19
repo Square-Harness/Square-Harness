@@ -155,6 +155,8 @@ operational stop and does not authorize another allowance automatically.
 The ledger records zero usage when DeepInfra returns HTTP 429 before opening
 a generation stream. If an accepted stream fails, a valid final usage record
 settles the reservation. Streams with unknown usage keep their reservations.
+If an accepted generation ends with a transient provider error before its first
+output, a replacement needs a fresh reservation within the same tester allowance.
 The job and chat meters list these amounts separately from reported output.
 
 For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's

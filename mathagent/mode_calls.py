@@ -332,6 +332,11 @@ class ModeOrchestrator(Orchestrator):
 
     def _new_state(self, query, files, history):
         super()._new_state(query, files, history)
+        previous = getattr(self.agent, 'previous_markdown', None)
+        if previous:
+            self.state['previous_markdown'] = previous
+        if self.local_markdown_conversion:
+            self.state['conversion_style_mode'] = getattr(self.agent, 'conversion_style_mode', None) or 'auto'
         if self.required_mode == 'referee' and getattr(self.agent, 'review_reference', None):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         if self.required_mode is not None:
@@ -340,7 +345,7 @@ class ModeOrchestrator(Orchestrator):
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
         elif self.local_markdown_conversion:
             action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'low',
-                      'reason': 'Convert the supplied Markdown file to LaTeX.'}
+                      'reason': 'Convert the previous answer to LaTeX.' if previous else 'Convert the supplied Markdown file to LaTeX.'}
         else:
             action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
         if action is None:

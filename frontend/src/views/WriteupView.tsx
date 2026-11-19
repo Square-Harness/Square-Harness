@@ -101,7 +101,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{step === 'compile' && data.phase === 'repair' ? 'Repair' : STEP_NAMES[step]}</li>
         })}
       </ol>
-      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} />
+      <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
       <div className="job-facts">
         {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path}</span>)}
         <span>{String(data.settings.model)}</span>
@@ -141,7 +141,7 @@ function DocumentTab({ data, ours, onCite }: { data: ResearchDetail; ours: boole
       {data.running && data.live && <LiveWriteup id={data.id} role={data.live.role} file={data.live.file} ours={ours} owner={data.owner_task} />}
       {data.document ? (
         <>
-          <p className="caveat">{data.conversion_source ? 'Converted from the pinned Markdown file.' : data.document.includes('% src:')
+          <p className="caveat">{data.conversion_source ? 'Converted from the saved Markdown source.' : data.document.includes('% src:')
             ? <>Model draft. Each <code>% src</code> mark opens the note lines a paragraph came from; red ones cite lines that were never read. TODO comments are left for you.</>
             : <>Model draft: read it before using it. <code>% TODO</code> comments mark points for you to settle.</>}</p>
           <TexSource text={data.document} onCite={onCite} flagged={flagged} errorLines={errorLines} />

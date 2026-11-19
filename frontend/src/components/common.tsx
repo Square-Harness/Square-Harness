@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom'
 import { api, type Budget, type WorkProgress, type WorkspaceFile } from '../api'
 import { meterDisplay } from '../usage'
 import { workProgressText } from '../workProgress'
+import { taskById } from '../concurrency'
 import { bytes, count } from '../format'
 import { useApp, useTick } from '../store'
 import { useRoute } from '../router'
@@ -57,11 +58,19 @@ export function UsageMeters({ budget }: { budget: { tokens: Budget; input_tokens
   </>
 }
 
-export function WorkProgressNote({ progress, status, running = false, pipeline }: { progress?: WorkProgress | null; status: string; running?: boolean; pipeline?: string | null }) {
-  if (!progress) return null
-  return <div className="work-progress" role="status" title={progress.scope || undefined}>
+export function ModelWaitNote({ taskId }: { taskId?: string }) {
+  const { snapshot } = useApp()
+  const waiting = taskById(snapshot, taskId)?.task.waiting_model_calls || 0
+  if (!waiting) return null
+  return <p className="muted small" role="status">{waiting === 1
+    ? 'DeepInfra accepted the request. Waiting for its first output.'
+    : `DeepInfra accepted ${waiting} requests that are still waiting for their first output.`}</p>
+}
+
+export function WorkProgressNote({ progress, status, running = false, pipeline, taskId }: { progress?: WorkProgress | null; status: string; running?: boolean; pipeline?: string | null; taskId?: string }) {
+  return <>{progress && <div className="work-progress" role="status" title={progress.scope || undefined}>
     <p className="muted small">{workProgressText(progress, status, running, pipeline)}</p>
-  </div>
+  </div>}{running && taskId && <ModelWaitNote taskId={taskId} />}</>
 }
 
 export function Collapse({ summary, children, open, className }: { summary: ReactNode; children: ReactNode; open?: boolean; className?: string }) {
