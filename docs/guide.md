@@ -421,6 +421,27 @@ give the filename you want to use.
 Temporary model or source outages leave saved work resumable. Resuming retries
 the same child job; cancelled queued turns leave a clear notice in the chat.
 
+### Following agents in a conversation
+
+Open the research notebook from the conversation header. Workers started together
+share a group in the conversation. Each row shows its objective, status, latest
+activity and elapsed time. The bars use the same time scale, so you can see when
+two workers overlapped. Select a row to inspect its agent or a result to open
+its output. A stopped worker and a mathematical objection have different marks.
+
+The **Agents** tab shows the worker history and links to native job pages.
+**Outputs** collects saved answers, proof and review text, sandbox artifacts
+and Write-Up downloads. **Record** shows the evidence available in the
+conversation's scope, including its project when it has one. **Plan** shows the
+investigation target, dependencies, progress and budget. It also lets you
+finish a current investigation with its saved evidence.
+
+On a wide screen the notebook opens beside the conversation. Drag its divider
+or focus the divider and use the arrow keys to resize it. On a smaller screen
+the panel overlays the page. On a phone it fills the screen. Close it with
+Escape or its close button. The URL identifies the tab and selected item, so
+you can reload or share a link within the same authorized workspace.
+
 ### The terminal
 
 `square-harness --workspace <folder>` opens a prompt. Proof is the default: type

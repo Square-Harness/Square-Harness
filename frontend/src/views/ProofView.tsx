@@ -175,7 +175,7 @@ function Work({ data, ours, onArtifact }: { data: ProofDetail; ours: boolean; on
   )
 }
 
-function SelectedAnswer({ data, candidate }: { data: ProofDetail; candidate: Candidate }) {
+export function SelectedAnswer({ data, candidate }: { data: ProofDetail; candidate: Candidate }) {
   const clean = candidate.review_status === 'no_issue_found'
   const look = candidateLook(candidate)
   const review = [...data.reviews].reverse().find((item) => item.candidate === candidate.id && item.response)

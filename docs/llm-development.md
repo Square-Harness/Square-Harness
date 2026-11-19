@@ -671,6 +671,14 @@ solver output, omit it and retry preflight, preserving the exact mathematical
 inputs and ordinary allocation rule. Keep unfinished-solver continuation and
 interruption recovery on their existing saved-text/reasoning paths.
 
+The frontend research notebook uses the saved chat and attributed activity
+events to show worker groups and their outputs. Keep agent IDs, batch IDs,
+card indices and output IDs stable on reload. An old card can lack exact
+timing or an answer artifact. Display the evidence available on that card.
+The panel location uses the chat URL's `panel` and `selected` parameters.
+New output types should reuse the authenticated native preview or download
+endpoint and preserve keyboard navigation and both themes.
+
 A guided investigation enters through an explicit mode selection. The hub
 constructs `Investigation` for that turn. Its frame collects an exact target
 and a bounded plan. The approved plan controls worker admission. A changed

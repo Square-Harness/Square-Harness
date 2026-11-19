@@ -34,7 +34,7 @@ from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, sourc
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
-from . import personalization, projects
+from . import agent_views, personalization, projects
 
 CHAT_MODES = ('explore', 'free')
 SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
@@ -895,6 +895,9 @@ def list_chats(root, templates_root=None):
         chats.append({'id': chat['id'], 'kind': chat['mode'], 'title': chat['title'] or 'New conversation',
                       'project_id': chat.get('project_id'),
                       'updated_at': chat['updated_at'], 'created_at': chat['created_at'],
+                      'agent_statuses': [{k: lane[k] for k in ('id', 'mode', 'status')}
+                                         for lane in agent_views.agents(chat, current_only=True)]
+                      if (chat.get('assistant_state') or {}).get('status') == 'running' else [],
                       'messages': sum(1 for item in chat['transcript'] if item.get('role') == 'user'),
                       'preview': one_line(last, 140), 'math_macros': chat['_display_macros']})
     return sorted(chats, key=lambda chat: chat['updated_at'], reverse=True)
@@ -999,7 +1002,16 @@ def update_item(root, chat_id, index, **fields):
     chat = load_chat(root, chat_id)
     if type(index) is not int or not 0 <= index < len(chat['transcript']):
         raise NotFound('Unknown conversation item')
-    chat['transcript'][index].update(fields)
+    item = chat['transcript'][index]
+    status = fields.get('status')
+    if item.get('role') == 'route' and status and status != item.get('status'):
+        fields['status_time'] = _now()
+        if status == 'started':
+            fields.setdefault('started_at', item.get('started_at') or fields['status_time'])
+            fields['ended_at'] = None
+        elif status in ('done', 'failed', 'stopped', 'cancelled', 'dismissed'):
+            fields['ended_at'] = fields['status_time']
+    item.update(fields)
     _save_chat(root, chat)
     return chat['transcript'][index]
 
@@ -1008,6 +1020,7 @@ def update_item(root, chat_id, index, **fields):
 def save_assistant(root, chat_id, state):
     """Checkpoint the parent and its child identities in the same atomic chat file."""
     chat = load_chat(root, chat_id)
+    agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     _save_chat(root, chat)
 
@@ -1016,6 +1029,7 @@ def save_assistant(root, chat_id, state):
 def checkpoint_investigation(root, chat_id, state):
     """Commit the final report and checkpoint together, including after a crash or a repeated stop."""
     chat = load_chat(root, chat_id)
+    agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     record_id = state['investigation']['id']
     if state.get('status') == 'complete' and not any(
@@ -1077,12 +1091,55 @@ def assistant_accounting(root, state, transcript=()):
     return budget
 
 
+def _agent_receipts(root, chat, lanes):
+    """Fill available timing and counts of older workers from their immutable native identity."""
+    for lane in lanes:
+        if lane['ended_at'] is not None or lane['status'] not in ('finished', 'failed', 'stopped'):
+            continue
+        try:
+            job_id = lane.get('job_id')
+            answer_id = lane.get('answer_id')
+            if answer_id:
+                from ..workers import _answer_path
+                path = _answer_path(root, chat['id'], answer_id)
+                def load():
+                    data = json.loads(_read(path))
+                    if (data.get('id'), data.get('chat_id'), data.get('mode')) != (answer_id, chat['id'], lane['mode']):
+                        raise ValueError('Worker identity differs')
+                    return data.get('created'), {}, None
+            elif isinstance(job_id, str) and _ID.fullmatch(job_id):
+                folder = 'proofs' if lane['mode'] == 'prove' else 'checks' if lane['mode'] == 'check' else 'research'
+                directory = _proof_directory(root, job_id) if folder == 'proofs' else _job_directory(root, job_id, folder)
+                path = directory / 'state.json'
+                def load():
+                    data = ProofStore.load(root, job_id).state if folder == 'proofs' else _read_research(directory, job_id, verify=False)
+                    usage = {dest: data[key] for key, dest in (('tokens_charged', 'output_tokens'),
+                             ('input_tokens_charged', 'input_tokens'), ('seconds_used', 'seconds'))
+                             if type(data.get(key)) in (int, float)}
+                    return data.get('updated_at'), usage, agent_views._progress(data.get('progress'))
+            else:
+                continue
+            ended, usage, progress = _cached(path, load, 'agent-receipt-v1')
+            lane['ended_at'] = ended
+            lane['usage'] = {**usage, **lane['usage']}
+            lane['progress'] = lane['progress'] or progress
+        except (LookupError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
+def budget_view(budget, running=False):
+    reserved = budget.get('reserved_tokens', 0) if running else 0
+    return {'tokens': output_totals(budget.get('tokens', 0), budget.get('max_tokens'),
+                                    reserved, budget.get('measured_tokens', 0)),
+            'input_tokens': _budget(budget.get('input_tokens', 0), budget.get('max_input_tokens')),
+            'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900))}
+
+
 def assistant_view(chat, root=None):
     state = chat.get('assistant_state') or {}
     status = state.get('status')
     status = 'paused' if status in ('interrupted', 'incomplete') else status
     budget = assistant_accounting(root, state, chat.get('transcript', ()))
-    reserved = budget.get('reserved_tokens', 0) if status == 'running' else 0
     progress = state.get('progress') if status != 'set_aside' else None
     if not isinstance(progress, dict) and status != 'set_aside':
         children = state.get('children') or []
@@ -1103,14 +1160,14 @@ def assistant_view(chat, root=None):
             progress = None
     last_call = state.get('last_call') or {}
     context = _live_context(last_call) if status == 'running' and last_call.get('status') == 'running' else {}
-    return {'assistant_status': status,
+    lanes = agent_views.agents(chat)
+    if root is not None:
+        _agent_receipts(root, chat, lanes)
+    return {'agents': lanes, 'agent_concurrency': (state.get('limits') or {}).get('concurrency'),
+            'assistant_status': status,
             'assistant_resumable': status in ('paused', 'running'),
             'assistant_progress': progress,
-            'assistant_budget': {'tokens': output_totals(budget.get('tokens', 0), budget.get('max_tokens'),
-                                                         reserved, budget.get('measured_tokens', 0)),
-                                 'input_tokens': _budget(budget.get('input_tokens', 0), budget.get('max_input_tokens')),
-                                 'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900)),
-                                 **context}}
+            'assistant_budget': {**budget_view(budget, status == 'running'), **context}}
 
 
 # -- workspace settings, folders, uploads and templates -------------------------------
@@ -1575,6 +1632,44 @@ def _card_answer(root, chat, card):
     if any(known is not None and known != digest for known in (record.get('answer_sha256'), card.get('answer_sha256'))):
         raise ValueError('Saved answer differs from its recorded digest')
     return {'answer': answer, 'status': record['status']}
+
+
+def _has_chat_job(root, chat_id, folder, job_id):
+    chat = load_chat(root, chat_id)
+    links = _chat_evidence(chat)
+    if (folder, job_id) in links:
+        return True
+    from ..project_index import collect
+    return any((folder, job_id) in e.get('links', []) and
+               (e.get('chat_id') == chat_id or (e['folder'], e['job_id']) in links) for e in collect(root))
+
+
+def saved_chat_experiment(root, chat_id, experiment_id):
+    """Read native or retained numerical evidence only if this conversation produced or cited the run."""
+    from ..project_index import collect, read_text
+    if not isinstance(experiment_id, str) or not _EXPERIMENT.fullmatch(experiment_id):
+        raise ValueError('Invalid experiment ID')
+    if not _has_chat_job(root, chat_id, 'experiments', experiment_id):
+        raise NotFound('Unknown experiment in this chat')
+    entry = next((e for e in collect(root) if e['folder'] == 'experiments' and e['job_id'] == experiment_id), None)
+    if not entry:
+        raise NotFound('The saved experiment is no longer available')
+    return {'answer': read_text(root, {'entries': [entry]}, entry['id']), 'status': entry['status']}
+
+
+def saved_chat_check(root, chat_id, job_id):
+    """Read a check through its originating conversation, including a recorded nested check."""
+    if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+        raise ValueError('Invalid check ID')
+    if not _has_chat_job(root, chat_id, 'checks', job_id):
+        raise NotFound('Unknown check in this chat')
+    directory = _job_directory(root, job_id, 'checks')
+    record = _read_research(directory, job_id)
+    if record.get('kind') != 'check':
+        raise NotFound('Unknown check in this chat')
+    report = directory / 'report.md'
+    return {'answer': _read(report) if report.exists() else record.get('answer') or '',
+            'status': record['status']}
 
 
 def saved_chat_answer(root, chat_id, answer_id):

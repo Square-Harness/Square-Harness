@@ -544,12 +544,17 @@ class Investigation(Orchestrator):
             return
         # Save the authorization before adopting its absolute ceilings. Resume
         # reapplies the same caps even after a crash between these operations.
+        for task in self.inv['plan']['tasks']:
+            slot = self.inv['tasks'][task['id']]
+            slot.setdefault('child_id', 'child_' + uuid.uuid4().hex)
+            slot['batch_id'] = self.state['id'] + '-after-' + '-'.join(sorted(task['after']))
         self.inv.update(approved=True, phase='running')
         self._save()
 
     def _make_child(self, task, slot):
-        if slot.get('child_id'):
-            return next(c for c in self.state['children'] if c['id'] == slot['child_id'])
+        existing = next((c for c in self.state['children'] if c['id'] == slot.get('child_id')), None)
+        if existing is not None:
+            return existing
         claim = self.inv['target']
         if task.get('claim') == 'variant':
             claim = next((v for v in self.inv['variants'] if v['task'] == task['id']), None)
@@ -581,7 +586,9 @@ class Investigation(Orchestrator):
         if self.state.get('project_snapshot') is not None:
             context['project_snapshot'] = copy.deepcopy(self.state['project_snapshot'])
         limits = self.inv['allowances'][task['id']]
-        child = {'id': 'child_' + uuid.uuid4().hex, 'native_id': str(uuid.uuid4()), 'job_id': None, 'status': 'pending',
+        child = {'id': slot.get('child_id') or 'child_' + uuid.uuid4().hex, 'native_id': str(uuid.uuid4()),
+                 'turn_id': self.state['id'], 'batch_id': slot.get('batch_id') or self.state['id'],
+                 'job_id': None, 'status': 'pending',
                  'context': context, 'evidence_jobs': list(dict.fromkeys(evidence_jobs)), 'investigation_limits': dict(limits),
                  'allocation': limits['tokens'], 'usage': {'tokens': 0, 'input_tokens': 0}, 'result': None,
                  'action': {'mode': task['mode'], 'effort': task['effort'], 'request': request,

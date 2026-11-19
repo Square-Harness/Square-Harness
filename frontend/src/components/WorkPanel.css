@@ -1,0 +1,36 @@
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+/* Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors */
+.chat-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.chat-workspace > .chat { min-width: 0; }
+.work-panel {
+  position: relative; display: flex; flex-direction: column; width: var(--work-panel-width);
+  min-width: 0; flex: none; min-height: 0; color: var(--text); background: var(--paper);
+  border-inline-start: 1px solid var(--line-strong); font-family: var(--font-ui);
+}
+.work-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 17px 19px 11px; border-top: 3px solid var(--ink);
+}
+.work-panel-head h2 { font: 700 22px/1.15 var(--font-text); margin: 0; }
+.work-panel-head .icon-btn { flex: none; }
+.work-panel-tabs { display: flex; padding: 0 16px; gap: 3px; border-bottom: 1px solid var(--line); }
+.work-panel-tabs button { flex: 1; min-width: 0; border: 0; border-bottom: 2px solid transparent;
+  background: none; color: var(--text-2); padding: 9px 4px; font: 600 14px/1.2 var(--font-ui); cursor: pointer; }
+.work-panel-tabs button:hover { background: var(--hover); }
+.work-panel-tabs [aria-selected="true"] { color: var(--ink-strong); border-bottom-color: var(--ink); }
+.work-panel-scroll { min-width: 0; min-height: 0; flex: 1; padding: 17px; overflow: auto; overflow-wrap: anywhere; overscroll-behavior: contain; }
+.work-panel-grip { position: absolute; z-index: 2; left: -5px; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; }
+.work-panel-grip:is(:hover,:focus-visible)::after { content: ''; display: block; height: 100%; width: 2px; margin: auto; background: var(--ink); }
+.work-panel-scrim { position: fixed; inset: 0; z-index: 42; background: rgba(15, 20, 36, .35); }
+@media(min-width:1320px) {
+  .main:has(.work-panel) > .feedback-open { right: calc(var(--work-panel-width, 390px) + 16px); }
+  .chat-workspace:has(.work-panel) .composer { padding-right: 20px; }
+}
+@media(max-width:1319px) {
+  .work-panel { position: fixed; inset: 0 0 0 auto; z-index: 48; width: min(480px, 87vw); box-shadow: var(--shadow-lg); }
+}
+@media(max-width:760px) {
+  .work-panel { z-index: 58; inset: 0; width: 100%; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .work-panel-scroll { padding: 16px; }
+  .work-panel-head .icon-btn, .work-panel-tabs button { min-height: 44px; }
+}

@@ -153,13 +153,22 @@ export async function deleteConversation(id: string) {
   forgetChat(result.deleted)
 }
 
+// Folder changes invalidate every loaded chat, job, pending HTTP request and live stream.
+function leaveWorkspace() {
+  const notebook = window.location.hash.split('?')[0].split('/').slice(0, 2).join('/') || '#/free'
+  window.history.replaceState(null, '', notebook)
+  window.location.reload()
+}
+
+let statusGeneration = 0
 export async function refreshStatus() {
+  const generation = ++statusGeneration
   try {
     const status = await api.status()
+    if (generation !== statusGeneration) return
     if (state.status && state.status.workspace !== status.workspace) {
-      resetChatDeletionCache()
-      set({ projects: null, projectFilter: 'all' })
-      refreshLists()
+      leaveWorkspace()
+      return
     }
     set({ status })
   } catch {
@@ -224,7 +233,10 @@ function handle(event: ServerEvent) {
       break
     }
     case 'activity':
-      set((s) => ({ snapshot: reduceActivity(s.snapshot, event.task, { kind: event.kind, text: event.text, time: event.time }, event.seq) }))
+      set((s) => ({ snapshot: reduceActivity(s.snapshot, event.task, {
+        kind: event.kind, text: event.text, time: event.time, child_id: event.child_id, card_index: event.card_index,
+        turn_id: event.turn_id, batch_id: event.batch_id, job: event.job, id: event.id,
+      }, event.seq) }))
       break
     case 'approval':
       set((s) => ({
@@ -273,11 +285,7 @@ function handle(event: ServerEvent) {
       bump(event.chat)
       break
     case 'workspace':
-      // Jobs and chats belong to a folder: leave any page from the previous one.
-      resetChatDeletionCache()
-      set({ projects: null, projectFilter: 'all' })
-      window.location.hash = window.location.hash.split('/').slice(0, 2).join('/') || '#/free'
-      refreshAll()
+      leaveWorkspace()
       break
     case 'files':
       bump('files')
@@ -340,6 +348,10 @@ export async function start() {
   })
   try {
     const status = await api.status()
+    if (state.status && state.status.workspace !== status.workspace) {
+      leaveWorkspace()
+      return
+    }
     set({ status, auth: 'ok' })
     connect()
     refreshLists()

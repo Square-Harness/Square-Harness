@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Follow parallel agents in a conversation and open their activity, saved
+  outputs, project evidence and investigation plan in a responsive research
+  notebook. The selected tab and result can be reopened from the chat link.
+
 - Add explicit guided investigations to the Assistant and terminal. Approve an
   exact target, run a bounded plan across mathematical modes, pause or resume,
   and finish with an evidence-linked report.

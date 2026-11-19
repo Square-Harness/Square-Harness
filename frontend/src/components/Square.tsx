@@ -6,7 +6,7 @@ import type { Candidate, ReviewIssue } from '../api'
 
 export type Variant =
   | 'reviewed' | 'gap' | 'refuted' | 'uncertain' | 'complete'
-  | 'running' | 'paused' | 'spent' | 'error' | 'ready' | 'partial'
+  | 'running' | 'paused' | 'spent' | 'error' | 'ready' | 'partial' | 'waiting' | 'halted'
 
 const BOX = { x: 2.75, y: 2.75, width: 10.5, height: 10.5, rx: 1 }
 
@@ -23,6 +23,7 @@ export function Square({ variant, size = 14, label }: { variant: Variant; size?:
       {variant === 'reviewed' && <path d="M13.25 2.75V13.25H2.75Z" className="sq-fill" />}
       {variant === 'partial' && <rect x="2.75" y="8.5" width="10.5" height="4.75" className="sq-fill" />}
       {variant === 'refuted' && <path d="M5 5l6 6M11 5l-6 6" className="sq-mark" />}
+      {variant === 'halted' && <path d="M4.5 11.5l7-7" className="sq-mark" />}
       {variant === 'paused' && <path d="M6.5 5.5v5M9.5 5.5v5" className="sq-mark" />}
       {variant === 'spent' && <path d="M5.2 8h5.6" className="sq-mark" />}
       {variant === 'error' && <path d="M8 5v3.6M8 10.6v.4" className="sq-mark" />}

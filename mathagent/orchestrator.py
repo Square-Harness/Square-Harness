@@ -827,6 +827,7 @@ class Orchestrator:
         previous_ids = {call.get('id') for message in self.state['messages']
                         for call in message.get('tool_calls', [])}
         pending = []
+        batch_id = None
         for index, call in enumerate(calls):
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 raise AgentError('Malformed main-agent tool call')
@@ -847,7 +848,11 @@ class Orchestrator:
                 raise AgentError('Malformed or repeated main-agent tool ID')
             call['id'] = call_id
             previous_ids.add(call_id)
-            pending.append({'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None})
+            if function['name'] != 'delegate':
+                batch_id = None
+            elif batch_id is None:
+                batch_id = f"{self.state['id']}-b{self.state['main_calls']}-{index}"
+            pending.append({'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None, 'batch_id': batch_id})
         self.state['messages'].append(assistant)
         self.state['pending_calls'] = pending
         self._save()
@@ -941,7 +946,8 @@ class Orchestrator:
         # Messages include relevant file excerpts and earlier worker findings.
         child = {
             'id': 'child_' + uuid.uuid4().hex, 'job_id': None, 'status': 'pending',
-            'action': copy.deepcopy(args), 'result': None,
+            'action': copy.deepcopy(args), 'result': None, 'turn_id': self.state['id'],
+            'batch_id': pending.get('batch_id') or f"{self.state['id']}-b{self.state['main_calls']}",
             'source_key': source_key,
             'context': {'query': self.state['query'], 'history': copy.deepcopy(self.state['history']),
                         'files': copy.deepcopy(self.state['files']),

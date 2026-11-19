@@ -153,7 +153,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   )
 }
 
-function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
+export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
   return (
     <div className={data.pipeline === REVIEW_PIPELINE ? 'report literature-review' : 'report'}>
       {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}

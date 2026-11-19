@@ -100,6 +100,8 @@ def run_worker(host, parent, budget, action, child, save):
     from .gui import effort
     root, online, state_lock = host.root, host.online, parent._state_lock
     mode = action['mode']
+    child.setdefault('turn_id', parent.state.get('id'))
+    child.setdefault('batch_id', child['turn_id'])
     context = child['context']
     image_refs = context.get('images', [])
     docs = [f for f in action.get('files', []) if mode == 'prove' and briefs.DOC_ID.fullmatch(f)]
@@ -300,7 +302,22 @@ def run_worker(host, parent, budget, action, child, save):
                     parent.state['progress'] = copy.deepcopy(child['progress'])
                     save()
         if kind in ('notice', 'tool', 'result'):
-            item = {'kind': kind, 'text': str(value)[:4000], 'time': time.time()}
+            # Activity is a display log. Source passages, tool arguments and raw results stay in their native record.
+            if kind == 'tool':
+                name = str(value).split(maxsplit=1)[0] if value else ''
+                text = 'Using ' + (name if re.fullmatch('[A-Za-z0-9_]+', name) else 'a tool')
+            elif kind == 'result':
+                text = 'Tool result received'
+            else:
+                text = str(value).splitlines()[0][:240] if value else ''
+            item = {'kind': kind, 'text': text, 'time': time.time(), 'job': mode, 'id': child.get('job_id'),
+                    'child_id': child['id'], 'card_index': child.get('card_index'), 'turn_id': child.get('turn_id'),
+                    'batch_id': child.get('batch_id')}
+            with state_lock:
+                timeline = child.setdefault('agent_timeline', [])
+                timeline.append(item)
+                del timeline[:-40]
+                save()
             host.activity(mode, child.get('job_id'), item)
 
     if mode == 'explore' and online:
@@ -522,7 +539,8 @@ def run_worker(host, parent, budget, action, child, save):
         host.update_card(child, status='stopped' if result['status'] == 'paused' else 'done',
                           **({'answer_id': answer_id, 'answer_sha256': hashlib.sha256(result['answer'].encode()).hexdigest()}
                              if mode in ('explore',) + USER_MODES else {}), outcome=outcome,
-                          error=(result.get('error') or {}).get('message'),
+                          error=(result.get('error') or {}).get('message'), native_status=result['status'],
+                          error_code=(result.get('error') or {}).get('code'),
                           job_id=result['job_id'] if mode not in ('explore',) + USER_MODES else None,
                           **({'outputs': runner.state.get('outputs') or {}}
                              if mode in ('writeup', 'summarize', 'literature') and runner and runner.state else {}))
@@ -557,7 +575,8 @@ def run_worker(host, parent, budget, action, child, save):
             error = {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
                      'scope': 'operation', 'details': {'mode': mode}}
         host.update_card(child, status='stopped' if error['retryable'] else 'failed',
-                          outcome=str(exc), error=str(exc))
+                          outcome=str(exc), error=str(exc), error_code=error['code'],
+                          agent_error={k: error[k] for k in ('code', 'message', 'scope', 'retryable') if k in error})
         host.saved()
         return {'status': 'failed', 'answer': ('The saved Write-Up could not be compiled. ' + str(exc)
                 if parent.state.get('compile_job') else ''), 'warnings': [str(exc)], 'error': error,

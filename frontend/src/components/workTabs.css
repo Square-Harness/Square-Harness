@@ -1,0 +1,30 @@
+.work-tab-content { min-width: 0; overflow-wrap: anywhere; }
+.work-tab-content h3 { margin: 1rem 0 .45rem; font-size: 1.05rem; }
+.work-tab-context { color: var(--text-2); font-weight: 600; }
+.work-output-list, .work-record-list, .work-plan-list { list-style: none; margin: 0; padding: 0; }
+.work-output-list li, .work-record-list li, .work-plan-list li { border-bottom: 1px solid var(--line); }
+.work-output-list { max-height: min(32dvh, 18rem); overflow-y: auto; overscroll-behavior: contain; }
+.work-output-list button { color: inherit; background: transparent; border: 0; text-align: left; width: 100%; padding: .6rem .55rem; font: inherit; cursor: pointer; }
+.work-output-list button:hover, .work-output-list button[aria-pressed="true"] { background: var(--ink-soft); }
+.work-output-list button[aria-pressed="true"] { box-shadow: inset 3px 0 var(--ink); }
+.work-output-list span, .work-output-list time, .work-record-list summary span { color: var(--text-2); display: block; font-size: .82rem; }
+.work-output-preview { margin-top: 1.1rem; border-top: 2px solid var(--ink); }
+.work-output-source { white-space: pre-wrap; overflow: auto; font-size: .86rem; }
+.work-output-image { display: block; max-width: 100%; height: auto; }
+.work-output-frame { width: 100%; height: min(64dvh, 44rem); border: 1px solid var(--line); background: var(--sheet); }
+.work-tab-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .7rem; }
+.work-output-objective { color: var(--text-2); }
+.work-record-filter { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .6rem; }
+.work-record-filter label { flex: 1 1 7rem; min-width: 0; font-size: .85rem; }
+.work-record-filter input, .work-record-filter select { width: 100%; box-sizing: border-box; display: block; margin-top: .25rem; }
+.work-record-list details { padding: .6rem .1rem; }
+.work-record-list summary { cursor: pointer; }
+.work-record-list summary strong { font-weight: 500; }
+.work-record-id { display: block; font-size: .8rem; color: var(--text-2); margin: .4rem 0; }
+.work-plan-list li { display: grid; grid-template-columns: 1.15rem minmax(0, 1fr); align-items: baseline; gap: .4rem; padding: .6rem 0; }
+.work-plan-list p { margin: .25rem 0; }
+.work-plan-list small, .work-plan-state { color: var(--text-2); font-size: .82rem; }
+.work-plan-state { margin-left: .55em; }
+.work-plan-limits dl { display: grid; grid-template-columns: 1fr auto; margin: .4rem 0; gap: .2rem .6rem; }
+.work-plan-limits dd { margin: 0; font-variant-numeric: tabular-nums; }
+.work-plan-meters { margin-bottom: 1rem; }

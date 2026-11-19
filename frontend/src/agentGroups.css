@@ -1,0 +1,38 @@
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+/* Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors */
+
+.agent-header { display: flex; justify-content: flex-start; padding: .35rem .65rem; flex: 0 0 auto; min-height: 2.25rem; border-bottom: 1px solid var(--line); background: var(--sheet); }
+.agent-trigger, .agent-group-toggle, .agent-chip { background: var(--sheet); color: var(--text-2); border: 1px solid var(--line); border-radius: .35rem; display: inline-flex; align-items: center; gap: .36rem; padding: .22rem .52rem; font: inherit; font-size: .8rem; cursor: pointer; }
+.agent-trigger { min-height: 2rem; }
+.agent-trigger:focus-visible, .agent-lane:focus-visible, .agent-chip:focus-visible, .agent-group-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.agent-squares { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.agent-squares:empty { display: none; }
+.agent-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.agent-group { margin: .8rem 0 1rem; background: var(--sheet); border: 1px solid var(--line); border-radius: .4rem; overflow: hidden; min-width: 0; }
+.agent-group-head { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; padding: .48rem .6rem; }
+.agent-group-toggle { font-size: .88rem; font-weight: 600; color: var(--text); border-color: transparent; }
+.agent-group-toggle:hover, .agent-lane:hover, .agent-trigger:hover, .agent-chip:hover, .agent-picker button:hover { background: var(--ink-soft); }
+.agent-chip { max-width: 100%; overflow-wrap: anywhere; }
+.agent-lanes, .agent-picker, .agent-timeline { padding: 0; margin: 0; list-style: none; }
+.agent-lanes li { border-top: 1px solid var(--line); }
+.agent-lane { position: relative; width: 100%; border: 0; background: transparent; padding: .55rem .8rem .6rem 1.1rem; display: grid; gap: .13rem; text-align: left; color: var(--text); cursor: pointer; font: inherit; min-width: 0; }
+.agent-cover { position: absolute; left: 0; top: .55rem; bottom: .55rem; width: 4px; border-radius: 0 2px 2px 0; }
+.agent-lane-top { display: flex; gap: .35rem; align-items: center; font-size: .82rem; }
+.agent-lane-top strong { margin-right: auto; }
+.agent-lane-top time, .agent-metadata, .agent-step, .agent-timeline { font-size: .75rem; color: var(--text-2); }
+.agent-objective, .agent-step { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agent-axis { height: 3px; background: var(--paper-2); position: relative; overflow: hidden; margin-top: .18rem; }
+.agent-axis i { position: absolute; height: 100%; min-width: 2px; background: var(--ink); }
+.sq-halted { color: var(--red); } .sq-waiting { color: var(--text-3); }
+.agent-inspector { min-width: 0; }
+.agent-picker { display: grid; gap: .35rem; }
+.agent-picker button { width: 100%; background: var(--sheet); border: 1px solid var(--line); border-radius: .3rem; padding: .45rem .55rem; text-align: left; color: var(--text); display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .2rem .45rem; cursor: pointer; font: inherit; }
+.agent-picker button[aria-pressed=true] { border-color: var(--ink); background: var(--ink-soft); }
+.agent-picker span, .agent-picker small { color: var(--text-2); font-size: .75rem; }
+.agent-picker small { grid-column: 2 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-details { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .75rem; overflow-wrap: anywhere; }
+.agent-details h3 { margin-top: 0; }
+.agent-job { display: grid; gap: .5rem; margin: .6rem 0; }
+.agent-timeline { border-left: 1px solid var(--line-strong); margin: .75rem .25rem; padding-left: .7rem; max-height: 22rem; overflow: auto; }
+.agent-timeline li { display: grid; gap: .15rem; margin-bottom: .45rem; }
+.agent-timeline time { font-variant-numeric: tabular-nums; color: var(--text-3); font-size: .7rem; }

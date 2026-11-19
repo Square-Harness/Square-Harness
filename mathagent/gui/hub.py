@@ -78,7 +78,14 @@ class _ChatWorkerHost:
                                      approve=lambda preview: self.hub._approve(self.task, preview))
 
     def show_experiments(self, workspace):
-        self.hub._show_experiments(workspace, self.root, self.chat_id, self.task)
+        self.hub._show_experiments(workspace, self.root, self.chat_id, self.task, producer=self.producer)
+
+    def bind_child(self, child):
+        self.child = child
+
+    def producer(self):
+        return {'child_id': self.child['id'], 'card_index': self.child.get('card_index'),
+                'turn_id': self.child.get('turn_id'), 'batch_id': self.child.get('batch_id')}
 
     def review_concurrency(self):
         return self.hub.review_concurrency()
@@ -97,19 +104,23 @@ class _ChatWorkerHost:
 
     def start_card(self, child, action, files, image_refs):
         if child.get('card_index') is None:
+            stamp = store._now()
             item = dict(role='route', status='started', mode=action['mode'], request=action['request'],
+                        child_id=child['id'], turn_id=child.get('turn_id'), batch_id=child.get('batch_id'),
+                        started_at=stamp, status_time=stamp,
                         files=files, images=image_refs, effort=action['effort'], reason=action['reason'],
-                        orchestrated=True, task=self.task.id, time=store._now())
+                        orchestrated=True, task=self.task.id, time=stamp)
             child['card_index'] = store.append_items(self.root, self.chat_id, [item])
         else:
             self.update_card(child, status='started', task=self.task.id, outcome='', error=None)
 
     def update_card(self, child, **changes):
-        store.update_item(self.root, self.chat_id, child['card_index'], **changes)
+        store.update_item(self.root, self.chat_id, child['card_index'], child_id=child['id'],
+                          turn_id=child.get('turn_id'), batch_id=child.get('batch_id'), **changes)
 
     def activity(self, mode, job, item):
-        self.hub.bus.publish('activity', mutate=lambda: self.task.activity.append(item),
-                             task=self.task.id, job=mode, id=job, **item)
+        event = {**item, **self.producer(), 'job': mode, 'id': job}
+        self.hub.bus.publish('activity', mutate=lambda: self.task.activity.append(event), task=self.task.id, **event)
 
     def saved(self):
         self.hub.bus.publish('chat_saved', chat=self.chat_id)
@@ -379,6 +390,8 @@ class Task:
         self.work = None
         self.on_update = on_update
         self.origin_chat = target if kind == 'chat' else None
+        self.investigation_id = None
+        self.investigation_phase = None
 
     def summary(self):
         return {'id': self.id, 'kind': self.kind, 'target': self.target, 'label': self.label,
@@ -747,7 +760,7 @@ class Hub:
         if chat:
             self._discarded(chat, (task.live or {}).get('user', ''), AgentError(reason))
 
-    def pause(self, task_id=None):
+    def pause(self, task_id=None, *, investigation_id=None, chat_id=None):
         with self._lock:
             if task_id is None:
                 tasks = [t for t in self._tasks.values() if t.state in RUNNING]
@@ -758,6 +771,10 @@ class Hub:
                 task = self._tasks.get(task_id)
                 if task is None or task.state not in RUNNING:
                     raise ValueError('That task is no longer running.')
+            if investigation_id is not None:
+                if (task.kind != 'chat' or task.target != chat_id or task.investigation_id != investigation_id
+                        or task.investigation_phase not in ('frame', 'approval', 'running')):
+                    raise Busy('The active task does not belong to this investigation.')
             task.cancel.set()
             task.state = 'pausing'
         self._publish_task(task)
@@ -955,7 +972,7 @@ class Hub:
         agent.document_output_cap = getattr(args, 'specialist_output_tokens', None)
         return agent, library
 
-    def _show_experiments(self, workspace, root, chat_id, task, persist=True):
+    def _show_experiments(self, workspace, root, chat_id, task, persist=True, producer=None):
         """Show each sandbox run's files in the conversation as soon as the run is saved.
 
         With ``persist`` (Assistant turns, reviews) the item is saved in the transcript at once.
@@ -970,6 +987,8 @@ class Hub:
                                          record.get('purpose', ''))
             if item is None:
                 return
+            if producer is not None:
+                item.update(producer())
             if persist:
                 store.append_items(root, chat_id, [item])
                 self.bus.publish('chat_saved', chat=chat_id)
@@ -1390,13 +1409,9 @@ class Hub:
         return self._assistant_turn(chat_id, content, files, required_mode=required_mode, required_effort=required_effort)
 
     def resume_assistant(self, chat_id):
-        chat = store.load_chat(self.root, chat_id)
-        state = chat.get('assistant_state') or {}
-        if state.get('status') not in ('interrupted', 'running', 'incomplete'):
-            raise ValueError('This Assistant turn is not paused or recoverable.')
-        return self._assistant_turn(chat_id, state['query'], state.get('files', ()), resume=True)
+        return self._assistant_turn(chat_id, '', resume=True)
 
-    def stop_investigation(self, chat_id):
+    def stop_investigation(self, chat_id, expected_id=None):
         """Close a paused investigation using only its saved evidence."""
         from ..investigation import save_record, stop_state
         with self._lock:
@@ -1406,6 +1421,8 @@ class Hub:
             state = store.load_chat(self.root, chat_id).get('assistant_state') or {}
             if not state.get('investigation'):
                 raise ValueError('This conversation has no current investigation.')
+            if expected_id is not None and state['investigation']['id'] != expected_id:
+                raise Busy('This investigation has been replaced. Open the current plan before stopping it.')
             if state.get('status') != 'complete':
                 state = stop_state(self.root, state)
             store.checkpoint_investigation(self.root, chat_id, state)
@@ -1445,9 +1462,33 @@ class Hub:
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
             raise ValueError('Only Assistant conversations orchestrate workers.')
+        saved = chat.get('assistant_state') or {}
+        resumable = ('interrupted', 'running', 'incomplete')
+        if resume:
+            if saved.get('status') not in resumable:
+                raise ValueError('This Assistant turn is not paused or recoverable.')
+            content, files = saved['query'], saved.get('files', ())
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters.')
-        saved = chat.get('assistant_state') or {}
+
+        def admission_chat():
+            # Caller holds the hub lock. Inputs assembled outside it are valid
+            # only for the conversation snapshot that supplied them.
+            pending = list(self._tasks.values()) + list(self.queue)
+            if (self._closing or chat_id in self.routing
+                    or any(t.origin_chat == chat_id or t.target == chat_id for t in pending)):
+                raise Busy('The Assistant is still working on this conversation.')
+            current = store.load_chat(self.root, chat_id)
+            latest = current.get('assistant_state') or {}
+            if resume and latest.get('status') not in resumable:
+                raise ValueError('This Assistant turn is no longer paused or recoverable.')
+            if not resume and latest.get('status') in resumable and latest.get('investigation'):
+                raise ValueError('Resume the investigation or choose Stop and report before sending another message.')
+            if (latest != saved or any(current.get(key) != chat.get(key)
+                    for key in ('transcript', 'images', 'project_id'))):
+                raise Busy('The conversation changed while preparing this turn. Try again with its latest state.')
+            return current
+
         personal_context = (saved.get('personal_context', '') if resume else
                             personalization.context(personalization.load(self.base)))
         review_reference = (copy.deepcopy(saved.get('review_reference')) if resume else
@@ -1496,30 +1537,26 @@ class Hub:
                 files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         except (ValueError, OSError) as exc:
             if resume:
-                failed = chat.get('assistant_state') or {}
-                failed['status'] = 'failed'
-                failed.setdefault('warnings', []).append(str(exc))
-                store.save_assistant(self.root, chat_id, failed)
-                store.append_items(self.root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc),
-                    'discarded': True, 'time': store._now()}])
-                self.bus.publish('chat_saved', chat=chat_id)
+                with self._lock:
+                    failed = admission_chat().get('assistant_state') or {}
+                    failed['status'] = 'failed'
+                    failed.setdefault('warnings', []).append(str(exc))
+                    store.save_assistant(self.root, chat_id, failed)
+                    store.append_items(self.root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc),
+                        'discarded': True, 'time': store._now()}])
+                    self.bus.publish('chat_saved', chat=chat_id)
             raise
         with self._lock:
-            current = store.load_chat(self.root, chat_id)
-            project_snapshot = (copy.deepcopy(saved.get('project_snapshot')) if resume else
+            current = admission_chat()
+            latest = current.get('assistant_state') or {}
+            project_snapshot = (copy.deepcopy(latest.get('project_snapshot')) if resume else
                                 projects.snapshot(self.root, current.get('project_id')))
-            pending = list(self._tasks.values()) + list(self.queue)
-            if (self._closing or chat_id in self.routing
-                    or any(t.origin_chat == chat_id or t.target == chat_id for t in pending)):
-                raise Busy('The Assistant is still working on this conversation.')
-            set_aside = not resume and saved.get('status') in ('interrupted', 'running', 'incomplete')
-            if set_aside and saved.get('investigation'):
-                raise ValueError('Resume the investigation or choose Stop and report before sending another message.')
+            set_aside = not resume and latest.get('status') in resumable
             self.routing[chat_id] = time.time()
             try:
                 if set_aside:
                     # A new message moves on from a paused or stuck turn instead of being refused.
-                    store.save_assistant(self.root, chat_id, {**saved, 'status': 'set_aside'})
+                    store.save_assistant(self.root, chat_id, {**latest, 'status': 'set_aside'})
                     store.append_items(self.root, chat_id, [{'role': 'notice', 'discarded': True, 'time': store._now(),
                         'content': 'Not added to the conversation: the paused turn was set aside by a new message. '
                                    'Jobs it started keep their saved work.'}])
@@ -1589,6 +1626,8 @@ class Hub:
                         if personal_context:
                             state['personal_context'] = personal_context
                         if state.get('investigation'):
+                            task.investigation_id = state['investigation']['id']
+                            task.investigation_phase = state['investigation']['phase']
                             from ..investigation import save_record
                             store.checkpoint_investigation(root, chat_id, state)
                             save_record(root, state, chat_id)
@@ -1723,6 +1762,7 @@ class Hub:
 
     def _assistant_worker(self, task, root, chat_id, parent, budget, action, child, save, online, state_lock):
         host = _ChatWorkerHost(self, task, root, chat_id, online)
+        host.bind_child(child)
         return run_worker(host, parent, budget, action, child, save)
 
     @staticmethod

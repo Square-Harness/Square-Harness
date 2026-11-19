@@ -5,6 +5,7 @@
 // left and a job's overview (budget, candidates, checks) on the right. Remembered
 // per browser; phones and narrow windows ignore it.
 import { useSyncExternalStore } from 'react'
+import type { WorkTab } from './router'
 
 export type Panel = 'sidebar' | 'aside'
 
@@ -44,4 +45,22 @@ export function usePanelHidden(panel: Panel): boolean {
 /** For event handlers: whether the panel is hidden right now. */
 export function isPanelHidden(panel: Panel): boolean {
   return hidden[panel]
+}
+
+type WorkPreference = { open?: boolean; width?: number; tab?: WorkTab }
+
+export function workPreferences(): WorkPreference {
+  try {
+    const value = JSON.parse(localStorage.getItem('square-work-panel') || '{}')
+    return {
+      open: typeof value?.open === 'boolean' ? value.open : undefined,
+      width: typeof value?.width === 'number' && Number.isFinite(value.width) ? value.width : undefined,
+      tab: ['agents', 'outputs', 'record', 'plan'].includes(value?.tab) ? value.tab : undefined,
+    }
+  } catch { return {} }
+}
+
+export function rememberWorkPanel(change: WorkPreference) {
+  try { localStorage.setItem('square-work-panel', JSON.stringify({ ...workPreferences(), ...change })) }
+  catch { /* Navigation and resizing still work without browser storage. */ }
 }

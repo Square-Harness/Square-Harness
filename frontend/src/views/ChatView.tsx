@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
 import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
@@ -22,9 +22,13 @@ import { literalUnderscores } from '../mathtext'
 import { ago, count } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
-import { go, href } from '../router'
+import { WorkPanel } from '../components/WorkPanel'
+import { go, href, openWorkPanel } from '../router'
 import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
+
+import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
+import { AgentGroup, AgentHeader } from '../components/AgentGroup'
 
 type ChatMode = 'critic' | 'explore' | 'free'
 
@@ -86,6 +90,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
   const [ended, setEnded] = useState(0)
   const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended, personalizationTick])
+  const agentLanes = useMemo(() => data && data.id === id ? deriveAgents(data, app.proofs || [], app.research || []) : [],
+    [data, id, app.proofs, app.research])
   const work = chatWork(app.snapshot, id)
   const task = work.active?.task
   const ours = !!task
@@ -158,7 +164,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const hasImages = attachments.some(isImagePath)
   const budgetDisplay = data?.assistant_budget ? assistantBudgetDisplay(data.assistant_budget) : null
   const paused = free && assistantResumable(data)
-  const pausedInvestigation = paused && !!data?.investigation
+  const pausedInvestigation = paused && !!data?.investigation?.current
   const send = async (text?: string) => {
     let raw = text ?? draft
     let imageOnlyCall: ModeCall | null = null
@@ -238,7 +244,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     if (!id || resuming) return
     setResuming(true)
     setSendError('')
-    try { await api.stopInvestigation(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
+    try { await api.stopInvestigation(id, data?.investigation?.id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
   const transcript = data?.transcript || []
   const lastTask = app.snapshot.task
@@ -251,7 +257,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
 
   return (
     <MathMacrosProvider definitions={data?.math_macros}>
+    <div className="chat-workspace">
     <div className="chat">
+      {id && free && <AgentHeader lanes={agentLanes} />}
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
@@ -259,7 +267,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
-          {id && <Transcript items={transcript} mode={mode} chatId={id} />}
+          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} />}
           {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
@@ -267,18 +275,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </div>
           )}
           {live && <LiveTurnView live={live} mode={mode} waitingForOutput={!!task?.waiting_model_calls} />}
-          {data?.investigation && data.investigation.tasks.length > 0 && data.assistant_status !== 'complete' && (
-            <div className="entry">
-              <span className="in-margin" />
-              <details open className="route-card">
-                <summary>Investigation plan · {data.investigation.phase === 'approval' ? 'awaiting approval' : data.investigation.phase}</summary>
-                <ol>{data.investigation.tasks.map((step) => <li key={step.id}>
-                  <strong>{step.id} · {step.mode}</strong> · {step.status}
-                  {!!step.after.length && <small> · after {step.after.join(', ')}</small>}
-                  <p>{step.objective}</p>
-                </li>)}</ol>
-              </details>
-            </div>
+          {data?.investigation?.current && data.assistant_status !== 'complete' && (
+            <div className="entry"><span className="in-margin" /><div>
+              <button type="button" className="btn btn-small btn-quiet" onClick={() => openWorkPanel('plan')}>View investigation plan</button>
+            </div></div>
           )}
           {free && data?.assistant_progress && <div className="entry">
             <span className="in-margin" />
@@ -358,6 +358,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
     </div>
+    {data && <WorkPanel key={data.id} chat={data} />}
+    </div>
     </MathMacrosProvider>
   )
 }
@@ -405,13 +407,40 @@ function group(items: TranscriptItem[]): Turn[] {
   return turns
 }
 
-function Transcript({ items, mode, chatId }: { items: TranscriptItem[]; mode: ChatMode; chatId: string }) {
+function Transcript({ items, mode, chatId, lanes }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[] }) {
+  const turns = group(items)
+  const groups = groupsOf(lanes)
+  const byCard = new Map<number, AgentLane[]>()
+  const cardTurns = new Map<number, number>()
+  turns.forEach((turn, index) => turn.steps.forEach(step => cardTurns.set(step.index, index)))
+  const owners = new Map<string, number>()
+  for (const lane of lanes) {
+    const owner = lane.card_index == null ? undefined : cardTurns.get(lane.card_index)
+    if (owner !== undefined) owners.set(lane.turn_id, owner)
+  }
+  const unstarted = new Map<number, AgentLane[][]>()
+  for (const batch of groups) {
+    const cards = batch.flatMap(lane => lane.card_index == null ? [] : [lane.card_index])
+    if (cards.length) {
+      for (const index of cards) byCard.set(index, index === Math.min(...cards) ? batch : [])
+    } else {
+      // An unstarted historical slot may have no transcript position. Always
+      // retain it in Agents; only display it inside a turn of known ownership.
+      const owner = owners.get(batch[0].turn_id) ?? (batch.some(activeAgent) ? turns.length - 1 : undefined)
+      if (owner !== undefined) {
+        const previous = unstarted.get(owner)
+        if (previous) previous.push(batch)
+        else unstarted.set(owner, [batch])
+      }
+    }
+  }
   return (
     <>
-      {group(items).map((turn, index) => (
+      {turns.map((turn, index) => (
         <div key={index} className="turn">
           {turn.user && <UserMessage item={turn.user} />}
-          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} />
+          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} />
+          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} />)}
         </div>
       ))}
     </>
@@ -434,7 +463,7 @@ function UserMessage({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; chatId: string }) {
+function ModelSteps({ steps, mode, chatId, groups }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]> }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
   // An Assistant conversation answers with one voice, whichever engine mode wrote it, except
@@ -457,7 +486,9 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
     const { item, index } = steps[i]
     if (item.role === 'route') {
       flush(index)
-      out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
+      const batch = mode === 'free' && item.orchestrated ? groups.get(index) : undefined
+      if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
+      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} />)
     } else if (item.role === 'assistant') {
       if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
       const calls = item.tool_calls || []
@@ -653,7 +684,7 @@ function ExperimentFigures({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: string }) {
+export function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: string }) {
   const display = displayOf(artifact.mime_type)
   const caption = (
     <figcaption>

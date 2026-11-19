@@ -194,7 +194,7 @@ function highlight(line: string): ReactNode[] {
   return parts
 }
 
-function TexSource({ text, onCite, flagged, errorLines }: { text: string; onCite: (ref: string) => void; flagged: Set<string>; errorLines: Set<number> }) {
+export function TexSource({ text, onCite, flagged, errorLines }: { text: string; onCite: (ref: string) => void; flagged: Set<string>; errorLines: Set<number> }) {
   const lines = useMemo(() => text.split('\n'), [text])
   return (
     <pre className="source tex">
