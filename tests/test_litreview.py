@@ -57,15 +57,18 @@ class LiteratureReviewTests(unittest.TestCase):
     def test_outline_failure_and_interrupted_check_still_deliver_only_source_checked_prose(self):
         fact = 'The observation time is strictly positive for an exterior strip at positive distance from the singular line.'
         unsupported = 'All bounded domains have the same numerical threshold.'
-        check = {'judgments': [{'units': [1], 'source': 1, 'condition_id': 1, 'conclusion_id': 1},
-                               {'units': [2], 'source': 0, 'problem': 'No numerical statement in the paper.'}],
-                 'findings': []}
+        located = {'verdicts': [
+            {'unit': 1, 'reading': 'Positive time for an exterior strip.', 'verdict': 'supported',
+             'support': [{'source': 1, 'condition': 1, 'conclusion': 1}]},
+            {'unit': 2, 'reading': 'nothing', 'verdict': 'unsupported', 'support': [],
+             'problem': 'No numerical statement in the paper.'}]}
+        compared = {'checks': [{'unit': 1, 'faithful': True}]}
         measured = DeepInfraGenerationError('Stream interrupted.', category='interrupted',
                                             stats={'eval_count': 12, 'prompt_eval_count': 130})
         empty = DeepInfraGenerationError('Model generation failed.', category='server_error', confirmed_terminal=True,
                                         stats={'eval_count': 0, 'prompt_eval_count': 130})
         transport = FakeClient([[measured], response(fact[:-1] + ' [@1].\n\n' + unsupported[:-1] + ' [@1].'),
-                                [empty], response(json.dumps(check))])
+                                [empty], response(json.dumps(located)), response(json.dumps(compared))])
         runner = ReviewRunner(Agent(transport, Workspace(self.root)))
         default_step = runner._step
         def step(phase):
@@ -87,9 +90,10 @@ class LiteratureReviewTests(unittest.TestCase):
         markdown = (runner.directory / 'review.md').read_text()
         self.assertIn(fact[:-1] + ' [1].', markdown)
         self.assertNotIn(unsupported[:-1], markdown)
-        self.assertEqual([row['status'] for row in runner.state['calls']],
-                         ['generation_failed', 'complete', 'generation_failed', 'complete'])
-        self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (52, 460))
+        self.assertEqual([(row['role'], row['status']) for row in runner.state['calls']],
+                         [('outline', 'generation_failed'), ('write', 'complete'), ('check', 'generation_failed'),
+                          ('check', 'complete'), ('verify', 'complete')])
+        self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (72, 560))
 
     def test_outage_stops_before_a_fourth_unknown_charge_and_resume_keeps_the_failed_units(self):
         outage = DeepInfraGenerationError('Provider ended the stream.', category='server_error', confirmed_terminal=True)
@@ -213,6 +217,28 @@ class LiteratureReviewTests(unittest.TestCase):
     def primary(self, n, passages):
         self.runner.state['cards'][str(n)] = {'mode': 'primary_passages', 'passages': passages}
 
+    def check(self, i, verdicts):
+        """Check a section as the check phase does: locate (and ask once more for a sentence left without
+        an answer), compare, settle. `verdicts` scripts the locating referee by sentence number; the
+        comparison confirms every sentence it is given."""
+        state = self.runner.state
+        state.setdefault('settings', {'max_rounds': 1})
+        state.setdefault('tokens_charged', 0)
+
+        def ask(role, prompt, *, units=(), **options):
+            numbers = [int(unit.split(':')[1]) for unit in units]
+            if role == 'verify':
+                return {'complete': True, 'value': {'checks': [{'unit': j, 'faithful': True} for j in numbers]}}
+            return {'complete': True, 'value': {'verdicts': [dict(verdicts[j], unit=j) for j in numbers if j in verdicts]}}
+        frame = self.runner._check_frame(i)
+        with patch.object(self.runner, '_ask', side_effect=ask):
+            for _ in range(2):
+                for _, job in self.runner._locating_jobs({i: frame}):
+                    job()
+            for _, job in self.runner._verifying_jobs({i: frame}):
+                job()
+        self.runner._settle_check(i, frame)
+
     def test_assigned_cached_primary_survives_exhausted_online_budget(self):
         state = self.runner.state
         lit = self.runner.agent.workspace.literature = LiteratureTools(self.root, online=True, max_requests=0)
@@ -326,15 +352,14 @@ class LiteratureReviewTests(unittest.TestCase):
         draft = '\n\n'.join(['Let $C$ denote the constant.', fact[:-1] + ' [@1].', *claims,
                             '| Estimate | Value |\n| --- | --- |\n| Bound | $C=24$ [@1] |'])
         units = [p for p in self.runner._assertion_units(draft) if p.strip()]
-        good = {'units': [2], 'source': 1, 'condition_id': 1, 'conclusion_id': 1}
-        rejected = {'units': list(range(3, 26)), 'source': 0, 'problem': 'No numerical constant in the paper.'}
-        finding = {'type': 'unsupported', 'unit': len(units), 'quote': '$C=24$', 'problem': 'Unsupported bound.'}
-        for judgments, findings, judged in [([good], [], 1), ([good, rejected], [finding], 25)]:
+        good = {2: {'verdict': 'supported', 'support': [{'source': 1, 'condition': 1, 'conclusion': 1}]}}
+        rejected = {'verdict': 'unsupported', 'support': [], 'problem': 'No numerical constant in the paper.'}
+        every = {**good, **{j: rejected for j in [*range(3, 26), len(units)]}}
+        # A referee can return fewer verdicts than sentences, twice: the others stay unjudged.
+        for verdicts, judged in [(good, 1), (every, 25)]:
             with self.subTest(judged=judged):
                 state['sections'] = {'0': {'text': draft}}
-                reply = {'complete': True, 'value': {'judgments': judgments, 'findings': findings}}
-                with patch.object(self.runner, '_ask', return_value=reply):
-                    self.runner._check_section(0, 2000)
+                self.check(0, verdicts)
                 check = state['checks']['0']
                 self.assertEqual((check['judged_units'], check['substantive_units']), (judged, 25))
                 self.assertEqual(check['ran'], judged == 25)
@@ -499,7 +524,7 @@ class LiteratureReviewTests(unittest.TestCase):
         self.primary(1, {tag: passage + r' The estimate holds if and only if $q>q_c$ in the other model.'})
         self.assertFalse(self.runner._support([verdict], [target], [1]))
 
-    def test_checked_export_keeps_the_hypothesis_and_numbers_only_the_cited_work(self):
+    def test_checked_export_keeps_the_hypothesis_and_lists_an_undiscussed_planned_work_apart(self):
         condition = 'Under assumption (2.1), let $d>1$.'
         result = 'The system is observable in positive time.'
         self.primary(2, {'L5-L6': condition + ' ' + result})
@@ -514,20 +539,22 @@ class LiteratureReviewTests(unittest.TestCase):
         self.runner._pack([2], sources_only=True, source_spans=spans)
         ids = {sentence: int(key[1:]) for key, (_, _, sentence) in spans.items()}
         # Even a referee endorsing both sentences with real source spans cannot drop d>1.
-        verdict = {'units': [1, 2], 'source': 2, 'condition_id': ids[condition], 'conclusion_id': ids[result]}
-        reply = {'complete': True, 'value': {'judgments': [verdict], 'findings': []}}
-        with patch.object(self.runner, '_ask', return_value=reply):
-            self.runner._check_section(0, 2000)
+        verdict = {'verdict': 'supported',
+                   'support': [{'source': 2, 'condition': ids[condition], 'conclusion': ids[result]}]}
+        self.check(0, {1: verdict, 2: verdict})
         self.runner._assemble()
         markdown = (self.root / 'review.md').read_text()
         self.assertIn('For $d>1$, the system is observable in positive time [1].', markdown)
         self.assertNotIn('In every dimension', markdown)
         self.assertNotIn('Every measurable set', markdown)
-        self.assertEqual(state['bibliography'], [2])
-        self.assertEqual(state['references'][0]['read'], 'full_text')
+        # The unchecked section says nothing; its planned work is listed apart, without a claim.
+        self.assertEqual(state['bibliography'], [2, 1])
+        self.assertEqual([(row['read'], row['cited']) for row in state['references']],
+                         [('full_text', True), ('metadata', False)])
+        self.assertLess(markdown.index('**Further reading.**'), markdown.index('2. A. Author. *Observation from a strip*'))
         bib = (self.root / 'references.bib').read_text()
         self.assertIn('10.5555/fixture.2', bib)
-        self.assertNotIn('10.5555/fixture.1', bib)
+        self.assertIn('10.5555/fixture.1', bib)
 
 
     def test_export_drops_only_a_contradicted_relative_publication_date(self):

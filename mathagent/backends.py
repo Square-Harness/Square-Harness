@@ -62,6 +62,21 @@ class ProviderStreamError(AgentError):
         super().__init__('The model provider reported an error during generation.')
 
 
+class SilentStreamStart(AgentError):
+    """An accepted completion stream sent keep-alives but no model output before its start limit."""
+
+
+def _started(response, seconds, output):
+    """The lines of an accepted response. A caller that sets `_start_seconds` gives up a stream that
+    carries no model output by then (a provider can keep it open with comment lines for minutes),
+    instead of waiting for the provider's own error. `output['started']` is set by the reader."""
+    limit = time.monotonic() + seconds
+    for raw in response:
+        if not output['started'] and time.monotonic() >= limit:
+            raise SilentStreamStart('The model server accepted the request but did not start to answer')
+        yield raw
+
+
 class MeasuredStreamCancellation(KeyboardInterrupt):
     """Cancellation still prevents delivery of a result, even if its provider usage arrived."""
 
@@ -295,7 +310,8 @@ class OpenAICompatible:
 
     def stream(self, payload):
         data = self._payload(payload)
-        yield from self._stream(data, output_char_limit=payload.get('_output_char_limit'))
+        yield from self._stream(data, output_char_limit=payload.get('_output_char_limit'),
+                                start_seconds=payload.get('_start_seconds'))
 
     def _stream_failure(self, exc, category, progress, final_usage, output_started):
         return exc
@@ -306,7 +322,7 @@ class OpenAICompatible:
     def _stream_deadline(self):
         return time.monotonic() + self.timeout
 
-    def _stream(self, data, output_char_limit=None):
+    def _stream(self, data, output_char_limit=None, start_seconds=None):
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
@@ -316,7 +332,9 @@ class OpenAICompatible:
         try:
             with self.request('/chat/completions', data) as response:
                 accepted = True
-                for raw in self._sse(response, deadline):
+                output = {'started': False}
+                lines = response if start_seconds is None else _started(response, start_seconds, output)
+                for raw in self._sse(lines, deadline):
                     if raw.strip() == '[DONE]':
                         if finish is None or usage is None or (getattr(self, 'require_terminal_usage', False) and final_usage is None):
                             raise AgentError('Model stream ended without finish reason and token usage')
@@ -357,7 +375,7 @@ class OpenAICompatible:
                             delta = choice.get('delta') if isinstance(choice, dict) else None
                             if isinstance(delta, dict) and any(delta.get(field) for field in
                                     ('content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call')):
-                                output_started = True
+                                output_started = output['started'] = True
                                 self._first_model_output()
                                 break
                     current = chunk.get('usage')
@@ -447,6 +465,8 @@ class OpenAICompatible:
             if final_usage:
                 raise MeasuredStreamCancellation(final_usage) from None
             raise
+        except SilentStreamStart as exc:
+            raise self._stream_failure(exc, 'interrupted', progress, final_usage, output_started) from None
         except AgentError as exc:
             if not accepted:
                 raise

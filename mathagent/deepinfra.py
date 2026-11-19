@@ -24,7 +24,8 @@ from urllib.parse import urlsplit
 from urllib.request import Request
 
 from .agent import AgentError, ModelNotDispatched
-from .backends import MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, ToolCallError
+from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
+                       ToolCallError)
 from .model_limits import MODEL_OUTPUT_TOKENS
 
 
@@ -144,6 +145,16 @@ def generation_stream(client, payload, emit):
             with attempt:
                 yield from client.stream(payload)
                 return
+
+
+class DeepInfraSilentStart(DeepInfraGenerationError):
+    """DeepInfra accepted the request and sent no output before the caller's start limit. The caller
+    closed the stream itself, so nothing was generated for it: it can be replaced like a terminal error."""
+
+    def __init__(self, stream_progress=None, retry_spent=False):
+        super().__init__('DeepInfra accepted the request but did not start to answer.',
+                         category='service_unavailable', stream_progress=stream_progress,
+                         confirmed_terminal=True, retry_spent=retry_spent)
 
 
 class DeepInfraRateLimit(DeepInfraGenerationError):
@@ -548,6 +559,9 @@ class DeepInfra(OpenAICompatible):
     def _stream_failure(self, exc, category, progress, final_usage, output_started):
         if str(exc) in {'Proof preparation exceeded its short text allowance', 'Proof preparation exceeded its short tool-argument allowance'}:
             return exc
+        if isinstance(exc, SilentStreamStart):
+            window = _generation_window.get()
+            return DeepInfraSilentStart(progress, retry_spent=bool(window and window.retry_spent))
         if isinstance(exc, ProviderStreamError):
             category, message = _generation_failure(exc.detail)
         elif category == 'interrupted':
