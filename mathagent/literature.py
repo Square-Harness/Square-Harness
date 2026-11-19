@@ -901,7 +901,7 @@ class LiteratureTools:
                     if isinstance(item, dict) and isinstance(item.get('citingPaper'), dict)]
         return self._cache_search('s2-citations', doi, limit, fetch)['results']
 
-    def crossref(self, *, query=None, dois=(), limit=10, texts=False, offset=0):
+    def crossref(self, *, query=None, dois=(), limit=10, texts=False, offset=0, abstract=900):
         """Crossref works for controller code: a bibliographic search, or a batch of DOIs. Free and
         uncapped; records carry open reference lists (DOIs), used to follow citations backwards."""
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -937,10 +937,11 @@ class LiteratureTools:
                             **({'reference_texts': [_plain(' '.join(str(x.get(k) or '') for k in (
                                 'unstructured', 'author', 'volume-title', 'article-title', 'year')), 300)
                                 for x in r.get('reference') or [] if isinstance(x, dict)][:200]} if texts else {}),
-                            'abstract': _plain(re.sub(r'<[^>]+>', ' ', r.get('abstract') or ''), 900),
+                            'abstract': _plain(re.sub(r'<[^>]+>', ' ', r.get('abstract') or ''), abstract),
                             'url': 'https://doi.org/' + str(r.get('DOI', ''))})
             return out
-        key = json.dumps([params.get('query.bibliographic'), params.get('filter'), params.get('offset', 0)] + (['texts'] if texts else []))
+        key = json.dumps([params.get('query.bibliographic'), params.get('filter'), params.get('offset', 0)] + (['texts'] if texts else [])
+                         + ([f'abstract {abstract}'] if abstract != 900 else []))
         return self._cache_search('crossref', key, limit, fetch)['results']
 
     def repository_versions(self, doi):

@@ -136,6 +136,7 @@ const REVIEW_ROLES: Record<string, RoleInfo> = {
   write: { active: 'Writing a section', name: 'Section' },
   intro: { active: 'Writing the introduction', name: 'Introduction' },
   check: { active: 'Checking a section against the evidence', name: 'Check', structured: true },
+  verify: { active: 'Comparing sentences with their source passages', name: 'Comparison', structured: true },
   'recover-write': { active: 'Reconstructing missing results from their sources', name: 'Missing results', structured: true },
   'recover-check': { active: 'Verifying the recovered results', name: 'Verification', structured: true },
   editorial: { active: 'Checking scope and repetition across sections', name: 'Final review', structured: true },

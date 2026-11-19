@@ -692,23 +692,31 @@ def _paper_bibliography(lines):
     return end, {key: entry for key, entry in entries.items() if len(entry) > 20}
 
 
+def _abstract_lines(lines, end):
+    """(start, stop) of the abstract printed in an extracted paper, or None."""
+    start = next((i for i in range(min(end, 150)) if lines[i].strip().casefold().rstrip('.') in ('abstract', 'résumé', 'zusammenfassung')), None)
+    if start is None:
+        return None
+    stop = start + 1
+    while stop < min(end, start + 24) and not HEADING.match(lines[stop]):
+        line = lines[stop].strip()
+        if STATEMENT.match(line) or re.match(r'^(?:key\s?words?|ams|msc|contents)\b', line, re.I):
+            break
+        stop += 1
+    return start, stop
+
+
 def paper_excerpts(lines, keywords, budget=7600, *, primary=None, abstract='', query=''):
     """The abstract, statements of results, related-work and topic paragraphs of an extracted paper,
     labelled with their line ranges, and the entries of its bibliography."""
     end, entries = _paper_bibliography(lines)
     bibliography = list(entries.values())
     pieces = []
-    start = next((i for i in range(min(end, 150)) if lines[i].strip().casefold().rstrip('.') in ('abstract', 'résumé', 'zusammenfassung')), None)
+    printed = _abstract_lines(lines, end)
     body = 0
-    if start is not None:
-        stop = start + 1
-        while stop < min(end, start + 24) and not HEADING.match(lines[stop]):
-            line = lines[stop].strip()
-            if STATEMENT.match(line) or re.match(r'^(?:key\s?words?|ams|msc|contents)\b', line, re.I):
-                break
-            stop += 1
-        pieces.append((start, stop, 0))
-        body = stop
+    if printed:
+        pieces.append((*printed, 0))
+        body = printed[1]
     keywords = [k.lower() for k in keywords if k]
     def math_key(text):
         return re.sub(r'\\(?:mathcal|mathbb|mathbf|mathrm)|[{}\s$]', '', text).lower()
@@ -900,6 +908,7 @@ class ReviewRunner(ResearchRunner):
         self._keys, self._indexed, self._title_words, self._counts = {}, 0, {}, {}
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
         self._generation_failure_streak, self._provider_pause = 0, None
+        self._side, self._repository_down = None, False
 
     @property
     def emit(self):
@@ -1378,19 +1387,21 @@ class ReviewRunner(ResearchRunner):
 
     # -- sources -----------------------------------------------------------------------------
 
-    def _log(self, source, query, count=None, error=None):
+    def _log(self, source, query, count=None, error=None, seconds=None):
         log = self.state['sweep_log']
         if len(log) < 600:
-            log.append({'source': source, 'query': query[:200], 'results': count, 'error': error})
+            log.append({'source': source, 'query': query[:200], 'results': count, 'error': error,
+                        **({} if seconds is None else {'seconds': round(seconds, 1)})})
 
     def _fetch(self, source, query, call, kind=list):
         """A source answer, or an empty one: failures are logged as coverage gaps; only the deadline stops the job."""
         self._cancel()
+        began = time.monotonic()
         try:
             result = call()
         except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
-            self._log(source, query, error=message[:200])
+            self._log(source, query, error=message[:200], seconds=time.monotonic() - began)
             if (isinstance(exc, LiteratureError) and exc.code == 'workflow_budget'
                     or self._elapsed() >= self.state['settings']['max_seconds']):
                 raise ResearchBudget(message) from exc
@@ -1398,8 +1409,47 @@ class ReviewRunner(ResearchRunner):
         if not isinstance(result, kind) or kind is list and any(not isinstance(x, (dict, str)) for x in result):
             self._log(source, query, error='Malformed provider result')
             return kind()
-        self._log(source, query, len(result) if kind is list else 1)
+        self._log(source, query, len(result) if kind is list else 1, seconds=time.monotonic() - began)
         return result
+
+    # arXiv spaces its requests (three seconds for its registry, more for a paper's text), and each
+    # answer takes a second or two. A helper thread asks arXiv while this thread asks the other hosts.
+    # The helper uses a second tools instance and touches no job state: it has its own request counter,
+    # the same on-disk cache and the same process-wide host gates. Results are recorded by this thread.
+
+    def _apart(self, lane, call):
+        """Start call(side tools) in the helper lane; _joined returns its result."""
+        lit = self.literature
+        if self._side is None:
+            self._side = type(lit)(lit.root, online=lit.online, max_requests=0, max_chars=lit.max_chars,
+                                   timeout=lit.timeout)
+        side = self._side
+
+        def run():
+            # One request, with the retries and the redirect or fallback its transport may need.
+            side.reset_budget(max_requests=min(4, max(0, lit.max_requests - lit.stats['requests'])), max_chars=lit.max_chars)
+            side.deadline = lit.deadline
+            try:
+                return call(side), None, side.stats['requests']
+            except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
+                return None, exc, side.stats['requests']
+        return lane.submit(run)
+
+    def _counted(self, future):
+        """Wait for a helper request and charge its HTTP requests to the job. Returns (result, error)."""
+        self._cancel()
+        result, error, used = future.result()
+        self.literature.stats['requests'] += used
+        return result, error
+
+    def _joined(self, future, source, query, kind=list):
+        """The result of a helper request, logged like _fetch logs this thread's requests."""
+        result, error = self._counted(future)
+        return self._fetch(source, query, lambda: self._raised(error) if error else result, kind)
+
+    @staticmethod
+    def _raised(error):
+        raise error
 
     def _index(self):
         pool = self.state['pool']
@@ -1771,7 +1821,7 @@ class ReviewRunner(ResearchRunner):
                 allowed.append(query)
         return allowed
 
-    def _discovery_room(self, phase):
+    def _discovery_room(self, phase, reserve=0):
         """Leave requests for the first-hand sources, including PDF retrieval and redirects."""
         if self._late(phase):
             return False
@@ -1780,7 +1830,7 @@ class ReviewRunner(ResearchRunner):
         if not cap or not getattr(lit, 'online', False):
             return True  # cached results remain available with network access disabled
         share = .45 if phase == 'search' else .70
-        return lit.stats['requests'] < max(1, math.ceil(share * cap))
+        return lit.stats['requests'] < max(1, math.ceil(share * cap) - reserve)
 
     def _search(self):
         lit, scope, level = self.literature, self.state['scope'], self._level()
@@ -1802,25 +1852,31 @@ class ReviewRunner(ResearchRunner):
                 self._cut('search', 'The discovery allowance ended before all topic queries were searched.')
                 break
             via = f'query {number}'
-            registries = [('arxiv', lambda: lit.arxiv_search(query, limit=level['per_source'], categories=cats)),
-                          ('crossref', lambda: lit.crossref(query=query, limit=level['per_source'])),
-                          ('zbmath', lambda: lit.zbmath_search(query, limit=level['per_source']))]
-            hits = set()
-            for provider, lookup in registries:
-                if not self._discovery_room('search'):
-                    break
-                for raw in self._fetch(provider, query, lookup):
-                    record = self._record(raw, provider, via)
-                    if record:
-                        hits.add(record['n'])
-            if first and self._discovery_room('search') and len(hits) < min(8, level['per_source']):
-                for raw in self._fetch('semantic_scholar', query, lambda: lit.search_papers(query, 'semantic_scholar', 8)['results']):
-                    self._record(raw, 'semantic_scholar', via)
-            if (first and facet < level['newest'] and (scope['intent'] != 'learn' or facet == 0)
-                    and self._discovery_room('search')):
-                for raw in self._fetch('arxiv', query + ' (newest)',
-                                       lambda: lit.arxiv_search(query, limit=level['per_source'], newest=True, categories=cats)):
-                    self._record(raw, 'arxiv', 'recent ' + via)
+            newest = (first and facet < level['newest'] and (scope['intent'] != 'learn' or facet == 0))
+            with ThreadPoolExecutor(1, thread_name_prefix='mathagent-literature-source') as lane:
+                try:
+                    topical = self._apart(lane, lambda tools: tools.arxiv_search(
+                        query, limit=level['per_source'], categories=cats))
+                    recent = self._apart(lane, lambda tools: tools.arxiv_search(
+                        query, limit=level['per_source'], newest=True, categories=cats)) if newest else None
+                    others = [(provider, self._fetch(provider, query, lookup)) for provider, lookup in (
+                        ('crossref', lambda: lit.crossref(query=query, limit=level['per_source'])),
+                        ('zbmath', lambda: lit.zbmath_search(query, limit=level['per_source'])))
+                              if self._discovery_room('search')]
+                    hits = set()
+                    for provider, results in [('arxiv', self._joined(topical, 'arxiv', query)), *others]:
+                        for raw in results:
+                            record = self._record(raw, provider, via)
+                            if record:
+                                hits.add(record['n'])
+                    if first and self._discovery_room('search') and len(hits) < min(8, level['per_source']):
+                        for raw in self._fetch('semantic_scholar', query, lambda: lit.search_papers(query, 'semantic_scholar', 8)['results']):
+                            self._record(raw, 'semantic_scholar', via)
+                    if recent is not None:
+                        for raw in self._joined(recent, 'arxiv', query + ' (newest)'):
+                            self._record(raw, 'arxiv', 'recent ' + via)
+                finally:
+                    lane.shutdown(wait=True, cancel_futures=True)
             self.state['search_done'] = index + 1
             self._save()
         if not self.state.get('frontier_done') and cats:
@@ -2068,38 +2124,47 @@ class ReviewRunner(ResearchRunner):
             return
         counts = self._cited_by_relevant()
         core = self._relevant(3) or [n for n in self._relevant(2) if self._hits(self._by_n(n))[0]]
+        traced, trace = s.setdefault('bibliography_anchors', []), []
         if level['leads']:
-            # Read primary-source bibliographies before spending the network allowance on
-            # forward citations. An unindexed preprint is often named by a single recent paper.
-            traced = s.setdefault('bibliography_anchors', [])
+            # Read primary-source bibliographies: an unindexed preprint is often named by a single recent paper.
             candidates = [n for n in core if self._by_n(n).get('arxiv') and n not in traced]
             newest = sorted(candidates, key=lambda n: (self._year(n), self._by_n(n)['arxiv']), reverse=True)
-            anchors_left = max(0, level['newest'] - len(traced))
-            for n in newest[:anchors_left]:
-                if not self._discovery_room('expand'):
-                    break
-                lines = self._paper(n)
-                if lines:
-                    self._trace_bibliography(n, lines)
-                traced.append(n)
-                self._save()
-            attempts = sum(lead['status'] != 'open' for lead in s['leads'].values())
-            self._resolve_leads(max(0, level['leads'] - attempts))
-        if self._discovery_room('expand'):
-            self._cocited(level['cocited'])
+            trace = newest[:max(0, level['newest'] - len(traced))]
         candidates = [n for n in core if n not in s['expanded']]
         anchors = sorted(candidates, key=lambda n: (-counts.get(n, 0), self._year(n) or 9999))[:level['anchors']]
-        if anchors:
-            self.emit('notice', f'Following the citations of {len(anchors)} key works')
-        for n in anchors:
-            if not self._discovery_room('expand'):
-                self._cut('expand', 'The discovery allowance ended before the citation graph was fully explored.')
-                break
-            self._forward(n, level['citing'])
-            if self._discovery_room('expand'):
-                self._backward(n)
-            s['expanded'].append(n)
-            self._save()
+        # The bibliographies and their leads keep their place in the request allowance.
+        reserve = 2 * len(trace) + min(8, level['leads'])
+        with ThreadPoolExecutor(1, thread_name_prefix='mathagent-literature-source') as lane:
+            try:
+                # arXiv serves one paper per crawl delay. The helper downloads these texts into the
+                # cache while this thread follows the citations through the other registries.
+                texts = [(n, self._apart(lane, lambda tools, n=n: tools.open_paper('arxiv:' + self._by_n(n)['arxiv'])))
+                         for n in trace]
+                if self._discovery_room('expand', reserve):
+                    self._cocited(level['cocited'])
+                if anchors:
+                    self.emit('notice', f'Following the citations of {len(anchors)} key works')
+                for n in anchors:
+                    if not self._discovery_room('expand', reserve):
+                        self._cut('expand', 'The discovery allowance ended before the citation graph was fully explored.')
+                        break
+                    self._forward(n, level['citing'])
+                    if self._discovery_room('expand', reserve):
+                        self._backward(n)
+                    s['expanded'].append(n)
+                    self._save()
+                for n, text in texts:
+                    self._counted(text)
+                    lines = self._paper(n)  # from the cache when the helper succeeded
+                    if lines:
+                        self._trace_bibliography(n, lines)
+                    traced.append(n)
+                    self._save()
+            finally:
+                lane.shutdown(wait=True, cancel_futures=True)
+        if level['leads']:
+            attempts = sum(lead['status'] != 'open' for lead in s['leads'].values())
+            self._resolve_leads(max(0, level['leads'] - attempts))
         self._link_references()
         s['expand_round'] += 1
         self._note(f'Citation graph, round {s["expand_round"]}', f'{len(s["pool"])} candidate works after following '
@@ -2155,8 +2220,12 @@ class ReviewRunner(ResearchRunner):
     def _archive_version(self, n):
         """Match a deposit by DOI, title and author before admitting its abstract or PDF URL."""
         r = self._by_n(n)
+        if self._repository_down:
+            return  # The repository index failed once in this run: each further lookup would wait for its time-out.
+        asked = len(self.state['sweep_log'])
         hits = self._fetch('openaire', f'open repository versions of work #{n}',
                            lambda: self.literature.repository_versions(r['doi']))
+        self._repository_down = any(row['error'] for row in self.state['sweep_log'][asked:])
         authors = {_norm(_surname(a)) for a in r.get('authors', [])}
         for hit in hits:
             if (_full_title(hit.get('title')) != _full_title(r['title'])
@@ -2406,6 +2475,9 @@ class ReviewRunner(ResearchRunner):
             score += {'foundational': 4, 'survey': 3}.get(v['kind'], 0) + 2 * (self._year(n) >= this_year - 2)
             r = self._by_n(n)
             score += 3 * bool(self._hits(r)[0]) + 3 * bool(r.get('cited_in_context'))
+            # A review can state what a readable paper proves. A bare record, with no abstract, no
+            # bibliographic review and no open text, supports only its own title.
+            score += 2 if r.get('arxiv') else 0 if _intact_abstract(r.get('abstract')) or r.get('review') else -3
             return round(score, 2)
         scored = {int(n): importance(int(n)) for n, v in s['screened'].items() if v['kind'] != 'off_topic' and v['relevance'] >= 1}
         s['duplicates'] = self._duplicates(sorted(scored, key=lambda n: -scored[n]))
@@ -2421,8 +2493,9 @@ class ReviewRunner(ResearchRunner):
         if core:
             priority.append(core[0])
             recent = [n for n in core if self._year(n) >= this_year - 2 and s['screened'][str(n)]['kind'] == 'result']
-            if recent:
-                priority.append(recent[0])
+            # New results have no citations yet and would lose every place to the classics. Outside a
+            # request for the classical canon, a quarter of the places goes to them.
+            priority += recent[:keep_core // 4 if s['scope'].get('intent') != 'learn' else 1]
             facets = set()
             for n in core:
                 facet = s['screened'][str(n)].get('facet', -1)
@@ -2475,7 +2548,7 @@ class ReviewRunner(ResearchRunner):
         aggregated = lambda n: set(self._by_n(n)['sources']) <= {'semantic_scholar', 'opencitations'}
         pending = [n for n in selected if aggregated(n)]
         # A search result carries the first 900 characters of an abstract: the result is often stated after them.
-        clipped = [n for n in selected if self._by_n(n).get('arxiv') and len(self._by_n(n).get('abstract') or '') == 900]
+        clipped = [n for n in selected if 890 <= len(self._by_n(n).get('abstract') or '') <= 900]
         # An arXiv deposit may give the publication DOI without the journal or issue year.
         # Confirm these in the same registry batch as aggregator records, even if the preprint is verified.
         incomplete = [n for n in selected if self._by_n(n).get('arxiv') and self._by_n(n).get('doi')
@@ -2483,13 +2556,15 @@ class ReviewRunner(ResearchRunner):
         if not pending and not incomplete and not clipped:
             return selected
         lit = self.literature
-        dois = list(dict.fromkeys(self._by_n(n)['doi'] for n in pending + incomplete if self._by_n(n).get('doi')))
+        unread = [n for n in clipped if not self._by_n(n).get('arxiv')]
+        dois = list(dict.fromkeys(self._by_n(n)['doi'] for n in pending + incomplete + unread if self._by_n(n).get('doi')))
         for i in range(0, len(dois), 40):
             chunk = dois[i:i + 40]
-            for raw in self._fetch('crossref', f'metadata of {len(chunk)} works', lambda: lit.crossref(dois=chunk, limit=len(chunk))):
+            for raw in self._fetch('crossref', f'metadata of {len(chunk)} works',
+                                   lambda: lit.crossref(dois=chunk, limit=len(chunk), abstract=2500)):
                 self._record(raw, 'crossref', 'metadata check')
         ids = [self._by_n(n)['arxiv'] for n in pending if self._by_n(n).get('arxiv') and aggregated(n)]
-        ids = list(dict.fromkeys(ids + [self._by_n(n)['arxiv'] for n in clipped]))[:100]
+        ids = list(dict.fromkeys(ids + [self._by_n(n)['arxiv'] for n in clipped if self._by_n(n).get('arxiv')]))[:100]
         if ids:
             for raw in self._fetch('arxiv', f'metadata of {len(ids)} preprints', lambda: lit.arxiv_records(ids)):
                 self._record(raw, 'arxiv', 'metadata check')
@@ -2661,6 +2736,7 @@ class ReviewRunner(ResearchRunner):
         for n in pending[:self.concurrency]:
             lines = self._paper(n)
             if lines:
+                self._printed_abstract(n, lines)
                 primary = {}
                 excerpts, bibliography = paper_excerpts(lines, self._vocabulary(), primary=primary,
                                                          abstract=self._by_n(n).get('abstract') or '', query=self._review_question())
@@ -2689,6 +2765,15 @@ class ReviewRunner(ResearchRunner):
             s['card_failed'][str(n)] = reason
         self._wave(jobs, failed)
 
+    def _printed_abstract(self, n, lines):
+        """Registries return the first 900 characters of an abstract, and the result is often stated after
+        them. Use the abstract printed in the verified paper when it is the longer one."""
+        record = self._by_n(n)
+        printed = _abstract_lines(lines, _paper_bibliography(lines)[0])
+        text = ' '.join(' '.join(lines[printed[0] + 1:printed[1]]).split()) if printed else ''
+        if 200 <= len(text) <= 4000 and len(text) > len(_intact_abstract(record.get('abstract'))) + 40 and _intact_abstract(text):
+            record['abstract'], record['abstract_source'] = text[:2500], 'paper'
+
     def _record_card(self, n):
         record = self._by_n(n)
         mode = 'abstract' if record.get('abstract') else 'metadata'
@@ -2714,6 +2799,8 @@ class ReviewRunner(ResearchRunner):
                              and (self._by_n(n).get('arxiv') or self._by_n(n).get('doi'))),
                             key=priority, reverse=True)
         def record(n, lines):
+            if lines:
+                self._printed_abstract(n, lines)
             card = self._record_card(n)
             if lines:
                 primary = {}
@@ -2924,8 +3011,9 @@ class ReviewRunner(ResearchRunner):
             'or setting, a parallel approach, an earlier partial result, a later refinement, a survey). A work known '
             'by its record only can only be a context work. Give every candidate that is about the requested topic '
             'one place, in works or in context_works. Leave out a candidate that is about something else, however '
-            'prominent or highly rated. Start with the problem, the model and its most '
-            'instructive result; define notation there once. Later sections address different questions. '
+            'prominent or highly rated. Keep a section to one question: a theme that needs more than about four '
+            'works explained in detail is two sections with different questions. Start with the problem, the model '
+            'and its most instructive result; define notation there once. Later sections address different questions. '
             'Plan at most one comparison table in the entire review, only for genuinely comparable theorems. '
             'Keep the hypotheses and the strength of each conclusion visible. Include an open-questions section '
             'only if dated, explicit questions survive comparison with the other evidence. An early result missing '
@@ -3212,7 +3300,12 @@ class ReviewRunner(ResearchRunner):
         section = s['outline']['sections'][i]
         works = self._section_works(i)
         context = [n for n in section.get('context') or [] if n in works]
-        words = self._section_words(i) + 25 * len(context)
+        # Paper passages carry a theorem with its hypotheses; an abstract carries a sentence or two. A
+        # longer target than the evidence can fill is met with commentary that the check then removes.
+        cards = s['cards']
+        room = 100 + sum(150 if (cards.get(str(n)) or {}).get('passages') else 80 if self._has_source_text(n) else 0
+                         for n in section['works']) + 40 * sum(n not in section['works'] and n not in context for n in works)
+        words = min(self._section_words(i), room) + 25 * len(context)
         table = i == self._table_section()
         other_topics = ' / '.join(sec['heading'] for j, sec in enumerate(s['outline']['sections']) if j != i)
         directions = [
@@ -3242,7 +3335,9 @@ class ReviewRunner(ResearchRunner):
             'Authors’ questions are historical claims: attribute and date them. '
             'A theorem stopping short of a case does not establish current open status.',
             'Give the reader the supported mathematics directly. Avoid commentary about supplied records, '
-            'missing details or the writing process. Omit a source’s internal reference numbers and any claim '
+            'missing details or the writing process. State each result once: no recapitulation of what the '
+            'section has already said and no closing summary. When a work is the subject of a sentence, '
+            'name its authors with {@n}; a bare citation number is never the subject. Omit a source’s internal reference numbers and any claim '
             'which requires identifying that reference. Use the review’s [@n] citations only. '
             'Enclose every LaTeX expression in math delimiters and use standard LaTeX macros that render in Markdown.',
             'The request, plan and headings describe what to investigate; they are not mathematical evidence.',
