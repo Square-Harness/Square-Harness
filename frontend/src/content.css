@@ -391,6 +391,8 @@
 
 /* Attachments and Free-mode suggestions */
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.message-sources { margin: 8px 0 0; color: var(--text-2); font: 13px/1.45 var(--font-ui); overflow-wrap: anywhere; }
+.message-sources > span { color: var(--text-3); }
 .composer-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 8px; max-width: calc(var(--measure) + 40px); }
 .chip-static { padding-right: 9px; }
 .routing { display: flex; align-items: center; gap: 8px; margin: 6px 0 18px; font-size: 14px; }

@@ -440,8 +440,8 @@ After recovering an interrupted turn, use Resume in the same conversation;
 an incomplete fragment is never treated as a completed proof.
 
 This profile makes a small structured routing call for an unassigned new
-Assistant request. It uses at most 1,024 output tokens and 60 seconds, charged
-to the existing allowance. Very elementary identities may stay direct;
+Assistant request. It uses at most 1,024 output tokens and observes the configured
+model request timeout and the remaining Assistant allowance. Very elementary identities may stay direct;
 nontrivial proof requests start Proof mode. Explicit `@` selections and the
 existing automatic source/reference routes bypass this extra decision.
 

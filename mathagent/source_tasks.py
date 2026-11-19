@@ -15,7 +15,7 @@ from . import manuscript
 
 _FILE = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
 _RESULT = re.compile(r'\b(?:theorem|lemma|proposition|corollary|proof|theoreme|lemme|demonstration|preuve)\b')
-_ARTICLE = re.compile(r'\b(?:article|paper|manuscript|document|preprint|papier|manuscrit)\b')
+_ARTICLE = re.compile(r'\b(?:article|paper|manuscript|document|preprint|papier|manuscrit|pdf|lecture notes|notes de cours)\b')
 _OVERVIEW = re.compile(r'\b(?:main results?|principal results?|key results?|overview|summary|novelty|contribution|'
                        r'resultats? principaux|principaux resultats?|nouveaute|contribution|resume|vue d.ensemble)\b')
 _NEGATION = re.compile(r"\b(?:do not|don.t|don’t|never|no need to|without|avoid|not asking|"
@@ -40,14 +40,74 @@ def _fold(text):
                    if not unicodedata.combining(c)).casefold()
 
 
-def _instruction_text(query):
+def access_check_source(query, files):
+    """Return the unambiguous selected document for a question about access to it."""
+    docs = [f for f in files if f.lower().endswith(('.pdf', '.tex', '.md', '.txt', '.tgz', '.tar', '.gz'))]
+    if not docs:
+        return None
+    named = named_attachments(query, docs)
+    if len(named or docs) != 1:
+        return None
+    source = (named or docs)[0]
+    # An individually quoted filename is still a reference. Quoted questions
+    # and examples must not trigger a read of the surrounding workspace.
+    visible = query
+    for mark in ('"', "'", '`'):
+        visible = visible.replace(mark + source + mark, 'the document')
+    prose = _instruction_text(visible.replace(source, 'the document'))
+    asks = re.search(
+        r"\b(?:(?:can(?:not|'t|’t)?|could(?:n't|n’t)?|are) you (?:still |actually |now )?"
+        r"(?:access|open|see|read|able to (?:open|read|access))|"
+        r"(?:do|did|don.t|didn.t) you (?:still |already )?have(?: access to)?|"
+        r"(?:as[ -]tu|avez[ -]vous|tu (?:n.as pas|as)|vous (?:n.avez pas|avez)) (?:toujours )?acces|"
+        r"(?:peux[ -]tu|pouvez[ -]vous|tu peux|vous pouvez) (?:encore )?(?:lire|ouvrir|voir|acceder))\b", prose)
+    if not asks or re.search(r"\b(?:do not|don.t|never|without) (?:open|read|use)|\b(?:sans|ne pas) (?:lire|ouvrir)", prose):
+        return None
+    subject = r'(?:pdf|file|document|paper|attachment|lecture notes|manuscript|fichier|piece jointe)'
+    reference = r"\s+(?:(?:to|a|au|aux|the|this|that|my|previous|earlier|uploaded|attached|le|la|ce|mon|mes)\s+)*"
+    if re.match(reference + subject + r'\b', prose[asks.end():]):
+        return source
+    if re.match(r'\s+(?:it|that)\b', prose[asks.end():]) and re.search(r'\b' + subject + r'\b', prose[:asks.start()]):
+        return source
+    return None
+
+
+def instruction_prose(query):
     # Quoted documents and examples cannot select a workflow. Keep contractions,
     # but omit quoted prose, fenced examples, inline code and Markdown quotes.
     value = re.sub(r'```[\s\S]*?```|~~~[\s\S]*?~~~', ' ', query)
     value = re.sub(r'(?m)^\s*>.*$', ' ', value)
     value = re.sub(r'"[^"\n]*"|“[^”\n]*”|«[^»]*»|`[^`\n]*`', ' ', value)
     value = re.sub(r"(?<!\w)'[^'\n]*\s[^'\n]*'(?!\w)", ' ', value)
-    return _fold(value)
+    return value
+
+
+def _instruction_text(query):
+    return _fold(instruction_prose(query))
+
+
+def requests_workspace_search(query):
+    """An explicit request to use the wider workspace alongside selected sources."""
+    location = r'(?:(?:the|my|this|our|project|working|all|entire|whole|le|mon|ce|tout)\s+)*(?:workspace|folder|directory|espace de travail|dossier|repertoire)\b'
+    files = r'(?:(?:the |my |les |mes )?(?:other|all|remaining|autres|tous les|toutes les) (?:the )?(?:files|documents|pdfs?|notes|fichiers))\b'
+    scan = r'\b(?:search|scan|list|browse|inspect|look through|look in|check|cherch\w*|parcour\w*|list\w*)\s+'
+    use = r'\b(?:read|use|look at|compare|check|lis|lire|utilis\w*|compar\w*|consulte\w*)\s+'
+    patterns = (scan + r'(?:(?:in|through|dans)\s+)?(?:' + location + '|' + files + ')',
+                use + files, r'\b(?:find|look for|search for|cherche\w*)\b.{1,75}?\b(?:in|across|dans) ' + location)
+    for clause in re.split(r'[.!?;\n]|\b(?:but|mais)\b', _instruction_text(query)):
+        if not _NEGATION.search(clause) and any(re.search(pattern, clause) for pattern in patterns):
+            return True
+    return False
+
+
+def excludes_external_sources(query):
+    """Detect an explicit per-turn restriction on external retrieval."""
+    return bool(re.search(
+        r"\b(?:(?:no|without|avoid|sans)\s+(?:(?:any|using|consulting|accessing|the|aucune?)\s+)*"
+        r"(?:external (?:sources?|references?|search(?:es)?)|(?:internet|web)(?: searches?)?|"
+        r"sources? externes?|recherche en ligne)|"
+        r"(?:do not|don.t|never) (?:search|browse|use|consult) (?:the )?(?:web|internet|external sources))\b",
+        _instruction_text(query)))
 
 
 def automatic_source_action(query, files=()):
@@ -120,7 +180,7 @@ def automatic_source_action(query, files=()):
     article_explanation = re.search(
         r'\b(?:explain|explique(?:r|z)?|expliquer)\s+(?:(?:me|moi|nous|us)\s+)?'
         r'(?:(?:the|this|that|attached|supplied|cet|cette|ce|le|la|les|l.)\s+){0,3}'
-        r'(?:article|paper|manuscript|document|preprint|papier|manuscrit)\b', text)
+        r'(?:article|paper|manuscript|document|preprint|papier|manuscrit|pdf|lecture notes|notes de cours)\b', text)
     if imperative and explain and (len(set(numbered)) == 1 or (proof_walkthrough and len(set(numbered)) <= 1)):
         mode = 'explain'
         reason = 'Explain the specified mathematical result or proof from the supplied source.'
@@ -135,6 +195,45 @@ def automatic_source_action(query, files=()):
     return {'mode': mode, 'request': query, 'files': refs, 'effort': 'medium', 'reason': reason}
 
 
+def named_attachments(text, files):
+    """Resolve exact attachment names, including quoted names and unambiguous basenames."""
+    forms = {name: name for name in files}
+    for name in files:
+        base = name.rsplit('/', 1)[-1]
+        if base not in forms and sum(f.rsplit('/', 1)[-1] == base for f in files) == 1:
+            forms[base] = name
+    if not forms:
+        return []
+    alternatives = '|'.join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+    matched = {forms[m[0]] for m in re.finditer(r'(?<![\w./-])(?:' + alternatives + r')(?![\w/-]|\.\w)', text)}
+    return [name for name in files if name in matched]
+
+
+def requested_source_tasks(query, files):
+    """Recognize explicit reading objectives within a list of independent user instructions."""
+    if not files or '```' in query or '~~~' in query or _NEGATION.search(_instruction_text(query)):
+        return []
+    tasks = []
+    for part in re.split(r'\n|;|\s+(?:at the same time|meanwhile|en parallèle|en meme temps)[,:]?\s+', query, flags=re.I):
+        clause = re.sub(r'^\s*(?:[-*•]|\d+[.)])\s+', '', part).strip()
+        clause = re.sub(r'^(?:and|et|also|ensuite)\s+', '', clause, flags=re.I)
+        named = named_attachments(clause, files)
+        local_document = re.search(r'\b(?:this|that|the attached|my|the supplied|the uploaded|'
+                                   r'ce|cet|cette|mon|le|la)\s+(?:lecture|pdf|document|paper|'
+                                   r'manuscript|notes|cours|fichier|article)\b', _instruction_text(clause))
+        if not named and (len(files) != 1 or not local_document):
+            continue
+        source = automatic_source_action(clause, named or files)
+        if not source and re.match(r'^(?:please )?(?:explain what|tell me what|what|which|according to|'
+                                   r'que contient|de quoi parle|quels?|quelle[s]?)\b', _instruction_text(clause).strip()):
+            source = {'mode': 'explore', 'request': clause, 'files': named or list(files)}
+        if source:
+            task = {k: source[k] for k in ('mode', 'request', 'files')}
+            if task not in tasks:
+                tasks.append(task)
+    return tasks
+
+
 def _source_lines(workspace, filename):
     path = workspace.path(filename, pdf=True)
     workspace._readable(path)
@@ -142,8 +241,9 @@ def _source_lines(workspace, filename):
         if workspace.literature is None:
             raise ValueError('Local PDF extraction is unavailable')
         summary = workspace.literature.import_local(str(path.relative_to(workspace.root)))
-        return list(workspace.literature._document(summary['document_id'])[1])
-    return workspace.text(path).splitlines()
+        metadata, lines = workspace.literature._document(summary['document_id'])
+        return lines, metadata.get('extracted_pages')
+    return workspace.text(path).splitlines(), None
 
 
 def _groups(numbers):
@@ -156,10 +256,11 @@ def _groups(numbers):
     return groups
 
 
-def _overview(filename, lines, size):
+def _overview(filename, lines, size, extracted_pages=None):
     mapping = manuscript.build('\n'.join(lines), filename)
     total = len(lines)
-    header = f'SOURCE: {filename}; {total} total lines.\n'
+    pagination = f'{extracted_pages} extracted PDF pages; ' if extracted_pages else ''
+    header = f'SOURCE: {filename}; {pagination}{total} total lines.\n'
     if mapping['format'] == 'source-archive':
         header += 'SOURCE NOTE: Source files are separate, labelled members; TeX includes/macros and cross-file numbering were not expanded.\n'
     if not total:
@@ -303,7 +404,8 @@ def source_overview(workspace, files, max_chars=14000):
         if room < 350:
             break
         try:
-            packet = _overview(filename, _source_lines(workspace, filename), room)
+            lines, pages = _source_lines(workspace, filename)
+            packet = _overview(filename, lines, room, pages)
         except (OSError, ValueError, TypeError, UnicodeError) as exc:
             packet = f'SOURCE: {filename}\nNo source excerpt supplied: {type(exc).__name__}. Use an allowed read to inspect the source.\n'
         if len(packet) <= room:

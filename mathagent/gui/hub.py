@@ -37,6 +37,7 @@ from ..workers import REVIEW_MODES, run_worker
 from ..refcheck import CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state, full_review_requested
 from ..style import StyleRunner, load_choice, style_path
+from ..source_tasks import excludes_external_sources, requests_workspace_search
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WorkerInterrupted
@@ -1259,7 +1260,9 @@ class Hub:
         if mode != 'explore' and not legacy:
             raise ValueError('Use Explore for a direct conversation turn')
         turn_mode = 'free' if legacy else mode
+        explicitly_selected = bool(files)
         selected = conversation_sources(content, list(files), session['transcript'])
+        selected_documents = any(not images.is_image(name) for name in selected)
         if not files:
             selected = [name for name in selected if (self.root / name).is_file()]
         image_refs, attached_images = self._capture_images(selected, session, explicit=files)
@@ -1275,13 +1278,14 @@ class Hub:
             fresh = store.load_chat(self.root, chat_id)
             store.save_chat_images(self.root, chat_id, image_refs)
             agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
-                                    online=self.online(fresh['settings'].get('online', False)) if not self.online_locked else False)
+                                    online=bool(fresh['settings'].get('online')) and not self.online_locked
+                                    and not excludes_external_sources(content))
             agent.history = store.image_history(fresh)
             agent.turn_image_refs = attached_images
             agent.personal_context = personal_context
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
-            agent.workspace.pin_files(text_files)
+            agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
             self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
@@ -1290,10 +1294,12 @@ class Hub:
             try:
                 answer = agent.run(prompt, capture.emit, instruction='' if legacy else None)
             except BaseException as exc:
-                self._discarded(chat_id, content if echo_user else '', exc, files=files, image_refs=attached_images)
+                self._discarded(chat_id, content if echo_user else '', exc, files=files,
+                                attached_files=files if explicitly_selected else (), image_refs=attached_images)
                 raise
             store.commit_turn(self.root, chat_id, agent.history, capture.calls, capture.notices,
-                              echo_user=echo_user, mode=turn_mode, files=files, user_content=content,
+                              echo_user=echo_user, mode=turn_mode, files=files, attached_files=files if explicitly_selected else (),
+                              user_content=content,
                               project_snapshot=project_snapshot, image_refs=attached_images)
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': answer}
@@ -1392,13 +1398,13 @@ class Hub:
         live = {'chat': chat_id, 'kind': 'review', 'user': '', 'steps': [], 'mode': 'free'}
         return self._begin('chat', chat_id, 'Fresh review', last_user, work, live, queue=queue)
 
-    def _discarded(self, chat_id, content, exc, *, files=(), image_refs=()):
+    def _discarded(self, chat_id, content, exc, *, files=(), attached_files=(), image_refs=()):
         # As in the terminal, an unfinished turn never enters the model context;
         # unlike a terminal, a chat window should still show what happened.
         reason = ('it was paused before the answer finished' if isinstance(exc, KeyboardInterrupt)
                   else str(exc) or type(exc).__name__)
         try:
-            store.record_discarded(self.root, chat_id, content, reason, files=files, image_refs=image_refs)
+            store.record_discarded(self.root, chat_id, content, reason, files=files, attached_files=attached_files, image_refs=image_refs)
             self.bus.publish('chat_saved', chat=chat_id)
         except (OSError, ValueError, store.NotFound):
             pass
@@ -1516,10 +1522,13 @@ class Hub:
                         or not can_recover_previous_markdown(store.research_state(self.root, child['job_id']), snapshot)):
                     snapshot = None
             previous_markdown = snapshot
+        explicitly_selected = bool(files) and not resume
         selected = (list(files) if resume else [] if review_reference or previous_markdown or previous_experiments or compile_job else
                     conversation_sources(content, list(files), chat['transcript'], mode=required_mode))
+        unavailable_sources = saved.get('unavailable_source_files', []) if resume else []
         if not files and not resume:
-            selected = [name for name in selected if (self.root / name).is_file()]
+            unavailable_sources = [name for name in selected if not (self.root / name).is_file()]
+            selected = [name for name in selected if name not in unavailable_sources]
         local_conversion = bool(previous_markdown) or (selected_mode in (None, 'writeup')
                            and markdown_conversion_request(content, selected, style_mode=initial_style))
         try:
@@ -1562,6 +1571,7 @@ class Hub:
                                    'Jobs it started keep their saved work.'}])
                 if not resume:
                     store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files,
+                        'attached_files': list(files) if explicitly_selected else [],
                         **({'local_conversion': True} if local_conversion else {}),
                         **({'compile_job': compile_job} if compile_job else {}),
                         'images': attached_images, 'project_snapshot': project_snapshot, 'time': store._now()}])
@@ -1584,19 +1594,28 @@ class Hub:
             online = bool(fresh['settings'].get('online')) and not self.online_locked
             if previous:
                 online = online and bool(previous.get('online', False))
+            elif excludes_external_sources(content):
+                online = False
             main, _ = self._engine(task, mode='explore', think=False, online=online)
             main.review_reference = review_reference
             main.scope_chat_id = chat_id
             main.index_view = (previous.get('index_view') if previous is not None else
                                briefs.freeze_view(root, fresh, workspace=getattr(self.args, 'terminal_investigation', False)))
-            if main.index_view and main.index_view.get('entries'):
+            if main.index_view and (project_snapshot or main.index_view.get('entries')):
                 main.workspace.index = briefs.IndexReader(root, main.index_view)
             main.project_snapshot = project_snapshot
+            main.unavailable_source_files = unavailable_sources
             main.personal_context = personal_context
             main.project_context = projects.context(project_snapshot)
             images.bind(main, image_refs)
             main.turn_image_refs = attached_images
-            main.workspace.pin_files([name for name in files if not images.is_image(name)])
+            text_files = [name for name in files if not images.is_image(name)]
+            selected_only = bool(text_files or unavailable_sources) and not requests_workspace_search(content)
+            if project_snapshot and not files and projects.requests_scoped_record(content):
+                # The project's frozen notebook and scoped result index are already available.
+                # An empty record is a valid answer, even if other projects share this folder.
+                selected_only = True
+            main.workspace.pin_files(text_files, selected_only=selected_only)
             self._show_experiments(main.workspace, root, chat_id, task)
             if previous is not None and previous_markdown:
                 previous['previous_markdown'] = previous_markdown

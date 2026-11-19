@@ -904,7 +904,7 @@ def list_chats(root, templates_root=None):
 
 
 @_locked_chat
-def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None,
+def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
                 project_snapshot=None, image_refs=(), job_id=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
@@ -921,6 +921,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
         if message['role'] == 'user':
             item['files'] = list(files)
+            item['attached_files'] = list(attached_files)
             if image_refs:
                 item['images'] = [dict(ref) for ref in image_refs]
             if project_snapshot is not None:
@@ -970,13 +971,14 @@ def commit_review(root, chat_id, result, calls, notices):
 
 
 @_locked_chat
-def record_discarded(root, chat_id, content, reason, *, files=(), image_refs=()):
+def record_discarded(root, chat_id, content, reason, *, files=(), attached_files=(), image_refs=()):
     """Keep an unfinished turn visible without adding it to the model context."""
     chat = load_chat(root, chat_id)
     stamp = _now()
     if content:
         chat['transcript'].append({'role': 'user', 'content': content, 'time': stamp, 'discarded': True,
-                                   'files': list(files), 'images': [dict(ref) for ref in image_refs]})
+                                   'files': list(files), 'attached_files': list(attached_files),
+                                   'images': [dict(ref) for ref in image_refs]})
         if not chat['title']:
             chat['title'] = one_line(content, 80)
     chat['transcript'].append({'role': 'notice', 'content': 'Not added to the conversation: ' + reason,
@@ -1440,15 +1442,25 @@ def previous_writeup_source(root, chat, *, before=None):
     answers = [(i, item['content']) for i, item in turn if item.get('role') == 'assistant'
                and not item.get('tool_calls') and isinstance(item.get('content'), str) and item['content'].strip()]
     routes = [(i, item) for i, item in turn if item.get('role') == 'route']
-    if len(answers) > 1 or len(routes) > 1 or any(item.get('status') != 'done' for _, item in routes):
+    if len(answers) > 1:
         return None
-    if any(item.get('mode') in ('writeup', 'summarize') for _, item in routes):
-        return None
-    experiments = _shown_experiments(item for _, item in turn)
-    if experiments:
-        return {'experiment_ids': experiments}
     bibliography = ''
     origin = {'chat_id': chat['id']}
+    final = turn[-1][1] if answers and turn[-1][0] == answers[0][0] else {}
+    synthesis = final.get('synthesis')
+    if final.get('investigation_id') and isinstance(synthesis, str) and synthesis.strip():
+        # The final research answer is a single deliverable. Its child jobs and
+        # technical evidence report are separate from the narrative shown in chat.
+        origin['investigation_id'] = final['investigation_id']
+        answers = [(answers[0][0], synthesis)]
+        routes = []
+    else:
+        if (len(routes) > 1 or any(item.get('status') != 'done' or item.get('mode') in ('writeup', 'summarize')
+                                  for _, item in routes)):
+            return None
+        experiments = _shown_experiments(item for _, item in turn)
+        if experiments:
+            return {'experiment_ids': experiments}
     if routes and routes[0][1].get('mode') == 'literature':
         index, route = routes[0]
         job = route.get('job_id')

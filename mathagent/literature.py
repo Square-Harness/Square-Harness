@@ -1378,6 +1378,11 @@ class LiteratureTools:
         metadata = json.loads(raw)
         if metadata.get('text_sha256') != _digest(text):
             raise LiteratureError('Cached extraction changed; source hash verification failed')
+        # Both local PDF extractors terminate every extracted page with a form
+        # feed, including blank pages. Read it before splitlines loses the
+        # boundaries. This also works for verified extractions cached by older builds.
+        if metadata.get('extractor') in ('pdftotext -layout', 'pypdf subprocess') and text.rstrip('\r\n').endswith('\f'):
+            metadata['extracted_pages'] = text.count('\f')
         return metadata, text.splitlines()
 
     def read_paper(self, document_id, start_line=1, end_line=80):

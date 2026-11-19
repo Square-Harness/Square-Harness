@@ -157,14 +157,19 @@ class Workspace:
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
         self.index = None
         self.pinned = set()
+        self.selected_files_only = False
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
         self.source_archives = {}  # path -> last bounded, immutable source extraction
         if self.literature is None:
             self.readable.discard('.pdf')  # PDF extraction uses the literature backend
 
-    def pin_files(self, files):
-        """Allow these exact source paths without broadening file discovery."""
+    def pin_files(self, files, *, selected_only=False):
+        """Pin source paths, optionally limiting this engine's local reads to the selection."""
         paths = {self.path(filename, pdf=self.literature is not None) for filename in files}
+        if selected_only:
+            self.selected_files_only = True
+            self.readable.clear()
+            self.pinned.clear()
         self.pinned.update(paths)
 
     def path(self, filename, *, pdf=False):
@@ -183,6 +188,8 @@ class Workspace:
         return p
 
     def _readable(self, p):
+        if self.selected_files_only and p not in self.pinned:
+            raise ValueError('This file is outside the document selection for this request')
         if source_suffix(p) not in self.readable and p not in self.pinned:
             raise ValueError(f'The user has not allowed reading {p.suffix} files in this workspace; '
                              'ask them to pin the file or enable that file type')
@@ -230,6 +237,8 @@ class Workspace:
 
     def files(self, suffixes=None):
         allowed = TEXT if suffixes is None else suffixes
+        if not allowed or self.selected_files_only:
+            return
         count = 0
         for folder, dirs, files in os.walk(self.root, followlinks=False):
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP
@@ -246,7 +255,8 @@ class Workspace:
     def list_files(self, offset=0, limit=100):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError('Use a nonnegative file offset and a limit from 1 to 200')
-        names = [str(p.relative_to(self.root)) for p in self.files(self.readable)]
+        paths = sorted(self.pinned) if self.selected_files_only else self.files(self.readable)
+        names = [str(p.relative_to(self.root)) for p in paths]
         selected, size = [], 0
         for name in names[offset:offset + limit]:
             if selected and size + len(name) + 1 > MAX_RESULT - 300:
@@ -266,14 +276,17 @@ class Workspace:
             raise ValueError('Line bounds must be positive integers with start <= end')
         p = self.path(path, pdf=True)
         self._readable(p)
+        pagination = ''
         if p.suffix.lower() == '.pdf':
             # Local extraction, cached with the literature evidence; nothing is uploaded.
             summary = self.literature.import_local(str(p.relative_to(self.root)))
-            lines = self.literature._document(summary['document_id'])[1]
+            metadata, lines = self.literature._document(summary['document_id'])
+            if metadata.get('extracted_pages'):
+                pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
         else:
             lines = self.text(p).splitlines()
         end = min(end_line, start_line + 199, len(lines))
-        result = f'{path}: {len(lines)} total lines; requested excerpt {start_line}-{end}\n'
+        result = f'{path}: {pagination}{len(lines)} total lines; requested excerpt {start_line}-{end}\n'
         remaining = MAX_RESULT - len(result) - 250
         selected = []
         for index in range(start_line - 1, end):
@@ -443,7 +456,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
     def schemas(self):
         string = {'type': 'string'}
         integer = {'type': 'integer'}
-        kinds = ', '.join(sorted(self.readable))
+        kinds = 'selected documents only' if self.selected_files_only else ', '.join(sorted(self.readable))
         if '.tex' in self.readable:
             kinds += ', .tar.gz/.tgz/.tar/.gz TeX sources'
         result = [] if not self.readable and not self.pinned else [

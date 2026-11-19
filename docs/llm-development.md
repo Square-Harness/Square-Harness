@@ -708,6 +708,18 @@ Independent deliverables in an ordinary DS4 turn use a validated batch through
 the native adapters. Each branch receives its own objective. Python Lab requires
 a scoped execution request from the current turn.
 
+Keep the user's explicit attachment selection separate from the effective files
+available to a turn. New GUI user messages record `attached_files` for the
+selection and `files` for source resolution. Preserve older records without
+guessing their origin. Independent workers receive their assigned sources.
+When the user asks whether an earlier document is readable, record a real
+`read_file` result before making an access claim. A filename, or a child job
+that merely received the path, does not establish that any text was read.
+Keep local reads within a document selection unless the user requests workspace
+search. Use extractor page boundaries before splitting into numbered lines.
+For a lookup of this project's saved research record, expose its frozen notebook
+and scoped index even when the index contains no results.
+
 An investigation has one background writer. It reads the native results of
 settled tasks through the scoped research index and saves a revised Markdown
 answer with the IDs of the steps it actually read. Revisions share the inference

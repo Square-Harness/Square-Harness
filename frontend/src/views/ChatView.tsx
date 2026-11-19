@@ -449,13 +449,22 @@ function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptIte
 }
 
 function UserMessage({ item }: { item: TranscriptItem }) {
+  const files = (item.files || []).filter(path => !item.images?.length || !isImagePath(path))
+  const attached = files.filter(path => item.attached_files?.includes(path))
+  const available = files.filter(path => !item.attached_files?.includes(path))
   return (
     <div className={'entry message message-user' + (item.discarded ? ' message-discarded' : '')}>
       <span className="in-margin speaker speaker-user">You</span>
       <div className="message-body">
         <Markdown>{literalUnderscores(item.content)}</Markdown>
-        {item.files && item.files.length > 0 && (
-          <div className="attachments">{item.files.filter((path) => !item.images?.length || !isImagePath(path)).map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
+        {attached.length > 0 && (
+          <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
+            <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>
+          )}</div>
+        )}
+        {available.length > 0 && (
+          <p className="message-sources"><span>{item.attached_files ? 'Available for this reply' : available.length === 1 ? 'Source' : 'Sources'}</span>
+            {' · '}{available.join(', ')}</p>
         )}
         {!!item.images?.length && <ImageGallery images={item.images} />}
         {item.time && <span className="message-time">{ago(item.time)}</span>}

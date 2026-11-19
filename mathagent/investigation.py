@@ -23,6 +23,7 @@ from .call_policy import CallContextError, allocate_call
 from .ledger import _atomic_write, _directory, _read
 from .investigation_writing import ProgressiveAnswer, WRITING_INPUT, WRITING_OUTPUT, WRITING_SECONDS, exact_review
 from .orchestrator import Orchestrator, WorkerInterrupted
+from .source_tasks import excludes_external_sources
 from .tools import schema
 
 VERSION = 1
@@ -45,7 +46,9 @@ Use the user's language and Markdown math delimiters for formulas you write in t
 Use low effort when possible. Run independent work in parallel. A task runs by default. Set optional=true only
 for a genuinely conditional non-Proof follow-up and explain its condition in the objective. Never mark a task
 the user explicitly asks to run as optional. Explore supports numerical checks
-when the sandbox is available. Check handles a single reference, literature surveys sources, quick_review requires a file.
+when the sandbox is available. Check looks up a bibliographic reference. Use Explore or Proof for a mathematical
+calculation or an internal consistency check. When external sources are excluded, omit reference-search workers.
+Literature surveys sources, quick_review requires a file.
 Every prove task MUST include "claim":"target" for the exact target, or "claim":"variant" for a special case.
 For a variant Proof, list the evidence tasks in after AND supply candidate = {statement, relation, reason}:
 a precise, mathematically relevant restricted conjecture to attempt if the evidence does not suggest a better one.
@@ -476,6 +479,10 @@ class Investigation(Orchestrator):
     def _propose(self, plan):
         validate_plan(plan, self.state['files'], self.inv['max_effort'], self._task_limit())
         tasks = plan['tasks']
+        query = self.state['query']
+        if (excludes_external_sources(query) and not re.search(r'\b(?:cached|cache|en cache)\b', query, re.I)
+                and any(t['mode'] in ('check', 'literature') for t in tasks)):
+            raise ValueError('The user excluded external sources. Use Explore or Proof for mathematical checks and omit reference searches.')
         candidates = set()
         for task in tasks:
             if task.get('claim') == 'variant' and 'candidate' not in task:

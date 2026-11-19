@@ -555,6 +555,22 @@ ask Python Lab to simulate a specified chain. The workers can start together.
 When one objective needs clarification, the other can still proceed. A Python
 result identifies whether the computation actually ran in the enabled sandbox.
 
+You can include a reading task in the same message. For example, attach your
+lecture notes and ask for a PDE reference, a simulation, and a summary of the
+notes. The reading worker receives the named file. In a later message you can
+refer to the same PDF without selecting it again. When you ask whether the
+Assistant can read it, the Assistant checks the file and can answer from an
+actual passage. If several earlier PDFs match, name the one you mean.
+If the chosen PDF has no extractable text, supply an OCR copy or the TeX source.
+The reader stays with the selected documents unless you ask it to search the folder.
+Asking for a LaTeX conversion of a finished investigation uses the research
+answer shown in the chat, including when several workers contributed.
+
+In the chat, a file chip marks a file you selected for that message. A file
+reused from the conversation appears under **Available for this reply**.
+Older messages show a neutral source label because they did not record how
+the file was selected.
+
 Up to six tasks can draw on Explore, Check, Literature,
 Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
 effort. Independent tasks can run together when the model server supports it.

@@ -18,10 +18,11 @@ from .agent import AgentError
 from .call_policy import allocate_call
 from .jsonutil import loads_single
 from .router import JOB_MODES
-from .source_tasks import _instruction_text
+from .refcheck import standalone_reference_request, precise_reference_request
+from .source_tasks import _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -32,6 +33,7 @@ SCHEMA = {
             'type': 'object', 'properties': {
                 'mode': {'type': 'string', 'enum': [*JOB_MODES, 'python_lab', 'clarify']},
                 'request': {'type': 'string', 'maxLength': 3000},
+                'files': {'type': 'array', 'items': {'type': 'string', 'maxLength': 300}, 'maxItems': 20},
                 'authorization': {'type': 'string', 'maxLength': 500}},
             'required': ['mode', 'request'], 'additionalProperties': False}},
         'reason': {'type': 'string', 'minLength': 1, 'maxLength': 400},
@@ -58,8 +60,14 @@ not for a question about code, an example, a quotation, a past request, or a
 request to write code without running it. For each Python task copy the exact
 operative phrase from the current user's own unquoted words into 'authorization'.
 Each task.request must describe only its own deliverable while preserving its
-hypotheses and constraints. A PDF request preserves the need for a legal PDF
-link if available. If one branch lacks a subject or other necessary input, put
+hypotheses and constraints. The attachment_references are AVAILABLE local sources. You see their
+names to assign work; the workers can read the actual documents. For each task, put only
+the attachments it needs in files, using the exact supplied paths. For unrelated tasks files=[].
+A request to explain or summarize an attached PDF calls for explore with that file, even if its title,
+subject and contents are unknown. Explain handles a specific proof or theorem in a file; summarize
+as a mode creates a separate formatted document. Never ask the user for the subject or contents of an
+available source just to summarize it. Recognized source objectives below identify reading tasks.
+A request to FIND a book in PDF is a different task: seek a legal external link if available. If one branch lacks a subject or other necessary input, put
 one task with mode=clarify and the question in request. Do not also dispatch
 a worker for that unresolved objective. Start the other tasks now.
 Do not invent a missing topic. Use prior conversation to resolve clear references.
@@ -125,32 +133,132 @@ steps or claiming a mathematical result was checked.
 """
 
 
-def _validated_tasks(decision, query):
+def _python_requests(query):
+    """Recover original execution directives without trusting a generated quotation."""
+    prose = instruction_prose(query)
+    text = _instruction_text(query)
+    engine = r'(?:python(?: lab)?|numpy|scipy)'
+    numeric_work = r'(?:simul\w*|numeri\w*|monte[ -]carlo|experiment\w*|samples?|sampling|echantillon\w*|plot\w*)'
+    execution = r'(?:run|execute|launch|lance[rz]?|execute[rz]?)'
+    operation = r'(?:simulat(?:e|ing)|sampl(?:e|ing)|comput\w*|calcul\w*|estimat\w*|generat\w*|draw|plot|trace[rz]?|simule[rz]?|echantillonn\w*|genere[rz]?|tire[rz]?)'
+    negative = r"\b(?:do not|don.t|never|without|avoid|no need to|sans|ne[^;.!?\n]{0,30}pas)\s+"
+    if re.search(negative + r'(?:(?:actually|ever|really)\s+)*(?:run\w*|execut\w*|launch\w*|simul\w*|lanc\w*|'
+                 r'(?:writ\w*|creat\w*)\s+(?:any\s+)?code|(?:us(?:e|ing)|utilis\w*)\s+(?:any\s+)?python)\b|'
+                 r'\bno (?:python|simulation|execution)\b', text):
+        return []
+    if re.search(r'\b(?:only if|unless|seulement si|sauf si|if (?:i|we) (?:later |explicitly )?'
+                 r'(?:ask|agree|say|approve|confirm)|after (?:my|our) (?:approval|confirmation))\b', text):
+        return []
+    code_requested = re.search(r'\b(?:write|draft|generate|create|provide|show|give|ecris|genere|cree|donne)\b[^;.!?\n]{0,60}'
+                               r'\b(?:code|script|algorithm|pseudocode|algorithme)\b', text)
+    parts = re.split(r'[;:!?\n]|\.(?=\s)|(?<!python)(?<!numpy)(?<!scipy),(?!\d)|\b(?:and|then|meanwhile|in parallel|at the same time|'
+                     r'et|puis|en parallèle|en même temps)\b', prose, flags=re.I)
+    directives = []
+    for part in parts:
+        part = part.strip().lstrip('-*•').strip()
+        part = re.sub(r'^(?:\d+[.)]\s+|(?:please|also|first|second|finally|independently|separately|additionally|ensuite)\s+)*', '', part, flags=re.I)
+        normalized = _instruction_text(part)
+        lead = re.sub(r'^(?:(?:can|could|would|will) you (?:(?:please|also|independently|separately) )*|(?:peux|pourrais)[ -]tu |'
+                      r'(?:pouvez|pourriez)[ -]vous |i (?:want|need|would like) you to |i.d like you to |'
+                      r'je (?:veux|voudrais) que (?:tu|vous) )', '', normalized)
+        lead = re.sub(r'^(?:in|with|using|en|avec) ' + engine + r'\s*[, ]\s*', '', lead)
+        if (not part or part not in query
+                or re.match(r'^(?:do (?:not|you|we|i)|run (?:me |us )?through|walk me through)\b', lead)):
+            continue
+        explicitly_run = bool(re.match(execution + r'\b', lead))
+        if code_requested and not explicitly_run:
+            continue
+        has_engine = bool(re.search(r'\b' + engine + r'\b', normalized))
+        has_numerics = bool(re.search(r'\b' + numeric_work + r'\b', normalized))
+        if explicitly_run:
+            requested = (has_engine or has_numerics or bool(re.search(r'\b(?:code|script)\b', lead))
+                         or bool(code_requested and re.match(execution + r' (?:it|that|the result)\b', lead)))
+        elif re.match(r'^(?:us(?:e|ing)|utilise[rz]?)\s+', lead):
+            # Referring to Python documentation or requesting an example of code
+            # does not ask the application to execute it.
+            tool = re.match(r'^(?:use|utilise[rz]?) (?:the |le )?' + engine + r'\b(?: +(?:to|for|pour|afin de) +|$)', lead)
+            goal = lead[tool.end():] if tool else ''
+            explanatory = re.match(r'(?:explain|describe|discuss|teach|expliquer|decrire)\b', goal)
+            requested = bool(tool and not explanatory and (re.search(r'\b' + operation + r'\b', goal)
+                                                            or has_numerics or lead.endswith('python lab')))
+        else:
+            requested = bool(re.match(operation + r'\b', lead) and (has_engine or has_numerics)
+                             or re.match(r'^(?:perform|do|fais|faites)\b', lead) and has_numerics)
+        if requested:
+            directives.append(part)
+    return directives
+
+
+def _validated_tasks(decision, query, files=(), reading=()):
     tasks = decision.get('tasks') or []
     questions = []
-    if not isinstance(tasks, list) or len(tasks) > 6 or (decision['route'] == 'workers') != bool(tasks):
-        raise AgentError('Invalid independent-worker assignment')
+    if decision['route'] != 'workers':
+        # Some services return extra assignments beside an otherwise valid direct/proof
+        # decision. Only a workers decision has authority to start that batch.
+        return {}
+    incomplete = not isinstance(tasks, list) or not 1 <= len(tasks) <= 6
+    if incomplete:
+        tasks = []
     assignments = []
+    python_requests = _python_requests(query) if any(isinstance(t, dict) and t.get('mode') == 'python_lab' for t in tasks) else []
     for task in tasks:
         if (not isinstance(task, dict) or task.get('mode') not in (*JOB_MODES, 'python_lab', 'clarify')
                 or not isinstance(task.get('request'), str) or not 1 <= len(task['request'].strip()) <= 3000):
-            raise AgentError('Invalid independent-worker objective')
+            incomplete = True
+            continue
+        refs = task.get('files', [])
+        if not isinstance(refs, list) or any(not isinstance(f, str) or f not in files for f in refs):
+            incomplete = True
+            continue
+        refs = list(dict.fromkeys(refs or named_attachments(task['request'], files)))
         if task['mode'] == 'clarify':
-            questions.append(task['request'].strip())
+            # For an explicit reading task the sourced worker can resolve questions
+            # about the attached document's identity, contents or topic itself.
+            about_source = re.search(r'\b(?:content|contents|topic|subject|upload|attach|provide|course|contenu|sujet|joindre)\b',
+                                     _instruction_text(task['request']))
+            if not (about_source and any(set(refs) & set(source['files']) for source in reading)):
+                questions.append(task['request'].strip())
             continue
         if task['mode'] == 'python_lab':
             phrase = task.get('authorization')
-            if (not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 500
-                    or phrase not in query or _instruction_text(phrase).strip() not in _instruction_text(query)
-                    or not re.search(r'\b(?:python|simul\w*|numeri\w*|monte[ -]carlo|experiment\w*|'
-                                     r'code|comput\w*|calcul\w*|sample|sampling|plot|trace\w*)\b',
-                                     _instruction_text(phrase))):
-                raise AgentError('Python Lab requires a numerical execution request from the current user')
+            claimed = _instruction_text(phrase).strip() if isinstance(phrase, str) else ''
+            # A truncated/malformed routing quotation cannot erase other independent
+            # work. Use only a positive operative clause recovered from the actual turn.
+            matching = next((part for part in python_requests if claimed and
+                             (claimed in _instruction_text(part) or _instruction_text(part) in claimed)), None)
+            if matching is None and len(python_requests) == 1:
+                matching = python_requests[0]
+            if matching is None:
+                incomplete = True
+                continue
+            verbatim = isinstance(phrase, str) and len(phrase) <= 500 and phrase in matching and bool(_python_requests(phrase))
+            phrase = matching
+            python_requests.remove(matching)
         assignment = {key: task[key].strip() for key in ('mode', 'request')}
         if task['mode'] == 'python_lab':
             assignment['authorization'] = phrase
+            if not verbatim:
+                assignment['request'] = phrase
+        if (assignment['mode'] == 'literature' and not refs and re.search(
+                r'\b(?:book|textbook|monograph|livre|manuel|ouvrage)\b', _instruction_text(assignment['request']))
+                and standalone_reference_request(assignment['request'])):
+            assignment['mode'] = 'check'
+        elif assignment['mode'] == 'check' and refs and not (
+                standalone_reference_request(assignment['request']) or precise_reference_request(assignment['request'])):
+            assignment['mode'] = 'explore'
+        assignment['files'] = refs
         assignments.append(assignment)
-    return {'tasks': assignments, 'question': ' '.join(questions)} if tasks else {}
+    for source in reading:
+        if not any(a['mode'] == source['mode'] and set(source['files']) <= set(a['files']) for a in assignments):
+            assignments.append(source)
+    if len(assignments) > 6 or (not assignments and not questions):
+        # Recover through the scoped ordinary tools. A malformed batch is never
+        # authority to run Python, and the normal child/action ceilings still apply.
+        return {'route': 'other', 'assignment_recovery': True}
+    outcome = {'tasks': assignments, 'question': ' '.join(questions)}
+    if incomplete:
+        outcome['assignment_recovery'] = True
+    return outcome
 
 
 def _reference_history(history):
@@ -185,21 +293,10 @@ def route_request(client, model, query, history=(), files=(), ctx=1_048_576, cur
 No worker is executed here. Failures are raised to the controller, which must
 preserve the unfinished routing step instead of falling back to a long answer.
 """
-    previous_timeout = getattr(client, 'timeout', None)
-    if (previous_timeout is not None
-            and (isinstance(previous_timeout, bool) or not isinstance(previous_timeout, (int, float))
-                 or not math.isfinite(previous_timeout) or previous_timeout <= 0)):
+    timeout = getattr(client, 'timeout', None)
+    if (timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                 or not math.isfinite(timeout) or timeout <= 0)):
         raise AgentError('Proof routing needs a finite positive model-request timeout')
-    if previous_timeout is not None:
-        client.timeout = min(previous_timeout, 60)
-    try:
-        return _route_request(client, model, query, history, files, ctx, current_images, suggested_mode)
-    finally:
-        if previous_timeout is not None:
-            client.timeout = previous_timeout
-
-
-def _route_request(client, model, query, history, files, ctx, current_images, suggested_mode):
     if not isinstance(query, str) or not query.strip():
         raise AgentError('Proof routing needs a nonempty current user request')
     if not isinstance(model, str) or not model:
@@ -209,7 +306,8 @@ def _route_request(client, model, query, history, files, ctx, current_images, su
     if type(ctx) is not int or ctx <= 0:
         raise AgentError('Proof routing needs a positive context allocation')
     prior = _reference_history(history)
-    material = {'current_user_request': query, 'attachment_references': list(files),
+    reading = requested_source_tasks(query, files)
+    material = {'current_user_request': query, 'attachment_references': list(files), 'recognized_source_objectives': reading,
                 'prior_reference_excerpts': prior, 'suggested_specialist': suggested_mode}
     messages = [{'role': 'system', 'content': POLICY}]
     for item in history:
@@ -269,6 +367,6 @@ def _route_request(client, model, query, history, files, ctx, current_images, su
         raise AgentError('Proof routing returned an invalid decision; no direct proof was authorized')
     if decision['route'] == 'suggested' and suggested_mode not in JOB_MODES:
         raise AgentError('The router selected an unavailable suggested specialist')
-    return {**_validated_tasks(decision, query), 'route': decision['route'], 'effort': decision['effort'], 'reason': decision['reason'].strip()[:400], 'stats': stats, 'allocation': allocation,
+    return {'route': decision['route'], **_validated_tasks(decision, query, files, reading), 'effort': decision['effort'], 'reason': decision['reason'].strip()[:400], 'stats': stats, 'allocation': allocation,
             'model': model, 'policy_version': POLICY_VERSION,
             'prompt_sha256': hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}

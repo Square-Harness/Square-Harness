@@ -538,6 +538,7 @@ export type TranscriptItem = AgentOrigin & {
   tool_name?: string
   discarded?: boolean
   files?: string[]
+  attached_files?: string[]
   images?: ImageRef[]
   mode?: RouteMode | 'critic' | 'clarify' | 'free'
   request?: string

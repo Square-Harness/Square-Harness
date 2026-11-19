@@ -12,7 +12,7 @@ from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
-from .source_tasks import automatic_source_action, _instruction_text
+from .source_tasks import access_check_source, automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
 
@@ -194,6 +194,16 @@ class ModeOrchestrator(Orchestrator):
             return super()._validate_delegate({**args, 'mode': 'explore'})
         return super()._validate_delegate(args)
 
+    def _worker_files(self, args):
+        # New independent assignments already carry their specific source set.
+        # Older checkpoints and ordinary delegation retain their original inheritance.
+        decision = self.state.get('proof_routing') or {}
+        if decision.get('route') == 'workers' and any(
+                t.get('mode') == args['mode'] and t.get('request') == args['request']
+                and t.get('files') == args.get('files') for t in decision.get('tasks', ())):
+            return list(args['files'])
+        return super()._worker_files(args)
+
     def _proof_pending(self):
         state = self.state or {}
         return ((self.required_mode == 'prove' or state.get('required_mode') == 'prove'
@@ -263,16 +273,31 @@ class ModeOrchestrator(Orchestrator):
                                'not establish a finite population expectation, a growth law or an almost-sure '
                                'statement. Do not use expectation notation for a sample average, even if a '
                                'worker does. Distinguish rigorous results from observed patterns. Preserve '
-                               'verified source qualifications and report unfinished branches explicitly.')
+                               'verified source qualifications and report unfinished branches explicitly. '
+                               'When a document could not be extracted, request a readable copy of that document. '
+                               'Do not use another file as a substitute or infer pagination from extracted lines.')
                 if decision.get('question'):
                     instruction += ('\nThis branch is waiting for the user to specify its subject. Ask the '
                                     'following question directly. Do not guess titles or make claims about '
                                     'network or file access on the basis of a deferred lookup. ' + decision['question'])
-                if self.state.get('children'):
+                if decision.get('assignment_recovery'):
+                    instruction += (' Some proposed assignments could not be validated. Read the original request '
+                                    'and use the available ordinary tools for its remaining objectives.')
+                if self.state.get('children') and not decision.get('assignment_recovery'):
                     # All requested branches have run. The parent can read full results
                     # for synthesis without spending another worker invocation.
-                    tools = [tool for tool in tools if tool['function']['name'] in ('read_result', 'read_experiment')]
+                    allowed = {'read_result', 'read_experiment'}
+                    if self.state['files']:
+                        allowed.add('read_file')
+                    tools = [tool for tool in tools if tool['function']['name'] in allowed]
                 return super()._payload(tools, instruction=instruction)
+            if self.state.get('access_check_source'):
+                return super()._payload(tools, instruction=(
+                    'Answer the access question from the current read_file result. If text was extracted, identify '
+                    'the document briefly from that text and address any outstanding document question in context. '
+                    'Use further reads for claims beyond this excerpt. If extraction failed or produced no text, '
+                    'describe that file’s limitation and ask for a readable copy if needed. Do not substitute '
+                    'another workspace file. A filename by itself is not evidence of its contents.'))
             return super()._payload(tools)
         if not tools:
             raise AgentError('Proof needs a prepared delegation, but further actions are unavailable; saved work is unchanged')
@@ -388,6 +413,15 @@ class ModeOrchestrator(Orchestrator):
             action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'low',
                       'reason': 'Convert the previous answer to LaTeX.' if previous else 'Convert the supplied Markdown file to LaTeX.'}
         else:
+            source = access_check_source(query, files)
+            if source:
+                # Verify access through the ordinary budgeted, resumable tool transaction.
+                # The whole-turn router can still arrange other requested work.
+                self.state['access_check_source'] = source
+                self._prepare_calls({'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': self.state['id'] + '_source_access', 'type': 'function',
+                    'function': {'name': 'read_file', 'arguments': {'path': source, 'start_line': 1, 'end_line': 40}}}]})
+                return
             action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
             if action and getattr(self.agent.client, 'profile', 'default') == 'deepinfra':
                 # A source/reference match may describe only one clause. Ask the normal
@@ -469,7 +503,7 @@ class ModeOrchestrator(Orchestrator):
             if decision['route'] == 'suggested':
                 actions = [state['suggested_specialist']]
             else:
-                actions = [dict(mode=task['mode'], request=task['request'], files=list(state['files']),
+                actions = [dict(mode=task['mode'], request=task['request'], files=list(task.get('files', state['files'])),
                                 effort=decision['effort'], reason='An independent objective from the current request.')
                            for task in decision['tasks']]
             if not actions:

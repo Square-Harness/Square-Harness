@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Keep a PDF-reading task alongside independent reference and simulation
+  requests. The Assistant checks access to a previously supplied document
+  by reading it. The chat distinguishes explicitly selected attachments from
+  earlier sources used again in a reply.
+- Read selected documents within their own file scope. A finished investigation's
+  research answer can be converted directly to LaTeX after parallel work.
+
 - DS4 can launch independent requests together, including a reference search
   and an explicitly requested Python simulation. In Investigate, Proof waits
   for its planned evidence and can take up a precise special case.

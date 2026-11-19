@@ -15,7 +15,7 @@ _IMAGES = ('.png', '.jpg', '.jpeg', '.webp')
 _DOCUMENT = r'(?:articles?|papers?|manuscripts?|documents?|preprints?|manuscrits?|fichiers?)'
 _IMAGE = r'(?:images?|screenshots?|pictures?|captures?)'
 _POINTER = (r'\b(?:this|that|attached|same|previous|earlier|the|my|your|these|those|all(?: the)?|'
-            r'cet|cette|ce|le|la|les|mon|ma|meme|precedent|ces|tous les|toutes les)\s+'
+            r'cet|cette|ce|le|la|les|au|aux|du|mon|ma|meme|precedent|ces|tous les|toutes les)\s+'
             r'(?:(?:same|previous(?:ly)?|earlier|attached|uploaded|meme|precedent)\s+)*')
 _PDF_POINTER = re.compile(_POINTER + r'pdfs?\b')
 _OLDER_PDF = re.compile(r'\b(?:earlier|previous(?:ly (?:sent|uploaded|attached))?|precedent|anterieur)\s+pdfs?\b|'
