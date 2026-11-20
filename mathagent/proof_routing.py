@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 7
+POLICY_VERSION = 8
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -59,7 +59,8 @@ dependency. A reference plus a simulation, or a numerical experiment plus an
 independent mathematical explanation, are two deliverables that start together.
 Use check for a targeted verified reference, literature for a survey,
 python_lab for a specifically requested execution or numerical simulation, explore
-for a mathematical explanation without a source, and prove for a nontrivial proof.
+for a mathematical explanation without a source or of a whole document, explain for one
+named result, page, section or appendix of an attached file, and prove for a nontrivial proof.
 Use writeup when the user asks for a document: a LaTeX note, a write-up, a .tex
 or PDF file of results. It writes the file from the results of the conversation,
 so it waits (after_results) for the tasks whose results it states or cites.
@@ -304,6 +305,13 @@ def _python_requests(query):
     return directives
 
 
+def _names_part(request):
+    """A named page, section or appendix of a file: what Explain reads exactly (review.py patterns)."""
+    from .review import PAGE_REQUEST, SECTION_REQUEST
+    text = _instruction_text(request)
+    return bool(PAGE_REQUEST.search(text) or SECTION_REQUEST.search(text))
+
+
 def _validated_tasks(decision, query, files=(), reading=()):
     tasks = decision.get('tasks') or []
     questions = []
@@ -376,6 +384,8 @@ def _validated_tasks(decision, query, files=(), reading=()):
         elif assignment['mode'] == 'check' and refs and not (
                 standalone_reference_request(assignment['request']) or precise_reference_request(assignment['request'])):
             assignment['mode'] = 'explore'
+        if assignment['mode'] == 'explore' and refs and _names_part(assignment['request']):
+            assignment['mode'] = 'explain'  # Explain reads exactly the named page, section or appendix.
         if assignment['mode'] == 'explore' and _DOCUMENT_REQUEST.search(_instruction_text(assignment['request'])):
             assignment['mode'] = 'writeup'  # Explore returns an analysis; only Write-up makes a file.
         assignment['files'] = refs
