@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- The Assistant sends a named page, section or passage of a document to Explain, and a whole
+  document to Explore. A chapter remembered by a literature check appears in the project
+  findings as memory, never as a checked place.
+
+- Explain works on what you point at: a named result, a page of a PDF ("page 9"),
+  a section or appendix, or a short text as a whole ("explain this page"). When a
+  result is stated in prose, or proved elsewhere without a "Proof" next to it, the
+  model first locates its lines instead of the request being refused. Appendices
+  placed after the references are read again, so their proofs attach to their
+  theorems, and a sentence starting with a capital letter and a period no longer
+  splits a section.
+- Literature check: a standard reference now comes with the chapter or section
+  the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
+  Section 3.5"), never as checked. The Assistant gives remembered places the same
+  way. The check searches by topic a second time only when no record fits: the
+  extra round it used to run did not change the answer in live checks and often
+  doubled the wait.
+
 - Show a dependent task while it waits, keep the notebook keyboard path through
   agents and tabs, and refresh chat activity without repeatedly fetching every
   job list. The report reader handles old and new section headings.

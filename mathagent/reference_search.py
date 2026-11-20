@@ -8,6 +8,8 @@ import re
 
 from .jsonutil import loads
 
+_TITLE_STOPWORDS = frozenset({'a', 'an', 'the', 'of', 'to', 'on', 'in', 'and', 'for', 'with'})
+
 
 class StandardReferenceSearch:
     def _standard_recall_instruction(self):
@@ -19,7 +21,10 @@ class StandardReferenceSearch:
             'For a broad classical topic a book is useful. For a specialized theorem an original article '
             'may be better. State the scope sought and 2-4 short public search phrases. '
             'Never invent authors, titles or dates: leave uncertain fields empty or return no candidates; '
-            'the controller can discover records by topic. Do not guess a chapter/theorem/page unless requested. '
+            'the controller can discover records by topic. For a book, put in locator only the chapter or '
+            'section where you think the result is treated (e.g. "Chapter 3, Section 3.5"), even when you are '
+            'not certain: the answer itself presents it as your memory, never as a checked place. Add a '
+            'theorem number only if you clearly remember it; leave locator empty only when you have no idea. '
             'For each candidate set source_type to book, article or unknown. '
             'Do not confuse a journal review of a book with the book itself. '
             'An exact bibliographic record will be located and a separate pass will assess its suitability. '
@@ -342,11 +347,16 @@ class StandardReferenceSearch:
                 continue
             index = source['candidate_index']
             if index is None:
+                recalled = self._recalled_place(record)
                 candidate = _clean_candidate({**record, 'year': str(record.get('year') or ''),
-                    'locator': '', 'why': ''}, 'bibliographic_discovery')
+                    'locator': recalled['locator'] if recalled else '', 'why': ''}, 'bibliographic_discovery')
                 if candidate is None:
                     continue
-                candidate['verdict'] = {'level': 'located', 'record': record, 'locator': '',
+                if recalled:
+                    # Another record (often another edition) of a recalled work: its remembered
+                    # place stays memory, tied to the edition year it was recalled for.
+                    candidate['locator_year'] = recalled['year']
+                candidate['verdict'] = {'level': 'located', 'record': record, 'locator': candidate['locator'],
                     'claimed': 'located', 'reasons': [], 'quote': '', 'source_url': None}
                 s['candidates'].append(candidate)
                 source['candidate_index'] = len(s['candidates']) - 1
@@ -370,20 +380,36 @@ class StandardReferenceSearch:
         s['standard_selection_usable'] = True
         s['standard_selection_signature'] = signature
         s['standard_unresolved'] = str(value.get('unresolved') or '')[:1200] if isinstance(value, dict) else ''
-        partial = any(candidate.get('selected') and candidate.get('suitability', {}).get('coverage') == 'partial'
-                      for candidate in s['candidates'])
-        needs_more = partial or bool(s['standard_unresolved'])
-        if (not selected or needs_more) and s['standard_selection_calls'] < 3 and not s.get('standard_discovery_continued'):
-            if s.get('standard_discovery_stage', 0):
-                s['standard_discovery_continued'] = True
-                retained = [source for source in pool if source.get('candidate_index') is not None
-                            and s['candidates'][source['candidate_index']].get('selected')]
-                s.setdefault('standard_record_archive', []).extend(source for source in pool if source not in retained)
-                s['standard_pool'] = retained
+        # Search by topic again only when no record fits. An "unresolved" note or a
+        # partial coverage nearly always restates unread places; in live checks a
+        # second round never changed the selection and doubled the waiting time.
+        if not selected and s['standard_selection_calls'] < 3 and not s.get('standard_discovery_continued'):
+            # Rejected records are archived (rediscovery restores their R identifiers),
+            # so the next selection judges what the topic search adds.
+            s['standard_discovery_continued'] = True
+            s.setdefault('standard_record_archive', []).extend(pool)
+            s['standard_pool'] = []
             s['phase'] = 'standard_discover'
         else:
             s['phase'] = 'answer'
 
+    def _recalled_place(self, record):
+        """The recalled candidate for the same work, when it carries a remembered place.
+
+        The same authors and every content word of the recalled title must occur in the
+        record, so another edition or catalogue entry of that book keeps the place."""
+        from .refcheck import _fold, _surnames
+
+        def words(title):
+            return set(re.findall(r'[a-z0-9]+', _fold(title))) - _TITLE_STOPWORDS
+        names = {_fold(name) for name in _surnames(record.get('authors'))}
+        title = words(record.get('title'))
+        for candidate in self.state['candidates']:
+            expected = words(candidate.get('title'))
+            if (candidate.get('source') != 'bibliographic_discovery' and candidate.get('locator') and expected
+                    and expected <= title and {_fold(name) for name in _surnames(candidate['authors'])} <= names):
+                return candidate
+        return None
 
     def _compose_standard(self):
         from .refcheck import describe, _fold
@@ -415,9 +441,16 @@ class StandardReferenceSearch:
             if len(chosen) > 1:
                 heading = str(index) + '. ' + heading
             out.append(heading + '**' + describe(source) + '**.')
+            if candidate.get('locator'):
+                # A recalled place is never read: the answer says so, whatever the model wrote.
+                out.append('By memory, I think it is in **' + candidate['locator'] + '** (not checked in the text).')
             if not record:
                 out.append('Unverified suggestion from model recall; no bibliographic record was confirmed' + (' by the lookup.' if self.state['settings'].get('online') else ' (online search was disabled).'))
                 continue
+            recalled_year = candidate.get('locator_year') or candidate.get('year')
+            if candidate.get('locator') and record.get('year') and recalled_year and str(record['year']) != str(recalled_year):
+                out.append('That place was recalled for the ' + str(recalled_year) + ' edition; the record is dated '
+                           + str(record['year']) + ', and numbering can differ between editions.')
             if author:
                 out.append('Identifier: ' + record['identifier'])
                 if record.get('published'):
@@ -451,11 +484,6 @@ class StandardReferenceSearch:
                 out.append('Scope limits: ' + suitability['limitations'])
             if record.get('year_kind') == 'catalog_first_publication':
                 out.append('The year is the catalog work date; a particular edition was not identified.')
-            if candidate.get('locator'):
-                out.append('Possible place from model recall: **' + candidate['locator'] + '** — unconfirmed.')
-                if record.get('year') and candidate.get('year') and str(record['year']) != str(candidate['year']):
-                    out.append('The record is dated ' + str(record['year']) + ', whereas model recall suggested '
-                               + str(candidate['year']) + '; the guessed place may refer to a different edition.')
             if record.get('url'):
                 out.append('Book or paper record: ' + record['url'])
         if self.state.get('standard_unresolved'):

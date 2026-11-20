@@ -86,11 +86,12 @@ Recorded sandbox code and figures are supplied automatically to write-up workers
 do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
-its proof; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
+its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
 proofs and is only for an explicit request. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
-with the source file; explain is for one specified result and its proof. Do not spend
+with the source file; explain is for one specified result and its proof, or one specified page, section
+or passage (give the page or section in the request, e.g. "page 4"). Do not spend
 the whole action allowance reading a paper in sequential 100-line excerpts. Start
 with its introduction, results and relevant headings, then read only needed passages.
 Separate the authors' novelty claims from independently verified literature comparisons.
@@ -130,7 +131,8 @@ cite a checked reference, keep its evidence level; located means the exact place
 was not confirmed. This includes chapter numbers and titles, section and theorem
 numbers, and pages: a guessed locator never becomes confirmed just because the
 book's bibliographic record was found. At level located, give the work's verified
-metadata and label every guessed place unconfirmed, or omit the guessed place.
+metadata and any remembered chapter or section as memory ("by memory, I think it is
+in Chapter 3"), never as a checked place.
 For two independent objectives, return both delegate calls in the same response:
 the controller runs them concurrently within a shared budget. Do not delegate
 dependent objectives together; inspect the first result before choosing the next.
@@ -662,9 +664,9 @@ class Orchestrator:
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER LOOKUP COMPLETION: one standard-reference lookup is finished. '
                 "Answer the original request briefly using only the worker's supported works and known "
-                'bibliographic details. If a chapter or other place was recalled, you may give it '
-                'as a possible unconfirmed lead. Say explicitly that you did not verify the precise '
-                'reference. A bibliographic record confirms the work exists, not that the theorem is in a '
+                'bibliographic details. If a chapter or section was recalled, give it as memory '
+                '("by memory, I think it is in Chapter 3"), never as a checked place. '
+                'A bibliographic record confirms the work exists, not that the theorem is in a '
                 'particular chapter. Do not search again or promise another lookup.'})
         if self._reviews():
             payload['messages'].append({'role': 'user', 'content':

@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 6
+POLICY_VERSION = 7
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -78,8 +78,9 @@ Each task.request must describe only its own deliverable while preserving its
 hypotheses and constraints. The attachment_references are AVAILABLE local sources. You see their
 names to assign work; the workers can read the actual documents. For each task, put only
 the attachments it needs in files, using the exact supplied paths. For unrelated tasks files=[].
-A request to explain or summarize an attached PDF calls for explore with that file, even if its title,
-subject and contents are unknown. Explain handles a specific proof or theorem in a file; summarize
+A request to explain or summarize a whole attached PDF calls for explore with that file, even if its
+title, subject and contents are unknown. Explain handles one named result and its proof, or one named
+page, section, appendix or short passage of a file (give it in the request, e.g. "page 4"); summarize
 as a mode creates a separate formatted document. Never ask the user for the subject or contents of an
 available source just to summarize it. Recognized source objectives below identify reading tasks.
 A request to FIND a book in PDF is a different task: seek a legal external link if available. If one branch lacks a subject or other necessary input, put
