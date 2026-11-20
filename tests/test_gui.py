@@ -320,7 +320,6 @@ class DeepInfraWorkflowTests(GuiCase):
         source = 'Let z be arbitrary in E. The requested statement is z=z.'
         (self.root / 'definitions.txt').write_text(source)
         query = 'Prove the statement in definitions.txt using the earlier definition of E.'
-        final = 'The Proof candidate and its review are saved.'
         marker = 'DISCARDED_PREPARATION_PROOF_ATTEMPT'
         # Simulate the reported runaway preparation. Even a provider response
         # with a huge partial body must not trigger a larger main-agent retry
@@ -350,8 +349,7 @@ class DeepInfraWorkflowTests(GuiCase):
             with self.subTest(preparation=label):
                 offset = len(self.fake.completions)
                 self.fake.replies = preparation + [(PROOF, 'Solver reasoning.', 37),
-                                                   (json.dumps(APPROVAL), 'Reviewer reasoning.', 23),
-                                                   (final, '', 19)]
+                                                   (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
                 chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
                 store.append_items(self.root, chat, [{'role': 'user', 'content': definition}])
                 self.ok('POST', f'/api/chats/{chat}/route', {
@@ -372,7 +370,7 @@ class DeepInfraWorkflowTests(GuiCase):
                                  (4096, 2048))
                 sent = self.fake.completions[offset:]
                 count = len(preparation)
-                self.assertEqual(len(sent), count + 3)
+                self.assertEqual(len(sent), count + 2)
                 self.assertEqual([call['max_tokens'] for call in sent[:count]], [2048] * count)
                 self.assertEqual([call['reasoning_effort'] for call in sent[:count]], ['none'] * count)
                 self.assertEqual(sent[0]['tool_choice'], 'required')
@@ -395,7 +393,7 @@ class DeepInfraWorkflowTests(GuiCase):
         large_definition = definition + '\n' + ('User-supplied context. ' * 1000)
         offset = len(self.fake.completions)
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
-                             (json.dumps(APPROVAL), 'Reviewer reasoning.', 23), (final, '', 19)]
+                             (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
         large = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
         store.append_items(self.root, large, [{'role': 'user', 'content': large_definition}])
         self.ok('POST', f'/api/chats/{large}/route', {
@@ -409,7 +407,7 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertTrue(any(item.get('role') == 'user' and item.get('content') == large_definition
                             for item in state['children'][0]['context']['history']),
                         'the complete original user context is retained')
-        self.assertEqual(len(self.fake.completions) - offset, 3)
+        self.assertEqual(len(self.fake.completions) - offset, 2)
         self.assertEqual([call['max_tokens'] for call in self.fake.completions[offset:offset + 2]], [4096, 2048])
         for call in self.fake.completions[offset:offset + 2]:
             self.assertTrue(json.dumps(large_definition, ensure_ascii=False)[1:-1]
@@ -447,14 +445,14 @@ class DeepInfraWorkflowTests(GuiCase):
         store.save_assistant(self.root, legacy, old)
         offset = len(self.fake.completions)
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
-                             (json.dumps(APPROVAL), 'Reviewer reasoning.', 23), (final, '', 19)]
+                             (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
         self.ok('POST', f'/api/chats/{legacy}/assistant/resume')
         self.assertEqual(self.wait_task(timeout=15)['state'], 'done')
         state = store.load_chat(self.root, legacy)['assistant_state']
         self.assertEqual(state['proof_preparation']['calls'], 2)
         self.assertEqual(state['proof_preparation']['status'], 'fallback')
         self.assertEqual(len(state['children']), 1)
-        self.assertEqual(len(self.fake.completions) - offset, 3)
+        self.assertEqual(len(self.fake.completions) - offset, 2)
         for call in self.fake.completions[offset:offset + 2]:
             self.assertIn(query, call['messages'][0]['content'])
             self.assertIn(definition, call['messages'][0]['content'])

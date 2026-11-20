@@ -4,8 +4,9 @@
 """Model-free views of saved specialist evidence. IDs include the full native job ID.
 
 Modes own scientific labels. This module owns task identity, safe record discovery
-and membership. A job follows its conversation on project moves. Unlinked native
-jobs belong to the workspace. No index file or reread of mutable source files:
+and membership, and labels a sandbox run superseded when the finished answer of its
+own worker passed it over for a later run. A job follows its conversation on project
+moves. Unlinked native jobs belong to the workspace. No index file or reread of mutable source files:
 a scan reuses the rows of every record whose files are unchanged and forgets the
 records that are gone.
 """
@@ -18,12 +19,17 @@ import re
 import threading
 
 from .ledger import ProofStore, _directory, _ID, _read
-from .numerics.artifacts import EXPERIMENT_ID
+from .numerics.artifacts import EXPERIMENT_ID, FAILED_RUNS
 from .research import _job_directory, _read_state
 
 VERSION = 1
 _PREFIX = {'proof': 'P', 'reference': 'C', 'source': 'L', 'review': 'R', 'experiment': 'E', 'lead': 'A',
            'unreadable': 'U'}
+# How a reader names each kind of record; the entry ID is only for read_index.
+_NAMES = {'proof': 'Proof', 'reference': 'Reference check', 'source': 'Source', 'review': 'Review',
+          'experiment': 'Python run', 'lead': 'Exploration', 'unreadable': 'Unreadable record'}
+# A run that a finished answer of its own passed over for a later run (workers.export_answer_evidence).
+SUPERSEDED = 'superseded run'
 _ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, IndexError)
 _WORKSPACES = 4  # remembered scans; an interface serves one folder at a time
 _SCANS = {}  # workspace root -> {record: (stamp, rows)}; a scan publishes a new table, never changes one
@@ -50,7 +56,7 @@ def _pinned(state):
             'images': [ref['sha256'] for ref in state.get('images', [])],
             'context_sha256': digest(_json(context)) if context else '',
             'original_request': context.get('query') or state.get('original_request') or '',
-            'launch_project': (context.get('project_snapshot') or {}).get('id')}
+            'launch_project': (context.get('project_snapshot') or {}).get('id') or state.get('launch_project')}
 
 
 def _entry(folder, job_id, row, state, pinned=None):
@@ -63,9 +69,14 @@ def _entry(folder, job_id, row, state, pinned=None):
     qualifiers = list(row.get('qualifiers', []))
     if pinned['sources'] or pinned['images'] or pinned['context_sha256']:
         qualifiers.append('relative to pinned context')
-    if original and state.get('goal', goal).strip() != original.strip():
-        qualifiers.append('worded by a model brief')
     kind = row['kind']
+    # A proof row states the task its job was given as the user reads it (proof.request_text).
+    worded = goal if kind == 'proof' else state.get('goal', goal).strip()
+    if original and worded != original.strip():
+        qualifiers.append('worded by a model brief')
+        if kind == 'proof' and row.get('direction') and pinned['context_sha256']:
+            # The reviewer read the user's request as authoritative over the brief.
+            qualifiers.append('reviewed with the request outranking the brief')
     entry_id = f'{_PREFIX[kind]}-{folder}-{job_id}' if kind == 'unreadable' else f'{_PREFIX[kind]}-{job_id}'
     if 'number' in row:
         entry_id += '.' + str(row['number'])
@@ -170,6 +181,9 @@ def collect(root):
             except _ERRORS:
                 result.append({**_unreadable('answers', path.stem), 'chat_id': owner.name})
     _publish(root, seen)
+    passed_over = {run for e in result if e['kind'] == 'lead' for run in e['evidence'].get('superseded_runs', [])}
+    result = [{**e, 'status': SUPERSEDED} if e['kind'] == 'experiment' and e['job_id'] in passed_over else e
+              for e in result]
     return sorted(result, key=lambda e: (e['created_at'], e['id']))
 
 
@@ -178,10 +192,19 @@ def _unreadable(folder, job_id):
 
 
 def line(entry):
-    label = ' · '.join([entry['status'], *entry['qualifiers']])
+    """One earlier record, named by its kind and task; its ID comes last, for read_index.
+
+    A task a model brief worded is shown after the user's request it came from.
+    """
+    label = ' · '.join([_NAMES[entry['kind']], entry['status'], *entry['qualifiers']])
     task = ' '.join(entry['task']['text'].split())
+    original = ' '.join(entry['task'].get('original_request', '').split())
+    statement = f'Recorded task: {task[:220]}'
+    if original and 'worded by a model brief' in entry['qualifiers']:
+        statement = f'Recorded request: {original[:220]} | Model brief: {task[:220]}'
     summary = ' '.join(entry['summary'].split())
-    return f"{entry['id']} | {label} | Task: {task[:220]}" + (f' | {summary[:250]}' if summary else '')
+    return (f"{label} | {statement}" + (f' | {summary[:250]}' if summary else '')
+            + f" | entry id (for read_index only): {entry['id']}")
 
 
 def render(view):
@@ -235,13 +258,17 @@ def _answer(path):
 
 
 def _carries_nothing(entry):
-    """A failed worker's empty answer, a proof without a candidate yet, a placeholder run that printed nothing."""
+    """A failed worker's empty answer, a proof without a candidate yet, a run its answer passed over, and a
+    failed or placeholder run that left nothing (no output, no result, no file)."""
     if entry['kind'] == 'lead':
         return not entry['summary']
     if entry['kind'] == 'proof':
         return entry['status'] == 'no candidate' and 'unfinished' in entry['qualifiers']
-    return (entry['kind'] == 'experiment' and entry['task']['text'].strip().casefold() == 'placeholder'
-            and not entry['summary'] and not entry['evidence'].get('artifacts'))
+    if entry['kind'] != 'experiment':
+        return False
+    empty = not entry['summary'] and not entry['evidence'].get('artifacts')
+    return entry['status'] == SUPERSEDED or empty and (
+        entry['status'] in FAILED_RUNS or entry['task']['text'].strip().casefold() == 'placeholder')
 
 
 def priority_order(entries):

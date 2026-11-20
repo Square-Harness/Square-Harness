@@ -209,9 +209,30 @@ export function toolLine(call: ToolCall): string {
     const effort = typeof args.effort === 'string' ? ` · ${args.effort} effort` : ''
     return `Start ${mode}${effort}`
   }
+  const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : ''
+  const short = (value: string, n = 80) => value.length > n ? value.slice(0, n - 1) + '…' : value
+  switch (fn.name) {
+    case 'read_result': return 'Read an earlier result again'
+    case 'read_conversation': return 'Read earlier messages of this conversation'
+    case 'list_index': return 'Looked through the findings of this project'
+    case 'read_index': return 'Read a saved finding'
+    case 'read_experiment': return 'Read a saved computation'
+    case 'execute_python': return 'Ran a computation' + (text('purpose') ? ': ' + short(text('purpose')) : '')
+    case 'read_file': return 'Read ' + (text('path') || 'a file')
+    case 'list_files': return 'Listed the files of the folder'
+    case 'search_text': return 'Searched the files for “' + short(text('query') || text('pattern'), 60) + '”'
+    case 'open_url': return 'Opened ' + short(text('url'))
+    case 'read_page': case 'search_page': return 'Read a web page'
+    case 'read_references': return 'Read the references of a web page'
+    case 'search_web': return 'Searched the web for “' + short(text('query'), 60) + '”'
+    case 'check_reference': return 'Checked a reference'
+  }
   const parts = Object.entries(args).map(([key, value]) => `${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`)
   return `${fn.name}${parts.length ? ': ' + parts.join(', ') : ''}`
 }
+
+/** Bookkeeping steps whose result is internal data: the label is enough, no raw body. */
+export const QUIET_TOOLS = new Set(['read_result', 'read_conversation', 'list_index', 'read_index', 'read_experiment'])
 
 export function Thinking({ text, live }: { text: string; live?: boolean }) {
   if (!text) return null

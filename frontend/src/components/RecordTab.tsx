@@ -22,6 +22,10 @@ const evidenceLabels: Record<string, [string, Variant]> = {
   'review uncertain': ['Uncertain reviews', 'uncertain'],
   'objections found': ['Open objections', 'gap'],
   'located, place unconfirmed': ['Source located, passage unconfirmed', 'uncertain'],
+  'failed run': ['Computations that failed', 'halted'],
+  'stopped at the time limit': ['Computations stopped at the time limit', 'halted'],
+  'superseded run': ['Computations replaced by a later run', 'waiting'],
+  'model-reviewed, direction unknown': ['Reviewed, proof or refutation not recorded', 'reviewed'],
 }
 
 const qualifierLabels: Record<string, string> = {
@@ -30,6 +34,7 @@ const qualifierLabels: Record<string, string> = {
   'bounded record': 'Partial experiment record',
   'legacy format': 'Earlier record format',
   'kept copy': 'Archived copy',
+  'reviewed with the request outranking the brief': 'Judged against your request',
   'started in another project': 'Started in another project',
 }
 

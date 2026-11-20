@@ -2,6 +2,95 @@
 
 ## Unreleased
 
+- Proof: when the Assistant hands your request to Proof without restating it, the agent
+  card, the Proof page, its report and the findings show your request, not the
+  controller's instructions to the solver (live: "You are the Proof child. Prove the exact
+  original user request..."); the solver and its reviewer still read those instructions.
+  Saved Proofs of that kind show your request in the findings.
+- Proof: a solve continued after a pause keeps the earlier research leads the first
+  attempt had, when the saved working notes still fit beside them.
+- Findings: a sandbox run that failed or stopped is labelled "failed run" or "stopped at
+  the time limit", and what it printed is given as printed before it stopped, never as a
+  result; one that left nothing (no output, no file) is not listed (live: ten empty
+  SyntaxError runs). A run that the finished answer of its own exploration passed over for
+  a later run (live: a first, wrongly scaled GOE sample) is labelled "superseded run" and
+  is not listed either.
+- Findings: an exploration's answer started in one project and moved with its conversation
+  to another is marked "started in another project", like its checks.
+- Answers name runs, results and earlier records by what they computed or establish: the
+  sandbox results and the project records handed to the Assistant name each run by its
+  purpose and each record by its kind and task, keep identifiers in fields labelled for
+  tool calls, and the Assistant is asked never to write experiment, job, task or record
+  IDs or tool names in its answer.
+- Referee reports: the novelty comparison no longer receives the request to referee a
+  manuscript it is not shown, so its "the manuscript is not available" text no longer
+  ends up in the report. Review, detailed review, quick review and Explain answers no
+  longer start with the job's status line (job ID, phase, effort) or end with usage and
+  storage notes; the job page keeps them. A follow-up on a disputed comment is headed with
+  that comment's number in the saved report.
+- Write-up: the reply asks about a problem of your notes only when the document still
+  keeps your version with a TODO (live: it asked about a false lemma the document had
+  already corrected), in plain words without inventory IDs; it gives the review's
+  findings as counts, not cut excerpts, and counts the same points as the PDF's notice.
+- Markdown to LaTeX: a character pdfLaTeX cannot print no longer stops the PDF (live: a
+  U+FFFD in a bibliography title). Mathematical characters become their commands; any
+  other becomes `?`, and the reply names it. "Compile it" builds such a saved conversion.
+- TeX source archives made with macOS `tar` are accepted: the `._*` metadata members (and
+  `__MACOSX/`) are ignored instead of refusing the archive.
+- Hosted DS4: a model stream that stops sending output in the middle of an answer (live:
+  nothing for 8 minutes, keep-alives only, while the card said running) is ended after three
+  minutes instead of waiting for the three-hour call limit. The job or turn pauses with a notice
+  saying so, keeps its saved work and its reserved allowance, and Resume tries again; the call
+  is never resent by itself.
+- Parallel work: a turn you resume no longer goes to the back of the queue (live: 12 minutes
+  behind 14 newer turns); it waits only behind other resumed turns.
+
+- Parallel work: a conversation turn starts at once and takes a job place only when it
+  starts its first worker, so a direct answer no longer waits minutes behind long proofs
+  and reviews. A turn that needs a worker waits in the queue in order of request;
+  cancelling that wait pauses the turn with its work. Queued items carry their position
+  and the time they were queued. Automatic titles no longer wait until the whole interface
+  is idle: a title runs when a model request slot is free and nothing else is waiting.
+- Investigation: the sandbox runs of an exploration stopped before it answered now appear
+  under its step in Stop and report, in the conversation's findings and in later turns.
+  The report names steps by position and kind ("step 2 (Exploration)"), not by plan ID.
+- References: a zbMATH record whose title and authors zbMATH hides (live: Hoeffding 1963)
+  takes them from Crossref's record of the same DOI, so the reference can be confirmed.
+- Reference check: a theorem with a lettered label ("Theorem A", "Lemma B.2") can now be
+  confirmed, and a paper the check opened and read counts as found (live: Theorem A of
+  arXiv:2112.08681, read in the paper, was reported "not found"). A Zbl number, DOI or arXiv
+  number in a recalled place is no longer taken for a theorem number. Whether a check is
+  precise follows your own words, not the Assistant's rewording: asking for an exact or
+  numbered theorem, to check "precisely", or for a result's exact statement runs a precise
+  check, which reads the source and quotes the statement it read. A check with nothing to
+  check no longer says "the guesses below were checked".
+- Literature review: a sentence the source check anchored to exact passages is no longer
+  changed or removed on the word of one comparison call; a second call re-checks the objection
+  first (live: the de Bruijn–Erdős condition, correctly stated as convergent, was flagged and
+  would have been "corrected" to divergent). A definition that checked sentences depend on is
+  kept with them, so a section no longer loses its opening paragraph (live: it started "The
+  threshold N is not a convenience.").
+
+- Python Lab: a run that stopped at its time limit, on an error or at the memory limit is
+  now reported to the Assistant with its status and what it printed, so an answer no longer
+  says the run never happened. An exploration that has used its tool rounds is asked for its
+  results; a reply that only announces more work is marked unfinished, keeps what its runs
+  printed, and is not used as evidence by an investigation.
+- @prove: when the reviewer finds no issue, the conversation shows the reviewed text itself,
+  under one line saying whether it is a model-reviewed proof or refutation (counterexample),
+  instead of an Assistant rewrite; the Proof card says the same. The project's earlier records
+  reach the Assistant in its instructions, labelled as not the current request, instead of as
+  a message before your request. Notices and final answers no longer repeat instructions meant
+  for the model (write-up hand-backs, tools, workers, recovery attempts).
+
+- Proof: a prepared task that leaves out what your request states (live, a statement
+  taken from another conversation of the project) is replaced by your unchanged request.
+  The Assistant sees only the earlier project records related to the request, marked as
+  earlier records rather than the request. A Proof result now says whether the reviewed
+  answer proves or refutes the statement (`claim_outcome`). In the research record, a
+  task worded by a model brief is shown after the request it came from, so a verdict is
+  never read as one about the brief alone.
+
 - Explain a page, section or passage about five times faster with DS4: the explanation is
   written directly instead of after a long hidden reasoning pass, which in blind grading was
   also more accurate. Explaining a proof keeps its reasoning.

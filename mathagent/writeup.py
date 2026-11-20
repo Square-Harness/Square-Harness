@@ -117,6 +117,12 @@ def _digest(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
 
 
+def _clip(text, limit):
+    """At most `limit` characters, cut at a word boundary with an ellipsis."""
+    text = ' '.join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1].rsplit(' ', 1)[0].rstrip(',;:') + '…'
+
+
 def todo_comments(body):
     """The text of each % TODO comment of a body, with the comment lines that continue it."""
     items, current = [], None
@@ -880,6 +886,25 @@ _LISTING_MATH = {
     '∫': r'\int', '∂': r'\partial', '∇': r'\nabla',
 }
 _LISTING_HEADER = '% UTF-8 characters used in code listings'
+# Characters outside ASCII, Latin-1 and Latin Extended-A that pdfLaTeX prints with T1, utf8 inputenc and textcomp.
+_PRINTABLE_PUNCTUATION = frozenset('–—‘’‚“”„†‡•…‰‹›€™')
+
+
+def typesettable(text):
+    """(text, replaced) for a document converted from Markdown: pdfLaTeX stops at the first character it cannot
+    print. A mathematical one becomes its command (as in code listings); any other, such as the replacement
+    character U+FFFD that a broken encoding leaves in a retrieved title, becomes '?'. Idempotent."""
+    out, replaced = [], []
+    for char in unicodedata.normalize('NFC', text):
+        macro = _LISTING_MATH.get(char)
+        if macro:
+            out.append(r'\ensuremath{' + macro + '}' if macro.startswith('\\') else macro)
+        elif char in '\t\n\r' or ' ' <= char <= '~' or 0xA0 <= ord(char) < 0x180 or char in _PRINTABLE_PUNCTUATION:
+            out.append(char)
+        else:
+            out.append('?')
+            replaced.append(f'U+{ord(char):04X}')
+    return ''.join(out), list(dict.fromkeys(replaced))
 
 
 def prepare_listing_document(document, assets):
@@ -2823,9 +2848,13 @@ class WriteupRunner(ResearchRunner):
             published_pdf = bool((s.get('outputs') or {}).get('pdf') and (self.directory / 'artifacts' / 'compiled.pdf').is_file())
             note = None
             if s.get('conversion_source'):
-                _, body, expected, note = self._render_conversion()
-                if not note and (document != expected or s['body'] != body or s.get('source_files')):
+                _, body, expected, note, replaced = self._render_conversion()
+                # A conversion saved before its text was made typesettable compiles as it is converted now.
+                if not note and (typesettable(document)[0] != expected or typesettable(s['body'])[0] != body
+                                 or s.get('source_files')):
                     note = 'The saved LaTeX or its dependencies differ from the verified Markdown conversion.'
+                elif not note:
+                    document = expected
             if note:
                 answer = 'The saved LaTeX was not compiled. ' + note
                 attempt['preview_note'] = note
@@ -2855,7 +2884,7 @@ class WriteupRunner(ResearchRunner):
                         s['body_line'] = s.get('body_line', 1) + document.count('\n') - s['document'].count('\n')
                         s['draft'] = s['document'] = document
                     if s.get('conversion_source'):
-                        s['preview_note'] = None
+                        s.update(preview_note=None, body=body, unprintable=replaced)
                     self._record_compile(result, log)
                     if not s.get('conversion_source'):
                         self._check_source()
@@ -3297,14 +3326,16 @@ class WriteupRunner(ResearchRunner):
             raise WorkerInputError('Install markdown-it-py to convert Markdown locally.', code='markdown_parser_missing') from exc
         source = next(s for s in self.state['sources'] if s['id'] == self.state['conversion_source'])
         try:
-            return (source, *convert_markdown(source['content']))
+            body, document, preview_note = convert_markdown(source['content'])
         except ValueError as exc:
             raise WorkerInputError(str(exc), code='markdown_conversion_failed') from exc
+        (body, replaced), (document, _) = typesettable(body), typesettable(document)
+        return source, body, document, preview_note, replaced
 
     def _convert_markdown(self):
-        source, body, document, preview_note = self._render_conversion()
+        source, body, document, preview_note, replaced = self._render_conversion()
         self.state.update(body=body, document=document, title=Path(source['path']).stem,
-                          source_files=[], checks=[], phase='compile', preview_note=preview_note)
+                          source_files=[], checks=[], phase='compile', preview_note=preview_note, unprintable=replaced)
         if preview_note:
             self.state.update(gates=[{'gate': 'G1', 'message': preview_note}], readiness='draft', phase='export')
 
@@ -4889,7 +4920,7 @@ class WriteupRunner(ResearchRunner):
         points (citations, labels, figures, what the material lacks), the source checker's findings and the review's
         open issues."""
         points = self._template_notes() + ['Missing from the material: ' + piece + '.' for piece in self._missing_pieces()]
-        points += ['Question about your notes: ' + question for question in self._problem_questions()]
+        points += ['Question about your notes: ' + question for question in self._problem_questions(body)]
         points += self._review_points()
         for question in ((self.state.get('splice') or {}).get('notation') or {}).get('questions') or []:
             points.append('Notation: ' + question + '.')
@@ -5724,6 +5755,9 @@ class WriteupRunner(ResearchRunner):
         if s.get('conversion_source'):
             if any(w['message'].startswith('Missing character:') for w in s.get('log_warnings', [])):
                 fail('G8', 'the PDF font is missing characters from the source')
+            if s.get('unprintable'):
+                fail('G8', 'LaTeX cannot print ' + ', '.join(s['unprintable']) + ' from the source; the PDF shows ? in '
+                     + ('its' if len(s['unprintable']) == 1 else 'their') + ' place')
             return failed
         problems = [f for f in s['checks'] if texcheck.gate(f) == 'G3']
         if problems:
@@ -5749,8 +5783,9 @@ class WriteupRunner(ResearchRunner):
         model = review['issues'] if review else []
         serious = lambda layer: [i for i in model if i['layer'] == layer and i['severity'] in ('blocker', 'major')]
         if serious('fidelity'):
+            # The count only: the report lists the places, in full.
             fail('G5', f'the review found {len(serious("fidelity"))} place{"s" if len(serious("fidelity")) > 1 else ""} '
-                 f'that differ{"" if len(serious("fidelity")) > 1 else "s"} from the material or the request (' + '; '.join(dict.fromkeys(i['problem'][:80] for i in serious('fidelity')))[:300] + ')')
+                 f'that differ{"" if len(serious("fidelity")) > 1 else "s"} from the material or the request')
         parts = [f for f in s['checks'] if f['rule'] == 'part-missing']
         # A dependency the skeleton guessed is no reason to hold the document: skeleton links are reported, not gated.
         links = [f for f in s['checks'] if f['rule'] == 'frame-links']
@@ -5774,17 +5809,23 @@ class WriteupRunner(ResearchRunner):
                  + (' (one is the page head: shorten the title)' if any(f['line'] is None for f in overfull) else ''))
         return failed
 
-    def _problem_questions(self, choices_only=False):
-        """The material's problems the author must settle, each with both versions when the outline has them: the
-        document keeps the material's version (with a TODO) until the author answers. `choices_only`: only the
-        problems with two versions to choose between (for the reply; the report lists them all)."""
+    def _problem_questions(self, body, choices_only=False):
+        """The material's problems the author must still settle, in plain words, each with both versions when the
+        outline has them: only those the document keeps with a % TODO about them (a problem the conversation settled
+        is written in its settled version, with no TODO). `choices_only`: only the problems with two versions to
+        choose between (for the reply; the report lists them all)."""
+        words = lambda text: set(re.findall(r'[a-z]{4,}', text.lower()))
+        todos = [words(t) for t in todo_comments(body) if not re.match(r'(?i)reference\b', t)]
         out = []
         for p in (self.state.get('outline') or {}).get('problems') or []:
+            said = words(p['what'] + ' ' + p['as_written'])
+            if not any(todo and 2 * len(todo & said) >= len(todo) for todo in todos):
+                continue
             choice = bool(p.get('alternative') and p.get('as_written'))
             if choices_only and not choice:
                 continue
-            what = p['what'] if not choices_only or len(p['what']) <= 200 else p['what'][:197].rstrip() + '...'
-            out.append(f'{p["inventory_id"]}: {what}' + (f' As written: {p["as_written"]}; or: {p["alternative"]}?' if choice else ''))
+            what = p['what'] if not choices_only else _clip(p['what'], 200)
+            out.append(what + (f' Keep “{p["as_written"]}”, or write “{p["alternative"]}”?' if choice else ''))
         return out[:3] if choices_only else out
 
     def _missing_pieces(self):
@@ -6807,21 +6848,22 @@ class WriteupRunner(ResearchRunner):
         out = [f'Review: {len(ledger)} finding{"s" if len(ledger) != 1 else ""} over {len(reviews)} check{"s" if len(reviews) > 1 else ""}, '
                f'{rounds} revision round{"s" if rounds != 1 else ""}.']
         if fixed:
-            out.append('Fixed: ' + ', '.join(f'{rule} ({n})' for rule, n in fixed.items()) + '.')
+            out.append(f'Fixed: {sum(fixed.values())}.')
         aside = sum(i['status'] == 'refuted' for i in ledger)
         if aside:
             out.append(f'Set aside after the writer\'s answer and a ruling: {aside}.')
         disputed = [i for i in ledger if i['status'] == 'disputed']
         if disputed:
             out.append(f'For you to settle ({len(disputed)}): the reviewer and the writer disagree on '
-                       + '; '.join(f'"{i["quote"][:80]}" ({i["problem"][:100]} / {i["rebuttal"][:100]})' for i in disputed[:3]) + '.')
+                       + '; '.join(f'"{_clip(i["quote"], 80)}" ({_clip(i["problem"], 100)} / {_clip(i["rebuttal"], 100)})'
+                                   for i in disputed[:3]) + '.')
         serious = [i for i in left if i['severity'] in ('blocker', 'major')]
         if serious:
-            out.append(f'Left: {len(serious)} serious issue{"s" if len(serious) > 1 else ""} ('
-                       + ', '.join(dict.fromkeys(i['rule'] for i in serious)) + ').')
+            out.append(f'Left: {len(serious)} serious issue{"s" if len(serious) > 1 else ""}.')
         questions = [i for i in left if for_author(i) and i['fix'].strip()]
         if questions:
-            out.append('Questions for you: ' + '; '.join(f'"{i["quote"][:120]}" or "{i["fix"][:120]}"?' for i in questions[:4]))
+            out.append('Questions for you: ' + '; '.join(f'"{_clip(i["quote"], 120)}" or "{_clip(i["fix"], 120)}"?'
+                                                         for i in questions[:4]))
         return ' '.join(out)
 
     def _repair(self):
@@ -7119,7 +7161,7 @@ class WriteupRunner(ResearchRunner):
         if self.state.get('conversion_source'):
             for source in self.state['sources']:
                 if source.get('conversion_bibliography'):
-                    contents['references.bib'] = source['content'].encode('utf-8')
+                    contents['references.bib'] = typesettable(source['content'])[0].encode('utf-8')
         body = (self.state['body'] if self.state.get('conversion_source') else self._body_file()).encode('utf-8')
         contents['document-body.tex'] = body
         _atomic_write(self.directory / 'artifacts' / 'body.tex', body)
@@ -7330,8 +7372,12 @@ class WriteupRunner(ResearchRunner):
             if summary := self._check_summary():
                 parts.append(summary)
             if s.get('block'):
-                parts.append('The top of the document counts the points to check; the report on its page lists them.')
-        questions = self._problem_questions(choices_only=True)
+                todo, points = self._points_to_check(s['body'])
+                counted = ', '.join(filter(None, [f'{len(todo)} TODO comment{"s" if len(todo) != 1 else ""}' if todo else '',
+                                                  f'{len(points)} other point{"s" if len(points) != 1 else ""}' if points else '']))
+                parts.append(f'The top of the document counts the points to settle ({counted}); the report on its page lists them.'
+                             if counted else 'The report on its page lists the points to settle.')
+        questions = self._problem_questions(s.get('body') or '', choices_only=True)
         if questions:
             parts.append('Questions about your notes (the document keeps their version, marked TODO, until you answer): '
                          + ' '.join(questions))

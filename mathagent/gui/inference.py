@@ -61,6 +61,11 @@ class InferencePool:
             self._capacity = capacity
             self._condition.notify_all()
 
+    def free(self) -> bool:
+        """Whether a stream could start now with no other request waiting."""
+        with self._condition:
+            return not self._waiters and sum(self._active.values()) < self._capacity
+
     def register(self, owner: Hashable) -> None:
         """Register an active task. Repeated registration is harmless."""
         with self._condition:

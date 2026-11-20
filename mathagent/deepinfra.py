@@ -25,7 +25,7 @@ from urllib.request import Request
 
 from .agent import AgentError, ModelNotDispatched
 from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
-                       ToolCallError)
+                       StalledStream, ToolCallError)
 from .model_limits import MODEL_OUTPUT_TOKENS
 
 
@@ -314,6 +314,9 @@ class DeepInfra(OpenAICompatible):
     """Authenticated stateless Chat Completions; no redirects or proxy env."""
     profile = 'deepinfra'
     require_terminal_usage = True
+    # DS4 streams about 150 tokens/s once started; three minutes with only keep-alives is a stalled
+    # stream. It is ended, never resent: its output had started, so the job pauses for the user.
+    stall_seconds = 180
 
     def __init__(self, host=BASE_URL, timeout=600):
         parsed = urlsplit(host.rstrip('/'))
@@ -564,6 +567,8 @@ class DeepInfra(OpenAICompatible):
             return DeepInfraSilentStart(progress, retry_spent=bool(window and window.retry_spent))
         if isinstance(exc, ProviderStreamError):
             category, message = _generation_failure(exc.detail)
+        elif isinstance(exc, StalledStream):
+            message = str(exc)
         elif category == 'interrupted':
             message = 'The DeepInfra connection ended before the completion stream finished.'
         elif str(exc) == 'Model stream ended without finish reason and token usage':

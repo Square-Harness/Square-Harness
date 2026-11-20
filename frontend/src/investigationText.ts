@@ -7,7 +7,7 @@ import type { RouteMode } from './api'
 
 const digestLine = /^SHA-256 [0-9a-f]{64}$/m
 const uuid = '[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}'
-const recordId = new RegExp('^([A-Z])-(' + uuid + '|exp-\\d{8}-\\d{6}-[a-z0-9]+)(?:\\.\\d+)? \\| (.+?) \\| Task: (.*)$')
+const recordId = new RegExp('^([A-Z])-(' + uuid + '|exp-\\d{8}-\\d{6}-[a-z0-9]+)(?:\\.\\d+)? \\| (.+?) \\| (?:Task|Recorded task|Recorded request): (.*)$')
 const jobEnd = new RegExp(' · job (' + uuid + ')$')
 const reportTask = /^- \*\*(t[1-8]) · (explore|check|literature|prove|quick_review) · ([a-z_]+)\*\* — (.*)$/
 export type Finding = { kind: string; job: string; label: string; qualifiers: string[]; summary: string }
@@ -19,7 +19,9 @@ function finding(line: string): Finding | null {
   const [, kind, job, qualification, content] = parts
   const [label, ...qualifiers] = qualification.split(' · ')
   const separator = content.lastIndexOf(' | ')
-  return { kind, job, label, qualifiers, summary: separator < 0 ? '' : content.slice(separator + 3) }
+  const last = separator < 0 ? '' : content.slice(separator + 3)
+  // 'Recorded request: … | Model brief: …' carries the brief, not a summary, in its last part.
+  return { kind, job, label, qualifiers, summary: last.startsWith('Model brief: ') ? '' : last }
 }
 
 // Only the logged conclusion can attribute a proof or refutation to the approved statement.

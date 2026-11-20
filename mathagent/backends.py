@@ -77,6 +77,44 @@ def _started(response, seconds, output):
         yield raw
 
 
+class StalledStream(AgentError):
+    """A stream that had started to answer sent no model output for its idle limit."""
+
+
+def _read_timeout(response, seconds):
+    sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+    if sock is not None:
+        try:
+            sock.settimeout(seconds)
+        except OSError:
+            pass
+
+
+def _unstalled(lines, response, seconds, output):
+    """Give up a stream that started to answer and then sent no model output for `seconds`. Keep-alive
+    comments do not count (a provider can send them for hours); a socket that sends nothing at all is
+    caught by a read timeout, set only once output has started. `output['last']` is set by the reader."""
+    lines = iter(lines)
+    while True:
+        if output['started']:
+            remaining = output['last'] + seconds - time.monotonic()
+            if remaining <= 0:
+                break
+            _read_timeout(response, remaining)
+        try:
+            raw = next(lines)
+        except StopIteration:
+            return
+        except TimeoutError:
+            if not output['started']:
+                raise
+            break
+        yield raw
+    span = f'{round(seconds / 60)} minutes' if seconds >= 120 else f'{round(seconds)} seconds'
+    raise StalledStream(f'The model stopped sending output for {span} in the middle of its answer, '
+                        'so the call was ended. Resume to try again.')
+
+
 class MeasuredStreamCancellation(KeyboardInterrupt):
     """Cancellation still prevents delivery of a result, even if its provider usage arrived."""
 
@@ -284,6 +322,10 @@ class OpenAICompatible:
             data['thinking_token_budget'] = int(cap * fraction)
         return data
 
+    # Seconds without model output, once a stream has started, before the call is ended. None for
+    # local servers, whose scheduler may hold a started request for a long time; set by hosted profiles.
+    stall_seconds = None
+
     @staticmethod
     def _sse(response, deadline=None):
         lines, size = [], 0
@@ -332,8 +374,10 @@ class OpenAICompatible:
         try:
             with self.request('/chat/completions', data) as response:
                 accepted = True
-                output = {'started': False}
+                output = {'started': False, 'last': None}
                 lines = response if start_seconds is None else _started(response, start_seconds, output)
+                if self.stall_seconds:
+                    lines = _unstalled(lines, response, self.stall_seconds, output)
                 for raw in self._sse(lines, deadline):
                     if raw.strip() == '[DONE]':
                         if finish is None or usage is None or (getattr(self, 'require_terminal_usage', False) and final_usage is None):
@@ -370,14 +414,15 @@ class OpenAICompatible:
                     # A tool ID or an unfinished function fragment is model output
                     # even if no complete tool call has reached the caller. Inspect
                     # co-located deltas before an error in that same frame.
-                    if not output_started:
-                        for choice in chunk.get('choices') or []:
-                            delta = choice.get('delta') if isinstance(choice, dict) else None
-                            if isinstance(delta, dict) and any(delta.get(field) for field in
-                                    ('content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call')):
+                    for choice in chunk.get('choices') or []:
+                        delta = choice.get('delta') if isinstance(choice, dict) else None
+                        if isinstance(delta, dict) and any(delta.get(field) for field in
+                                ('content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call')):
+                            output['last'] = time.monotonic()
+                            if not output_started:
                                 output_started = output['started'] = True
                                 self._first_model_output()
-                                break
+                            break
                     current = chunk.get('usage')
                     if current is not None:
                         if not isinstance(current, dict) or any(type(current.get(key)) is not int or current[key] < 0 for key in ('prompt_tokens', 'completion_tokens')):
@@ -465,7 +510,7 @@ class OpenAICompatible:
             if final_usage:
                 raise MeasuredStreamCancellation(final_usage) from None
             raise
-        except SilentStreamStart as exc:
+        except (SilentStreamStart, StalledStream) as exc:
             raise self._stream_failure(exc, 'interrupted', progress, final_usage, output_started) from None
         except AgentError as exc:
             if not accepted:

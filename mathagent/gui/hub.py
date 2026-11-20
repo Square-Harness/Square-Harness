@@ -8,7 +8,9 @@ terminal interface, forwards emit() callbacks as events, answers approve()
 callbacks from the browser, and pauses work by raising the KeyboardInterrupt
 that the runners already treat as a checkpointed pause. Independent tasks keep
 their own budgets and share a bounded inference pool. Further starts wait in a
-queue, and each conversation has at most one pending turn.
+queue, and each conversation has at most one pending turn. An Assistant turn
+holds a task slot only from its first worker on, so a direct answer never waits
+behind long jobs.
 """
 import collections
 from contextlib import contextmanager
@@ -384,6 +386,11 @@ class Task:
         self.result_status = None
         self.started = time.time()
         self.finished = None
+        self.queued_at = None
+        # Whether this task holds one of the task slots; see Hub._hold_slot.
+        self.slot = False
+        self.resumed = False
+        self.granted = threading.Event()
         self.activity = collections.deque(maxlen=200)
         self.waiting_model_calls = 0
         self.live = None
@@ -398,7 +405,8 @@ class Task:
         return {'id': self.id, 'kind': self.kind, 'target': self.target, 'label': self.label,
                 'title': self.title[:500], 'state': self.state, 'error': self.error,
                 'result_status': self.result_status, 'started': self.started, 'finished': self.finished,
-                'origin_chat': self.origin_chat, 'waiting_model_calls': self.waiting_model_calls}
+                'origin_chat': self.origin_chat, 'waiting_model_calls': self.waiting_model_calls,
+                'queued_at': self.queued_at, 'slot': self.slot}
 
 
 class Approval:
@@ -524,6 +532,14 @@ class Hub:
         with self._lock:
             return [t for t in self._tasks.values() if t.state in RUNNING]
 
+    def _held(self):
+        # Caller holds the lock.
+        return sum(t.slot for t in self._tasks.values())
+
+    def _queue_summary(self):
+        # Caller holds the lock.
+        return [{**t.summary(), 'position': position} for position, t in enumerate(self.queue, 1)]
+
     def _capacity(self):
         return {'chats': self.concurrency, 'requests': self.inference.capacity,
                 'active': len(self._tasks)}
@@ -568,16 +584,15 @@ class Hub:
     def _publish_queue(self):
         with self.bus._cond:
             with self._lock:
-                queue = [t.summary() for t in self.queue]
+                queue = self._queue_summary()
             self.bus.publish('queue', queue=queue)
 
-    def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None, allow_routing=False):
+    def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None, allow_routing=False,
+               light=False):
+        """Start or queue one task. A light task starts at once without a task slot (see _hold_slot)."""
         with self._lock:
             if self._closing:
                 raise Busy('The interface is shutting down.')
-            # Cosmetic work yields immediately when real work arrives.
-            for title_task in self._titles.values():
-                title_task.cancel.set()
             origin_chat = target if kind == 'chat' else getattr(on_update, '_origin_chat', None)
             if origin_chat:
                 # Registration and deletion share this lock. An earlier read
@@ -589,17 +604,17 @@ class Hub:
                            or (target is not None and t.kind == kind and t.target == target)
                            for t in pending)):
                 raise Busy('This conversation or job already has running or queued work.')
-            busy = len(self._tasks) >= self.concurrency or bool(self.queue)
-            queued = busy
-            if busy and not queue:
+            queued = not light and (self._held() >= self.concurrency or bool(self.queue))
+            if queued and not queue:
                 raise Busy('All active task slots are occupied. Queue this request or wait for a slot.')
             task = Task(kind, target, label, title, on_update)
             task.origin_chat = origin_chat
             task.live, task.work = live, work
-            if busy:
-                task.state = 'queued'
+            if queued:
+                task.state, task.queued_at = 'queued', time.time()
                 self.queue.append(task)
             else:
+                task.slot = not light
                 self._register(task)
         # Promotion may happen immediately after releasing the lock. Only the
         # scheduler launches an enqueued task, even if it already started.
@@ -667,32 +682,81 @@ class Hub:
 
     def _advance(self, finished=None):
         """Fill available task slots in FIFO order, after all final writes."""
-        launch = []
+        launch, changed = [], False
         with self._lock:
             if finished is not None:
                 self._tasks.pop(finished.id, None)
                 self.inference.unregister(finished.id)
                 self.task = next(iter(self._tasks.values()), finished)
-            while not self._closing and len(self._tasks) < self.concurrency and self.queue:
+                if finished in self.queue:  # a slot request the turn no longer needs
+                    self.queue.remove(finished)
+                    changed = True
+            while not self._closing and self._held() < self.concurrency and self.queue:
                 task = self.queue.popleft()
+                changed = True
+                task.slot = True
+                if task.thread is not None:
+                    task.granted.set()  # a running Assistant turn about to start its first worker
+                    continue
                 task.state = 'starting'
                 self._register(task)
                 launch.append(task)
-        if launch:
+        if changed:
             self._publish_queue()
-            for task in launch:
-                self._launch(task)
+        for task in launch:
+            self._launch(task)
         if finished is not None and finished.origin_chat and finished.state == 'done':
             self._schedule_title(self.root, finished.origin_chat)
 
+    def _hold_slot(self, task, budget, waiting=None, resumed=False):
+        """Give an Assistant turn a task slot before its first worker starts.
+
+        Until then the turn only makes model calls, which the inference pool
+        already bounds, so a direct answer never waits behind long jobs. The slot
+        request joins the FIFO queue like a new job; a turn the user resumed was
+        admitted once already, so it waits only behind other resumed turns. The
+        turn keeps the slot until it ends. Pause and queue cancellation withdraw
+        the request and pause the turn, with its saved work. Waiting does not use
+        the turn's time allowance.
+        """
+        with self._lock:
+            if task.slot:
+                return
+            if task.cancel.is_set() or self._closing:
+                raise KeyboardInterrupt
+            queued = task not in self.queue
+            if queued:
+                if self._held() < self.concurrency and not self.queue:
+                    task.slot = True
+                    task.granted.set()
+                    return
+                task.queued_at, task.resumed = time.time(), resumed
+                self.queue.insert(next((i for i, t in enumerate(self.queue) if resumed and not t.resumed),
+                                       len(self.queue)), task)
+        if queued:
+            self._publish_queue()
+            self._publish_task(task)
+            if waiting:
+                waiting()
+        with budget.waiting():
+            while not task.granted.wait(0.1):
+                if task.cancel.is_set() or self._closing:
+                    with self._lock:
+                        withdrawn = task in self.queue
+                        if withdrawn:
+                            self.queue.remove(task)
+                    if withdrawn:
+                        self._publish_queue()
+                    raise KeyboardInterrupt
+
     def _schedule_title(self, root=None, chat_id=None):
-        """One small, idle-only cosmetic call; failure keeps the prompt preview."""
+        """One small cosmetic call at the lowest priority; failure keeps the prompt preview."""
         if not getattr(self.args, 'gui_auto_titles', True):
             return
         with self._lock:
             if root is not None and chat_id is not None:
                 self._title_queue[(str(root), chat_id)] = None
-            if self._closing or self._tasks or self.queue or self.routing or self._titles:
+            if self._closing or self._titles:
                 return
             query = None
             while self._title_queue and query is None:
@@ -705,10 +769,19 @@ class Hub:
                 return
             task = Task('title', chat_id, 'Conversation title')
             self._titles[chat_id] = task
-            self.inference.register(task.id)
 
         def work():
             try:
+                # Wait, without registering as an inference owner (which would shrink
+                # other tasks' share), until a model-request slot is free and no
+                # request waits. Once admitted the call is at most 64 tokens and 15 s.
+                while not self.inference.free():
+                    if task.cancel.wait(0.5):
+                        return
+                with self._lock:
+                    if self._closing:
+                        return
+                    self.inference.register(task.id)
                 agent, _ = self._engine(task, think=False, online=False)
                 agent.client.timeout = min(agent.client.timeout, 15)
                 client = BudgetClient(agent.client, max_tokens=64, max_input_tokens=4096,
@@ -747,11 +820,16 @@ class Hub:
             task = next((t for t in self.queue if t.id == task_id), None)
             if task is None:
                 raise store.NotFound('That job is no longer waiting')
-            self.queue.remove(task)
-            task.state = 'cancelled'
-            task.finished = time.time()
-            task.cancel.set()
-            task.ready.set()
+            running = task.thread is not None
+            if not running:
+                self.queue.remove(task)
+                task.state = 'cancelled'
+                task.finished = time.time()
+                task.cancel.set()
+                task.ready.set()
+        if running:
+            # An Assistant turn waiting for a slot for its first worker: pause it, keeping its work.
+            return self.pause(task_id)
         self._cancelled_turn(task, 'The queued turn was cancelled before it started.')
         self._publish_queue()
         self._publish_task(task)
@@ -786,7 +864,9 @@ class Hub:
         with self._lock:
             self._closing = True
             self._title_queue.clear()
-            queued = list(self.queue)
+            # A running turn waiting for a worker slot pauses with the other running tasks.
+            queued = [t for t in self.queue if t.thread is None]
+            waiting = bool(self.queue)
             self.queue.clear()
             for task in queued:
                 task.state, task.finished = 'cancelled', time.time()
@@ -799,7 +879,7 @@ class Hub:
         for task in queued:
             self._cancelled_turn(task, 'The queued turn was cancelled when the interface stopped.')
             self._publish_task(task)
-        if queued:
+        if waiting:
             self._publish_queue()
         deadline = time.monotonic() + wait
         for task in tasks:
@@ -819,7 +899,7 @@ class Hub:
                                   for t in self._tasks.values() if t.state in RUNNING],
                         'concurrency': self._capacity(),
                         'approvals': [a.summary() for a in self._approvals.values()],
-                        'queue': [t.summary() for t in list(self.queue)],
+                        'queue': self._queue_summary(),
                         'routing': sorted(self.routing)}
         seq, value = self.bus.snapshot(read)
         return {'seq': seq, **value}
@@ -1720,6 +1800,8 @@ class Hub:
                     if kind == 'end' and parent is not None and capture.calls:
                         capture.calls[-1]['discarded'] = (parent.state.get('last_call') or {}).get('status') == 'invalid_tool_call'
             def delegate(action, child, save):
+                self._hold_slot(task, budget, lambda: capture.emit('progress', 'Waiting for a free task slot to start a worker…'),
+                                resumed=resume)
                 return self._assistant_worker(task, root, chat_id, parent, budget, action, child, save, online, checkpoint_lock)
 
             options = dict(emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
@@ -1820,7 +1902,7 @@ class Hub:
 
         live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'free'}
         try:
-            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True, allow_routing=True)
+            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True, allow_routing=True, light=True)
         finally:
             with self._lock:
                 self.routing.pop(chat_id, None)

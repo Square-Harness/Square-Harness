@@ -21,7 +21,7 @@ import unicodedata
 from .jsonutil import loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
-from .literature import bibliography_entry, bibliography_keys, cited_keys, cites_place
+from .literature import bibliography_entry, bibliography_keys, cited_keys, cites_place, has_place, place_number
 from .model_limits import is_ds4, substantive_output, workflow_budget
 from .research import ResearchRunner, remaining_limit, _working_reference_prompt
 from .reference_search import StandardReferenceSearch
@@ -47,17 +47,20 @@ def _unaccented(pattern):
     return ''.join(c for c in unicodedata.normalize('NFKD', pattern) if not unicodedata.combining(c))
 
 
-def precise_reference_request(text):
-    """Human-requested precision, never the assistant's stricter restatement."""
-    text = _fold(text)
-    # Explicitly declining precision must not opt into the expensive workflow.
-    # Remove only that clause, preserving later positive citation requests.
-    text = re.sub(_unaccented(
+def _accepted(text):
+    """The request without a clause that declines precision ("no need for the exact page"):
+    declining it must not opt into the expensive workflow. Later positive requests are kept."""
+    return re.sub(_unaccented(
         r"\b(?:without|no need|do not need|don't need|don’t need|sans|pas besoin de)\b"
         r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?]){0,70}"
         r"(?:exact|precise|précis\w*|precis\w*|theorem number|numéro)"
         r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?])*"),
-        '', text, flags=re.I)
+        '', _fold(text), flags=re.I)
+
+
+def precise_reference_request(text):
+    """Human-requested precision, never the assistant's stricter restatement."""
+    text = _accepted(text)
     return re.search(_unaccented(
         r'\b(?:exact|precise|précis\w*|precis\w*)\s+(?:(?:bibliographic|theorem|lemma)\s+)?'
         r'(?:reference|référence|citation|place|location|locator|chapter|chapitre|section|page|number|edition)\b'
@@ -69,7 +72,19 @@ def precise_reference_request(text):
         r'|\b(?:which|what|quel\w*)\b.{0,40}(?:chapter|chapitre|section|page|theorem number|numéro du théorème)'
         r'|\b(?:reference|citation|theoreme|lemme|proposition|section|page)\s+(?:(?:is|must be|should be|soit)\s+)?exact\w*\b'
         r'|\bnumero\s+(?:du|de la)\s+(?:theoreme|lemme|proposition|section|page)\b'
-        r'|\b(?:which|what|quelle|verify|check|confirm)\b.{0,25}\bedition\b'), text, re.I | re.S) is not None
+        r'|\b(?:which|what|quelle|verify|check|confirm)\b.{0,25}\bedition\b'
+        r'|\b(?:check|verify|confirm|look up|search)\b.{0,40}\bprecisely\b'
+        r'|\bnumbered\s+(?:theorem|lemma|proposition|corollary|result)'
+        r'|\bwhich\s+(?:theorem|lemma|proposition|corollary)\s+(?:of|in)\b'), text, re.I | re.S) is not None
+
+
+def statement_request(text):
+    """The human asks for the exact statement of a result, which only a read passage can give."""
+    return re.search(_unaccented(
+        r'\b(?:exact|precise|full|complete|precis\w*)\s+(?:\w+\s+)?(?:statement|form|formulation|wording)\b'
+        r'|\bwhat\s+(?:exactly\s+)?does\s+(?:it|the\s+\w+)\s+state\b'
+        r'|\bquote\b.{0,40}\bstatement\b'
+        r'|\benonce\s+(?:exact|precis|complet)'), _accepted(text), re.I | re.S) is not None
 
 
 def standalone_reference_request(text):
@@ -202,17 +217,20 @@ def _fold(text):
     return ''.join(c for c in text if not unicodedata.combining(c)).casefold()
 
 
-def _number(locator):
-    """The checkable part of a locator: '9.26' in 'Theorem 9.26'; single numbers are too common.
-    A theorem-like number wins over a section number in a locator naming both."""
-    text = str(locator or '')
-    named = re.findall(r'(?:theorem|thm|lemma|proposition|prop|corollary|cor|remark)\.?\s*(\d+(?:\.\d+)+[a-z]?)', text, re.I)
-    found = named or re.findall(r'\d+(?:\.\d+)+[a-z]?', text)
-    return found[0] if found else None
+_number = place_number  # 'Theorem 9.26' -> '9.26', 'Theorem A' -> 'A'; identifiers such as a Zbl number are no place
 
 
 def _has_number(text, number):
-    return bool(number) and re.search(r'(?<![\d.])' + re.escape(number) + r'(?![\d])', text or '') is not None
+    return bool(number) and has_place(text, number)
+
+
+def _identity(value):
+    """A record or document identifier without its prefix: an arXiv number without version, or a DOI."""
+    from urllib.parse import unquote
+    value = str(value or '').casefold()
+    value = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', value).removeprefix('doi:')
+    value = re.sub(r'^https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/', '', value).removeprefix('arxiv:')
+    return re.sub(r'v\d+$', '', value) if re.fullmatch(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', value) else unquote(value)
 
 
 def _surnames(authors):
@@ -297,6 +315,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None, **overrides):
         if lookup not in ('standard', 'precise'):
             raise ValueError('lookup must be standard or precise')
+        human = reference_context.get('query') if isinstance(reference_context, dict) else None
+        words = human if isinstance(human, str) and human.strip() else question
+        if lookup == 'standard' and asker is None and (precise_reference_request(words) or statement_request(words)):
+            # Precision is the human's request: the user's own words, never the Assistant's restatement
+            # of them. An exact statement can be given only from a passage read in a precise check.
+            lookup = 'precise'
         if effort not in EFFORTS:
             raise ValueError('Choose low, medium or high effort')
         level = EFFORTS[effort]
@@ -772,20 +796,38 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             metadata, _ = self.literature._document(document_id)
         except (ValueError, OSError, AttributeError):
             return False
-        def identity(value):
-            from urllib.parse import unquote
-            value = str(value or '').casefold()
-            value = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', value).removeprefix('doi:')
-            value = re.sub(r'^https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/', '', value).removeprefix('arxiv:')
-            return re.sub(r'v\d+$', '', value) if re.fullmatch(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', value) else unquote(value)
-        canonical = identity(metadata.get('canonical_identifier'))
-        identifiers = [identity((record or {}).get(k)) for k in ('identifier', 'doi', 'arxiv_id')]
+        canonical = _identity(metadata.get('canonical_identifier'))
+        identifiers = [_identity((record or {}).get(k)) for k in ('identifier', 'doi', 'arxiv_id')]
         if canonical and canonical in identifiers:
             return True
         words = lambda title: set(re.findall(r'[a-z0-9]+', _fold(title)))
         actual = words(metadata.get('title'))
         expected = words((record or {}).get('title') or candidate.get('title'))
         return len(expected) >= 3 and len(actual & expected) >= max(3, .8 * len(expected))
+
+    def _opened_work(self, candidate, evidence, claimed_record):
+        """The work's own text opened in this check stands for its record, so that a work that was read is
+        never "not found". The document is the work when its title matches the guess, or when the question
+        names it, the verifier gives it as the work's record and the titles share half their words."""
+        goal = _fold(self.state['goal'])
+        words = lambda title: set(re.findall(r'[a-z0-9]+', _fold(title)))
+        expected = words(candidate.get('title'))
+        for e in evidence:
+            if e['tool'] != 'open_paper':
+                continue
+            try:
+                doc = json.loads(e['result']).get('document_id')
+                metadata, _ = self.literature._document(doc)
+            except (ValueError, OSError, AttributeError, TypeError):
+                continue
+            canonical = _identity(metadata.get('canonical_identifier'))
+            named = (bool(canonical) and canonical == _identity(claimed_record) and canonical in goal
+                     and len(expected & words(metadata.get('title'))) >= .5 * len(expected) > 0)
+            if named or self._document_is_work(doc, candidate, None):
+                return {'identifier': metadata.get('canonical_identifier'), 'authors': [], 'year': None,
+                        'title': unicodedata.normalize('NFKC', str(metadata.get('title') or '')),
+                        'url': metadata.get('source_url'), 'opened_document': doc}
+        return None
 
     def _text(self, document_id, a, b):
         try:
@@ -803,7 +845,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         level = claimed.get('level') if claimed.get('level') in LEVELS else 'located'
         locator = str(claimed.get('locator') or '').strip() or c['locator']
         number = _number(locator)
-        record = self._record(c, evidence, str(claimed.get('record') or ''))
+        record = (self._record(c, evidence, str(claimed.get('record') or ''))
+                  or self._opened_work(c, evidence, str(claimed.get('record') or '')))
         reasons, quote, doc, span, url, entry = [], '', None, None, None, ''
 
         def read(doc_id, a, b):
@@ -950,7 +993,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         authors = record.get('authors') or candidate['authors']
         title = record.get('title') or candidate['title']
         year = str(record.get('year') or candidate['year'] or '')
-        if not authors or not title:
+        if not authors or not title or record.get('opened_document'):  # an opened paper gives no bibliographic record
             return ''
         key = re.sub(r'\W', '', _fold(_surnames(authors)[0] if _surnames(authors) else 'ref')) + year
         kind = 'book' if 'book' in _fold(record.get('type')) or _fold(record.get('type')) == 'monograph' else 'article' if 'article' in _fold(record.get('type')) else 'misc'
@@ -970,8 +1013,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if s['check'].get('lookup') == 'standard':
             return self._compose_standard()
         out = []
-        if not chosen:
+        if not chosen and s['candidates']:
             out.append('**No reference could be confirmed.** The guesses below were checked; treat them as leads only.')
+        elif not chosen:
+            out.append('**No reference could be confirmed.** No candidate work was recalled or found to check.')
         elif all(c['verdict']['level'] == 'located' for c in chosen):
             out += ['**No exact place was confirmed.** These work records were found; '
                     'the theorem or section is the model\'s guess.', '']

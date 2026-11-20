@@ -461,7 +461,8 @@ function WorkspacePanel({ about }: { about: boolean }) {
     : !installed ? (ollama ? 'Model is not installed' : 'Model is not served') : 'Model ready'
   const modelHint = !reachable ? (ollama ? 'Start ollama serve, then reload.' : 'Start the model server, then reload.')
     : ollama ? `Run ollama pull ${status.model}.` : `Serve ${status.model}, or restart with --model.`
-  const active = activeTasks(app.snapshot).length
+  // A conversation that is only answering (no specialist yet) holds no place.
+  const active = activeTasks(app.snapshot).filter((entry) => entry.task.slot !== false).length
   const queued = app.snapshot.queue.length
   return (
     <footer className="workspace">

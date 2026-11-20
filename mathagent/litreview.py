@@ -245,6 +245,12 @@ replacement a drop-in corrected phrase (keep the citation tokens and balanced ma
 when the passages cannot repair it.
 """
 
+RECHECK = """
+Some units carry the objection of a first comparison. Judge each of them afresh from the passages: the objection may
+be wrong. Mark the unit unfaithful only if the passages themselves show the defect, and propose a correction only
+when the passages state the corrected phrase.
+"""
+
 # Words of mathematical writing in general, in any field: a topic term made of them alone identifies nothing.
 GENERIC = {'operator', 'operators', 'equation', 'equations', 'heat', 'wave', 'waves', 'problem', 'problems', 'estimate',
            'estimates', 'inequality', 'inequalities', 'method', 'methods', 'analysis', 'space', 'spaces', 'function',
@@ -3762,14 +3768,23 @@ class ReviewRunner(ResearchRunner):
             pending = [j for j in sorted(located['support'])
                        if str(j) not in work['verified'] and work['unverified'].get(str(j), 0) < 2
                        and self._anchored(located['current'][j], located['support'][j], frame['spans'])]
-            groups += [(i, pending[a:a + VERIFY_UNITS], located) for a in range(0, len(pending), VERIFY_UNITS)]
+            # Sentences a first comparison disputed are re-checked in calls of their own.
+            disputed = work.get('disputed') or {}
+            for part in ([j for j in pending if str(j) not in disputed], [j for j in pending if str(j) in disputed]):
+                groups += [(i, part[a:a + VERIFY_UNITS], located) for a in range(0, len(part), VERIFY_UNITS)]
         cap = self._wave_cap(600 + 320 * VERIFY_UNITS, len(groups))
         return [(('verify', i, tuple(batch)), lambda i=i, batch=batch, located=located: self._verify(i, batch, frames[i], located, cap))
                 for i, batch, located in groups]
 
     def _verify(self, i, batch, frame, located, cap):
-        """Compare located sentences with the whole passages their anchors come from."""
+        """Compare located sentences with the whole passages their anchors come from.
+
+        The locating referee anchored each sentence to exact passages, so one comparison that finds it
+        unfaithful is a disagreement between two calls: the sentence is compared once more, in a call of
+        its own that sees the objection, and the objection stands only if that call also finds it."""
         current, support = located['current'], located['support']
+        disputed = self._check_work(i).setdefault('disputed', {})
+        objections = {j: disputed[str(j)] for j in batch if str(j) in disputed}
         passages, lines = {}, []
         for j in batch:
             named, earlier = [], []
@@ -3783,22 +3798,31 @@ class ReviewRunner(ResearchRunner):
                         passages.setdefault(n, {})[tag] = body
                         named.append(f'[@{n}] {tag}')
                 earlier += [d for d in anchor.get('depends_on', []) if d not in batch and current.get(d)]
+            objection = objections.get(j)
             lines.append(f'UNIT {j} (support named: {"; ".join(dict.fromkeys(named))}): {current[j]}'
-                         + ''.join(f'\n  It relies on the earlier sentence: {current[d]}' for d in dict.fromkeys(earlier)))
+                         + ''.join(f'\n  It relies on the earlier sentence: {current[d]}' for d in dict.fromkeys(earlier))
+                         + (f'\n  A first comparison objected: {objection["problem"]}' if objection else '')
+                         + (f' It proposed replacing "{objection["quote"]}" by "{objection["replacement"]}".'
+                            if objection and objection['quote'] and objection['replacement'] else ''))
         evidence = '\n\n'.join(f'[@{n}] {self._card_header(n)}\n' + '\n'.join(f'{tag}: {body}' for tag, body in blocks.items())
                                 for n, blocks in passages.items())
-        prompt = VERIFY + '\nSOURCE PASSAGES\n' + evidence + '\n\nUNITS\n' + '\n\n'.join(lines)
+        prompt = (VERIFY + (RECHECK if objections else '') + '\nSOURCE PASSAGES\n' + evidence
+                  + '\n\nUNITS\n' + '\n\n'.join(lines))
         answer = self._referee('verify', prompt, cap=cap, schema=_verify_schema(len(batch)), units=[f'{i}:{j}' for j in batch])
         work = self._check_work(i)
         with self._mutex:
             for item in _items(answer.get('checks')):
                 j = _int(item.get('unit'))
                 if j in batch and type(item.get('faithful')) is bool and str(j) not in work['verified']:
-                    work['verified'][str(j)] = {
+                    verdict = {
                         'faithful': item['faithful'], 'problem': ' '.join(str(item.get('problem') or '').split())[:240],
                         'quote': str(item.get('quote') or '').strip(), 'replacement': str(item.get('replacement') or '').strip()}
+                    if verdict['faithful'] or j in objections:
+                        work['verified'][str(j)] = verdict
+                    else:
+                        disputed[str(j)] = verdict
             for j in batch:
-                if str(j) not in work['verified']:
+                if str(j) not in work['verified'] and (j in objections or str(j) not in disputed):
                     work['unverified'][str(j)] = work['unverified'].get(str(j), 0) + 1
 
     def _settle_check(self, i, frame):
@@ -4406,7 +4430,12 @@ class ReviewRunner(ResearchRunner):
         for k, quotes in withheld.items():
             pieces[k] = self._independent_sentences(pieces[k], quotes) if support is None else ''
         if support is not None:
-            follows = follows or {}
+            follows = {j: list(listed) for j, listed in (follows or {}).items()}
+            # A definition that anchored sentences depend on prepares them, whatever units its own verdict listed.
+            for j, anchors in sorted(support.items()):
+                for d in {d for anchor in anchors.values() for d in anchor.get('depends_on', [])}:
+                    if d in follows and j not in follows[d]:
+                        follows[d].append(j)
             visible, claims, connecting, settings, needs = set(), set(), set(), set(), {}
             lost_premise = False
 

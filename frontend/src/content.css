@@ -371,7 +371,18 @@
   .composer-bar > .composer-budget { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 @media (hover: none) { .composer-hint { display: none; } }
-@media (max-width: 760px) { .composer { padding-left: 12px; padding-right: 12px; } }
+@media (max-width: 760px) {
+  .composer { padding-left: 12px; padding-right: 12px; padding-top: 8px; }
+  /* On a phone the folder, project, notes and attach controls share one scrolling row of
+     compact chips, so the conversation keeps most of the screen. */
+  .composer .composer-top { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; overflow-x: auto; scrollbar-width: none; }
+  .composer .composer-top::-webkit-scrollbar { display: none; }
+  .composer .composer-top > *, .composer-top .project-selector { flex: none; }
+  .composer-top .project-selector { display: flex; gap: 6px; align-items: center; }
+  .composer-chip-label, .composer-long-label { display: none; }
+  .composer-chip select { max-width: 132px; }
+  .composer-bar { margin-top: 4px; }
+}
 
 /* Pairing */
 .login-card {

@@ -226,11 +226,30 @@ def kept(record):
     return out
 
 
+def _finding(record):
+    """What a run found: its returned result, else the last printed lines (a conclusion is usually
+    printed last; the first line is often a timing or a header)."""
+    result = record.get('result')
+    if result not in (None, '', {}, []):
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        return ' '.join(text.split())[:500]
+    lines = [line.strip() for line in (record.get('stdout') or '').splitlines() if line.strip()]
+    return ' · '.join(lines[-3:])[-500:]
+
+
+# A run that did not finish is never listed as a result: what it printed is output before it stopped.
+_STOPPED = {'timeout': 'stopped at the time limit'}
+FAILED_RUNS = ('failed run', *_STOPPED.values())  # the index statuses of runs that did not finish
+
+
 def export_evidence(record):
     status = record.get('status') or 'unknown'
-    text = record.get('stdout') or str(record.get('result') or '')
-    return [{'kind': 'experiment', 'mode': 'numerics', 'status': 'ran' if status == 'ok' else status,
-             'text': record.get('purpose') or '', 'summary': ' '.join(text.splitlines()[:1])[:500],
+    summary = _finding(record)
+    if status != 'ok' and summary:
+        summary = 'Printed before it stopped: ' + summary
+    return [{'kind': 'experiment', 'mode': 'numerics',
+             'status': 'ran' if status == 'ok' else _STOPPED.get(status, FAILED_RUNS[0]),
+             'text': record.get('purpose') or '', 'summary': summary,
              'qualifiers': ['bounded record'] if record.get('truncated') else [],
              'evidence': {'sha256': hashlib.sha256(_encode(kept(record))).hexdigest(),
                           'artifacts': record.get('artifacts', [])}}]

@@ -22,7 +22,7 @@ from .litreview import ReviewRunner, review_outcome
 from .mode_calls import USER_MODES, routed_python_task
 from .model_limits import input_limit as model_input_limit, output_limit, is_ds4
 from .numerics import SandboxUnavailable
-from .orchestrator import CUT_MARK, FINAL_PREDICT
+from .orchestrator import CUT_MARK, FINAL_PREDICT, PROOF_OUTCOMES
 from .proof import ProofRunner
 from .refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from .research import _read_state, _job_directory
@@ -32,6 +32,8 @@ from .worker_errors import WorkerInputError
 from .writeup import WriteupRunner
 
 USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
+# Characters of output shown for each sandbox run that did not finish (timeout, error, memory).
+FAILED_RUN_OUTPUT = 1000
 
 REPAIR_REQUEST = re.compile(r"\A(?=.{0,300}\Z)(?=.*\b(?:fix|repair|correct|corrige[rz]?|r[ée]pare[rz]?)\b)"
                             r"(?!.*\b(?:proof|preuve|d[ée]monstration|lemma|lemme|theorem|th[ée]or[èe]me|argument)\b)",
@@ -91,7 +93,9 @@ def _save_answer(root, chat_id, child, result, agent, ident):
                   status=result['status'], answer=result['answer'], answer_sha256=hashlib.sha256(result['answer'].encode()).hexdigest(),
                   created=_now(), warnings=result.get('warnings', []),
                   experiments=list(dict.fromkeys(experiments)), checks=checks, trail=trail,
-                  result_fields={k: result[k] for k in ('source_excerpt', 'shown_files', 'recorded_measurements') if k in result})
+                  launch_project=(child['context'].get('project_snapshot') or {}).get('id'),
+                  result_fields={k: result[k] for k in ('source_excerpt', 'shown_files', 'recorded_measurements', 'experiments')
+                                 if k in result})
     data = _bytes(json.dumps(record, ensure_ascii=False, allow_nan=False))
     _atomic_write(_answer_path(root, chat_id, ident, create=True), data)
 
@@ -123,19 +127,40 @@ def _whole_documents(packet):
     return packet.startswith('SOURCE TEXT')
 
 
-def _sandbox_observations(session, child, room):
-    """This worker's own durable, successful experiments, within ``room`` characters shared equally.
+def _sandbox_succeeded(session, child):
+    """Whether one of this worker's durable experiments finished with status ok."""
+    return any(session.store.load(ident)['status'] == 'ok' for ident in child.get('experiment_ids', []))
 
-    Nothing is cut silently: a longer result or output ends with the call that reads the rest.
+
+def _sandbox_observations(session, child, room):
+    """This worker's own durable experiments, within ``room`` characters.
+
+    A run that did not finish (timeout, error, memory) is listed with its status, its error
+    and at most ``FAILED_RUN_OUTPUT`` characters of what it printed before it stopped:
+    a stopped run is an observation too, never a run that did not happen. Successful
+    runs share the rest equally. Nothing is cut silently: a longer result or output
+    ends with the call that reads the rest.
     """
-    records = [record for record in map(session.store.load, child.get('experiment_ids', [])) if record['status'] == 'ok']
+    records = list(map(session.store.load, child.get('experiment_ids', [])))
+    if not records:
+        return ''
+    failed = [record for record in records if record['status'] != 'ok']
+    failed_share = min(FAILED_RUN_OUTPUT, room // len(records))
+    ok_share = (room - failed_share * len(failed)) // max(1, len(records) - len(failed))
     observations = []
     for record in records:
-        left = room // len(records)
-        lines = [f"Recorded Python experiment {record['id']}: {record.get('purpose') or 'calculation'}"]
+        left = ok_share if record['status'] == 'ok' else failed_share
+        # The run is named by its purpose; its identifier is the argument of read_experiment.
+        lines = [f"Python run: {record.get('purpose') or 'calculation'} (experiment_id for read_experiment: {record['id']})"]
+        if record['status'] != 'ok':
+            error = record.get('error') if isinstance(record.get('error'), dict) else {}
+            reason = ': '.join(str(part) for part in (error.get('type'), error.get('message') or record.get('message')) if part)
+            lines.append(f"Status: {record['status']}" + (f' ({reason})' if reason else '') +
+                         '. This run did not finish: it ran, and its output is only what it printed before it stopped.')
         for label, part, value in (('Result', 'result', json.dumps(record['result'], ensure_ascii=False)
                                     if record.get('result') is not None else ''),
-                                   ('Output', 'stdout', record.get('stdout') or '')):
+                                   ('Output' if record['status'] == 'ok' else 'Output before the stop', 'stdout',
+                                    record.get('stdout') or '')):
             if value:
                 shown = _shown(value, left, record['id'], part)
                 left = max(0, left - len(shown))
@@ -481,17 +506,22 @@ def run_worker(host, parent, budget, action, child, save):
                         clean['earlier_user_questions_in_project'] = questions
                 passages = (briefs.primary_sources(local_view, [*deps, *briefs.named_entries(local_view, action['request'])])
                             if scoped is not None else [])
-                result = runner.start(native_request, job_id=native,
+                result = runner.start(native_request, job_id=native, statement=child.get('proof_statement'),
                     reference_context=context if clean is None else clean, verifier_reference=clean,
                     solver_leads=child.get('brief'), source_passages=passages, source_files=files, max_rounds=level['tries'],
                     max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
                     verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
                     verify_temperature=host.args.proof_verify_temperature)
-            outcome = {'candidate_complete': 'The verifier found no issue in the response; read it to distinguish a proof from a counterexample.', 'uncertain': 'The model review is uncertain.',
-                       'review_unavailable': 'Review unavailable; the candidate is preserved.'}.get(result['status'], result['stop_reason'] or result['status'])
+            # The direction of a no-issue review (proved or refuted) words the card and the parent's result.
+            claim = result.get('claim_outcome') or 'unclassified'
+            reviewed = PROOF_OUTCOMES.get(claim) if result['status'] == 'candidate_complete' else None
+            outcome = (reviewed + '.' if reviewed else
+                       {'candidate_complete': 'The verifier found no issue in the response; read it to distinguish a proof from a counterexample.', 'uncertain': 'The model review is uncertain.',
+                        'review_unavailable': 'Review unavailable; the candidate is preserved.'}.get(result['status'], result['stop_reason'] or result['status']))
             result = {'status': result['status'], 'answer': result['answer'], 'job_id': result['id'],
-                      'review_status': result.get('selected_review_status'),
-                      'outcome': result.get('outcome', 'unclassified'), 'warnings': [result['stop_reason']],
+                      'review_status': result.get('selected_review_status'), 'outcome': claim,
+                      'warnings': [reviewed + ': the model verifier found no issue. This does not certify the requested claim.'
+                                   if reviewed else result['stop_reason']],
                       'artifact': str(Path(result['proof_path']).relative_to(root))}
         elif mode == 'check':
             # A quick verified lookup: its own small budgets (refcheck.EFFORTS), capped by
@@ -657,7 +687,7 @@ def run_worker(host, parent, budget, action, child, save):
                 answer = agent.run(goal, emit, fresh=True, recover_empty_tool_answer=True)
             except (AgentError, OSError, ValueError) as exc:
                 if (mode not in USER_MODES or not child.get('experiment_ids')
-                        or not _sandbox_observations(agent.workspace.numerics, child, room)):
+                        or not _sandbox_succeeded(agent.workspace.numerics, child)):
                     raise
                 # Execution and its interpretation are separate outcomes.
                 answer = ''
@@ -671,22 +701,33 @@ def run_worker(host, parent, budget, action, child, save):
                           narration_error or agent.last_stop_reason or 'The worker answer is incomplete.']}
             unanswered = not complete and not answer.strip()
             if mode in USER_MODES and (numerical_assignment or child.get('experiment_ids')):
+                # Every run is reported, a stopped one with its status: the parent must not say it never ran.
                 observations = _sandbox_observations(agent.workspace.numerics, child, room)
-                if numerical_assignment and not observations:
+                succeeded = _sandbox_succeeded(agent.workspace.numerics, child)
+                result['experiments'] = list(child.get('experiment_ids', []))
+                if numerical_assignment and not succeeded:
                     complete, unanswered = False, True
-                    result.update(status='incomplete', answer='The simulation produced no successful sandbox run.',
+                    result.update(status='incomplete', answer='The simulation produced no successful sandbox run.' + (
+                                      '\n\n' + observations if observations else ''),
                                   warnings=[*result['warnings'], 'No successful numerical experiment was recorded.'])
                 elif observations and not complete:
                     unanswered = False
-                    result.update(status='partial', answer=observations + '\n\nThe numerical output was saved. '
-                                  'The worker did not finish interpreting it.' + (
+                    result.update(status='partial' if succeeded else 'incomplete', answer=observations + '\n\n' + (
+                                      'The numerical output was saved; its interpretation was not completed.' if succeeded
+                                      else 'No run finished; the interpretation was not completed.') + (
                                       '\n\nIts unfinished interpretation:\n' + answer if answer.strip() else ''))
-                else:
-                    result['experiments'] = list(child['experiment_ids'])
-                    if numerical_assignment and observations:
-                        # The answer is the worker's interpretation. The measurements are what
-                        # its runs printed, kept apart so the parent can tell the two.
-                        result['recorded_measurements'] = observations
+                elif numerical_assignment:
+                    # The answer is the worker's interpretation. The measurements are what
+                    # its runs printed, kept apart so the parent can tell the two.
+                    result['recorded_measurements'] = observations
+            elif (mode == 'explore' and not complete and child.get('experiment_ids')
+                  and agent.workspace.numerics is not None):
+                # An unfinished exploration (for example one that only announced more work) stays
+                # incomplete, and keeps what its sandbox runs printed.
+                unanswered = False
+                result['experiments'] = list(child['experiment_ids'])
+                result['answer'] = ((answer.rstrip() + '\n\n' if answer.strip() else '') + 'Its sandbox runs:\n\n'
+                                    + _sandbox_observations(agent.workspace.numerics, child, room))
             if unanswered:
                 result['job_id'] = None  # no answer is saved under that identifier
             if agent.workspace.numerics is not None and agent.workspace.numerics.runs:
@@ -750,14 +791,29 @@ def run_worker(host, parent, budget, action, child, save):
                 'job_id': child.get('job_id')}
 
 
+def _passed_over(runs, answer):
+    """The runs a finished answer passes over: it names a later run of its own (by its identifier or the
+    identifier's final hexadecimal part) but not these, like a first run it reports as wrongly scaled."""
+    def named(run):
+        return run in answer or re.search(r'(?<![0-9a-f])' + run[-6:] + r'(?![0-9a-f])', answer)
+    runs = sorted(runs)  # an identifier starts with its creation time
+    last = max((i for i, run in enumerate(runs) if named(run)), default=0)
+    return [run for run in runs[:last] if not named(run)]
+
+
 def export_answer_evidence(state):
     """The small worker's output remains a model-written lead, including after a successful run."""
     from .numerics.artifacts import EXPERIMENT_ID
     links = [('checks', k) for k in state.get('checks', []) if isinstance(k, str) and _ID.fullmatch(k)]
-    links += [('experiments', k) for k in state.get('experiments', []) if isinstance(k, str) and EXPERIMENT_ID.fullmatch(k)]
-    qualifiers = ['unfinished'] if state.get('status') not in ('complete', 'done', 'completed') else []
+    runs = [k for k in state.get('experiments', []) if isinstance(k, str) and EXPERIMENT_ID.fullmatch(k)]
+    links += [('experiments', k) for k in runs]
+    finished = state.get('status') in ('complete', 'done', 'completed')
+    qualifiers = [] if finished else ['unfinished']
     text = ' '.join(state['answer'].split())
     excerpt = text if len(text) <= 220 else text[:219] + '…'
+    evidence = {'sha256': hashlib.sha256(state['answer'].encode()).hexdigest()}
+    passed_over = _passed_over(runs, state['answer']) if finished else []
+    if passed_over:
+        evidence['superseded_runs'] = passed_over
     return {'kind': 'lead', 'mode': state['mode'], 'text': state['request'], 'status': 'lead (model-written)',
-            'qualifiers': qualifiers, 'summary': excerpt,
-            'evidence': {'sha256': hashlib.sha256(state['answer'].encode()).hexdigest()}, 'links': links}
+            'qualifiers': qualifiers, 'summary': excerpt, 'evidence': evidence, 'links': links}

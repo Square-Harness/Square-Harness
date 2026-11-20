@@ -1055,6 +1055,16 @@ class Handler(BaseHTTPRequestHandler):
     def _raw_body(self):
         length = self.headers.get('Content-Length', '')
         if not length.isdigit() or int(length) > store.UPLOAD_BYTES:
+            # Read a moderately oversized body before refusing it, so the client receives the
+            # message instead of a broken connection; a much larger one is not read at all.
+            if length.isdigit() and int(length) <= 4 * store.UPLOAD_BYTES:
+                remaining = int(length)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                self.body_read = True
             raise ValueError('Files are limited to 20 MB')
         data = self.rfile.read(int(length))
         self.body_read = True

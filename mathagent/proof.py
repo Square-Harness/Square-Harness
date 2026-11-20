@@ -202,9 +202,13 @@ class ProofRunner:
     def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
               min_solve_tokens=None, verify_temperature=None, repair_tokens=None, reference_context=None,
-              initial_min_solve_tokens=None, solver_leads=None, verifier_reference=None, source_passages=(), job_id=None):
-        if not isinstance(goal, str) or not goal.strip() or len(goal) > 60000:
-            raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
+              initial_min_solve_tokens=None, solver_leads=None, verifier_reference=None, source_passages=(), job_id=None,
+              statement=None):
+        """``goal`` is the task as the user reads it; ``statement``, when given, is the fuller text the solver
+        receives (and the reviewer reads as the solver's task) in its place."""
+        for text in (goal, statement if statement is not None else goal):
+            if not isinstance(text, str) or not text.strip() or len(text) > 60000:
+                raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
         for name, value, lower, upper in (
             ('max_rounds', max_rounds, 1, 100),
             ('max_predict', max_predict, 128, 1000000), ('verify_tokens', verify_tokens, 128, 1000000),
@@ -281,8 +285,11 @@ class ProofRunner:
             settings['verifier_reference'] = copy.deepcopy(verifier_reference)
         if solver_leads and solver_leads.get('text'):
             settings['solver_leads'] = copy.deepcopy(solver_leads)
+        if statement is not None and statement != goal:
+            settings['statement'] = statement
+        task = settings.get('statement', goal)
         if verifier_reference is not None or any(src.get('document_id') for src in sources):
-            self._fits('The first solve', initial_request(goal, sources), reference_context, max_predict,
+            self._fits('The first solve', initial_request(task, sources), reference_context, max_predict,
                        initial_min_solve_tokens, settings, sources)
             # The verifier must be able to read the candidate as well as generate a
             # review. Share the remaining window in the requested solve/review ratio,
@@ -293,7 +300,7 @@ class ProofRunner:
             floor = max(initial_min_solve_tokens, min_solve_tokens)
             combined = candidate + review
             required = combined if settings['full_output_ceiling'] else floor + 128
-            room = self._fits('The whole-candidate review', review_request(goal, sources, ''),
+            room = self._fits('The whole-candidate review', review_request(task, sources, ''),
                               reference_context if verifier_reference is None else verifier_reference,
                               verify_tokens, 128, settings, sources, VERIFIER_SCHEMA, window_floor=required)
             if room < combined:
@@ -566,6 +573,15 @@ class ProofRunner:
     def _initial_messages(self, goal, sources):
         return self._reference_messages(initial_request(goal, sources))
 
+    def _statement(self):
+        """The task the solver receives: the goal, or the fuller statement a job was started with."""
+        return self.state['settings'].get('statement', self.state['goal'])
+
+    def _leads(self, pending):
+        """The solver's prior research leads, unless this attempt left them out for room."""
+        leads = self.state['settings'].get('solver_leads', {}).get('text')
+        return leads if leads and not pending.get('solver_leads_omitted') else ''
+
     def _repair_history(self, review):
         """Bound earlier allegations without inventing resolution or replaying reasoning."""
         earlier = self.state['reviews'][:self.state['reviews'].index(review)]
@@ -589,11 +605,11 @@ class ProofRunner:
         return json.dumps(records, ensure_ascii=False) if records else ''
 
     def _solve_messages(self, pending):
-        goal, sources = self.state['goal'], self.state['sources']
+        goal, sources = self._statement(), self.state['sources']
         pending['repair_history_chars'] = 0
         messages = self._initial_messages(goal, sources)
-        leads = self.state['settings'].get('solver_leads', {}).get('text')
-        if leads and not pending.get('solver_leads_omitted') and pending['kind'] in ('initial', 'retry', 'repair'):
+        leads = self._leads(pending)
+        if leads and pending['kind'] in ('initial', 'retry', 'repair'):
             messages[0]['content'] += '\n\n' + leads
         if pending['kind'] in {'initial', 'retry'}:
             return messages
@@ -615,10 +631,11 @@ class ProofRunner:
         """Continue from the written text and as much of the latest notes as fits.
 
         Only the solver's own saved notes may be excerpted, with an explicit
-        marker. If even the written text leaves too little output room, a fresh
-        solve of the original problem replaces the continuation.
+        marker. The prior research leads come too when the whole notes fit beside
+        them; they never displace notes. If even the written text leaves too little
+        output room, a fresh solve of the original problem replaces the continuation.
         """
-        goal, sources = self.state['goal'], self.state['sources']
+        goal, sources = self._statement(), self.state['sources']
         previous_call = self._find_call(prior['call'])
         previous_result = self._read_stream(previous_call['stream'])
         notes = previous_result['thinking']
@@ -633,13 +650,21 @@ class ProofRunner:
         if type(observed_context) is int and observed_context > 0:
             ctx = min(ctx, observed_context)
 
-        def build(tail):
+        def build(tail, leads=''):
             header = ('SAVED WORKING NOTES:\n' if len(tail) == len(notes) else
                       f'SAVED WORKING NOTES — final excerpt, earlier notes omitted ({len(tail)} of {len(notes)} characters):\n')
             messages = self._initial_messages(goal, sources)
-            messages[0]['content'] += '\n\n' + CONTINUE_POLICY + '\n\nSAVED WRITTEN TEXT:\n' + text + '\n\n' + header + tail
+            messages[0]['content'] += (('\n\n' + leads if leads else '') + '\n\n' + CONTINUE_POLICY
+                                       + '\n\nSAVED WRITTEN TEXT:\n' + text + '\n\n' + header + tail)
             return messages
 
+        leads = self._leads(pending)
+        if leads:
+            messages = build(notes, leads)
+            if self._count(messages, floor) + floor + CONTEXT_MARGIN <= ctx:
+                pending.update(notes_chars_kept=len(notes), notes_chars_total=len(notes))
+                return messages
+            self.emit('notice', 'Earlier research leads omitted to keep the saved notes and solver output allowance')
         room = ctx - CONTEXT_MARGIN - floor - self._count(build(''), floor)
         if room >= 0:
             keep = min(len(notes), int(room * 2.5))
@@ -668,7 +693,7 @@ class ProofRunner:
         pending.update(kind='retry', continuation_fallback='fresh_solve',
                        notes_chars_kept=0, notes_chars_total=len(notes))
         self.emit('notice', 'Saved work does not fit a useful continuation; solving the original problem afresh')
-        return self._initial_messages(goal, sources)
+        return self._solve_messages(pending)
 
     def _candidate(self, result, pending):
         # A completed solver call can be recovered without dispatching it again.
@@ -704,7 +729,7 @@ class ProofRunner:
 
     def _review(self, pending):
         candidate = self._get_candidate(pending['candidate'])
-        messages = self._reference_messages(review_request(self.state['goal'], self.state['sources'], self._candidate_text(candidate)), reviewer=True)
+        messages = self._reference_messages(review_request(self._statement(), self.state['sources'], self._candidate_text(candidate)), reviewer=True)
         if pending.get('protocol_error'):
             messages[0]['content'] += ('\n\nYour previous review could not be interpreted: ' + pending['protocol_error'] +
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
@@ -1023,7 +1048,7 @@ class ProofRunner:
                       f'Original policy SHA-256 `{migration["original_policy_sha256"]}`; '
                       f'new policy SHA-256 `{migration["policy_sha256"]}`. '
                       'Earlier calls remain unchanged; saved allowances were not increased.', '']
-        lines += ['## Original problem', '', self.state['goal'], '', '## Candidates', '']
+        lines += ['## Original problem', '', request_text(self.state), '', '## Candidates', '']
         for candidate in self.state['candidates']:
             marker = ' (selected)' if candidate['id'] == selected_id else ''
             lines.append(f'- [{candidate["id"]}](artifacts/{candidate["artifact"]}){marker}: '
@@ -1059,30 +1084,56 @@ class ProofRunner:
                 'directory': str(self.store.directory), 'report_path': str(self.store.directory / 'report.md'),
                 'proof_path': str(self.store.directory / 'proof.md'), 'answer': answer, 'report': report,
                 'selected_review_status': selected['review_status'] if selected else 'unreviewed',
-                'claim_outcome': 'unclassified',
+                'claim_outcome': (_direction(selected, _own_review(self.state, selected)) if selected else None) or 'unclassified',
                 'initial_candidate': copy.deepcopy(initial), 'selected_candidate': copy.deepcopy(selected),
                 'tokens_charged': self.state['tokens_charged'], 'seconds_used': self.state['seconds_used'],
                 'rounds_started': self.state['rounds_started']}
 
 
+def _own_review(state, candidate):
+    """The latest valid review of exactly this candidate text, or an empty mapping."""
+    return next((r.get('response') for r in reversed(state['reviews'])
+                 if r.get('candidate') == candidate['id'] and r.get('candidate_sha256') == candidate['sha256']
+                 and isinstance(r.get('response'), dict) and not r.get('protocol_error')), {})
+
+
+def _direction(candidate, review):
+    """proved or refuted when the candidate passed its own whole-task review; otherwise None."""
+    if candidate.get('review_status') == 'no_issue_found' and review.get('verdict') == 'no_issue_found':
+        direction = review.get('task_status')
+        return direction if direction in ('proved', 'refuted') else None
+    return None
+
+
+# Proofs started without a prepared task before the solver's note was kept apart opened their goal with it.
+LEGACY_HANDOFF = 'You are the Proof child. Prove the exact original user request'
+
+
+def request_text(state):
+    """The task as the user reads it: the goal, or the user's request for such a saved handoff Proof."""
+    goal = state.get('goal', '')
+    query = ((state.get('settings') or {}).get('reference_context') or {}).get('query')
+    if goal.startswith(LEGACY_HANDOFF) and isinstance(query, str) and query.strip():
+        return query
+    return goal
+
+
 def export_evidence(state):
     """Export only the selected candidate and its own hash-matched whole-task review."""
     qualifiers = [] if state.get('status') in TERMINAL else ['unfinished']
-    row = {'mode': 'prove', 'kind': 'proof', 'qualifiers': qualifiers, 'status': 'no candidate'}
+    row = {'mode': 'prove', 'kind': 'proof', 'qualifiers': qualifiers, 'status': 'no candidate', 'text': request_text(state)}
     if state.get('version') == 1:
         return [{**row, 'status': 'legacy proof, not classified', 'qualifiers': ['legacy format', *qualifiers]}]
     candidate = next((c for c in state['candidates'] if c['id'] == state.get('selected_candidate')), None)
     if not candidate:
         return [row]
     row['evidence'] = {'artifact': candidate['artifact'], 'sha256': candidate['sha256']}
-    review = next((r.get('response') for r in reversed(state['reviews'])
-                   if r.get('candidate') == candidate['id'] and r.get('candidate_sha256') == candidate['sha256']
-                   and isinstance(r.get('response'), dict) and not r.get('protocol_error')), {})
+    review = _own_review(state, candidate)
     verdict = candidate.get('review_status')
     row['status'] = {'issues_found': 'objections found', 'uncertain': 'review uncertain'}.get(verdict, 'not reviewed')
     if verdict == 'no_issue_found' and review.get('verdict') == verdict:
-        direction = review.get('task_status')
-        if direction in ('proved', 'refuted'):
+        direction = _direction(candidate, review)
+        if direction:
             row['direction'] = direction
             row['status'] = 'model-reviewed proof' if direction == 'proved' else 'model-reviewed refutation'
         elif 'task_status' not in review:

@@ -197,6 +197,39 @@ def _same_work(reference, entry):
             and len(title_words) >= 1 and len(title_words & cited) >= max(1, (2 * len(title_words) + 2) // 3))
 
 
+def _numbered_comment(report, excerpt):
+    """(section, number) of the report's numbered comment that contains this excerpt, or None. A comment runs
+    from its "N. " line through the indented paragraphs that follow it."""
+    wanted = ' '.join(excerpt.split())
+    if not wanted:
+        return None
+    section, comments, current = '', [], None
+    for line in report.split('\n'):
+        number = re.match(r'(\d+)\. ', line)
+        if line.startswith('## '):
+            section, current = line[3:].strip(), None
+        elif number:
+            current = [section, int(number[1]), line]
+            comments.append(current)
+        elif current is not None and (line.startswith('   ') or not line.strip()):
+            current[2] += ' ' + line
+        else:
+            current = None
+    return next(((section, n) for section, n, text in comments if wanted in ' '.join(text.split())), None)
+
+
+def _shown_report(report):
+    """report.md as the conversation and the terminal show it: without its status line (job id, phase, effort)
+    and its usage and storage footer, which stay in report.md for the job page."""
+    lines = report.split('\n')
+    if len(lines) > 5 and lines[4].startswith('Status: `') and not lines[5].strip():
+        del lines[4:6]
+    if '## Usage' in lines:
+        del lines[len(lines) - 1 - lines[::-1].index('## Usage'):]
+    text = '\n'.join(lines).rstrip()
+    return text[:-len('---')].rstrip() if text.endswith('\n---') else text
+
+
 def _fold_text(text):
     import unicodedata
     return ''.join(c for c in unicodedata.normalize('NFKD', str(text).lower()) if not unicodedata.combining(c))
@@ -497,8 +530,12 @@ class ReviewBase(ResearchRunner):
             return result
 
     @retry_generation_call
-    def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None):
-        """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact."""
+    def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None,
+             reference=True):
+        """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact.
+
+        reference=False leaves out the delegation context: a call that does not read the manuscript (the
+        novelty comparison) would otherwise be told to referee a manuscript it is not shown."""
         with self._mutex:
             self._check_time()
             settings = self.state['settings']
@@ -514,7 +551,7 @@ class ReviewBase(ResearchRunner):
             if schema:
                 payload['format'] = schema
             payload['messages'] = [{'role': 'system', 'content': self.POLICY + '\n' + self.state['skill']},
-                                   {'role': 'user', 'content': prompt + self._reference_material()}]
+                                   {'role': 'user', 'content': prompt + (self._reference_material() if reference else '')}]
             try:
                 payload, allocation = allocate_call(self.agent.client, payload, cap,
                     minimum=minimum_output or min(512, cap), explicit_cap=getattr(self.agent, 'document_output_cap', None))
@@ -1212,6 +1249,11 @@ class ReviewBase(ResearchRunner):
         except Exception as exc:  # a report must always be written, even after an error
             body, appendix = [f'*The report could not be assembled: {type(exc).__name__}: {exc}*'], []
         self._write_report(body, appendix)
+
+    def _result(self):
+        result = super()._result()
+        result['report'] = _shown_report(result['report'])
+        return result
 
     def _finish(self):
         body, appendix = self._render()
@@ -2214,7 +2256,8 @@ class JournalRunner(ReviewBase):
         prompt = (P.NOVELTY_POLICY + '\n\nFIELD: ' + scope.get('field', '') + '\nCLAIMED CONTRIBUTION: ' + scope.get('contribution', '')
                   + '\n\nSEARCH RESULTS:\n' + listing)
         with self._timeout():
-            result = self._ask('novelty', prompt, cap=self._analysis_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty')
+            result = self._ask('novelty', prompt, cap=self._analysis_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty',
+                               reference=False)
         value = result['value'] or {}
         related = [{'n': _int(r.get('n')), 'relation': str(r.get('relation') or '')[:300]} for r in value.get('related') or []
                    if isinstance(r, dict) and 1 <= _int(r.get('n')) <= len(results)]
@@ -2676,10 +2719,13 @@ class SummaryReviewRunner(JournalRunner):
         source = s['sources'][0]
         body = ['## Response to the previous review', '',
                 'This follow-up addresses understanding and presentation. The proofs were not checked.', '',
-                f'Manuscript: `{source["path"]}` (the saved version used for the previous review).', '']
+                f'Manuscript: {Path(source["path"]).name} (the saved version used for the previous review).', '']
         decisions = {'maintain': 'Maintained', 'revise': 'Revised', 'withdraw': 'Withdrawn', 'unresolved': 'Unresolved'}
         for n, row in enumerate(s.get('followup_responses', []), 1):
-            body += [f'### Point {n}: {decisions[row["decision"]]}', '',
+            # The previous report's own numbering, so a disputed comment keeps the number the user read.
+            found = _numbered_comment(s['review_reference']['report'], row['prior_comment'])
+            title = f'Comment {found[1]} ({found[0]})' if found else f'Point {n}'
+            body += [f'### {title}: {decisions[row["decision"]]}', '',
                      '> ' + row['prior_comment'].replace('\n', '\n> '), '', row['answer'], '']
             if row['located']:
                 body += [self._loc(source['id'], row['start_line'], row['end_line']) + ' “' + row['quote'] + '”', '']

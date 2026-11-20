@@ -83,6 +83,11 @@ class Ollama:
 
 ANSWER_NOW = ('You reached your output limit before giving an answer. Write your final answer now, from your '
               'reasoning so far: what you established, what remains open, and why. No further reasoning or tools.')
+# After the tool-round limit the next call has no tools: it must report results, not plan more work.
+RESULTS_ONLY = ('No further tools are available. Write your final answer now from the results above: what you '
+                'established, the values your runs printed, and what remains open. Report results only; do not '
+                'announce further checks, runs or reading.')
+ANNOUNCED_ONLY = 'The final answer announced further work instead of reporting results.'
 
 
 class Agent:
@@ -120,7 +125,7 @@ class Agent:
         context = [{'role': 'user', 'content': value} for value in
                    (getattr(self, 'personal_context', ''), getattr(self, 'project_context', '')) if value]
         schemas = self.workspace.schemas()
-        round_no, answer_now = -1, False
+        round_no, answer_now, forced_final = -1, False, False
         while True:
             round_no += 1
             tools = schemas if round_no < self.max_rounds and not answer_now else []
@@ -212,6 +217,8 @@ class Agent:
                     emit('result', result[:200])
                 if round_no + 1 == self.max_rounds:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')
+                    messages.append({'role': 'user', 'content': RESULTS_ONLY})
+                    forced_final = True
                 continue
             exhausted = self.last_stats.get('done_reason') == 'length'
             empty_after_tool = recover_empty_tool_answer and round_no > 0 and not exhausted
@@ -230,14 +237,20 @@ class Agent:
                 messages.append({'role': 'user', 'content': prompt})
                 continue
             if not assistant['content'].strip():
+                # A worker's stop reason reaches the parent, which repeats it to the user: no controller terms.
                 if answer_now and recover_empty_tool_answer:
-                    self.last_stop_reason = 'The model returned no final answer after one recovery attempt.'
+                    self.last_stop_reason = 'No written conclusion was produced.'
                 else:
-                    self.last_stop_reason = ('Output limit reached while reasoning; no final answer after one recovery attempt.'
+                    self.last_stop_reason = ('Output limit reached while reasoning; no written conclusion was produced.'
                                              if answer_now else 'The model returned no final answer.')
                 emit('notice', self.last_stop_reason)
             elif self.last_stats.get('done_reason') == 'length':
                 self.last_stop_reason = 'Generation hit its output limit; the written answer is incomplete.'
+            elif forced_final or answer_now:
+                from .orchestrator import _ends_with_work_plan  # the orchestrator imports this module
+                if _ends_with_work_plan(assistant['content']):
+                    self.last_stop_reason = ANNOUNCED_ONLY
+                    emit('notice', ANNOUNCED_ONLY)
             # Recovery notes belong only to that one request; scratch thinking is never kept in history.
             for message in messages:
                 message.pop('thinking', None)

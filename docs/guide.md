@@ -118,7 +118,9 @@ by a mathematical benchmark. Existing Qwen profiles keep their previous budget
 rules, and paused jobs keep their saved limits when resumed.
 
 Pause interrupts an active model-response stream even if the provider stops
-sending data. The partial response remains unfinished and resumable. If no
+sending data. The partial response remains unfinished and resumable. When the
+hosted model stops sending output for three minutes in the middle of an answer,
+the call is ended and the work pauses with that notice; **Resume** tries again. If no
 final usage arrived, its reservation stays charged to the local allowance;
 that is conservative harness accounting, not a measurement of the API bill.
 Waiting for an inference slot does not reserve Proof output or consume its
@@ -144,7 +146,8 @@ setting and remain read-only.
 
 SH reads the source files with their filenames and a file manifest. TeX,
 bibliography and local style/class files are available as text; figures, code
-and other binary assets are listed as omitted. Nothing inside the archive is
+and other binary assets are listed as omitted. The metadata files that macOS
+`tar` and Finder add (`._main.tex`, `__MACOSX/`) are ignored. Nothing inside the archive is
 executed or unpacked into your working folder. The archive must contain readable
 TeX, fit within 10 MB, expand to at most 32 MB and stay within the member and
 source-text bounds. Unsafe or oversized bundles are rejected before an upload
@@ -234,10 +237,11 @@ Projects organize a single user's existing workspace. They do not add a new
 filesystem sandbox between that user's projects. Hosted testers continue to
 have separate private workspaces.
 
-After a conversation finishes and the interface is idle, an optional small
-model call proposes a short title from a bounded excerpt of its first
-substantive message. It has thinking disabled and a separate 64-output-token
-ceiling; it does not consume a Proof workflow's budget. Hosted provider usage
+After a conversation finishes, an optional small model call proposes a short
+title once a model request slot is free and no other request is waiting. It
+works from a bounded excerpt of the first substantive message, has thinking
+disabled and a separate 64-output-token ceiling; it does not consume a Proof
+workflow's budget. Hosted provider usage
 still counts against the user's allowance. A failed title leaves the prompt
 preview; a title entered manually in the conversation menu always takes
 precedence. Request a further critique or review through the conversation or an
@@ -399,6 +403,11 @@ one with a message.
     cancel them. Set how many jobs and model requests may run at once there
     (1–8 each; 2 and 2 by default). The button shows the count while work is
     running, and an animated square marks active conversations in the sidebar.
+    A conversation turn starts at once and takes a job place only when it
+    starts its first worker: a direct answer never waits behind long jobs, and
+    a turn that needs a worker waits in the queue (in order of request) for a
+    place; a turn you resume goes ahead of new work. Cancelling that wait
+    pauses the turn, which keeps its work.
   - **File access** sets which kinds of files the model may open by itself in
     this folder (switch a type off to hide it).
   - **Personalization** saves standing chat instructions and LaTeX commands
@@ -440,7 +449,10 @@ limit, the agent shows the failure and its partial text remains readable.
   Write-Up downloads.
 - **Findings** shows results and sources available in this conversation or project.
   Work that has produced nothing yet (a proof still without a candidate, an
-  answer that came back empty) is not listed.
+  answer that came back empty, a sandbox run that failed without printing
+  anything) is not listed, nor is a run that the finished answer of its own
+  exploration replaced by a later run. A run that failed or stopped at its time
+  limit is labelled so, with what it printed before it stopped.
 - **Plan** lists the research question, the steps and their dependencies in
   mathematical notation. Open **Time and usage** for the resource figures.
 
@@ -523,9 +535,13 @@ The Assistant receives each worker's written answer in full. For a Python Lab
 run it also receives what the run printed, up to the model's input allowance; a
 longer output is cut at a line, says how much is shown and names the call that
 reads the rest, and the same label appears when that result is read again in a
-later turn. A worker that writes nothing after its tool results is asked once
+later turn. A run that stopped (at its time limit, on an error or at the memory
+limit) is reported too, with its status and what it printed before it stopped.
+A worker that writes nothing after its tool results is asked once
 for its conclusion. If it still returns nothing, its card says that it did not
-finish, with the reason, and no answer is saved for it.
+finish, with the reason, and no answer is saved for it. A worker that has used
+all its tool rounds is asked for its results; a reply that only announces more
+work is marked unfinished and keeps what its runs printed.
 
 Before starting a Proof worker, the Assistant briefly prepares the task, with
 either Qwen or DS4. Preparation allows at most two model calls, each capped at
@@ -541,7 +557,9 @@ must not begin the proof or add a missing hypothesis.
 
 If preparation reaches its limit or fails to produce a usable delegation,
 Proof starts from the original request and saved context instead of extending
-the preparation. Unfinished preparation is not adopted as a proof or task
+the preparation. The same happens when the prepared task leaves out what your
+request states, for example a statement taken from another conversation of the
+project. Unfinished preparation is not adopted as a proof or task
 brief. Proof's solve and review allowances are unchanged. For new delegated jobs, both solver and reviewer receive the original user
 request, your earlier messages, the Assistant's earlier answers and the same
 pinned source text, so "prove the lemma you stated above" reaches both with its
@@ -556,6 +574,12 @@ or review: it sees the candidate and verifies it against the shared task and
 sources. A proof whose sources cannot fit the model's context with its review
 is refused before it starts. The Proof page's **Sources** tab shows **Original request**
 and, when the delegation differs from it, **Prepared task**.
+
+When you select **@prove** (or DS4 sends your message to Proof) and the reviewer
+finds no issue, the reply in the conversation is the reviewed text itself, under
+one line saying whether it is a model-reviewed proof or a model-reviewed
+refutation (counterexample); the Proof card says the same. Otherwise the
+Assistant reports the result in its own words.
 
 Preparation is charged to the shared Assistant budget and uses the existing
 saved delegation mechanism. Its call and token limits persist across pause and
@@ -748,9 +772,12 @@ How it works:
 2. The code checks that they exist in bibliographic indexes (zbMATH, Crossref,
    arXiv), and the model picks the records that fit the question. Only when none
    fits does the code search once more by topic.
-3. For a precise request (an exact theorem, page or edition, or checking a given
-   citation), the code opens open-access papers that cite the work and reads how
-   they cite it.
+3. For a precise request (an exact or numbered theorem, page or edition, a
+   result's exact statement, or checking a given citation), the code opens
+   open-access papers that cite the work and reads how they cite it, and the
+   work itself when it is open (an arXiv paper). A statement read in the work is
+   quoted in the answer. Your own words decide whether a check is precise, even
+   when the Assistant words the request it passes on.
 
 For the latest papers by a named author, it searches arXiv's author field and
 orders matching records by their original submission date. Revisions are listed
@@ -762,7 +789,8 @@ theorems, pages and hypotheses require a precise check when you ask for them.
 
 Each reference gets an evidence level:
 
-- **read**: the statement was read in the work itself;
+- **read**: the statement was read in the work itself (a numbered or lettered
+  place such as "Theorem 9.26" or "Theorem A");
 - **cited**: another paper was read that cites the work at that place for that
   result;
 - **located**: the work exists, but the exact place is unconfirmed;
@@ -823,7 +851,8 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
 To discuss a completed report, select `@referee` again and explain which comments
 you dispute. When the target is unambiguous, the follow-up reuses the reviewed
 manuscript and keeps the original report. It addresses the contested comments
-rather than silently replacing the earlier review. Ask explicitly for a full new
+rather than silently replacing the earlier review; each answer is headed with the
+comment's number in the saved report. Ask explicitly for a full new
 review to reread the whole paper. New attachments take precedence; when the target
 is ambiguous, the interface asks which manuscript to use.
 
@@ -843,7 +872,10 @@ To convert a finished review, ask “Write it in a LaTeX document please” dire
 after the review in the same conversation. You can also ask this after a written
 Markdown answer, or attach a Markdown file and ask to convert it. Write-up uses
 the saved text directly, including any coverage warnings in a partial review,
-and keeps its equations, headings and references in source order. The card
+and keeps its equations, headings and references in source order. A character
+pdfLaTeX cannot print becomes its math command (≤, α) or else `?` (such as the
+replacement character a broken encoding leaves in a retrieved title); the reply
+names it. The card
 provides the LaTeX source and a PDF when compilation succeeds. When the review
 has a matching saved BibTeX file, the source ZIP includes it.
 The PDF preview recognizes standard LaTeX and AMS mathematical notation,
@@ -902,7 +934,9 @@ How it works:
    kind of document, asks for it. The plan is shown in the **Outline** tab.
    When your notes contradict themselves (a constant whose own derivation gives
    another one), the document keeps your version, marked TODO, and the reply
-   asks you which one to keep, with both versions.
+   asks you which one to keep, with both versions. When the conversation has
+   already settled it (a review found the statement false and gave the
+   corrected one), the document uses the settled version and asks nothing.
    In a conversation, when a section depends on something the material does
    not contain (earlier work to cite, a proof, a definition, data, or a choice
    only you can make about a problem in your notes), nothing is written: the

@@ -253,6 +253,12 @@ def _candidate_text(store, candidate):
     return text if hashlib.sha256(text.encode()).hexdigest() == candidate.get('sha256') else None
 
 
+def proof_request_text(state):
+    """The task as the user reads it (a saved handoff Proof shows the user's request, not controller text)."""
+    from ..proof import request_text
+    return request_text(state)
+
+
 def list_proofs(root, active=None):
     root = Path(root)
     base = root / '.mathagent' / 'proofs'
@@ -268,7 +274,7 @@ def list_proofs(root, active=None):
             continue
         running = state['status'] == 'running' and (path.name == active or locked(path))
         jobs.append({'id': state['id'], 'kind': 'proof', 'version': state['version'], 'status': state['status'],
-                     'title': one_line(state['goal'], 140), 'updated_at': state['updated_at'],
+                     'title': one_line(proof_request_text(state), 140), 'updated_at': state['updated_at'],
                      'created_at': state['created_at'], 'running': running,
                      'sources': [s['path'] for s in state['sources']],
                      'rounds': _budget(state['rounds_started'], state['settings']['max_rounds']),
@@ -286,7 +292,7 @@ def proof_detail(root, proof_id, active=None):
     settings = s['settings']
     detail = {
         'id': s['id'], 'kind': 'proof', 'version': s['version'], 'legacy': s['version'] != 2,
-        'goal': s['goal'], 'status': s['status'], 'stop_reason': s.get('stop_reason'),
+        'goal': proof_request_text(s), 'status': s['status'], 'stop_reason': s.get('stop_reason'),
         'recovery_notice': s.get('recovery_notice'),
         'created_at': s['created_at'], 'updated_at': s['updated_at'], 'revision': s['revision'],
         'settings': settings,
@@ -378,7 +384,7 @@ def list_research(root, active=None):
             continue
         running = state['status'] == 'running' and (path.name == active or locked(path))
         jobs.append({'id': state['id'], 'kind': state['kind'], 'status': state['status'],
-                     'phase': state['phase'], 'title': one_line(state['goal'], 140),
+                     'phase': state['phase'], 'title': one_line(proof_request_text(state), 140),
                      'updated_at': state['updated_at'], 'created_at': state['created_at'],
                      'running': running, 'sources': [s['path'] for s in state['sources']],
                      'variant': state.get('variant'), 'verdict': state.get('verdict') or None,
@@ -1045,10 +1051,28 @@ def update_item(root, chat_id, index, **fields):
     return chat['transcript'][index]
 
 
+def _archive_experiments(chat, next_state):
+    """Keep a replaced turn's sandbox runs on its worker cards, for the research index (_chat_evidence).
+
+    An interrupted worker has no job or answer that would otherwise link them.
+    """
+    previous = chat.get('assistant_state') or {}
+    if not previous.get('id') or previous['id'] == next_state.get('id'):
+        return
+    for child in previous.get('children') or []:
+        index, runs = child.get('card_index'), child.get('experiment_ids')
+        if not runs or type(index) is not int or not 0 <= index < len(chat['transcript']):
+            continue
+        card = chat['transcript'][index]
+        if card.get('role') == 'route' and card.get('child_id') in (None, child.get('id')):
+            card['experiment_ids'] = list(dict.fromkeys([*(card.get('experiment_ids') or []), *runs]))
+
+
 @_locked_chat
 def save_assistant(root, chat_id, state):
     """Checkpoint the parent and its child identities in the same atomic chat file."""
     chat = load_chat(root, chat_id)
+    _archive_experiments(chat, state)
     agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     _save_chat(root, chat)
@@ -1058,6 +1082,7 @@ def save_assistant(root, chat_id, state):
 def checkpoint_investigation(root, chat_id, state):
     """Commit the final report and checkpoint together, including after a crash or a repeated stop."""
     chat = load_chat(root, chat_id)
+    _archive_experiments(chat, state)
     agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     inv = state['investigation']
@@ -1890,6 +1915,8 @@ def _chat_evidence(chat):
         if role == 'route':
             link(mode, item.get('job_id'))
             link('answer', item.get('answer_id'))
+            for run in item.get('experiment_ids') or []:  # an earlier turn's worker (_archive_experiments)
+                link('experiment', run)
         elif role == 'assistant' and mode == 'check':
             if item.get('job_id'):
                 link('check', item['job_id'])
@@ -1917,6 +1944,9 @@ def _chat_evidence(chat):
     for child in (parent.get('children') or []):
         action = child.get('action') or {}
         link(action.get('mode') or child.get('mode'), child.get('job_id'))
+        # Sandbox runs of a worker, including one interrupted before it saved an answer.
+        for run in child.get('experiment_ids') or []:
+            link('experiment', run)
     for task in ((parent.get('investigation') or {}).get('tasks') or {}).values():
         link(task.get('mode'), task.get('job_id'))
     return jobs

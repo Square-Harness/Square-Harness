@@ -263,6 +263,17 @@ def list_records(root):
     return records
 
 
+STEP_NAMES = {'explore': 'Exploration', 'check': 'Literature check', 'literature': 'Literature review',
+              'prove': 'Proof', 'quick_review': 'Quick review'}  # as the notebook names them (outputs.ts)
+
+
+def _step_name(tasks, key):
+    """A plan step as the reader sees it (e.g. "step 2 (Exploration)"), never its internal ID."""
+    index = next((i for i, t in enumerate(tasks, 1) if t['id'] == key), None)
+    mode = next((t['mode'] for t in tasks if t['id'] == key), '')
+    return f"step {index} ({STEP_NAMES.get(mode, mode)})" if index else 'an earlier step'
+
+
 def _uncovered(inv):
     """Finished steps whose results the saved research answer was written without."""
     if 'synthesis_steps' not in inv:
@@ -294,7 +305,9 @@ def report(state):
         late = _uncovered(inv)
         if late:
             # A draft kept from before the last results must not pass for the final answer.
-            lines += [f"*This answer was written without the result{'s' if len(late) > 1 else ''} of {', '.join(late)}, "
+            names = [_step_name(inv['plan']['tasks'], key) for key in late]
+            names = names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]
+            lines += [f"*This answer was written without the result{'s' if len(late) > 1 else ''} of {names}, "
                       'listed under Work and evidence.*', '']
         lines.append(inv['synthesis'])
     if not target:
@@ -390,6 +403,26 @@ def _entry_for(root, chat_id, slot):
             slot['entry_count'] = len(matches)
 
 
+def _link_runs(root, chat_id, slot, child):
+    """List a worker's own sandbox runs under its step, even when it stopped before saving an answer."""
+    runs = child.get('experiment_ids') or []
+    if not runs:
+        return
+    from .gui.store import index_view
+    from .project_index import line
+    view = index_view(root, chat=chat_id) if chat_id else index_view(root)
+    found = [e for e in view['entries'] if e['folder'] == 'experiments' and e['job_id'] in runs]
+    slot['linked_job_ids'] = sorted({*slot.get('linked_job_ids', []), *(e['job_id'] for e in found)})
+    shown = slot.get('other_entries', [])
+    new = [line(e) for e in found if line(e) not in shown]
+    if new:
+        # Like _entry_for: at most twelve lines per step, the rest counted.
+        total = max(slot.get('entry_count', 0), len(shown) + bool(slot.get('entry_line'))) + len(new)
+        slot['other_entries'] = (shown + new)[:12 - bool(slot.get('entry_line'))]
+        if total > 12:
+            slot['entry_count'] = total
+
+
 def _receipt(root, chat_id, slot, child, value):
     native = value['status']
     error = value.get('error')
@@ -401,11 +434,12 @@ def _receipt(root, chat_id, slot, child, value):
         slot['reason'] = str(error.get('message', native)) if isinstance(error, dict) else str(error)
     elif value.get('warnings'):
         slot['reason'] = ' '.join(str(w) for w in value['warnings'] if w)
-    if slot['job_id']:
-        try:
+    try:
+        if slot['job_id']:
             _entry_for(root, chat_id, slot)
-        except (ValueError, OSError, LookupError, TypeError) as exc:
-            slot['reason'] = (slot.get('reason', '') + ' The saved result could not be read: ' + str(exc)).strip()
+        _link_runs(root, chat_id, slot, child)
+    except (ValueError, OSError, LookupError, TypeError) as exc:
+        slot['reason'] = (slot.get('reason', '') + ' The saved result could not be read: ' + str(exc)).strip()
     if slot.get('entry_line'):
         # Native evidence exists independently. Keep only the typed receipt on the parent.
         child['result'] = {k: value[k] for k in ('status', 'job_id', 'artifact', 'error') if k in value}
@@ -425,11 +459,13 @@ def _collect_partial(root, state):
             _receipt(root, inv.get('chat_id'), slot, child, value)
         else:
             slot.update(status='interrupted', job_id=child.get('job_id'))
-            if slot['job_id']:
-                try:
+            try:
+                if slot['job_id']:
                     _entry_for(root, inv.get('chat_id'), slot)
-                except (ValueError, OSError, LookupError, TypeError) as exc:
-                    slot['reason'] = str(exc)
+                # An interrupted Explore has no answer yet; its saved runs still count as evidence.
+                _link_runs(root, inv.get('chat_id'), slot, child)
+            except (ValueError, OSError, LookupError, TypeError) as exc:
+                slot['reason'] = str(exc)
     return state
 
 

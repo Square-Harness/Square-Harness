@@ -214,8 +214,31 @@ def _fold(text):
     return ''.join(c for c in text if not unicodedata.combining(c)).casefold()
 
 
+LABEL_WORDS = r'(?:theorem|thm|lemma|proposition|prop|corollary|cor|remark)'
+
+
+def place_number(locator):
+    """The checkable part of a locator: '9.26' in 'Theorem 9.26', 'A' or 'B.2' in 'Theorem A' or 'Lemma B.2'.
+    A theorem-like label wins over a section number; single numbers are too common to check. Identifiers
+    ('Zbl 0276.60013', a DOI, an arXiv number) are not places."""
+    text = re.sub(r'\b(?:zbl|mr|doi|arxiv)\b\.?:?\s*\S+|\b10\.\d{4,9}/\S+|\b\d{4}\.\d{4,5}(?:v\d+)?\b', ' ',
+                  str(locator or ''), flags=re.I)
+    named = re.findall(r'(?<![A-Za-z])(?i:' + LABEL_WORDS + r')\.?\s*(\d+(?:\.\d+)+[a-z]?|[A-Z](?:\.\d+)*(?![\w]|\.\d))', text)
+    found = named or re.findall(r'\d+(?:\.\d+)+[a-z]?', text)
+    return found[0] if found else None
+
+
 def _num(number):
+    if number[:1].isalpha():  # a lettered label: the capital itself, never a word that starts with it
+        return r'(?<![\w.])(?-i:' + re.escape(number) + r')(?![\w]|\.\d)'
     return r'(?<![\d.])' + re.escape(number) + r'(?![\d])'
+
+
+def has_place(text, number):
+    """Whether the text names this place. A lettered label counts only after a theorem word:
+    'Theorem A', not the article 'A' or 'Appendix A'."""
+    label = LABEL_WORDS + r'\.?\s*' if number[:1].isalpha() else ''
+    return bool(number) and re.search(label + _num(number), text or '', re.I) is not None
 
 
 TITLE_STOP = {'theory', 'equations', 'equation', 'introduction', 'methods', 'problems', 'applications', 'second',
@@ -277,7 +300,7 @@ def bibliography_entry(lines, key):
 
 def cited_keys(text, number, surname, keys=()):
     """The bibliography keys under which the text cites this number."""
-    found = [key for key, place in keyed_citations(text, keys) if re.search(_num(number), place)]
+    found = [key for key, place in keyed_citations(text, keys) if has_place(place, number)]
     match = re.search(PLACE_WORDS + r'\.?\s*' + _num(number) + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I)
     if match and match.group(1).strip() in keys:
         found.append(match.group(1).strip())
@@ -290,7 +313,7 @@ def keyed_citations(text, keys):
     for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
         for part in bracket.split(';'):
             key, comma, place = part.partition(',')
-            if comma and key.strip() in keys and re.search(r'\d', place):
+            if comma and key.strip() in keys and re.search(r'\d|' + LABEL_WORDS + r'\.?\s*[A-Z]\b', place, re.I):
                 found.append((key.strip(), ' '.join(place.split())[:60]))
     return found
 
@@ -309,12 +332,12 @@ def cites_place(text, number, surname, keys=()):
     if not number:
         return False
     n = _num(number)
-    if any(re.search(n, place) for _, place in keyed_citations(text, keys)):
+    if any(has_place(place, number) for _, place in keyed_citations(text, keys)):
         return True
     for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
         for part in bracket.split(';'):
             key, comma, place = part.partition(',')
-            if comma and re.search(n, place):
+            if comma and has_place(place, number):
                 return key.strip() in keys
     if re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I):
         key = re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I).group(1).strip()
@@ -324,7 +347,7 @@ def cites_place(text, number, surname, keys=()):
     # Without keys: the surname as a whole word ("Stein", not "Einstein"), with the place next to it.
     folded = _fold(text)
     for match in re.finditer(r'(?<![a-z])' + re.escape(_fold(surname)) + r'(?![a-z])', folded):
-        if re.search(PLACE_WORDS + r'\.?\s*\(?' + n, folded[max(0, match.start() - 150):match.end() + 150], re.I):
+        if re.search(PLACE_WORDS + r'\.?\s*\(?' + _num(_fold(number)), folded[max(0, match.start() - 150):match.end() + 150], re.I):
             return True
     return False
 
@@ -677,6 +700,8 @@ class LiteratureTools:
             return self._cache_search('arxiv-recent', query, limit,
                                       lambda: self._search('arxiv', query, limit, recent=True))
         result = self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
+        if provider == 'zbmath':
+            result['results'] = self._unhide(result['results'])
         if provider == 'crossref':
             result['results'] = [{key: value for key, value in record.items()
                                   if key not in ('references', 'reference_texts')}
@@ -747,6 +772,32 @@ class LiteratureTools:
                 raise
             return [_zbmath_record(r) for r in (json.loads(body).get('result') or [])[:limit] if isinstance(r, dict)]
         raise LiteratureError('Unknown provider')
+
+    def _unhide(self, records):
+        """Fill the title and authors zbMATH Open hides from Crossref's record of the same DOI.
+
+        The cache keeps zbMATH's own records; this costs at most one (cached) Crossref
+        request per search, within the usual request budget. Without it (offline,
+        budget spent, Crossref down) the records stay as zbMATH gave them.
+        """
+        hidden = [r for r in records if r.get('doi') and not (r.get('title') and r.get('authors'))]
+        if not hidden:
+            return records
+        try:
+            found = {r['doi']: r for r in self.crossref(dois=[r['doi'] for r in hidden], limit=min(100, len(hidden)))
+                     if r.get('doi')}
+        except (LiteratureError, ValueError):
+            return records
+        for record in hidden:
+            match = found.get(record['doi'].strip().lower())
+            if not match:
+                continue
+            filled = [key for key in ('title', 'authors') if not record.get(key) and match.get(key)]
+            for key in filled:
+                record[key] = match[key]
+            if filled:
+                record['filled_from_crossref'] = filled
+        return records
 
     def arxiv_recent(self, query, limit=6):
         """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
@@ -829,7 +880,7 @@ class LiteratureTools:
                                          for x in r.get('references') or [] if isinstance(x, dict)][:200]
                 out.append(record)
             return out
-        return self._cache_search('zbmath-full', query, limit, fetch)['results']
+        return self._unhide(self._cache_search('zbmath-full', query, limit, fetch)['results'])
 
     def s2_links(self, identifier, direction='citations', *, limit=500):
         """Works citing (direction='citations') or cited by ('references') a paper, from Semantic Scholar.
@@ -1077,9 +1128,7 @@ class LiteratureTools:
         topic = ' '.join(topic.split())[:120] if isinstance(topic, str) else ''
         title = ' '.join(title.split())[:300] if isinstance(title, str) else ''
         # A theorem-like number wins over a section number when the locator names both.
-        named = re.findall(r'(?:theorem|thm|lemma|proposition|prop|corollary|cor|remark)\.?\s*(\d+(?:\.\d+)+[a-z]?)', locator, re.I)
-        found = named or re.findall(r'\d+(?:\.\d+)+[a-z]?', locator)
-        number = found[0] if found else None
+        number = place_number(locator)
         if not number and not topic:
             raise LiteratureError('Give a numbered locator (e.g. "Theorem 9.26") or a topic phrase')
         hits, chain, searched, opens = [], None, '', 4

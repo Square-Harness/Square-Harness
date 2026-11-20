@@ -76,7 +76,7 @@ export function ProjectSelector({ value, onChange, disabled = false }: { value: 
         {projects?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select>
     </label>
-    {project && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing(true)}><NotesIcon size={14} /> Project notes</button>}
+    {project && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing(true)} aria-label="Project notes"><NotesIcon size={14} /><span className="composer-long-label"> Project notes</span></button>}
     {editing && project && <ProjectEditor project={project} onClose={() => setEditing(false)} onSaved={() => { refreshLists(); setEditing(false) }} />}
   </div>
 }

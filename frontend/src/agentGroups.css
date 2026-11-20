@@ -54,7 +54,6 @@
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
 }
 .agent-step { color: var(--text-2); font: .8rem/1.4 var(--font-ui); }
-.agent-lane-running .agent-step::after { content: '…'; }
 .agent-axis { grid-column: 2 / -1; position: relative; overflow: hidden; height: 3px; border-radius: 2px; background: var(--track); }
 .agent-axis i { position: absolute; height: 100%; min-width: 3px; border-radius: 2px; background: var(--track-strong); }
 .agent-axis i.agent-axis-live { background: var(--ink); }

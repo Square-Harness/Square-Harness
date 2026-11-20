@@ -171,6 +171,9 @@ export type TaskState = 'queued' | 'starting' | 'running' | 'pausing' | 'paused'
 
 export type TaskSummary = {
   waiting_model_calls?: number
+  position?: number
+  queued_at?: number | null
+  slot?: boolean
   id: string
   kind: 'proof' | 'research' | 'chat'
   target: string | null

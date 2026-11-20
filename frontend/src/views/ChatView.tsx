@@ -26,7 +26,7 @@ import { WorkPanel } from '../components/WorkPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
 import { go, href } from '../router'
 import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
-import { BusyNote, Thinking, toolLine } from './shared'
+import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
@@ -297,7 +297,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-top">
           <WorkspaceSwitch />
           <ProjectSelector value={currentProject} onChange={(project) => { void changeProject(project) }} disabled={sending || resuming || projectSaving || work.blocked || (!!id && !data)} />
-          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || work.blocked} onClick={() => window.dispatchEvent(new Event('square-attach-files'))}><FileIcon size={14} /> Attach files{app.status?.image_support ? ' or images' : ''}</button>
+          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || work.blocked} onClick={() => window.dispatchEvent(new Event('square-attach-files'))} aria-label={'Attach files' + (app.status?.image_support ? ' or images' : '')}><FileIcon size={14} /><span className="composer-long-label"> Attach files{app.status?.image_support ? ' or images' : ''}</span></button>
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
             <span key={path} className="chip">
               <FileIcon size={14} /><span>{path}</span>
@@ -345,7 +345,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
         <ModelWaitNote taskId={task?.id} />
-        {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
+        {work.queued && <p className="queued-note" role="status">{work.queued.position && work.queued.position > 1 ? `Waiting for a free place: ${work.queued.position - 1} ahead of this one.` : 'Next to start, as soon as a place frees up.'} You can cancel it above.</p>}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
@@ -509,7 +509,8 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
       blocks.push(
         <div key={index} className="step">
           <Thinking text={item.thinking || ''} />
-          {calls.map((call, n) => groups.size > 0 && call.function?.name === 'delegate' ? null : (
+          {calls.map((call, n) => groups.size > 0 && call.function?.name === 'delegate' ? null :
+            QUIET_TOOLS.has(call.function?.name || '') ? <p key={n} className="tool-step tool-line">{toolLine(call)}</p> : (
             <Collapse key={n} className="tool-step" summary={<span className="tool-line">{toolLine(call)}</span>}>
               <pre className="plain">{results[n]?.content ?? 'No result was recorded.'}</pre>
             </Collapse>

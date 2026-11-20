@@ -46,7 +46,7 @@ MD_HEADING = re.compile(r'^\s*(#{1,6})\s+(.*\S)')
 # "Appendix A. Proofs." or "Appendix B: Title" (a title is required, so that a sentence ending
 # "... in Appendix B." on its own line is not a heading), or "APPENDIX A" with an optional title.
 TEXT_APPENDIX = re.compile(r'^\s*(?:Appendix\s+([A-Z])\s*[.:]\s+([A-Z(].{0,90})|APPENDIX\s+([A-Z])\.?(?:\s*[.:]?\s+(\S.{0,90}))?)\s*$')
-END_MARK = re.compile(r'[□∎■]\s*[*_]*\s*$|\\qed\b|\bQ\.E\.D\.?')
+END_MARK = re.compile(r'(?:[□∎■]|\\(?:blacksquare|square|Box)\b\s*\$*)\s*[*_]*\s*$|\\qed\b|\bQ\.E\.D\.?')
 TEXT_REF = re.compile(r'\b(' + TYPE_WORDS + r')s?\s+(' + NUMBER + r'(?:\s*(?:,|and|&|or)\s*' + NUMBER + r')*)', re.I)
 TEXT_CITE = re.compile(r'\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)(?:\s*,\s*([^\[\]]{1,80}?))?\]')
 TEXT_EQUATION = re.compile(r'\((\d+\.\d+|[A-Z]\.\d+)\)')

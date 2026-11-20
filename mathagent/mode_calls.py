@@ -35,6 +35,15 @@ PROOF_PREP_CALLS = 2
 PROOF_PREP_INPUT = 16384
 PROOF_PREP_TOTAL_INPUT = 32768
 PROOF_PREP_REQUEST_CHARS = 4000
+# A Proof started without a prepared task proves the user's request: the request is its visible task
+# (card, Proof page, findings) and this controller note goes to the solver alone (`proof_statement`).
+PROOF_HANDOFF = ('You are the Proof child. Prove the exact original user request in the reference context. '
+                 'Preserve all user definitions and hypotheses; flag ambiguity and any unproved step. '
+                 'No restated task was prepared; no partial parent argument is an established fact.')
+# Answers name what was found; identifiers stay in the tool-call fields that carry them.
+NAMING = ('Refer to runs, worker results and earlier records by what they computed or establish. Their '
+          'identifiers (experiment, job, task and record ids) and tool names are for tool calls only: '
+          'never write them in the answer.')
 
 PROOF_PREPARATION = """
 You are the main mathematical assistant preparing one task for a Proof child.
@@ -185,6 +194,37 @@ def _recap_proof_target(state, args, selected):
     return None
 
 
+# Words that point at a statement without stating it ("this lemma", "the claim above").
+_POINTERS = set('above below earlier previous last again please can you could would lemma claim statement '
+                'proposition corollary conjecture result message same following here'.split())
+
+
+def _content(text):
+    """Content words (a plural folded to its singular) and formula tokens such as h^1 or a_n; LaTeX command names left out."""
+    from .briefs import _words
+    text = text.casefold()
+    formulas = {re.sub(r'[{}\s]', '', token) for token in re.findall(r'[^\W_]+\s*[\^_]\s*\{?[\w+-]+\}?', text)}
+    words = {word[:-1] if len(word) > 4 and word.endswith('s') else word
+             for word in _words(re.sub(r'\\[a-z]+', ' ', text))}
+    return (words - _POINTERS) | formulas
+
+
+def _unrelated_proof_task(request, query):
+    """A prepared Proof task that shares at most one content word or formula, under half, with the request.
+
+    A request that only points at earlier material ("prove it", "prove the lemma above") is not compared.
+    """
+    asked = _content(query)
+    shared = len(asked & _content(request))
+    return len(asked) >= 2 and shared < 2 and 2 * shared < len(asked)
+
+
+def _handoff_statement(query):
+    """What the solver of a Proof without a prepared task reads as its statement: the note, then the request
+    unless it is long (the reference context holds it in full)."""
+    return PROOF_HANDOFF + ('\n\nORIGINAL REQUEST:\n' + query if len(query) <= 6000 else '')
+
+
 def routed_python_task(state, args):
     decision = (state or {}).get('proof_routing') or {}
     return (args.get('mode') == 'python_lab' and decision.get('status') == 'complete'
@@ -319,16 +359,14 @@ class ModeOrchestrator(Orchestrator):
         prep.update(status='fallback', reason=reason)
         chosen = (self.required_effort or self.state.get('required_effort')
                   or self.state.get('proof_routing', {}).get('effort') or 'medium')
-        request = ('You are the Proof child. Prove the exact original user request in the reference context. '
-                   'Preserve all user definitions and hypotheses; flag ambiguity and any unproved step. '
-                   'Preparation reached its short handoff limit; no partial parent argument is an established fact.')
-        if len(self.state['query']) <= 6000:
-            request += '\n\nORIGINAL REQUEST:\n' + self.state['query']
+        query = self.state['query']
+        # A request longer than a delegation is named by the controller note; the reference context holds it.
+        request = query if len(query) <= 8000 else _handoff_statement(query)
         action = {'mode': 'prove', 'request': request, 'files': list(self.state['files']),
                   'effort': chosen, 'reason': 'Start Proof now from the unchanged original request and context.'}
         self._validate_delegate(action)
         self._save()
-        self.emit('notice', 'Starting Proof now; the short preparation limit was reached.')
+        self.emit('notice', 'Starting Proof on the request as written.')
         return {'role': 'assistant', 'content': '', 'tool_calls': [
             {'id': self.state['id'] + '_proof_handoff', 'type': 'function',
              'function': {'name': 'delegate', 'arguments': action}}]}, ''
@@ -351,6 +389,10 @@ class ModeOrchestrator(Orchestrator):
                     message.pop('thinking', None)
             if omitted:
                 child['context']['omitted_generated_preparation_characters'] = omitted
+            if (pending['call'].get('id') == self.state['id'] + '_proof_handoff' and not child.get('shared_proof_objective')
+                    and child['action']['request'] == self.state['query']):
+                # Older handoffs carried the note in the request itself (and in their Proof's goal).
+                child.setdefault('proof_statement', _handoff_statement(self.state['query']))
         return child
 
     def _payload(self, tools):
@@ -372,6 +414,7 @@ class ModeOrchestrator(Orchestrator):
                                'verified source qualifications and report unfinished branches explicitly. '
                                'When a document could not be extracted, request a readable copy of that document. '
                                'Do not use another file as a substitute or infer pagination from extracted lines.')
+                instruction += ' ' + NAMING
                 if decision.get('chat_recap'):
                     instruction += ' ' + recap
                 if decision.get('question'):
@@ -416,7 +459,7 @@ class ModeOrchestrator(Orchestrator):
                     'Use further reads for claims beyond this excerpt. If extraction failed or produced no text, '
                     'describe that file’s limitation and ask for a readable copy if needed. Do not substitute '
                     'another workspace file. A filename by itself is not evidence of its contents.'))
-            return super()._payload(tools)
+            return super()._payload(tools, instruction=NAMING if self.state.get('children') else '')
         if not tools:
             raise AgentError('Proof needs a prepared delegation, but further actions are unavailable; saved work is unchanged')
         prep = self._preparation()
@@ -492,6 +535,9 @@ class ModeOrchestrator(Orchestrator):
                 self._validate_delegate(function['arguments'])
                 if len(function['arguments']['request']) > PROOF_PREP_REQUEST_CHARS:
                     raise ValueError('The prepared task is too long')
+                if _unrelated_proof_task(function['arguments']['request'], self.state['query']):
+                    # An earlier record or another statement can pass for the request; prove the request itself.
+                    raise ValueError('The prepared task does not restate the current request')
             except (ValueError, TypeError, KeyError) as exc:
                 return self._handoff(str(exc))
             prep['status'] = 'complete'
@@ -564,9 +610,11 @@ class ModeOrchestrator(Orchestrator):
              'function': {'name': 'delegate', 'arguments': action}}]})
 
     def _document_answer(self):
-        if (self.state.get('required_mode') == 'referee'
-                and (self.state.get('review_reference') or {}).get('followup')):
-            child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == 'referee'), None)
+        # An explicitly selected review is shown as written, so its comment numbers are those of
+        # the saved report that a later dispute refers to.
+        mode = self.state.get('required_mode')
+        if mode in ('referee', 'detailed_review'):
+            child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
             if child is not None and child['status'] == 'complete':
                 answer = (child.get('result') or {}).get('answer')
                 if isinstance(answer, str) and answer.strip():

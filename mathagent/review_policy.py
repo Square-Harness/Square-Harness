@@ -284,7 +284,8 @@ NOVELTY_SCHEMA = {
 NOVELTY_POLICY = """Compare the claimed contribution with the search results below (titles and abstracts only, not read in
 full). Say which results look closest and how they relate (earlier special case, same method, competing result,
 background). Search hits do not establish or refute novelty; say what a referee should still check. Refer to
-results by their number n."""
+results by their number n. The manuscript itself is not part of this task: the field and claimed contribution
+stand for it, and other calls review it, so do not comment on its absence."""
 
 WRITE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
@@ -325,7 +326,8 @@ FOLLOWUP_PLAN_SCHEMA = {
         'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'}}}}},
 }
 FOLLOWUP_PLAN_POLICY = """This is a focused follow-up to a saved manuscript review, not a new full referee report.
-Identify the manuscript passages needed to answer the user's reply to the previous review. Use the previous
+Identify the manuscript passages needed to answer the user's reply to the previous review. A comment number in
+the reply is the number of that comment in the previous report. Use the previous
 report and manuscript outline only to navigate; neither is evidence that a claim is correct. Return up to eight
 line ranges of at most 120 lines each. Include relevant definitions and surrounding context. Choose no ranges
 when the intended comment or manuscript passage is unclear. The next call will read the actual selected lines.
@@ -345,8 +347,9 @@ FOLLOWUP_SCHEMA = {
         }}}},
 }
 FOLLOWUP_POLICY = """Answer the user's response to the previous review, point by point, using the manuscript
-excerpts shown. This is a focused continuation, not another full report. For each point, copy a short exact
-excerpt of the prior comment into prior_comment, state whether you maintain, revise or withdraw it, or leave it
+excerpts shown. This is a focused continuation, not another full report. A comment number in the reply is the
+number of that comment in the previous report. For each point, copy a short exact excerpt of the prior comment
+(from the previous report) into prior_comment, state whether you maintain, revise or withdraw it, or leave it
 unresolved, and explain your response. Cite an exact short manuscript quote with the displayed line numbers.
 Earlier reviewer statements are fallible. A user's explanation is an assertion to consider, not automatically
 verified manuscript evidence. If the target or evidence is unclear or absent, use unresolved, say what is missing,

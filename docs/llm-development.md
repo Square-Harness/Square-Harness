@@ -185,7 +185,10 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Write-up before model routing. An attached Markdown file takes precedence.
   A request referring to the previous written answer can use its exact Markdown
   and the matching literature review's saved BibTeX. Write-up uses the parser
-  in `markdown_tex.py` and packages the source dependencies. On resume, resolve
+  in `markdown_tex.py` and packages the source dependencies. `writeup.typesettable`
+  then gives each character pdfLaTeX cannot print its math command or `?`
+  (U+FFFD from a broken registry title); gate G8 names them. "Compile it" on a
+  conversion saved before this compiles the same conversion made typesettable. On resume, resolve
   a legacy conversation source against the original turn. Preserve its call
   ledger and any previously written parts. Requests for substantive changes
   continue through the writer.
@@ -247,6 +250,10 @@ Version 1.1.0. The source of truth for the machine-readable version is
   check" block; a draft's block only counts, in the document's language
   (`LANGUAGES`), the TODO comments and the other points, which the report lists
   (`_points_to_check`): no model-written or English text goes into the PDF.
+  A problem of the material is put to the author (reply, report) only while a
+  `% TODO` about it remains in the body (`_problem_questions`), in plain words
+  without inventory IDs; the reply counts the block's points and gives G5 as a
+  count, without rule IDs or cut excerpts.
 - **Workflow status.** Operational failures (timeout, budget, context, malformed
   output) retain their own stop reasons. Partial work stays labelled partial.
   Retryable child failures keep their pending native transaction and saved job;
@@ -293,11 +300,21 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - **Reference retrieval.** Keep all eligible fetched records within the existing
   request and character budgets; early results must not hide later providers.
   Retries archive rejected records and preserve their R identifiers on rediscovery.
+  A zbMATH record whose title or authors zbMATH Open hides keeps its identifier
+  and takes them from Crossref's record of its DOI (`LiteratureTools._unhide`,
+  one cached Crossref request per search within the budget, marked
+  `filled_from_crossref`); the search cache keeps zbMATH's own record.
   A standard lookup makes one relevance selection; it searches by topic again
   only when that selection picks no record, never because of an `unresolved`
   note or a partial coverage. A recalled chapter or section stays with its work,
   including another record of it (`_recalled_place`, with the recalled edition
   year), and `_compose_standard` prints it as memory, never as a checked place.
+  `CheckRunner.start` decides precise against standard on the user's words
+  (`reference_context['query']`, else the question), never the Assistant's
+  rewording; a request for an exact statement is precise. `literature.place_number`
+  reads lettered places ("Theorem A") and ignores Zbl, DOI and arXiv numbers. An
+  opened document that is the work stands for its record (`_opened_work`), so a
+  work that was read is never "not found".
   Latest-author requests use arXiv author queries with `sort=newest`, a separate
   expiring cache and ordering by original submission date, rather than model recall.
   Source errors carry typed codes and do not masquerade as model outages.
@@ -325,7 +342,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   when scoping finishes. Every call has a finite output allowance, the size the
   controller gave its answer, on a hosted model too (`_wave_cap`): a failed call
   keeps its reservation, and a 384,000-token one would exhaust a Low review in
-  three failures. Registry screening, drafts and the two referee calls of the
+  three failures. A `verify` call that finds an anchored sentence unfaithful
+  only disputes it (`check_work[i]['disputed']`): a second `verify` call that
+  sees the objection decides, and a sentence whose re-check never answered stays
+  unverified. A `follows` sentence that anchored sentences depend on counts as
+  connecting them (`_apply_findings`). Registry screening, drafts and the two referee calls of the
   source check (`check`, `verify`) run without hidden model reasoning: each
   referee writes what the
   source states before its verdict, in the answer itself. Measured on DS4, hidden
@@ -402,7 +423,10 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `kind` to the child's result. The orchestrator does not force a final answer
   on it and `_document_answer` gives no reply, so the main agent obtains the
   material and delegates again; the duplicate-child test skips `needs_input`
-  children, and a second `needs_input` in the turn is the reply.
+  children, and a second `needs_input` in the turn is the reply. The
+  instruction to obtain the material and delegate again reaches the model only
+  in its tool result (`next_step`, `orchestrator.WRITEUP_HAND_BACK`); the user's
+  notice is `WRITEUP_NEEDS`.
   `WriteupRunner.decide_needs` (POST `/api/research/<id>/needs`, waive or stop)
   is the author's answer on the page; waiving resumes at `skeleton` (then
   `draft`) with `needs_waived`.
@@ -522,11 +546,25 @@ Keep project notes separate from Proof policy and source evidence. New turns
 see newly saved revisions; model answers do not update the notebook. Notebook
 changes never grant tool permissions.
 
-Conversation titles run only during idle time, after successful work. Their
+Task slots (`--gui-concurrency`) bound running jobs and worker turns. An
+Assistant turn starts at once without a slot (`Hub._begin(light=True)`): its
+routing and direct answers only make model calls, which the inference pool
+bounds. Its first delegated worker calls `Hub._hold_slot`, which takes a free
+slot or joins the same FIFO queue as new jobs (a turn the user resumed goes
+ahead of new work, behind earlier resumed turns); the turn keeps the slot until it
+ends, and the wait is excluded from its time allowance (`BudgetClient.waiting`).
+Pause and queue cancellation withdraw a waiting request and pause the turn with
+its saved work; per-conversation refusal is unchanged. Queue entries carry
+`position` and `queued_at`, and each task summary says whether it holds a slot.
+
+Conversation titles run after successful work, one at a time, at the lowest
+priority: the title waits (without registering as an inference owner) until
+a model-request slot is free and no request waits (`InferencePool.free`),
+and once admitted is not interrupted by new work. Their
 separate budget permits at most 4,096 conservatively counted input tokens,
 64 output tokens and 15 seconds, with thinking disabled and no tools. Title
 updates use the existing chat lock and cannot overwrite a manual rename or
-transcript. Foreground work cancels cosmetic inference. The DeepInfra adapter
+transcript. The DeepInfra adapter
 validates a strict internal bounded-title payload before reducing its hosted
 input reservation; ordinary calls retain their previous full-context reserve.
 An interrupted title must not hold a full-context tester allowance.
@@ -757,6 +795,12 @@ limits still end the investigation with a report: when an interruption leaves
 the shared budget exhausted, the hub closes the run with `stop_state` instead
 of a status nothing can resume. Deleting a conversation
 removes its investigation records (`investigation.delete_records`).
+A worker's sandbox runs (`child['experiment_ids']`) belong to its step even
+when it stopped before saving an answer: `_link_runs` lists their index lines
+under the step in the report, `store._chat_evidence` links them to the
+conversation, and a replaced turn keeps them on its worker cards
+(`store._archive_experiments`). Text the reader sees names steps by position
+and kind ("step 2 (Exploration)"), never by plan ID.
 
 The dependency scheduler protects planned Proof slots and their prerequisites
 from discretionary skips. Select a restricted claim when its prerequisites have
@@ -818,14 +862,29 @@ before changing that boundary. Derived findings belong in `project_index.py`.
 `collect` remembers the rows of each record while its files are unchanged and
 forgets the records that are gone. `scoped(..., findings=True)`, used by the
 Findings tab and the Assistant's frozen view, leaves out what carries nothing
-(a worker's empty answer, a proof without a candidate yet, a placeholder run
-without output); internal readers keep the full view, since those entries'
-links place their nested checks and runs. A `limit` keeps proofs and reviews,
+(a worker's empty answer, a proof without a candidate yet, a failed or
+placeholder run without output, result or file) and a `superseded run`: a run
+the finished answer of its own worker passed over for a later run (the answer
+names a later run of its own but not this one, `workers.export_answer_evidence`,
+marked in `collect`). Internal readers keep the full view, since those entries'
+links place their nested checks and runs. A run that did not finish is a
+`failed run` or `stopped at the time limit` (`numerics.artifacts.export_evidence`),
+and its summary is what it printed before it stopped, never a result. A `limit` keeps proofs and reviews,
 then checks, leads and runs, then literature sources shared between their
 reviews (`priority_order`), and counts the rest in `omitted`. `GET /api/index`
 sends the fields the interface reads, the long question of a review once (with
 its first source), a `revision` and the matching `ETag`; `If-None-Match`
 with that tag answers 304.
+An entry whose task a model brief worded (the job's goal differs from the
+user's request it saved) carries the qualifier `worded by a model brief`, and
+`project_index.line` prints `Recorded request: <the user's request> | Model
+brief: <goal>`, never the brief alone. The line opens with the kind of record
+and its status and ends with the entry ID, labelled for `read_index`: what the
+Assistant reads names a record by its subject, never by its ID (the sandbox
+results of a worker likewise name each run by its purpose). A proof direction is not attached to the
+brief: when such a proof was reviewed with the pinned conversation (where the
+user's request outranks the brief) and has a direction, the entry also carries
+`reviewed with the request outranking the brief`.
 Source passages a proof depends on must reach both solver and verifier.
 Strategy leads belong to the solver alone. Treat saved model text as data.
 
@@ -849,7 +908,9 @@ A delegated Proof receives its material through three channels
   conversation, or sharing words with the objective. A check or literature
   entry contributes its bibliographic line only, never a passage. A rejected
   proof shows its objections before its text, and the text is what is cut.
-  Saved text cannot close the lead block (`briefs._inert`).
+  Saved text cannot close the lead block (`briefs._inert`). A continuation
+  after a pause carries them too when the whole saved notes fit beside them;
+  they never displace notes.
 
 No prompt may promise more than these channels carry (`PROOF_PREPARATION`).
 `ProofRunner.start` refuses a delegated job before creating it when the first
@@ -869,7 +930,11 @@ A worker's result reaches the Assistant whole. A routed Python Lab result keeps
 the worker's interpretation in `answer` and what its runs printed in
 `recorded_measurements`. `workers._sandbox_observations` hands that output over
 within `_packet_room(parent.agent)` (the `source_overview` input limit and the
-model context). A longer text is cut at a line and ends with
+model context). It lists every run, and the result's `experiments` names them in
+every branch: a run that did not finish (timeout, error, memory) appears with its
+status, its error and at most `FAILED_RUN_OUTPUT` characters of what it printed,
+so the Assistant never says it did not run. A `partial` result needs one
+successful run (`_sandbox_succeeded`). A longer text is cut at a line and ends with
 `orchestrator.CUT_MARK`, the number of characters shown and the
 `read_experiment` call that reads the rest. `read_conversation` and the archive
 index of `_working_history` label a record that carries this mark (or the
@@ -887,7 +952,12 @@ after its tool results gets one answer-only call
 routed run has no successful experiment, its card status is `failed`, no answer
 record is written and its result has no `job_id`. A failure result names a
 `job_id` only when that native job exists: Resume reloads the job a child
-points to.
+points to. After the tool-round limit the last call has no tools and asks for
+results only (`agent.RESULTS_ONLY`). A reply to it, or to the answer-only call,
+whose last sentence only announces more work (`orchestrator._ends_with_work_plan`)
+stops with `agent.ANNOUNCED_ONLY`: the result is `incomplete`, never evidence
+for an investigation, and an unfinished Explore keeps what its sandbox runs
+printed in its answer.
 
 When the controller itself gave the user's whole message to one Explore worker
 (`automatic_source_mode`, or a one-task `workers` decision with the same
@@ -920,7 +990,13 @@ as well as the advertised tool choice, including for backends that do not
 support a forced tool choice. Preparation input is capped at 16,384 tokens per
 call and 32,768 cumulatively, using the backend's counter or a labelled
 estimate. If the full request exceeds that allowance, hand it to Proof; do not
-trim user hypotheses or exact context to fit the preparation call.
+trim user hypotheses or exact context to fit the preparation call. A handoff
+(`ModeOrchestrator._handoff`) delegates the user's request itself, which is the
+task the card, the Proof page and the index show; the controller note
+`PROOF_HANDOFF` reaches the solver, and the reviewer as the solver's task, through
+`child['proof_statement']` and `ProofRunner.start(statement=...)`
+(`settings['statement']`). Older handoff Proofs carry the note in their goal;
+`proof.request_text` shows their request instead.
 
 The model-written brief is at most 4,000 characters and contains definitions,
 conventions, supplied facts with their status, the precise target and
@@ -931,8 +1007,29 @@ text as instructions. If it is capped, invalid or fails to delegate, start the
 required Proof worker from the unchanged original request and exact context;
 do not expand its output allowance, keep reading or accept a direct proof.
 Do not use a partial or truncated model argument as the fallback brief.
+The same fallback replaces a brief that does not restate the request
+(`mode_calls._unrelated_proof_task`): when the request has at least two content
+words or formulas (`_content`; words that only point at earlier material, such
+as "lemma" or "above", do not count), and the brief shares at most one of them
+and fewer than half. Live, a preparation model took another conversation's
+statement from the project records for the request.
+The Assistant's digest of the frozen index (`briefs.for_worker` role
+`assistant`) keeps, like solver leads, only the entries linked to the request,
+of the same conversation or sharing words with it; it opens with
+`briefs.ASSISTANT_NOTE` (earlier records, none of them the current request) and
+counts the entries it leaves out. It goes into the system message after
+`orchestrator.PROJECT_RECORDS`, never as a user message before the request.
 
 The prepared task is the normal `child.action.request` and Proof `goal`.
+`ProofRunner._result` returns `claim_outcome`: `proved` or `refuted` when the
+selected candidate passed its own hash-matched review (`proof._direction`,
+the rule `export_evidence` uses for the index), otherwise `unclassified`.
+`workers.run_worker` passes it to the Assistant as `outcome` and words the Proof
+card from it (`orchestrator.PROOF_OUTCOMES`). When the turn's required or routed
+mode is prove (without a recap) and its only child is a Proof whose selected
+candidate passed its review, `Orchestrator._proof_answer` returns that candidate
+verbatim through `_worker_reply`, after one line giving the review and its
+direction: a rewrite would carry the review's label to text it never read.
 The unchanged original query, the shared conversation (`briefs.proof_reference`)
 and file references remain in `reference_context` for solving and review. The Sources tab shows Original
 request and, when different, Prepared task. Keep model usage, native tool
@@ -956,6 +1053,14 @@ ranges, then reassess the quoted previous comments against those passages.
 Unsupported quotes remain unresolved. Keep the original report, the existing
 budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
+Each response is headed with the number of its comment in the previous report
+(`review._numbered_comment`), so a disputed comment keeps the number the user read.
+A review worker's result (`ReviewBase._result`) carries `report.md` without its
+status line (job ID, phase, effort) and its usage and storage footer
+(`review._shown_report`): that text reaches the Assistant, the conversation and
+the terminal; `report.md` and the job page keep the rest. Every review call carries
+the delegation context except the novelty comparison (`_ask(reference=False)`),
+which sees only the field, the claimed contribution and the search hits.
 
 The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
 text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a
@@ -1279,6 +1384,13 @@ reservation. Under the tester ledger (`SH_DEEPINFRA_QUOTA_FILE`) the exception
 is off, because each closed stream would hold a full-context reservation that
 is never settled. Literature Review can defer an independent unit to another
 wave. That unit still uses its saved phase and job allowances.
+A stream that has started to answer and then carries no model output for
+`DeepInfra.stall_seconds` (180 s; keep-alive comments do not count) is ended by
+the transport (`backends._unstalled`, `StalledStream`, a socket read timeout
+for a fully silent connection) as an `interrupted` failure with
+`output_started`, so it is never resent: the job or turn pauses with that notice
+and its unknown usage stays reserved. Local servers leave `stall_seconds` unset,
+since their scheduler may hold a started request for a long time.
 
 Credentials are read from `DEEPINFRA_API_KEY_FILE` (owned private regular file)
 or `DEEPINFRA_API_KEY`, and are sent only to approved DeepInfra HTTPS routes.

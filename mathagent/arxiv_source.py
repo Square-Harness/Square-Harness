@@ -258,6 +258,10 @@ def extract_source(body, *, deadline=None, cancelled=lambda: False):
                 data = memoryview(payload)[member.offset_data:member.offset_data + member.size]
                 item = {'path': name, 'bytes': member.size, 'sha256': _digest(data), 'included': False}
                 files.append(item)
+                if parts[0] == '__MACOSX' or parts[-1].startswith('._'):
+                    # macOS tar and Finder add AppleDouble resource forks (._main.tex) beside the real files.
+                    item['reason'] = 'macOS metadata; not decoded'
+                    continue
                 if PurePosixPath(name).suffix.lower() not in SOURCE_SUFFIXES:
                     item['reason'] = 'non-source asset; not decoded or executed'
                     continue
@@ -280,7 +284,10 @@ def extract_source(body, *, deadline=None, cancelled=lambda: False):
         if not any(item['included'] and PurePosixPath(item['path']).suffix.lower() in TEX_SUFFIXES for item in files):
             raise SourceArchiveError('Source archive contains no readable TeX source file')
     warnings = ['Untrusted source data. Files are listed in archive order, not compilation order; TeX includes and macros are not expanded and no commands are executed.']
-    omitted = sum(not item['included'] for item in files)
+    metadata = sum(item.get('reason') == 'macOS metadata; not decoded' for item in files)
+    omitted = sum(not item['included'] for item in files) - metadata
+    if metadata:
+        warnings.append(f'{metadata} macOS metadata file(s) (._* or __MACOSX/) ignored.')
     if omitted:
         warnings.append(f'{omitted} non-source or empty asset(s) omitted from the text; consult the file manifest and original archive.')
     if archive is None:
