@@ -451,10 +451,14 @@ class ReviewBase(ResearchRunner):
         """Checks reason before they answer (as Prove's verifier does) when the output ceiling leaves room."""
         return bool(getattr(self.agent, 'think', False)) and self._cap(cap) >= 4096
 
-    def _judge(self, role, prompt, *, cap, schema, key, direct_cap=3000):
-        """A call that reasons first when there is room, then once more without thinking (warmer) if unusable."""
-        direct_cap = self._model_cap('review_direct', direct_cap)
-        if self._thinks(cap):
+    def _judge(self, role, prompt, *, cap, schema, key, direct_cap=3000, reason=True):
+        """A call that reasons first when there is room, then once more without thinking (warmer) if unusable.
+
+        reason=False answers at once with the full allowance: for a written explanation the visible
+        text already carries the derivation, and hidden reasoning repeated it at several times the cost.
+        """
+        direct_cap = self._model_cap('review_direct', direct_cap) if reason else cap
+        if reason and self._thinks(cap):
             try:
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
             except AgentError as exc:
@@ -1586,8 +1590,11 @@ class ExplainRunner(ReviewBase):
             packet, fits, ranges = self._packet(unit, room, segment=item['segment'], context=True)
             self._mark(unit['source'], ranges)
             with self._timeout():
+                # Measured on DS4 with blind grading: a page explained without hidden reasoning took 36 s
+                # instead of 178 s and was judged more accurate; a proof walkthrough kept a small gain
+                # from reasoning, so proofs still reason.
                 result = self._judge('explain', policy + '\n\n' + packet, cap=self._explain_cap(), schema=P.EXPLAIN_SCHEMA,
-                                     key=item['key'], direct_cap=12000)
+                                     key=item['key'], direct_cap=12000, reason=not (passage and is_ds4(self.agent)))
             value = self._clean_explanation(result['value'], segment=item['segment'])
             if value is None:
                 numbers = [n for a, b in (item['segment'] or unit['proofs']) for n in range(a, b + 1)]

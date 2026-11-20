@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Explain a page, section or passage about five times faster with DS4: the explanation is
+  written directly instead of after a long hidden reasoning pass, which in blind grading was
+  also more accurate. Explaining a proof keeps its reasoning.
+
 - The Assistant sends a named page, section or passage of a document to Explain, and a whole
   document to Explore. A chapter remembered by a literature check appears in the project
   findings as memory, never as a checked place.

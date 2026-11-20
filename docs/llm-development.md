@@ -971,7 +971,11 @@ which sees the numbered text with `[page N]` markers. A named result without an 
 proof gets its proof lines from `locate` when the request asks about the proof. A passage is
 a unit with `passage: True`, no statement and its lines in `proofs`, so the walkthrough, the
 fill and the accuracy check cover every line; `PASSAGE_POLICY` and its fill and check
-variants replace the result-and-proof wording.
+variants replace the result-and-proof wording. With DS4 a passage is explained without
+hidden reasoning (`_judge(..., reason=False)`, full output allowance, same retries and
+larger-output recovery): replayed on the same request with blind grading, reasoning at
+High took 178 s against 36 s and wrote a wrong central formula, while a proof walkthrough
+kept a small gain from reasoning and still reasons. Measure before changing either.
 
 Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
 `classify` (domains by field and readership) → `observe` (one call per article,
