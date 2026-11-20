@@ -10,11 +10,26 @@ from .gui.server import folder_lock
 from .investigation import list_records, load_record
 
 
+PHASE_WORDS = {'frame': 'planning', 'planned': 'planned', 'approval': 'planned', 'running': 'started', 'done': 'finished',
+               'clarification': 'needs your answer', 'refused': 'no plan'}
+
+
+def _pause_causes(root, chat_id, state):
+    """What stopped the run. The terminal shows neither the worker cards nor the chat notices."""
+    slots = (state.get('investigation') or {}).get('tasks', {}).values()
+    causes = [slot['reason'] for slot in slots if slot['status'] == 'interrupted' and slot.get('reason')]
+    last = store.load_chat(root, chat_id)['transcript'][-1]
+    if last.get('role') == 'notice':
+        causes.append(last['content'])
+    return list(dict.fromkeys(causes))
+
+
 def command(name, argument, args, ui):
     if name == '/investigations':
         records = list_records(args.workspace)
         for record in records:
-            ui.say(f"{record['id']}  {record['phase']}  {(record.get('target') or {}).get('statement') or record.get('query', '')}")
+            ui.say(f"{record['id']}  {PHASE_WORDS.get(record['phase'], record['phase'])}  "
+                   f"{(record.get('target') or {}).get('statement') or record.get('query', '')}")
         if not records:
             ui.say('No saved investigations.')
         return 'listed'
@@ -68,6 +83,8 @@ def command(name, argument, args, ui):
             if record_id:
                 ui.say(f'Investigation {record_id}')
             if task.state == 'paused' and record_id:
+                for cause in _pause_causes(hub.root, chat_id, state):
+                    ui.say(cause)
                 ui.say(f'/investigate-resume {record_id} or /investigate-report {record_id}')
             if (state.get('investigation') or {}).get('phase') in ('failed', 'refused'):
                 return 'failed'

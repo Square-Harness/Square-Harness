@@ -106,3 +106,11 @@
   .work-output-formats button, .work-back, .work-fold > summary { min-height: 40px; }
   .work-text-link { padding-block: 6px; }
 }
+
+/* Answers written by an agent keep their own headings; in the narrow notebook they are set a size below the page. */
+.work-panel .prose h1 { font: 700 19px/1.25 var(--font-text); margin: 1.1em 0 .45em; }
+.work-panel .prose h2 { font: 700 17px/1.3 var(--font-text); margin: 1.1em 0 .4em; }
+.work-panel .prose h3, .work-panel .prose h4 { font: 700 15.5px/1.35 var(--font-text); margin: 1em 0 .35em; }
+.work-panel .prose table { display: block; max-width: 100%; overflow-x: auto; font-size: 13.5px; }
+.work-panel .prose pre { font-size: 12.5px; }
+.work-section-head h3 { font-size: 18px; }

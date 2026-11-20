@@ -564,10 +564,11 @@ export type TranscriptItem = AgentOrigin & {
 export type RecordEntry = {
   id: string; job_id: string; chat_id: string | null; scope: string; folder: string
   mode: string; kind: string; status: string; direction: string | null; qualifiers: string[]
-  task: { text: string; goal_sha256: string; sha256: string; original_request: string }
+  task: { text: string; text_truncated?: boolean }
   summary: string; created_at: string; evidence: Record<string, unknown>
+  documents?: { document_id: string; title?: string; passages?: { range: string; label?: string }[] }[]
 }
-export type ResearchIndex = { scope: string; entries: RecordEntry[]; scopes: { key: string; count: number }[] }
+export type ResearchIndex = { revision?: string; scope: string; entries: RecordEntry[]; scopes: { key: string; count: number }[] }
 export type Chat = {
   agents?: Agent[]
   agent_concurrency?: number | null
@@ -643,6 +644,27 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(response.status, (data && data.error) || response.statusText)
   }
   return data as T
+}
+
+/** The findings record is large and mostly unchanged between two events: an unchanged revision answers 304. */
+const indexPages = new Map<string, ResearchIndex>()
+async function indexPage(path: string): Promise<ResearchIndex> {
+  const known = indexPages.get(path)
+  let response: Response
+  try {
+    response = await fetch(path, { credentials: 'same-origin', headers: known?.revision ? { 'If-None-Match': '"' + known.revision + '"' } : {} })
+  } catch {
+    throw new ApiError(0, 'The harness is not reachable. Check that square-harness --gui is still running.')
+  }
+  if (response.status === 304 && known) return known
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    if (response.status === 401) authListeners.forEach((listener) => listener())
+    throw new ApiError(response.status, (data && data.error) || response.statusText)
+  }
+  indexPages.set(path, data as ResearchIndex)
+  if (indexPages.size > 12) indexPages.delete(indexPages.keys().next().value!)
+  return data as ResearchIndex
 }
 
 const authListeners = new Set<() => void>()
@@ -746,8 +768,7 @@ export const api = {
   researchBibDownloadUrl: (id: string) => `/api/research/${id}/bib?download=1`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
-  index: (scope: { chat?: string; project?: string }) =>
-    get<ResearchIndex>('/api/index?' + new URLSearchParams(scope).toString()),
+  index: (scope: { chat?: string; project?: string }) => indexPage('/api/index?' + new URLSearchParams(scope).toString()),
   chatExperiment: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/experiments/${job}`),
   chatCheck: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/checks/${job}`),
   savedChatAnswer: (chat: string, answer: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/answers/${answer}`),

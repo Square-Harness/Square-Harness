@@ -213,12 +213,12 @@ class Agent:
                 if round_no + 1 == self.max_rounds:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')
                 continue
-            empty_after_tool = (recover_empty_tool_answer and round_no > 0
-                                and self.last_stats.get('done_reason') == 'stop')
-            if (not assistant['content'].strip() and not answer_now
-                    and (self.last_stats.get('done_reason') == 'length' or empty_after_tool)):
-                # The reasoning (or an unfinished tool call) used the whole allowance: one more call,
-                # without reasoning or tools, asks for the answer instead of returning nothing.
+            exhausted = self.last_stats.get('done_reason') == 'length'
+            empty_after_tool = recover_empty_tool_answer and round_no > 0 and not exhausted
+            if not assistant['content'].strip() and not answer_now and (exhausted or empty_after_tool):
+                # The reasoning (or an unfinished tool call) used the whole allowance, or a worker wrote
+                # nothing after its tool results: one more call, without reasoning or tools, asks for
+                # the answer instead of returning nothing.
                 answer_now = True
                 recovery_notes = thinking[-input_limit(self, 'recovery_note', 4000):]
                 if empty_after_tool:

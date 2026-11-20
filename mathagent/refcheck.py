@@ -1122,11 +1122,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
 
-def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_source_budget=False):
+def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_source_budget=False, max_seconds=None):
     """check_reference for an answering agent: a separate verifier with its own budget and context.
 
     It shares the model client but not the answer's literature budget, and it is
-    never offered check_reference itself.
+    never offered check_reference itself. ``max_seconds`` bounds each check: on DS4
+    the effort's own allowance is hours, and a quarter of the caller's time never binds.
     """
     from .agent import Agent
     from .literature import LiteratureTools
@@ -1162,6 +1163,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
             limits['max_tokens'] = max(1024, int(tokens // 4))
         if isinstance(seconds, (int, float)) and seconds != float('inf'):
             limits['max_seconds'] = max(20.0, seconds / 4)
+        if max_seconds is not None:
+            limits['max_seconds'] = min(limits.get('max_seconds', max_seconds), max_seconds)
         if share_source_budget and parent is not None:
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
@@ -1192,8 +1195,9 @@ def export_evidence(state):
         asker = state['check'].get('asker')
         if asker in ('nested checker', 'detailed review'):
             qualifiers.append('worded by ' + asker)
-        elif not asker and not state.get('reference_context'):
-            qualifiers.append('asker unknown')
+        elif 'asker' not in state['check'] and not state.get('reference_context'):
+            # Saved before checks recorded who worded the question. A check the user typed needs no qualifier.
+            qualifiers.append('origin of the question not recorded')
         record = verdict.get('record') or {}
         document, lines = verdict.get('document_id'), verdict.get('lines')
         title = record.get('title') or candidate.get('title') or ''

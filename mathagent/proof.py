@@ -283,20 +283,36 @@ class ProofRunner:
             settings['solver_leads'] = copy.deepcopy(solver_leads)
         if verifier_reference is not None or any(src.get('document_id') for src in sources):
             # Validate the essential first dispatch using the same policy as the native solver.
-            messages = self._append_reference(initial_request(goal, sources), reference_context)
-            payload = self._payload('solver', messages, max_predict)
-            if getattr(self.agent, 'image_refs', None):
-                messages[0]['images'] = copy.deepcopy(self.agent.image_refs)
-            minimum = (min(max_predict, settings['specialist_output_cap'] or max_predict)
-                       if settings['full_output_ceiling'] else initial_min_solve_tokens)
-            allocate_call(self.agent.client, payload, max_predict, minimum=minimum,
-                          explicit_cap=settings['specialist_output_cap'])
+            self._fits('The first solve', initial_request(goal, sources), reference_context, max_predict,
+                       initial_min_solve_tokens, settings, sources)
+            # The review quotes the same task and sources. Refuse now a job whose review
+            # could not fit beside an empty candidate, instead of after its solve is spent.
+            self._fits('The review of this proof', review_request(goal, sources, ''),
+                       reference_context if verifier_reference is None else verifier_reference,
+                       verify_tokens, 128, settings, sources, VERIFIER_SCHEMA)
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources, job_id=job_id)
         if getattr(self.agent, 'image_refs', None):
             self.state['images'] = copy.deepcopy(self.agent.image_refs)
             self._save()
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
+
+    def _fits(self, call, messages, context, cap, floor, settings, sources, format_schema=None):
+        """Dry run of one call of a job that is not created yet, under the rule its dispatch will apply."""
+        messages = self._append_reference(messages, context)
+        if getattr(self.agent, 'image_refs', None):
+            messages[0]['images'] = copy.deepcopy(self.agent.image_refs)
+        explicit = settings['specialist_output_cap']
+        minimum = min(cap, explicit or cap) if settings['full_output_ceiling'] else floor
+        try:
+            # Only the counted input matters here: the solver's sampling options stand in for either role.
+            allocate_call(self.agent.client, self._payload('solver', messages, cap, format_schema), cap,
+                          minimum=minimum, explicit_cap=explicit)
+        except CallContextError as exc:
+            largest = max(sources, key=lambda source: len(source['content']), default=None)
+            hint = (f' The largest pinned source is {largest["path"]} ({len(largest["content"])} characters).'
+                    if largest else '')
+            raise CallContextError(f'{call} does not fit this model. {exc}{hint}', exc.details) from exc
 
     def resume(self, proof_id):
         self.store = ProofStore.load(self.agent.workspace.root, proof_id)
@@ -840,13 +856,18 @@ class ProofRunner:
         remaining_seconds = self.state['settings']['max_seconds'] - self._elapsed()
         if remaining_seconds <= 0:
             raise ProofBudget('Elapsed-time budget exhausted')
+        pending = self.state['pending']
+        optional = role == 'solver' and pending['kind'] in ('initial', 'retry', 'repair')
+        if optional and (pending.get('solver_leads_omitted') or pending.get('repair_history_omitted')):
+            # A retried dispatch is handed the first attempt's messages: build them again without what was omitted.
+            messages = self._solve_messages(pending)
+        leads = optional and self.state['settings'].get('solver_leads') and not pending.get('solver_leads_omitted')
         payload = self._payload(role, messages, cap, format_schema)
         client = self.agent.client
         old_timeout = getattr(client, 'timeout', None)
         if old_timeout is not None:
             client.timeout = max(0.1, min(old_timeout, remaining_seconds))
         try:
-            pending = self.state['pending']
             minimum = (self.state['settings'].get('initial_min_solve_tokens', self.state['settings']['min_solve_tokens'])
                        if role == 'solver' and pending['kind'] in {'initial', 'retry'} else
                        self.state['settings']['min_solve_tokens'] if role == 'solver' else 128)
@@ -856,15 +877,12 @@ class ProofRunner:
                 payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
                                                  explicit_cap=self.state['settings'].get('specialist_output_cap'))
             except CallContextError as exc:
-                if role != 'solver' or not (pending.get('repair_history_chars') or
-                        self.state['settings'].get('solver_leads') and pending['kind'] in ('initial', 'retry', 'repair')):
+                if role != 'solver' or not (pending.get('repair_history_chars') or leads):
                     raise ProofContext(str(exc) + ' Candidate retained.') from exc
                 payload = None
             # Optional history must never displace exact mathematical input or
             # reduce the output room available without it. Retry preflight only.
-            if (role == 'solver' and self.state['settings'].get('solver_leads') and
-                    pending['kind'] in ('initial', 'retry', 'repair') and not pending.get('solver_leads_omitted') and
-                    (payload is None or payload['options']['num_predict'] < self._call_cap(cap))):
+            if leads and (payload is None or payload['options']['num_predict'] < self._call_cap(cap)):
                 pending['solver_leads_omitted'] = 'context'
                 self.emit('notice', 'Earlier research leads omitted to preserve the statement and solver output allowance')
                 payload = self._payload(role, self._solve_messages(pending), cap, format_schema)

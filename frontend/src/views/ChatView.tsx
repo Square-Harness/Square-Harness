@@ -440,7 +440,7 @@ function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptIte
           {turn.user && <UserMessage item={turn.user} />}
           {plan && index === planTurn && <ConversationPlan key={plan.id} plan={plan} finished={finalTurn >= 0} />}
           <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
-          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} />)}
+          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} chatId={chatId} />)}
           {plan && index === planTurn && finalTurn < 0 && <WorkingAnswer plan={plan} chatId={chatId} />}
         </div>
       ))}
@@ -498,7 +498,7 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
       flush(index)
       const batch = mode === 'free' && item.orchestrated ? groups.get(index) : undefined
       if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
-      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} prompt={prompt} />)
+      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} prompt={prompt} chatId={chatId} />)
     } else if (item.role === 'assistant') {
       if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
       const calls = item.tool_calls || []
@@ -508,7 +508,7 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
       blocks.push(
         <div key={index} className="step">
           <Thinking text={item.thinking || ''} />
-          {calls.map((call, n) => (
+          {calls.map((call, n) => groups.size > 0 && call.function?.name === 'delegate' ? null : (
             <Collapse key={n} className="tool-step" summary={<span className="tool-line">{toolLine(call)}</span>}>
               <pre className="plain">{results[n]?.content ?? 'No result was recorded.'}</pre>
             </Collapse>
@@ -703,7 +703,6 @@ export function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpos
     <figcaption>
       {purpose ? `${purpose} · ` : ''}
       <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.filename}</a>
-      {' · '}<span className="experiment-id">{artifact.artifact_id.split('/')[0]}</span>
     </figcaption>
   )
   if (display === 'image') {
@@ -753,6 +752,8 @@ function LiveTurnView({ live, mode, investigating, waitingForOutput }: { live: L
               )}
             </div>
           ) : step.type === 'tool' ? (
+            // The agents block above already shows each delegated task with its own state.
+            step.text.startsWith('Delegating a mathematical task') ? null :
             <p key={index} className="tool-line tool-live">{step.text}</p>
           ) : step.type === 'result' ? (
             <p key={index} className="tool-result-live">{step.text}</p>

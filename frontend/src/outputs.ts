@@ -128,7 +128,7 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
       primary = false
     }
     if (!item.answer_id && !item.job_id && receipt) add('conversation', 'Answer in conversation', undefined, undefined, receipt.text)
-    else if (item.answer_id) add('answer', mode === 'explore' ? 'Exploration notes' : 'Written answer')
+    else if (item.answer_id) add('answer', mode === 'explore' ? 'Exploration notes' : researchModeName(mode) + ' answer')
     else if (mode === 'prove') {
       add('proof', 'Proof response')
       add('report', 'Proof review')

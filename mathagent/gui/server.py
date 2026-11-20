@@ -356,18 +356,47 @@ def image_snapshot(h, body, sha):
     return Streamed
 
 
+_RECORD_FIELDS = ('id', 'job_id', 'chat_id', 'scope', 'folder', 'mode', 'kind', 'status', 'direction', 'qualifiers',
+                  'summary', 'created_at', 'evidence')
+
+
+def _record_page(view):
+    """The fields the interface reads. The question of a literature review is sent in full with its first
+    source; its other sources carry the opening words, which is all the interface shows beside a source."""
+    told, entries = set(), []
+    for entry in view['entries']:
+        job, text = (entry['folder'], entry['job_id']), entry['task']['text']
+        room = 200 if entry['kind'] == 'source' and job in told else 2000
+        told.add(job)
+        task = {'text': text[:room], 'text_truncated': True} if len(text) > room else {'text': text}
+        documents = [{'document_id': doc['document_id'], 'title': doc.get('title') or '',
+                      'passages': [{'range': passage['range'], 'label': passage.get('label') or ''}
+                                   for passage in doc['passages']]} for doc in entry['documents']]
+        entries.append({**{field: entry[field] for field in _RECORD_FIELDS}, 'task': task, 'documents': documents})
+    return {'scope': view['scope'], 'entries': entries, 'scopes': view['scopes']}
+
+
 @route('GET', '/api/index')
 def research_index(h, body):
+    from ..project_index import digest
     if set(h.query) - {'chat', 'project'} or any(len(values) != 1 for values in h.query.values()):
         raise ValueError('Use one chat or project identifier')
-    result = store.index_view(h.server.hub.root, **{key: values[0] for key, values in h.query.items()})
-    for entry in result['entries']:
-        task = entry['task']
-        for field in ('text', 'original_request'):
-            if len(task[field]) > 2000:
-                task[field] = task[field][:2000]
-                task[field + '_truncated'] = True
-    return result
+    page = _record_page(store.index_view(h.server.hub.root, findings=True,
+                                         **{key: values[0] for key, values in h.query.items()}))
+    revision = digest(json.dumps(page, ensure_ascii=False, sort_keys=True))[:32]
+    headers = [('Cache-Control', 'no-store'), ('ETag', f'"{revision}"')]
+    known = [tag.strip().removeprefix('W/') for tag in h.headers.get('If-None-Match', '').split(',')]
+    if f'"{revision}"' in known:
+        # The record the client holds is current: no body.
+        h.send_response(304)
+        h.security_headers()
+        for key, value in headers:
+            h.send_header(key, value)
+        h.end_headers()
+    else:
+        h.send_bytes(200, json.dumps({'revision': revision, **page}, ensure_ascii=False).encode('utf-8'),
+                     'application/json; charset=utf-8', headers)
+    return Streamed
 
 
 @route('GET', '/api/proofs')

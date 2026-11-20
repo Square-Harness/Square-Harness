@@ -160,15 +160,21 @@ class ExperimentStore:
         older = sorted((p for p in folders if p.name != keep), key=lambda p: (p.stat().st_mtime_ns, p.name))
         while older and (len(older) + 1 > self.max_records or total > self.max_bytes):
             oldest = older.pop(0)
+            try:
+                original = self.load(oldest.name)
+                compact = _encode(kept(original))
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                # A damaged run (an interrupted save, an invalid record) is left in place: the next oldest is pruned.
+                warnings.warn(f'Left damaged experiment {oldest.name} in place: {exc}', RuntimeWarning, stacklevel=2)
+                continue
             # Before upgrading, this may be the only copy. Preserve it before pruning.
             try:
                 copy = self.root / '.mathagent' / 'index' / 'experiments' / (oldest.name + '.json')
                 _directory(self.root / '.mathagent')
                 _directory(copy.parent.parent, create=True)
                 _directory(copy.parent, create=True)
-                original = self.load(oldest.name)
                 try:
-                    intact = _read(copy, 65536).encode() == _encode(kept(original))
+                    intact = _read(copy, 65536).encode() == compact
                 except (OSError, ValueError):
                     intact = False
                 if not intact:

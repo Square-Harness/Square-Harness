@@ -32,7 +32,7 @@
 .investigation-conclusion p { font: 14px/1.4 var(--font-ui); margin: 2px 0 0; color: var(--text-2); }
 .investigation-evidence-label, .investigation-step-note { margin: 7px 0; }
 .investigation-excerpt { min-height: 1px; }
-.investigation-excerpt > .prose { margin: 9px 0; }
+.investigation-excerpt > .prose { margin: 9px 0; max-height: 15.5em; overflow: auto; overscroll-behavior: contain; }
 .investigation-sources ul { padding: 0 0 0 14px; list-style: square; margin: 9px 0; }
 .investigation-sources li { padding: 3px 0; line-height: 1.4; }
 .investigation-sources small, .investigation-sources li > span { display: block; }

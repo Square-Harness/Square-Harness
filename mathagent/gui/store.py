@@ -824,7 +824,8 @@ def delete_chat(root, chat_id):
     """Remove one saved conversation, preserving jobs and workspace sources.
 
     Chat calls have no separate disk streams: their transcript and Assistant
-    checkpoint live in this JSON. Proof/research stream files belong to jobs.
+    checkpoint live in this JSON. Its worker answers and investigation records
+    go with it. Proof/research stream files belong to jobs.
     The Hub guards active work before calling this storage operation.
     """
     if not isinstance(chat_id, str) or not _ID.fullmatch(chat_id):
@@ -851,6 +852,8 @@ def delete_chat(root, chat_id):
     if folder.exists() or folder.is_symlink():
         _directory(folder)
         shutil.rmtree(folder)
+    from ..investigation import delete_records
+    delete_records(root, chat_id)
     path.unlink()
     _sync_directory(base)
     with _cache_lock:
@@ -1687,12 +1690,15 @@ def saved_chat_check(root, chat_id, job_id):
 
 
 def saved_chat_answer(root, chat_id, answer_id):
-    """Read a durable worker answer through the matching card in its owning chat."""
+    """Read a durable worker answer through the matching card in its owning chat.
+
+    A failed card that names an answer keeps the partial text its worker wrote.
+    """
     if not isinstance(answer_id, str) or not _ID.fullmatch(answer_id):
         raise ValueError('Invalid answer ID')
     chat = load_chat(root, chat_id)
     card = next((item for item in chat['transcript'] if item.get('role') == 'route'
-                 and item.get('status') == 'done' and item.get('answer_id') == answer_id), None)
+                 and item.get('status') in ('done', 'failed') and item.get('answer_id') == answer_id), None)
     if card is None:
         raise NotFound('Unknown answer in this chat')
     return _card_answer(root, chat, card)
@@ -1911,7 +1917,8 @@ def evidence_links(root):
     return links, chats
 
 
-def index_view(root, *, chat=None, project=None, all_scopes=False, limit=None):
+def index_view(root, *, chat=None, project=None, all_scopes=False, limit=None, findings=False):
+    """The research record of one scope. `findings` lists only what a reader can use (see project_index.scoped)."""
     from .. import project_index
     if sum(bool(x) for x in (chat is not None, project is not None, all_scopes)) > 1:
         raise ValueError('Select one research-record scope')
@@ -1931,6 +1938,6 @@ def index_view(root, *, chat=None, project=None, all_scopes=False, limit=None):
         except FileNotFoundError:
             raise NotFound('Unknown project') from None
         scope = 'project:' + project
-    view = project_index.scoped(project_index.collect(root), links, chats, scope, limit)
+    view = project_index.scoped(project_index.collect(root), links, chats, scope, limit, findings)
     project_index.freeze_documents(root, view)
     return view

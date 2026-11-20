@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Confirmed, resumable mathematical investigations.
+"""Bounded, resumable mathematical investigations.
 
 Framing reads sources and freezes a finite plan with an exact target,
-worker slots and allowances. Code dispatches those slots through the native
-worker adapter. Optional model decisions can only skip work or name a variant.
-The report is computed from persisted observations, including on explicit stop.
+worker slots and allowances. The model words that target; the plan starts
+without a confirmation from the user, and the report says so. Code dispatches
+the slots through the native worker adapter. Optional model decisions can only
+skip work or name a variant. The report is computed from persisted
+observations, including on explicit stop.
 """
 import copy
 import hashlib
 import json
 import math
 import re
+import shutil
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
+from .backends import ToolCallError
 from .call_policy import CallContextError, allocate_call
+from .deepinfra import generation_attempts
 from .ledger import _atomic_write, _directory, _read
 from .investigation_writing import ProgressiveAnswer, WRITING_INPUT, WRITING_OUTPUT, WRITING_SECONDS, exact_review
 from .orchestrator import Orchestrator, WorkerInterrupted
@@ -29,7 +34,7 @@ from .tools import schema
 VERSION = 1
 MODES = ('explore', 'check', 'literature', 'prove', 'quick_review')
 EFFORTS = ('low', 'medium')
-MAX_TASKS, MAX_PROOFS, MAX_VARIANTS = 6, 2, 3
+MAX_TASKS, MAX_PROOFS = 6, 2
 FRAME_CALLS, FRAME_OUTPUT, CONTROL_OUTPUT, CONTROL_INPUT = 4, 4096, 1024, 32768
 READ_TOOLS = {'read_file', 'search_text', 'list_index', 'read_index', 'read_conversation'}
 TASK_STATES = ('complete', 'failed', 'skipped')
@@ -235,19 +240,44 @@ def list_records(root):
     return records
 
 
+def _uncovered(inv):
+    """Finished steps whose results the saved research answer was written without."""
+    if 'synthesis_steps' not in inv:
+        return []
+    return [key for key, slot in inv['tasks'].items() if slot['status'] == 'complete' and key not in inv['synthesis_steps']]
+
+
+def delete_records(root, chat_id):
+    """Remove the saved investigations of one conversation. Their proofs and reviews are separate jobs."""
+    for record in list_records(root):
+        if record.get('chat_id') == chat_id:
+            shutil.rmtree(_record_path(root, record['id']).parent)
+
+
 def report(state):
-    """Render from pinned entry labels. Only exact, independently indexed goals qualify for attribution."""
+    """Render from pinned entry labels. Only exact, independently indexed goals qualify for attribution.
+
+    The notebook reads the section headings, the task rows and their markers back
+    (frontend/src/investigationText.ts). Reword them there first. Reports saved
+    by earlier versions say "Confirmed statement".
+    """
     inv = state['investigation']
     target = inv.get('target')
     lines = ['## Investigation report', '', inv.get('reason', 'Investigation finished.')]
     if inv.get('synthesis'):
-        lines += ['', '### Research answer', '', inv['synthesis']]
+        lines += ['', '### Research answer', '']
+        late = _uncovered(inv)
+        if late:
+            # A draft kept from before the last results must not pass for the final answer.
+            lines += [f"*This answer was written without the result{'s' if len(late) > 1 else ''} of {', '.join(late)}, "
+                      'listed under Work and evidence.*', '']
+        lines.append(inv['synthesis'])
     if not target:
         return '\n'.join(lines)
     if inv['query'].strip() != target['statement']:
         lines += ['', '### Original request', '', inv['query']]
-    lines += ['', '### Confirmed statement' if inv.get('approved') else '### Proposed statement', '',
-              target['statement'], '', 'SHA-256 ' + target['sha256']]
+    # The framing model worded this statement and no user confirmed it.
+    lines += ['', '### Proposed statement', '', target['statement'], '', 'SHA-256 ' + target['sha256']]
     if inv.get('variants'):
         lines += ['', '### Model-declared variants']
         for v in inv['variants']:
@@ -256,7 +286,8 @@ def report(state):
     exact_reviews = []
     for t in inv['plan']['tasks']:
         slot = inv['tasks'][t['id']]
-        row = f"- **{t['id']} · {t['mode']} · {slot['status']}** — {t['objective']}"
+        # One line per row: the plan and the worker keep the objective as written.
+        row = f"- **{t['id']} · {t['mode']} · {slot['status']}** — {' '.join(t['objective'].split())}"
         if t['mode'] == 'prove':
             row += ' · claim ' + slot.get('claim_id', t['claim'])
         if slot.get('job_id'):
@@ -276,13 +307,14 @@ def report(state):
         lines.append(row)
         if exact_review(slot, target):
             exact_reviews.append(slot['entry_line'])
-    lines += ['', '### Status of the confirmed target' if inv.get('approved') else '### Status of the proposed target', '']
+    lines += ['', '### Status of the proposed target', '']
     if exact_reviews:
         lines.extend('• ' + line for line in exact_reviews)
-        lines.append('These are the saved model review outcomes for the exact target. A formal certificate requires separate verification.')
+        lines.append('These are the saved model review outcomes for this exact statement. A formal certificate requires separate verification.')
+    elif inv.get('approved'):
+        lines.append('No indexed model-reviewed proof or refutation of this exact statement is recorded. It remains unresolved here.')
     else:
-        lines.append('No indexed model-reviewed proof or refutation of the exact confirmed statement is recorded. The confirmed target remains unresolved here.'
-                     if inv.get('approved') else 'The proposed statement was not approved for execution.')
+        lines.append('The plan was not started, so no work examined this statement.')
     return '\n'.join(lines)
 
 
@@ -348,7 +380,7 @@ def _receipt(root, chat_id, slot, child, value):
         try:
             _entry_for(root, chat_id, slot)
         except (ValueError, OSError, LookupError, TypeError) as exc:
-            slot['reason'] = (slot.get('reason', '') + ' Index unavailable: ' + str(exc)).strip()
+            slot['reason'] = (slot.get('reason', '') + ' The saved result could not be read: ' + str(exc)).strip()
     if slot.get('entry_line'):
         # Native evidence exists independently. Keep only the typed receipt on the parent.
         child['result'] = {k: value[k] for k in ('status', 'job_id', 'artifact', 'error') if k in value}
@@ -435,11 +467,11 @@ class Investigation(Orchestrator):
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + self.state['main_calls']) % (2 ** 31)
         if client.remaining_tokens < 128:
-            raise AssistantBudget('The investigation has exhausted its controller output budget.')
+            raise AssistantBudget('The investigation has used up its output budget for planning.')
         cap = min(cap, int(client.remaining_tokens)) if math.isfinite(client.remaining_tokens) else cap
         payload, allocation = allocate_call(client, payload, cap, explicit_cap=getattr(self.agent, 'document_output_cap', None))
         if allocation['input_tokens'] > CONTROL_INPUT:
-            raise CallContextError('The complete investigation controller request exceeds its input allowance.', allocation)
+            raise CallContextError('The planning request of this investigation is longer than its input allowance.', allocation)
         # Optional decisions overlap independent workers. Stream transport updates
         # its working state per chunk. Publish only coherent snapshots to the shared
         # parent, without holding its lock while waiting for an inference slot.
@@ -453,7 +485,11 @@ class Investigation(Orchestrator):
             self.state['next_allocation'] = allocation
             stream.state = {key: copy.deepcopy(self.state[key]) for key in fields}
         try:
-            return stream._stream(payload, output_char_limit=4 * cap + 4096)
+            # As in an ordinary turn, a request the provider ends before any output is sent once more.
+            with generation_attempts(client, self.emit) as attempts:
+                for attempt in attempts:
+                    with attempt:
+                        return stream._stream(payload, output_char_limit=4 * cap + 4096)
         finally:
             publish(stream.state)
 
@@ -567,26 +603,50 @@ class Investigation(Orchestrator):
                 self._save()
                 continue
             if self.inv['frame_calls'] >= FRAME_CALLS:
-                last = next((m['content'] for m in reversed(self.state['messages']) if m['role'] == 'tool'), '')
-                _terminal(self.state, 'refused', 'No valid, affordable plan was proposed within the framing allowance.'
-                          + (' Last controller result: ' + last if '"invalid_plan"' in last else ''))
+                _terminal(self.state, 'refused', 'No valid plan within the available limits was prepared in '
+                          f'{FRAME_CALLS} attempts.' + self._last_plan_problem())
                 return
-            self.inv['frame_calls'] += 1
-            proposal_only = self.inv['frame_calls'] >= FRAME_CALLS - 1
-            self._save()
+            proposal_only = self.inv['frame_calls'] + 1 >= FRAME_CALLS - 1
             tools = [PROPOSE]
             if not proposal_only and self._action_room():
                 tools += [t for t in super()._tools() if t['function']['name'] in READ_TOOLS]
-            message, warning = self._controller_call(FRAME_POLICY + self._frame_status(), self._framing_messages(),
-                                                     tools, FRAME_OUTPUT, 'propose' if proposal_only else None)
+            # Only an answered request spends the framing allowance. One the provider
+            # did not answer leaves the frame as it was, for Resume.
+            try:
+                message, warning = self._controller_call(FRAME_POLICY + self._frame_status(), self._framing_messages(),
+                                                         tools, FRAME_OUTPUT, 'propose' if proposal_only else None)
+            except ToolCallError as exc:
+                self.inv['frame_calls'] += 1
+                self._reject_frame_call(exc)
+                continue
+            self.inv['frame_calls'] += 1
             if warning:
                 self._warning(warning)
-                continue
-            if message.get('tool_calls'):
+            elif message.get('tool_calls'):
                 self._prepare_calls(message)
             elif message.get('content', '').strip():
                 _terminal(self.state, 'clarification', message['content'].strip())
                 return
+            self._save()
+
+    def _last_plan_problem(self):
+        last = next((m['content'] for m in reversed(self.state['messages']) if m['role'] == 'tool'), '')
+        try:
+            result = json.loads(last)
+        except ValueError:
+            return ''
+        if not isinstance(result, dict) or result.get('status') != 'invalid_plan':
+            return ''
+        return ' Last problem: ' + str(result.get('error'))
+
+    def _reject_frame_call(self, exc):
+        # Nothing from a rejected response is executed. Tell the model why, since
+        # greedy decoding would otherwise repeat the same malformed call.
+        self.state['messages'].append({'role': 'user', 'content':
+            'CONTROLLER: your previous tool call was rejected before execution (' + str(exc) + '). '
+            'Call propose again with complete, valid JSON arguments.'})
+        self._warning('The model returned an invalid tool call while preparing the plan; asking again.')
+        self._save()
 
     def _check_cancel(self):
         if self.agent.workspace.cancelled():
@@ -594,8 +654,8 @@ class Investigation(Orchestrator):
 
     def _start_plan(self):
         self._check_cancel()
-        # Persist stable worker slots before dispatch. Older records use
-        # "approved" for the same transition from a frozen plan to execution.
+        # Persist stable worker slots before dispatch. The saved field "approved"
+        # records that the plan started. No user confirms the statement or the plan.
         for task in self.inv['plan']['tasks']:
             slot = self.inv['tasks'][task['id']]
             slot.setdefault('child_id', 'child_' + uuid.uuid4().hex)
@@ -664,7 +724,7 @@ class Investigation(Orchestrator):
         self._check_cancel()
         value = self.delegate(copy.deepcopy(child['action']), child, self._save)
         if not isinstance(value, dict) or not isinstance(value.get('status'), str):
-            raise AgentError('Worker did not supply a native result status.')
+            raise AgentError('The worker returned no result.')
         with self._state_lock:
             job_id = value.get('job_id')
             if job_id and job_id != child['id']:
@@ -880,6 +940,13 @@ class Investigation(Orchestrator):
                 writing.update()
                 self._reflect()
 
+    def _unanswered_frame(self, exc):
+        """As in an ordinary turn, a framing request the model did not answer waits for Resume."""
+        client = self.agent.client
+        return (self.inv['phase'] == 'frame' and isinstance(exc, AgentError)
+                and not isinstance(exc, (AssistantBudget, CallContextError))
+                and client.remaining_tokens > 0 and client.remaining_seconds > 0)
+
     def run_routed(self, state):
         """Continue the classified parent turn, keeping its identity, sources and usage."""
         self._retired_calls = set()
@@ -913,7 +980,7 @@ class Investigation(Orchestrator):
             if self.inv['phase'] in ('planned', 'approval', 'running'):
                 validate_plan(self.inv['plan'], self.state['files'], self.inv['max_effort'])
                 if self.inv.get('approval_sha256') and self.inv['approval_sha256'] != _approval_digest(self.inv):
-                    raise AgentError('The saved plan or ceilings no longer match the proposal. Its workers were not dispatched.')
+                    raise AgentError('The saved plan or its limits were changed after it was prepared. No further step was started.')
             if self.inv['phase'] in ('planned', 'approval'):
                 self._start_plan()
             if self.inv['phase'] == 'running':
@@ -935,6 +1002,10 @@ class Investigation(Orchestrator):
                 self.state['status'] = 'interrupted'
                 self._save()
                 raise WorkerInterrupted('Investigation paused by the user.') from exc
+            if self._unanswered_frame(exc):
+                self.state['status'] = 'interrupted'
+                self._save()
+                raise
             _terminal(self.state, 'failed', str(exc))
         self._save()
         return self._result()

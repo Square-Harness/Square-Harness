@@ -1553,7 +1553,8 @@ class Hub:
                     store.save_assistant(self.root, chat_id, failed)
                     store.append_items(self.root, chat_id, [{'role': 'notice', 'content': 'Not added to the conversation: ' + str(exc),
                         'discarded': True, 'time': store._now()}])
-                    self.bus.publish('chat_saved', chat=chat_id)
+                # Publish after releasing the hub lock: every other path takes the bus lock first.
+                self.bus.publish('chat_saved', chat=chat_id)
             raise
         with self._lock:
             current = admission_chat()
@@ -1624,7 +1625,7 @@ class Hub:
             main.compile_job = compile_job
             main.conversion_style_mode = initial_style if local_conversion else None
             # The investigation records its framing checkpoint before contacting
-            # the provider, so an unavailable endpoint still has a factual report.
+            # the provider, so an unavailable endpoint leaves a paused run to resume.
             if not local_conversion and not compile_job and selected_mode != 'investigate':
                 self._ensure_model(main)
             checkpoint_lock = threading.RLock()
@@ -1729,6 +1730,13 @@ class Hub:
             except AgentError as exc:
                 exhausted = isinstance(exc, AssistantBudget) or budget.remaining_tokens <= 0 or budget.remaining_seconds <= 0
                 permanent = isinstance(exc, CallContextError)
+                if (exhausted or permanent) and parent.state.get('investigation'):
+                    # Nothing can resume this investigation: close it with the evidence already saved.
+                    from ..investigation import stop_state
+                    parent.state = stop_state(root, parent.state, str(exc))
+                    checkpoint()
+                    self.bus.publish('chat_saved', chat=chat_id)
+                    return {'status': 'complete', 'answer': parent.state['answer']}
                 parent.state['status'] = 'budget_exhausted' if exhausted else 'failed' if permanent else 'interrupted'
                 parent.state.setdefault('warnings', []).append(str(exc))
                 checkpoint()

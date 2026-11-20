@@ -311,8 +311,8 @@ class ProgressiveAnswer:
             for case in cases:
                 answer += '\n\n**' + case['review'].capitalize() + ' of the special case**\n\n' + case['statement examined']
         with run._state_lock:
-            if run.agent.workspace.cancelled() or (keys, settled) != self.scheduled:
-                return
+            # A draft finished while another task completed, or while a pause was requested, is
+            # kept: it covers the steps it names, and the revision already scheduled corrects it.
             inv.update(synthesis=answer, synthesis_steps=covered)
             inv.pop('writing_pending', None)
             inv.pop('writing_error', None)

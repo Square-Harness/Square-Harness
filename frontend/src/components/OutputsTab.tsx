@@ -87,14 +87,14 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
     onSelect(id)
   }
   if (!outputs.length && !index.data && !index.error) return <p role="status">Loading results…</p>
-  if (!outputs.length) return <><ErrorNote>{index.error}</ErrorNote><p className="empty-note">Results will appear here when an agent saves its work.</p></>
+  if (!outputs.length) return <><ErrorNote>{index.error}</ErrorNote><p className="empty-note">Everything the agents produce in this conversation (answers, proofs, reviews, documents, figures) will be listed here.</p></>
   return <div className="work-tab-content work-results" ref={panel}>
     <MathMacrosProvider definitions={chat.math_macros}>
       {chosen ? <>
         <button type="button" className="work-back" onClick={() => choose(null)}><BackIcon size={15} /> All results</button>
         <OutputPreview key={chat.id + ':' + chosen.id} output={chosen} chat={chat.id} />
       </> : <>
-        <div className="work-section-head"><h3>Saved results</h3><small>{plural(outputs.length, 'item')}</small></div>
+        <div className="work-section-head"><h3>Results</h3><small>{plural(outputs.length, 'item')}</small></div>
         {selected && <p role="status" className="muted">{index.data ? 'This result is unavailable in the current conversation.' : 'Loading the saved result…'}</p>}
         <ResultsList outputs={outputs} choose={choose} />
       </>}
@@ -102,8 +102,13 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
   </div>
 }
 
+const QUIET_STATES = new Set(['done', 'ok', 'complete', 'completed', 'ran', 'ready', 'saved', 'started'])
+
+/** A plain success needs no word: only an outcome the reader should notice is named. */
 function ResultByline({ item, showProducer }: { item: WorkOutput; showProducer: boolean }) {
-  return <small>{showProducer && item.producer + ' · '}{resultState(item.status)}{item.time && <> · <time dateTime={item.time}
+  const parts = [showProducer && item.producer !== item.name && !item.name.startsWith(item.producer) ? item.producer : '',
+    QUIET_STATES.has(item.status) ? '' : resultState(item.status)].filter(Boolean)
+  return <small>{parts.join(' · ')}{item.time && <>{parts.length > 0 && ' · '}<time dateTime={item.time}
     title={new Date(item.time).toLocaleString()}>{ago(item.time)}</time></>}</small>
 }
 
@@ -291,7 +296,7 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   if (output.kind === 'report' && output.mode === 'literature') return <LiteratureReading output={output} data={research} error={error} />
   return <section className="work-output-preview" aria-label={output.name}>
     <div className="work-section-head"><h3>{output.name}</h3></div>
-    <p className="work-result-byline">{output.producer} · {resultState(output.status)}</p>
+    {output.producer !== output.name && <p className="work-result-byline">{output.producer}</p>}
     {output.objective && <Markdown mathProse className="work-output-objective">{output.objective}</Markdown>}
     <div className="work-tab-actions">
       {download && <a className="btn btn-small" href={download} download={localDownload ? output.kind + (output.kind === 'experiment' ? '.json' : '.md') : true}>Download</a>}

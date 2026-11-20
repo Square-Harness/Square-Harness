@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { api, type Chat } from '../api'
 import { chatWork, taskById } from '../concurrency'
 import { count, duration, plural } from '../format'
-import { PlanSteps } from './InvestigationReading'
+import { humanReason, PlanSteps } from './InvestigationReading'
 import { taskNotice } from '../workNotice'
 import { openWorkPanel } from '../router'
 import { useApp } from '../store'
@@ -78,7 +78,7 @@ export function PlanTab({ chat }: { chat: Chat }) {
         const task = tasks.find(item => item.id === id)
         if (!task) return null
         return <>
-          {task.reason && task.status !== 'complete' && <Markdown className="work-step-note">{taskNotice(task.reason, tasks)}</Markdown>}
+          {task.reason && task.status !== 'complete' && <Markdown className="work-step-note">{taskNotice(humanReason(task.reason), tasks)}</Markdown>}
           {task.child_id && (chat.agents || []).some(agent => agent.id === task.child_id) && <button type="button"
             className="work-text-link" onClick={() => openWorkPanel('agents', task.child_id)}>View activity <span aria-hidden="true">→</span></button>}
         </>

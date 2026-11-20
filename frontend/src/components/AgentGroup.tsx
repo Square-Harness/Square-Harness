@@ -57,12 +57,35 @@ function SingleAgent({ lane, prompt }: { lane: AgentLane; prompt?: string }) {
   </section>
 }
 
-export function AgentGroup({ lanes, prompt }: { lanes: AgentLane[]; prompt?: string }) {
+export function AgentGroup({ lanes, prompt, chatId }: { lanes: AgentLane[]; prompt?: string; chatId?: string }) {
   return lanes.length === 1 && activeAgent(lanes[0])
-    ? <SingleAgent lane={lanes[0]} prompt={prompt} /> : <AgentBatch lanes={lanes} />
+    ? <SingleAgent lane={lanes[0]} prompt={prompt} /> : <AgentBatch lanes={lanes} chatId={chatId} />
 }
 
-function AgentBatch({ lanes }: { lanes: AgentLane[] }) {
+/** A finished agent's answer, readable in place while the other agents of its batch are still working. */
+function EarlyAnswer({ chat, lane }: { chat: string; lane: AgentLane }) {
+  const { data } = useLoad(() => api.savedChatAnswer(chat, lane.answer_id!), [chat, lane.answer_id])
+  if (!data?.answer) return null
+  return <div className="agent-early">
+    <div className="agent-early-text"><Markdown mathProse>{data.answer}</Markdown></div>
+    <button type="button" className="agent-early-more" onClick={() => openWorkPanel(lane.result.outputId ? 'outputs' : 'agents', lane.result.outputId || lane.id)}>
+      Read the full answer <ChevronIcon size={12} />
+    </button>
+  </div>
+}
+
+function batchTitle(lanes: AgentLane[]) {
+  const n = lanes.length, running = lanes.filter(lane => lane.status === 'running').length
+  const waiting = lanes.filter(lane => lane.status === 'waiting').length
+  const done = lanes.filter(lane => lane.status === 'finished').length
+  const agents = (k: number) => k === 1 ? '1 agent' : k + ' agents'
+  if (running) return agents(running) + (running > 1 ? ' working in parallel' : ' working') + (waiting ? ' · ' + waiting + ' waiting' : '')
+  if (waiting) return agents(waiting) + ' waiting to start'
+  if (done === n) return agents(n) + ' finished'
+  return done ? done + ' of ' + n + ' agents finished' : n === 1 ? 'Agent interrupted' : 'Agents interrupted'
+}
+
+function AgentBatch({ lanes, chatId }: { lanes: AgentLane[]; chatId?: string }) {
   const id = useId()
   const active = lanes.some(activeAgent)
   const running = lanes.filter(lane => lane.status === 'running').length
@@ -70,51 +93,52 @@ function AgentBatch({ lanes }: { lanes: AgentLane[] }) {
   const open = folded?.active === active ? folded.value : active
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
-    if (!open || !running) return
+    if (!running) return
     setNow(Date.now())
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [open, running])
+  }, [running])
   const starts = lanes.map(lane => stamp(lane.started_at)).filter(Number.isFinite)
   const ends = lanes.map(lane => laneEnd(lane, now)).filter(Number.isFinite)
   const start = Math.min(...starts), span = Math.max(1, Math.max(...ends) - start)
-  const interrupted = lanes.filter(lane => lane.status === 'failed' || lane.status === 'stopped').length
-  const title = active ? (running > 1 ? 'Working in parallel' : running ? 'Work in progress' : 'Waiting to start')
-    : interrupted === lanes.length ? 'Work interrupted' : interrupted ? 'Work summary' : 'Completed work'
-  return <section className="agent-group" aria-label={title}>
+  const measured = starts.length > 0 && ends.length > 0
+  const title = batchTitle(lanes)
+  return <section className={'agent-group' + (active ? ' agent-group-active' : '')} aria-label={title}>
     <button type="button" className="agent-group-toggle" aria-expanded={open} aria-controls={id}
       onClick={() => setFolded({ active, value: !open })}>
+      <AgentSquares agents={lanes} />
       <span className="agent-group-title">{title}</span>
-      <span className="agent-group-count">{lanes.length} {lanes.length === 1 ? 'task' : 'tasks'}</span>
+      {measured && <time className="agent-group-time">{duration(span / 1000)}</time>}
       <ChevronIcon size={15} />
     </button>
     {open ? <ul id={id} className="agent-lanes">{lanes.map(lane => {
       const a = stamp(lane.started_at), b = laneEnd(lane, now)
       const timed = Number.isFinite(a) && Number.isFinite(b)
-      return <li key={lane.id}>
-        <div className="agent-lane">
-          <SkillCover mode={lane.mode} />
+      const working = lane.status === 'running'
+      return <li key={lane.id} className={'agent-lane agent-lane-' + lane.status}>
+        <SkillCover mode={lane.mode} />
+        <div className="agent-lane-copy">
           <button className="agent-row-link" type="button" onClick={() => openWorkPanel('agents', lane.id)}>
             {skillName(lane.mode)}<span className="agent-sr-only"> · {lane.objective}</span>
           </button>
-          <span className="agent-state"><Square variant={lane.result.variant} size={13} />
-            {lane.status === 'finished' ? lane.result.label : lane.stateLabel}
-            {timed && <time>{duration(Math.max(0, b - a) / 1000)}</time>}
-          </span>
           <span className="agent-objective"><Inline mathProse limit={210}>{lane.objective}</Inline></span>
           {lane.step && lane.step !== lane.result.label && activeAgent(lane) && lane.status !== 'waiting' &&
             <span className="agent-step">{lane.step}</span>}
-          {lane.notebook && <NotebookAction lane={lane} primary={activeAgent(lane)} />}
-          {timed && lanes.length > 1 && <span className="agent-axis" aria-hidden="true">
-            <i className={'mode-' + skillCover(lane.mode)} style={{
-              left: ((a - start) * 100 / span) + '%', width: Math.max(.7, (b - a) * 100 / span) + '%',
-            }} /></span>}
+          {lane.notebook && <NotebookAction lane={lane} />}
+          {active && chatId && lane.status === 'finished' && lane.answer_id && <EarlyAnswer chat={chatId} lane={lane} />}
         </div>
+        <span className="agent-state"><Square variant={lane.result.variant} size={13} />
+          {lane.status === 'finished' ? lane.result.label : lane.stateLabel}
+          {timed && <time>{duration(lane.status === 'finished' && lane.usage?.seconds ? Math.min(lane.usage.seconds, Math.max(0, b - a) / 1000) : Math.max(0, b - a) / 1000)}</time>}
+        </span>
+        {timed && lanes.length > 1 && <span className="agent-axis" aria-hidden="true">
+          <i className={working ? 'agent-axis-live' : ''} style={{
+            left: ((a - start) * 100 / span) + '%', width: Math.max(.7, (b - a) * 100 / span) + '%',
+          }} /></span>}
       </li>
     })}</ul> : <ul id={id} className="agent-results">{lanes.map(lane => {
-      const content = <><SkillCover mode={lane.mode} /><span>{lane.notebook?.label || skillName(lane.mode)}</span>
-        <span className="agent-chip-outcome"><Square variant={lane.result.variant} size={12} />{lane.result.label}</span>
-        <ChevronIcon size={12} /></>
+      const content = <><SkillCover mode={lane.mode} /><span className="agent-chip-name">{skillName(lane.mode)}</span>
+        <span className="agent-chip-outcome"><Square variant={lane.result.variant} size={12} />{lane.result.label}</span></>
       return <li key={lane.id}>{lane.notebook
         ? <a className="agent-chip" href={lane.notebook.url}>{content}</a>
         : <button type="button" className="agent-chip" onClick={() =>
@@ -185,11 +209,11 @@ export function AgentsTab({ chat, selected, onSelect }: { chat: Chat; selected: 
     if (selected) backButton.current?.focus({ preventScroll: true })
     else if (previous) inspector.current?.querySelector<HTMLButtonElement>('[data-task="' + CSS.escape(previous) + '"]')?.focus({ preventScroll: true })
   }, [selected])
-  if (!lanes.length) return <p className="empty-note">No specialist work in this conversation yet.</p>
+  if (!lanes.length) return <p className="empty-note">No agent has worked in this conversation yet. When the assistant delegates a proof, a search or an experiment, you can follow it here.</p>
   if (!selected) return <div className="agent-inspector" ref={inspector}>
-    <TaskList title="In progress" lanes={lanes.filter(l => l.status === 'running')} onSelect={onSelect} />
+    <TaskList title="Working now" lanes={lanes.filter(l => l.status === 'running')} onSelect={onSelect} />
     <TaskList title="Waiting" lanes={lanes.filter(l => l.status === 'waiting')} onSelect={onSelect} />
-    <TaskList title="Work history" lanes={lanes.filter(l => !activeAgent(l)).sort((a, b) =>
+    <TaskList title="Finished" lanes={lanes.filter(l => !activeAgent(l)).sort((a, b) =>
       (stamp(b.ended_at || b.started_at) || 0) - (stamp(a.ended_at || a.started_at) || 0))} onSelect={onSelect} />
   </div>
   const events = lane ? timeline(lane, task?.activity || []) : []

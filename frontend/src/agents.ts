@@ -10,7 +10,7 @@ import { PHASES, workProgressText } from './workProgress'
 import { activityCaption, taskNotice, workNotice } from './workNotice'
 
 export const agentLabels: Record<AgentStatus, string> = {
-  waiting: 'Waiting', running: 'Working', finished: 'Finished', failed: 'Interrupted', stopped: 'Stopped',
+  waiting: 'Waiting', running: 'Working', finished: 'Done', failed: 'Interrupted', stopped: 'Stopped',
 }
 export const agentSquares: Record<AgentStatus, Variant> = {
   waiting: 'waiting', running: 'running', finished: 'complete', failed: 'halted', stopped: 'halted',
@@ -46,8 +46,8 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
         look = proofLook(proof.status, proof.running, proof.version)
         if (proof.status === 'candidate_complete' && proof.version !== 1) look.label = 'Answer reviewed'
       } else if (job) look = (job.verdict && VERDICTS[job.verdict]) || researchLook(job.status, job.running, job.kind)
-      else if (agent.answer_id || (agent.card_index != null && oldAnswers.has(agent.card_index))) look.label = 'Answer saved'
-      else if (agent.mode === 'check') look.label = 'Reference check'
+      else if (agent.answer_id || (agent.card_index != null && oldAnswers.has(agent.card_index))) look.label = 'Done'
+      else if (agent.mode === 'check') look.label = 'Done'
     }
     const phaseId = agent.progress?.phase || job?.phase || ''
     const phase = (agent.mode === 'summarize' && summaryStages[phaseId]) ||

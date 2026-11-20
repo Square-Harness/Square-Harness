@@ -640,14 +640,15 @@ def main():
                 elif command == '/record':
                     from .gui import store as gui_store
                     from . import project_index
+                    # As in the Evidence tab, list what a reader can use.
                     if not rest or rest == 'all':
-                        view = gui_store.index_view(workspace.root, all_scopes=rest == 'all')
+                        view = gui_store.index_view(workspace.root, all_scopes=rest == 'all', findings=True)
                     else:
                         try:
-                            view = gui_store.index_view(workspace.root, chat=rest)
+                            view = gui_store.index_view(workspace.root, chat=rest, findings=True)
                         except gui_store.NotFound:
                             try:
-                                view = gui_store.index_view(workspace.root, project=rest)
+                                view = gui_store.index_view(workspace.root, project=rest, findings=True)
                             except gui_store.NotFound:
                                 raise ValueError('Unknown chat or project') from None
                     ui.say(project_index.render(view))

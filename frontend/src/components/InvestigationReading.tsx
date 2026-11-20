@@ -30,7 +30,7 @@ export function PlanSteps({ tasks, renderAfter }: { tasks: PlanStep[]; renderAft
       {task.status && <span>{stateLabel[task.status] || task.status}</span>}</header>
       <Markdown mathProse>{task.objective}</Markdown>
       {(task.after.length > 0 || roots.length > 1 || task.claim === 'variant') && <p className="investigation-timing">{
-        [task.after.length ? 'After ' + task.after.map(id => taskReference(tasks, id)).join(' and ') : roots.length > 1 ? (task.status && ['complete', 'skipped', 'failed'].includes(task.status) ? 'Independent step' : 'Can start in parallel') : '',
+        [task.after.length ? 'After ' + task.after.map(id => taskReference(tasks, id)).join(' and ') : roots.length > 1 ? (task.status && ['complete', 'skipped', 'failed'].includes(task.status) ? '' : 'Runs in parallel') : '',
          task.claim === 'variant' ? 'Proof of a special case' : ''].filter(Boolean).join(' · ')}</p>}
       {renderAfter?.(task.id)}
     </div>
@@ -92,7 +92,7 @@ function resultPassage(source: string) {
   const meaningful = sections.filter(s => !/references|bibliography|further reading|scope.{0,18}tools|tools used|original (?:task|request|question)$|(?:^|\s)(?:tasks?|objectives?|assignments?|instructions?|methods?|budget|setup|plan|next steps|proposed work|to[- ]?do)(?:$|\s|:)/i.test(s.title))
   const ordered = [...meaningful.filter(s => bottomLine.test(s.title)),
     ...meaningful.filter(s => /^.{0,5}(?:results?|findings?)(?:$|\s)/i.test(s.title)), ...meaningful]
-  for (const { title, body } of new Set(ordered)) {
+  for (const { body } of new Set(ordered)) {
     const blocks = body.trim().split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/).map(p => p.replace(/^\s*(?:[-*]|\d+\.)\s+/, '').trim())
       .filter(p => p.length > 35 && p.length < 2600 && !/^(?:[>#|`]|!\[|(?:\*{0,2})(?:task|objective|tools? used|scope|validation|references|further reading)\s*[:.])/i.test(p) &&
         !p.endsWith('?') && !/^(?:Survey|Numerically probe|Investigate|Attempt|Check|Find|Verify|Prove|Compute|Determine|Explore|Test whether|Search for|Your (?:task|objective)|You (?:must|should)|I (?:will|am going to))\b/i.test(p) &&
@@ -101,21 +101,8 @@ function resultPassage(source: string) {
     const explicit = blocks.find(p => /^\*{0,2}(?:headline|bottom line|answer to the original question|conjecture,? (?:not proved|unproved)|original question untouched)\b/i.test(p))
     const block = explicit || blocks[0]
     if (!block) continue
-    if (explicit || bottomLine.test(title) || block.length <= 410) return block
-    // Bibliographic prose and exploratory introductions can be long. Use complete
-    // sentences and keep qualifications that are expressed in the following sentence.
-    let ending = 0
-    for (const match of block.matchAll(/[.!?](?:[”’]\*{0,2}|\*{1,2})?(?=\s+[A-Z])/g)) {
-      const excerpt = block.slice(0, match.index + match[0].length)
-      if (excerpt.length < 75) continue
-      const math = excerpt.match(/(?<!\\)\$\$?|\\[()[\]]/g) || []
-      if (math.filter(m => m === '$').length % 2 || math.filter(m => m === '$$').length % 2 ||
-        math.filter(m => m === '\\(').length !== math.filter(m => m === '\\)').length ||
-        math.filter(m => m === '\\[').length !== math.filter(m => m === '\\]').length) continue
-      ending = excerpt.length
-      if (!/^(?:However|But|This (?:does not|only)|Nevertheless|Except|Yet|In contrast|Conversely)\b/.test(block.slice(ending).trimStart())) return excerpt
-    }
-    return ending ? block.slice(0, ending) : block
+    // The whole paragraph is kept: a caveat or refutation often follows the first sentence.
+    return block
   }
   return ''
 }
@@ -177,7 +164,7 @@ function ResultExcerpt({ chatId, step }: { chatId: string; step: Pick<ReportStep
     {observation && observation !== text && <div className="investigation-measurement"><small>Numerical observation</small><Markdown mathProse>{observation}</Markdown></div>}</div>
 }
 
-function humanReason(text: string) {
+export function humanReason(text: string) {
   if (text === 'No model-declared variant was registered for this slot.') return 'No separate statement was selected for this proof.'
   if (text === 'A prerequisite failed or was skipped.') return 'An earlier step this depended on was interrupted or skipped.'
   return text.replace(/^Model decision: /, '').replace(/^Model requested early stop: /, '')

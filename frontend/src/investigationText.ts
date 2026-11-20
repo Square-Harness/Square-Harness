@@ -18,7 +18,7 @@ function finding(line: string): Finding | null {
   if (!parts) return null
   const [, kind, job, qualification, content] = parts
   const [label, ...qualifiers] = qualification.split(' · ')
-  const separator = content.indexOf(' | ')
+  const separator = content.lastIndexOf(' | ')
   return { kind, job, label, qualifiers, summary: separator < 0 ? '' : content.slice(separator + 3) }
 }
 
@@ -53,7 +53,17 @@ export function readInvestigationReport(content: string) {
       if (!last) return null
       const text = line.trim()
       const entry = finding(text)
-      if (entry) last.evidence.push(entry)
+      // A report saved before objectives were written on one line: the job and claim markers end a
+      // later line, and the lines in between belong to the objective.
+      const tail = !last.job && !last.evidence.length && !last.excerpt && !entry && jobEnd.exec(text)
+      if (tail) {
+        let rest = text.slice(0, tail.index)
+        const claim = / · claim (target|variant|v\d+)$/.exec(rest)
+        if (claim) { rest = rest.slice(0, claim.index); last.claim = claim[1] }
+        last.objective = [last.objective, ...last.notes, rest].join(' ')
+        last.notes = []; last.job = tail[1]
+      }
+      else if (entry) last.evidence.push(entry)
       else if (text.startsWith('Model-written lead (excerpt): ')) last.excerpt = text.slice('Model-written lead (excerpt): '.length)
       else last.notes.push(text)
     }

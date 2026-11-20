@@ -5,21 +5,19 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
 import type { Chat } from '../api'
 import { rememberWorkPanel, workPreferences } from '../panels'
 import { closeWorkPanel, openWorkPanel, useRoute, WORK_TABS, type WorkTab } from '../router'
-import { AgentsTab } from './AgentGroup'
+import { AgentSquares, AgentsTab } from './AgentGroup'
 import { OutputsTab } from './OutputsTab'
 import { PlanTab } from './PlanTab'
 import { RecordTab } from './RecordTab'
-import { CloseIcon, NotebookIcon, NotesIcon, StackIcon, InvestigationIcon, FileIcon } from './Icons'
+import { CloseIcon, NotebookIcon } from './Icons'
 import { Glyph } from './Glyph'
-import { Square } from './Square'
 import './WorkPanel.css'
 
 const WIDE = '(min-width: 1200px)'
 const DEFAULT_WIDTH = 380
 const MIN_WIDTH = 304
 const MAX_WIDTH = 600
-const LABELS = { agents: 'Activity', outputs: 'Results', record: 'Evidence', plan: 'Plan' }
-const TAB_ICONS = { agents: StackIcon, outputs: FileIcon, record: NotesIcon, plan: InvestigationIcon }
+const LABELS = { agents: 'Agents', outputs: 'Results', record: 'Findings', plan: 'Plan' }
 const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(value)))
 
 export function WorkPanel({ chat }: { chat: Chat }) {
@@ -57,7 +55,7 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     const pref = workPreferences()
     const firstParallel = wide && currentTurn && autoTurn.current !== currentTurn && pref.open === undefined
     if (firstParallel) autoTurn.current = currentTurn
-    if (first && pref.open || firstParallel) {
+    if (wide && first && pref.open || firstParallel) {
       const tab = firstParallel ? 'agents' : pref.tab || 'agents'
       openWorkPanel(tab === 'plan' && !chat.investigation ? 'agents' : tab, null, true)
     }
@@ -102,17 +100,13 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     return () => document.removeEventListener('keydown', keys)
   }, [!!selection, wide])
   if (!selection) return <nav className="notebook-rail" aria-label="Research notebook">
-    <button className="notebook-pull" type="button" data-work-trigger aria-label="Open research notebook" aria-expanded={false}
-      title="Open research notebook" onClick={() => openWorkPanel(defaultTab)}>
-      <span className="notebook-pull-cover"><NotebookIcon size={21} /></span><span>Notebook</span>
+    <button className="notebook-pull" type="button" data-work-trigger aria-expanded={false}
+      aria-label={'Open the notebook' + (activity ? ': ' + activity : '')} title="Open the notebook: agents, results and findings"
+      onClick={() => openWorkPanel(activeLanes.length ? 'agents' : defaultTab)}>
+      <span className="notebook-pull-cover"><NotebookIcon size={19} /></span>
+      <span className="notebook-pull-label">Notebook</span>
+      {activeLanes.length > 0 && <span className="notebook-pull-agents"><AgentSquares agents={activeLanes} /></span>}
     </button>
-    <div className="notebook-index">{tabs.map(key => {
-      const Icon = TAB_ICONS[key]
-      return <button key={key} type="button" onClick={() => openWorkPanel(key)} aria-label={'Open ' + LABELS[key].toLowerCase()}>
-        <span className="notebook-index-icon"><Icon size={18} />{key === 'agents' && !!running && <i />}</span>
-        {LABELS[key]}
-      </button>
-    })}</div>
     <span aria-live="polite" className="sr-only">{announcement}</span>
   </nav>
   const choose = (key: WorkTab) => openWorkPanel(key)
@@ -140,18 +134,21 @@ export function WorkPanel({ chat }: { chat: Chat }) {
           const value = e.key === 'Home' ? MIN_WIDTH : e.key === 'End' ? MAX_WIDTH : clampWidth(width + (e.key === 'ArrowLeft' ? 1 : -1) * (e.shiftKey ? 64 : 16))
           setWidth(value); rememberWorkPanel({ width: value })
         }} />}
-      <header className={'work-panel-head' + (investigation ? ' work-panel-investigation' : '')}>
-        <span className="notebook-header-mark" aria-hidden="true">{investigation ? <Glyph mode="investigate" /> : <NotebookIcon size={22} />}</span>
-        <div className="notebook-heading"><h2 id="work-panel-title">Research notebook</h2>
-          {activity && <span className="notebook-head-status"><Square variant={running ? 'running' : 'waiting'} size={13} /> {activity}</span>}
+      <header className="work-panel-head">
+        <span className="notebook-header-mark" aria-hidden="true">{investigation ? <Glyph mode="investigate" /> : <NotebookIcon size={18} />}</span>
+        <div className="notebook-heading"><h2 id="work-panel-title">Notebook</h2>
+          <span className="notebook-head-status">{activeLanes.length > 0
+            ? <><AgentSquares agents={activeLanes} /> {activity}</>
+            : investigation ? 'Investigation' : 'Agents, results and findings of this conversation'}</span>
         </div>
         <span aria-live="polite" className="sr-only">{announcement}</span>
-        <button type="button" className="icon-btn" aria-label="Close research notebook" title="Close research notebook" onClick={closeWorkPanel}><CloseIcon size={18} /></button>
+        <button type="button" className="icon-btn" aria-label="Close the notebook" title="Close the notebook" onClick={closeWorkPanel}><CloseIcon size={18} /></button>
       </header>
       <div ref={tablist} role="tablist" aria-label="Research notebook" className="work-panel-tabs">
         {tabs.map((key, i) => <button type="button" key={key} id={'work-tab-' + key}
           role="tab" tabIndex={key === tab ? 0 : -1} aria-selected={key === tab} aria-controls="work-panel-content"
-          onKeyDown={(event) => keys(event, i)} onClick={() => choose(key)}>{LABELS[key]}</button>)}
+          onKeyDown={(event) => keys(event, i)} onClick={() => choose(key)}>{LABELS[key]}
+          {key === 'agents' && !!running && <i className="work-tab-live" aria-hidden="true" />}</button>)}
       </div>
       <div role="tabpanel" id="work-panel-content" aria-labelledby={'work-tab-' + tab} tabIndex={0} className="work-panel-scroll" key={tab}>
         {tab === 'agents' && <AgentsTab chat={chat} selected={selection.selected} onSelect={(id) => openWorkPanel('agents', id)} />}
