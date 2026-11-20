@@ -34,6 +34,6 @@ export function withoutDeletedChat(snapshot: TaskSnapshot, id: string): TaskSnap
 }
 
 export function deletedChatDestination(hash: string, id: string): string | null {
-  const [, mode, selected] = hash.split('/')
+  const [, mode, selected] = hash.split('?')[0].split('/')
   return ['free', 'critic', 'explore'].includes(mode) && selected === id ? '#/free' : null
 }

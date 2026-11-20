@@ -54,7 +54,7 @@ class _Pool:
 class BudgetClient:
     def __init__(self, client, *, state=None, max_tokens=None, max_input_tokens=None,
                  max_seconds=900, checkpoint=lambda: None, concurrency=2, pool=None,
-                 allowance=None, usage=None, adaptive_limits=None, deadline=None):
+                 allowance=None, usage=None, adaptive_limits=None, deadline=None, input_allowance=None):
         self.client = client
         self.deadline = deadline
         self._admitted = threading.local()
@@ -83,6 +83,7 @@ class BudgetClient:
         budget['reserved_tokens'] = 0
         self.pool = pool or _Pool(budget, checkpoint, concurrency)
         self.allowance = allowance
+        self.input_allowance = input_allowance
         self.usage = usage if usage is not None else {'tokens': 0, 'input_tokens': 0}
 
     def __getattr__(self, name):
@@ -112,9 +113,39 @@ class BudgetClient:
     def timeout(self, value):
         self.client.timeout = value
 
-    def fork(self, client, *, allowance, usage, max_seconds=None):
+    def fork(self, client, *, allowance, usage, max_seconds=None, input_allowance=None):
         deadline = None if max_seconds is None else time.monotonic() + max_seconds
-        return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage, deadline=deadline)
+        return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage, deadline=deadline,
+                            input_allowance=input_allowance)
+
+    def adopt(self, *, tokens, input_tokens, seconds, commit=True):
+        """Validate and optionally freeze absolute approved totals, including framing.
+
+        Absolute limits make this idempotent across an interrupted approval checkpoint.
+        """
+        caps = dict(max_tokens=tokens, max_input_tokens=input_tokens, max_seconds=seconds)
+        with self.pool.lock:
+            budget = self.pool.state
+            for key, value in caps.items():
+                if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError('Invalid investigation ceiling: ' + key)
+                ceiling = budget.get('adaptive_limits', {}).get(key, budget[key])
+                if ceiling is not None and value > ceiling:
+                    raise AssistantBudget(f'Plan requires {value:g} {key[4:]} in total; the configured ceiling is {ceiling:g}.')
+            if commit:
+                budget.update(caps)
+                budget.pop('adaptive_limits', None)
+        if commit:
+            self.pool.checkpoint()
+
+    @contextmanager
+    def waiting(self):
+        """Exclude human confirmation time when no inference is active."""
+        self.pool.admission_change(queued=1)
+        try:
+            yield
+        finally:
+            self.pool.admission_change(queued=-1)
 
     def ensure_limits(self, **requested):
         """Promote only saved adaptive limits; explicit caps and usage never change."""
@@ -125,6 +156,13 @@ class BudgetClient:
                     raise ValueError('Invalid requested Assistant limit: ' + key)
                 if key in ceilings and self.pool.state[key] is not None:
                     self.pool.state[key] = max(self.pool.state[key], min(value, ceilings[key]))
+
+    def allow_investigation_time(self, seconds):
+        """Enable the multi-worker time allowance only for adaptively timed turns."""
+        with self.pool.lock:
+            limits = self.pool.state.get('adaptive_limits', {})
+            if 'max_seconds' in limits:
+                limits['max_seconds'] = max(limits['max_seconds'], seconds)
 
     @property
     def remaining_tokens(self):
@@ -230,6 +268,8 @@ class BudgetClient:
                                max_input_tokens=self.pool.state['input_tokens'] + count)
             if type(cap) is not int or cap <= 0 or cap > self.remaining_tokens:
                 raise AssistantAdmissionRefused('Assistant output budget cannot cover the next model call.')
+            if self.input_allowance is not None and self.usage['input_tokens'] + count > self.input_allowance:
+                raise AssistantAdmissionRefused('Worker input budget exhausted; no mathematical context was clipped.')
             input_limit = self.pool.state['max_input_tokens']
             if input_limit is not None and self.pool.state['input_tokens'] + count > input_limit:
                 raise AssistantAdmissionRefused('Assistant input budget exhausted; no mathematical context was clipped.')

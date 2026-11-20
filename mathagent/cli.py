@@ -121,12 +121,17 @@ HELP = '''Commands
   /python-lab [request or code]       Run Python computations and plots in the Docker sandbox
   /sanity-check [claim]               Try to falsify a claim with cheap numerical experiments
   /experiments                       List saved sandbox experiments
+  /investigate <question>              Plan and run a bounded multi-mode investigation
+  /investigations                     List saved investigations
+  /investigate-resume <id>            Continue with the original statement and remaining budget
+  /investigate-report <id>            Finish a paused investigation or read its completed report
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
   /research-resume <id>               Resume a research job with its saved budgets
   /skills                            Show the built-in skills
   /resume [proof-id]                  Resume a saved proof with its remaining budget
   /proof-report [proof-id]            Read its saved report (works offline; /ledger alias)
+  /record [all|id]                   Show the saved workspace, project or chat research record (offline)
   /proofs                            List saved proof jobs (works offline)
   /review                            Fresh-context critique of the last answer
   /think on|off                      Toggle chat reasoning; proof work always uses thinking
@@ -193,7 +198,7 @@ def parser():
     p.add_argument('--proof-verify-temperature', type=float, default=None,
                    help='Verifier sampling temperature (default: --temperature)')
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
-                   help='Pin a complete theorem source relative to workspace; repeat for multiple files')
+                   help='Pin a workspace theorem source, PDF or cached doc-ID; repeat for multiple sources')
     network = p.add_mutually_exclusive_group()
     network.add_argument('--online', action='store_true', help='Allow external literature/search requests; queries leave this computer')
     network.add_argument('--offline', action='store_true', help='Use local/cached research sources only; model stays loopback unless --allow-remote-model (default)')
@@ -393,11 +398,11 @@ def main():
 
     def unpinned_files(query):
         pinned = {str(Path(f)) for f in args.proof_file}
-        names = dict.fromkeys(re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt)\b', query))
+        names = dict.fromkeys(re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', query))
         found = []
         for name in names:
             try:
-                if name not in pinned and workspace.path(name).is_file():
+                if name not in pinned and workspace.path(name, pdf=True).is_file():
                     found.append(name)
             except (OSError, ValueError):
                 continue
@@ -577,6 +582,9 @@ def main():
                 elif command == '/clear':
                     agent.history = []
                     ui.say('Conversation cleared.')
+                elif command in ('/investigate', '/investigations', '/investigate-resume', '/investigate-report'):
+                    from .terminal_investigation import command as investigation_command
+                    last_job_status = investigation_command(command, rest, args, ui)
                 elif command == '/skills':
                     for name in ('check', 'literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
@@ -629,6 +637,21 @@ def main():
                     ui.say('Mode: ' + agent.mode)
                     if rest:
                         run_query(rest)
+                elif command == '/record':
+                    from .gui import store as gui_store
+                    from . import project_index
+                    # As in the Evidence tab, list what a reader can use.
+                    if not rest or rest == 'all':
+                        view = gui_store.index_view(workspace.root, all_scopes=rest == 'all', findings=True)
+                    else:
+                        try:
+                            view = gui_store.index_view(workspace.root, chat=rest, findings=True)
+                        except gui_store.NotFound:
+                            try:
+                                view = gui_store.index_view(workspace.root, project=rest, findings=True)
+                            except gui_store.NotFound:
+                                raise ValueError('Unknown chat or project') from None
+                    ui.say(project_index.render(view))
                 elif command == '/proofs':
                     jobs = ProofStore.list(workspace.root)
                     if not jobs:

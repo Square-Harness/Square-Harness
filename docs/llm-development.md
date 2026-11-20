@@ -434,10 +434,27 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - Permissions are enforced in code, never by prompt text:
   - file writes need approval;
   - `--allow-python` (unsandboxed) requires `--online` and per-call approval;
-  - the sandbox policy is bound by the controller: the user's command binds
-    python-lab, and automatic contexts bind the strict sanity policy;
+  - the sandbox policy is bound by the controller: the user's command or a
+    routed run request (next item) binds python-lab, and automatic contexts
+    bind the strict sanity policy;
   - tool arguments can only lower limits;
-  - the Assistant cannot start `python_lab` or `sanity_check`;
+  - Python Lab starts in two cases only: the user selects `@python_lab`, or, in
+    a DS4 turn, the **current user message** itself asks for a computation,
+    simulation or plot to be run. The code check is
+    `proof_routing._python_requests`: it reads only the user's own words in
+    that message (no quotation, code block or reported speech), needs an
+    imperative clause such as "simulate …", "plot …", "run a simulation",
+    "compute … numerically" or "use Python to …", and returns nothing when the
+    message declines execution anywhere ("do not run code", "no code", "by
+    hand", "I will code it myself", "only explain"). An attached document, an
+    earlier turn, a worker result or the routing model's own wording never
+    counts. `_validated_tasks` drops a proposed `python_lab` task without such
+    a clause, and `mode_calls.routed_python_task` accepts a delegation only for
+    the exact request saved in that validated decision. The gate cannot tell a
+    pasted, unquoted exercise ("Simulate a random walk …") from the user's own
+    request: there the routing model's judgment is the remaining barrier;
+  - the Assistant cannot start `sanity_check`, nor `python_lab` outside the
+    case above;
   - workers cannot start workers.
 - Queries sent online use short public topic words, never manuscript text.
 - **Sandbox isolation** (`numerics/executor.py`), for every run:
@@ -690,6 +707,156 @@ solver output, omit it and retry preflight, preserving the exact mathematical
 inputs and ordinary allocation rule. Keep unfinished-solver continuation and
 interruption recovery on their existing saved-text/reasoning paths.
 
+The frontend research notebook uses the saved chat and attributed activity
+events to show worker groups and their outputs. Keep agent IDs, batch IDs,
+card indices and output IDs stable on reload. An old card can lack exact
+timing or an answer artifact. Display the evidence available on that card.
+The notebook coalesces chat checkpoints and refreshes the chat list independently
+of the proof, research and project lists. Preserve saved tab targets, keyboard
+focus and headings when the report format changes. Pending routed objectives
+come from the saved decision until their corresponding children exist.
+The panel location uses the chat URL's `panel` and `selected` parameters.
+New output types should reuse the authenticated native preview or download
+endpoint and preserve keyboard navigation and both themes.
+
+Worker cards and native jobs reuse saved child identifiers after interruption.
+Publish a new Proof, Check or research job directory by rename once its first
+state is durable. Older cards can hold the native UUID before the child checkpoint.
+A model output overrun marks the lane and card failed while retaining any saved
+partial answer. Checkpoint numerical experiment IDs on the Explore child as
+soon as the sandbox saves the record and provide its saved output on Resume.
+A worker that has exhausted its token budget is terminal for
+that task. Other investigation branches can finish independently.
+New scoped Proof jobs check the combined candidate and review window. Where
+the profile permits fitting, the saved candidate cap also applies to subsequent
+attempts. Recount the actual request before verifier dispatch. Preserve old job
+settings on resume. Share source-bearing web reads from this turn with both
+roles and keep indexed strategy leads in the solver-only channel.
+
+A guided investigation enters through a mode selection or a DS4 routing decision.
+A plan for an online request to look up prior work must include a required
+Check or Literature task. An ordinary recap of saved results can use the
+project and conversation readers without launching a document job.
+The hub constructs `Investigation` for that turn. Its frame persists an exact
+target and validates a bounded plan before starting its workers. The GUI renders
+the plan as it runs. File writes and other permission prompts retain their own checks. A changed
+statement is registered as a distinct variant. Always preserve the target
+hash when checking a Proof result against a claim. The stop route reads saved
+evidence and must work with the model offline.
+
+The framing model words the target and no user confirms it: the report labels
+it "Proposed statement" (the saved field `approved` only records that the plan
+started). `frontend/src/investigationText.ts` reads the report's section
+headings, task rows and markers back, so reword them in both places and keep
+reading the headings of saved reports ("Confirmed statement"). A framing
+request the model does not answer pauses the turn for Resume, as an ordinary
+turn does, after the one replacement `generation_attempts` allows; only
+answered requests count against `FRAME_CALLS`. A rejected tool call spends one
+framing call and is asked again with a correction message. Budget and context
+limits still end the investigation with a report: when an interruption leaves
+the shared budget exhausted, the hub closes the run with `stop_state` instead
+of a status nothing can resume. Deleting a conversation
+removes its investigation records (`investigation.delete_records`).
+
+The dependency scheduler protects planned Proof slots and their prerequisites
+from discretionary skips. Select a restricted claim when its prerequisites have
+settled. Keep it distinct from the general target in the record and the worker.
+Independent deliverables in an ordinary DS4 turn use a validated batch through
+the native adapters. Each branch receives its own objective. Python Lab requires
+a run request in the current user message (see Security posture). Only tasks
+that can start now are in that batch. A task marked `after_results` by the
+router, and a write-up without files of its own beside other work, is saved in
+the decision's `later` list: the Assistant delegates it once the batch has
+returned, so its worker sees those results. A routed Explore task that asks for
+a LaTeX note or a write-up becomes a Write-up task.
+
+A reading worker's source packet (`source_tasks.source_overview`) contains the
+whole numbered text of each document that fits the worker's input allowance
+(`workers._packet_room`: `model_limits.INPUTS['source_overview']` on DS4;
+on another model, half of the tokens its reply leaves in the context, counted
+at 2.5 characters per token). A longer
+document becomes a selection of excerpts labelled as a partial reading, and the
+worker is told to say so plainly. A numbered question or list item is not
+indexed as a section heading. The review parser's `manuscript.TEXT_SECTION`
+distinguishes numbered questions in a list from question-form section titles.
+PDF page numbers are physical, one-based positions derived from the verified
+extraction’s form feeds. Keep the cached text, line locators and hashes stable.
+
+Keep the user's explicit attachment selection separate from the effective files
+available to a turn. New GUI user messages record `attached_files` for the
+selection and `files` for source resolution. Preserve older records without
+guessing their origin. Combine explicitly named readable documents with selected
+attachments and resolve later document references against the conversation.
+For a project recall question without selected files, use the scoped index and
+notebook. An explicit file or a request to search the workspace keeps its usual
+scope. Independent workers receive their assigned sources.
+When the user asks whether an earlier document is readable, record a real
+`read_file` result before making an access claim. A filename, or a child job
+that merely received the path, does not establish that any text was read.
+Keep local reads within a document selection unless the user requests workspace
+search. Use extractor page boundaries before splitting into numbered lines.
+For a lookup of this project's saved research record, expose its frozen notebook
+and scoped index even when the index contains no results.
+
+An investigation has one background writer. It reads the native results of
+settled tasks through the scoped research index and saves a revised Markdown
+answer with the IDs of the steps it actually read. Revisions share the inference
+pool and are budgeted after the workers. Coalesce simultaneous completions,
+keep the last complete draft across interruptions, and append the final answer
+once to the originating chat. A draft that finishes while another task
+completes, or while a pause is requested, is saved with the steps it read, and
+the revision already scheduled corrects it. `report` names the finished steps a
+kept draft was written without. The GUI can display a newly completed finding
+before its revision is available.
+
+Worker execution lives in `workers.py`. The host supplies workspace and
+interface services. A mode maintainer can change a solver, reviewer or prompt
+inside its existing runner. Changes to its start/resume arguments, status
+semantics, or persisted evidence need corresponding changes to the adapter or
+the index reader. Exercise the mode both standalone and as a delegated child
+before changing that boundary. Derived findings belong in `project_index.py`.
+`collect` remembers the rows of each record while its files are unchanged and
+forgets the records that are gone. `scoped(..., findings=True)`, used by the
+Findings tab and the Assistant's frozen view, leaves out what carries nothing
+(a worker's empty answer, a proof without a candidate yet, a placeholder run
+without output); internal readers keep the full view, since those entries'
+links place their nested checks and runs. A `limit` keeps proofs and reviews,
+then checks, leads and runs, then literature sources shared between their
+reviews (`priority_order`), and counts the rest in `omitted`. `GET /api/index`
+sends the fields the interface reads, the long question of a review once (with
+its first source), a `revision` and the matching `ETag`; `If-None-Match`
+with that tag answers 304.
+Source passages a proof depends on must reach both solver and verifier.
+Strategy leads belong to the solver alone. Treat saved model text as data.
+
+A delegated Proof receives its material through three channels
+(`workers.run_worker`, `briefs.py`); keep each kind of material in its own:
+
+- **Pinned sources**, identical for the solver and the verifier: the files of
+  the request (`ModeOrchestrator._worker_files`; a PDF as extracted text with
+  its lossy-extraction note, whether or not the model listed it), the read
+  passages of an entry the objective names by its ID (`briefs.named_entries`),
+  and those of the task's dependencies: the scheduled ancestors of an
+  investigation task, or the results of the turn's earlier batches.
+- **The shared conversation** (`briefs.proof_reference`, saved as
+  `reference_context` and `verifier_reference`): the user's messages, the
+  Assistant's replies of earlier turns and the controller's file reads. Worker
+  records, other tool results, hidden reasoning and the replies of a turn that
+  delegated to one of `briefs.WITHHELD_REPLY_MODES` (a report on a proof
+  attempt or a review) are left out for both roles.
+- **Solver leads** (`briefs.for_worker`, `settings['solver_leads']`), never
+  given to the verifier: saved results linked to the task, of the same
+  conversation, or sharing words with the objective. A check or literature
+  entry contributes its bibliographic line only, never a passage. A rejected
+  proof shows its objections before its text, and the text is what is cut.
+  Saved text cannot close the lead block (`briefs._inert`).
+
+No prompt may promise more than these channels carry (`PROOF_PREPARATION`).
+`ProofRunner.start` refuses a delegated job before creating it when the first
+solve, or the review of an empty candidate, does not fit the context
+(`_fits`). A job whose review would fit only a short candidate is admitted and
+can still stop at review with `needs_context`.
+
 The Assistant (`orchestrator.py`) is a controller whose model may call a
 `delegate` tool with a mode, an objective, an effort and files. A worker
 adapter runs the child job. The child is saved before it runs, and its result
@@ -697,6 +864,51 @@ is saved before the model sees it. Independent children run concurrently
 (`--assistant-concurrency`, on OpenAI-compatible servers only: at most five
 for DS4 and four for the original profiles). All share one
 `AssistantBudget`. Children cannot delegate.
+
+A worker's result reaches the Assistant whole. A routed Python Lab result keeps
+the worker's interpretation in `answer` and what its runs printed in
+`recorded_measurements`. `workers._sandbox_observations` hands that output over
+within `_packet_room(parent.agent)` (the `source_overview` input limit and the
+model context). A longer text is cut at a line and ends with
+`orchestrator.CUT_MARK`, the number of characters shown and the
+`read_experiment` call that reads the rest. `read_conversation` and the archive
+index of `_working_history` label a record that carries this mark (or the
+earlier `[excerpt; full experiment saved]` of saved conversations) as an
+excerpt. Never shorten a result without the mark.
+
+An Explore worker's `check_reference` is a nested check (`refcheck.nested_checker`).
+It gets a quarter of the worker's remaining time and at most
+`refcheck.EFFORTS[effort]['seconds']` for the worker's own effort: on DS4 the
+check's own allowance is hours.
+
+A conversational worker (Explore, Python Lab, Sanity check) that writes nothing
+after its tool results gets one answer-only call
+(`Agent.run(recover_empty_tool_answer=True)`). If it still has no text, or a
+routed run has no successful experiment, its card status is `failed`, no answer
+record is written and its result has no `job_id`. A failure result names a
+`job_id` only when that native job exists: Resume reloads the job a child
+points to.
+
+When the controller itself gave the user's whole message to one Explore worker
+(`automatic_source_mode`, or a one-task `workers` decision with the same
+request) and the worker finished, `_single_worker_answer` returns its answer
+through `_worker_reply`. A worker the model chose, an unfinished answer or a
+narrower objective still goes through the parent's synthesis. An automatic
+article overview has no tool round when its packet is whole, and one round of
+`read_file` and `search_text` when it is partial.
+
+`stagnant_actions` counts consecutive operations that repeat an earlier action
+of the turn (the same tool and arguments, or a cached result) or that fail.
+Three end the turn's tool use. Different searches without a match are not
+repeats. The notice is emitted only when `_has_findings()` is false.
+
+Parallel children share the parent's state. A child record gains a key only
+under `parent._state_lock`, followed by `save()`: a sibling may be copying the
+state for its own checkpoint. Each child's result, card and answer record are
+saved when that child finishes. The tool results are appended in call order
+once the batch has returned, and a paused or interrupted batch reuses its
+finished children. In the hub, publish on the event bus after releasing
+`Hub._lock`: every other path takes the bus lock first.
 
 Conversational Proof preparation uses the existing main-agent tool loop and
 native `delegate` transaction for both Qwen and DeepInfra. Explicit `@prove`
@@ -721,8 +933,8 @@ do not expand its output allowance, keep reading or accept a direct proof.
 Do not use a partial or truncated model argument as the fallback brief.
 
 The prepared task is the normal `child.action.request` and Proof `goal`.
-The unchanged original query, conversation and file references remain in
-`reference_context` for solving and review. The Sources tab shows Original
+The unchanged original query, the shared conversation (`briefs.proof_reference`)
+and file references remain in `reference_context` for solving and review. The Sources tab shows Original
 request and, when different, Prepared task. Keep model usage, native tool
 history, checkpointing and resume on their existing paths: preparation uses
 its small stage allowance within the shared `AssistantBudget`. Proof's own
@@ -744,6 +956,22 @@ ranges, then reassess the quoted previous comments against those passages.
 Unsupported quotes remain unresolved. Keep the original report, the existing
 budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
+
+The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
+text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a
+References block placed before the appendices, so "Proof of Theorem 4.4" in an appendix
+attaches to Theorem 4.4. Lettered headings must come in order (A, B, …), so a wrapped
+sentence starting "G. The …" is not a section. `LiteratureTools.page_starts` keeps the
+first line of each PDF page (from the form feeds that `splitlines()` drops); pinned PDF
+sources carry it as `pages`. Explain (`ExplainRunner._pick_unit`) takes, in order: a result
+the request names (`manuscript.resolve`); a page, section or appendix it names, or the whole
+text when it is short (at most `WHOLE_TEXT_LINES` nonblank lines) and the request says "this
+page", "these notes" and the like; the usual unit choice; and otherwise one `locate` call,
+which sees the numbered text with `[page N]` markers. A named result without an attached
+proof gets its proof lines from `locate` when the request asks about the proof. A passage is
+a unit with `passage: True`, no statement and its lines in `proofs`, so the walkthrough, the
+fill and the accuracy check cover every line; `PASSAGE_POLICY` and its fill and check
+variants replace the result-and-proof wording.
 
 Writing styles (`style.py`) run the phases `scan` (exact skeletons) →
 `classify` (domains by field and readership) → `observe` (one call per article,
@@ -1120,9 +1348,8 @@ limit. A continuing rejection checkpoints the job for Resume. Initial connection
 the request timeout.
 
 DS4 unassigned Assistant turns use `proof_routing.route_request` before free
-generation. The bounded, nonthinking structured decision distinguishes direct
-elementary facts from substantive proof requests; this is a semantic model
-decision, not a keyword or character-count heuristic. Existing explicit mode
+generation. The bounded, nonthinking structured decision selects a direct answer,
+Proof, an investigation or ordinary specialist routing. Existing explicit mode
 and automatic source/reference selections take precedence. `ModeOrchestrator`
 saves the decision and usage, then runs the short preparation and durable Proof
 handoff when required. A malformed routing decision is an operational failure;

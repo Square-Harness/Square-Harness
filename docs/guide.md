@@ -215,8 +215,13 @@ New turns receive a bounded copy of the selected project's notes; their workers
 receive that same context. Switching projects or editing notes does not alter
 work already running. Resume uses the original saved copy. Project notes are
 user-maintained working context and are never updated
-automatically from model answers. Only that project's note is added; earlier
-conversations and all project files are not silently imported. You can move an
+automatically from model answers. The Assistant can also consult a bounded index
+of saved research from the same project. It receives short, labelled findings and
+can read their backing records on demand. When the record outgrows that index,
+proofs and reviews are kept first, then checks, exploratory answers and
+experiments; the sources of the literature reviews share the remaining places.
+An unassigned conversation uses its own
+chat scope. Moving a conversation changes where future turns find its records. You can move an
 idle conversation to a project using the **Project** selector above its message
 box, including conversations that have no project yet. The conversation menu
 also offers this action. The top-level list includes unassigned chats.
@@ -419,6 +424,32 @@ give the filename you want to use.
 Temporary model or source outages leave saved work resumable. Resuming retries
 the same child job; cancelled queued turns leave a clear notice in the chat.
 
+### Following agents in a conversation
+
+Open **Notebook** on the right of the conversation. On desktop its four shortcuts
+take you straight to a section. Workers that start together share a group in the
+conversation. Select a specialist to follow its work or open its result. Timing
+bars share a scale so you can see when two tasks overlapped. A dependent task
+appears as waiting until its prerequisite returns. A finished agent’s answer
+can be opened while the other agents continue. If an answer reached its output
+limit, the agent shows the failure and its partial text remains readable.
+
+- **Agents** shows what each specialist is doing. From a Literature task,
+  **Open literature review** takes you into the review itself.
+- **Results** collects investigation reports, saved answers, proof attempts, reviews, experiments and
+  Write-Up downloads.
+- **Findings** shows results and sources available in this conversation or project.
+  Work that has produced nothing yet (a proof still without a candidate, an
+  answer that came back empty) is not listed.
+- **Plan** lists the research question, the steps and their dependencies in
+  mathematical notation. Open **Time and usage** for the resource figures.
+
+On a wide screen the notebook opens beside the conversation. Drag its divider
+or focus the divider and use the arrow keys to resize it. On a smaller screen
+the panel overlays the page. On a phone it fills the screen. Close it with
+Escape or its close button. The URL identifies the tab and selected item, so
+you can reload or share a link within the same authorized workspace.
+
 ### The terminal
 
 `square-harness --workspace <folder>` opens a prompt. Proof is the default: type
@@ -435,6 +466,9 @@ a statement, or `/prove <statement>`. Other commands:
 | `/review` | Fresh-context critique of the last answer |
 | `/proofs`, `/proof-report <id>`, `/resume <id>` | List, read and resume proofs (reading needs no model) |
 | `/researches`, `/research-report <id>`, `/research-resume <id>` | The same for reports and other jobs |
+| `/investigate <question>`, `/investigations` | Start a guided investigation or list saved runs |
+| `/investigate-resume <id>`, `/investigate-report <id>` | Resume or finish with the evidence already saved |
+| `/record`, `/record all`, `/record <chat-or-project-uuid>` | Inspect unfiled workspace jobs, every scope, or the research record of one conversation or project. A filed conversation opens its project’s record. As in the Findings tab, work that has produced nothing yet is not listed. |
 | `/experiments`, `/skills`, `/status`, `/help` | Saved experiments, skill files, settings, help |
 
 For scripts, run one job and exit:
@@ -453,6 +487,7 @@ app and the other way round: both use the same saved files.
 | Skill | You get | Web app | Terminal |
 | --- | --- | --- | --- |
 | Conversation | Answers, with focused jobs when needed | type a message | web app only |
+| Guided investigation | A research plan and an evidence-linked report | `@investigate` | `/investigate` |
 | Prove | A proof, its review and every attempt | `@prove`, New proof | `/prove` (default) |
 | Explore | Approaches and useful first steps with heuristics labelled | `@explore` | `/explore` |
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
@@ -460,7 +495,7 @@ app and the other way round: both use the same saved files.
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
 | Review | Referee report: overview, typos, presentation | `@referee`, New review | `/referee` |
 | Detailed review | The review, plus checks of the proofs | `@detailed_review` | `/detailed_review` |
-| Explain | A result and its proof explained step by step | `@explain` | `/explain` |
+| Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
 | Sanity check | An attempt to falsify a claim numerically | `@sanity_check`, automatic | `/sanity-check` |
@@ -476,9 +511,21 @@ its status and what remains open, and decides what to do next. Independent
 workers can run at the same time on an OpenAI-compatible server
 (`--assistant-concurrency`: 1–4 for the original profiles, 1–5 for DS4). All
 workers share the conversation's budget, and a worker cannot start
-other workers. Only you can start Python Lab and an explicit sanity check: the
-Assistant cannot. It can open a web address you give it and read the page or its
-bibliography.
+other workers. Python Lab starts when you select **@python_lab**, or, with DS4,
+when your message itself asks for a computation, a simulation or a plot to be
+run ("simulate…", "plot…", "compute… numerically"). A suggestion in a document,
+in an earlier turn or from the model never starts it, and neither does a
+message that declines it ("do not run code", "by hand"). Only you can start an
+explicit sanity check. The Assistant can open a web address you give it and read
+the page or its bibliography.
+
+The Assistant receives each worker's written answer in full. For a Python Lab
+run it also receives what the run printed, up to the model's input allowance; a
+longer output is cut at a line, says how much is shown and names the call that
+reads the rest, and the same label appears when that result is read again in a
+later turn. A worker that writes nothing after its tool results is asked once
+for its conclusion. If it still returns nothing, its card says that it did not
+finish, with the reason, and no answer is saved for it.
 
 Before starting a Proof worker, the Assistant briefly prepares the task, with
 either Qwen or DS4. Preparation allows at most two model calls, each capped at
@@ -495,9 +542,19 @@ must not begin the proof or add a missing hypothesis.
 If preparation reaches its limit or fails to produce a usable delegation,
 Proof starts from the original request and saved context instead of extending
 the preparation. Unfinished preparation is not adopted as a proof or task
-brief. Proof's solve and review allowances are unchanged. The solver
-and reviewer receive the original request and exact conversation as
-authoritative reference context. The Proof page's **Sources** tab shows **Original request**
+brief. Proof's solve and review allowances are unchanged. For new delegated jobs, both solver and reviewer receive the original user
+request, your earlier messages, the Assistant's earlier answers and the same
+pinned source text, so "prove the lemma you stated above" reaches both with its
+statement. Pinned sources are the files attached to or named in your message (a
+PDF as extracted text, which can damage formulas) and the passages that a
+reference check or a literature review of the same message read; both can
+inspect the cited theorem and check its hypotheses. The solver can also use
+labelled ideas from earlier work, including results obtained earlier in the
+same message and earlier proof attempts with their objections. The independent
+reviewer receives none of these, nor an answer that reported an earlier proof
+or review: it sees the candidate and verifies it against the shared task and
+sources. A proof whose sources cannot fit the model's context with its review
+is refused before it starts. The Proof page's **Sources** tab shows **Original request**
 and, when the delegation differs from it, **Prepared task**.
 
 Preparation is charged to the shared Assistant budget and uses the existing
@@ -508,10 +565,104 @@ it does not rewrite the task of an existing Proof job. When Proof has been selec
 Assistant must call that worker rather than substitute a direct proof.
 Standalone Proof jobs and raw benchmark calls retain their direct path.
 
+### Guided investigations
+
+In an Assistant conversation, type **@investigate** followed by a question.
+For example, ask whether a proposed identity holds for all square matrices and
+which hypotheses suffice. The planner can explore counterexamples and check a
+restricted case, then give Proof an exact statement. The plan appears in the
+conversation and work starts automatically. You can follow the steps in the
+notebook or pause while the workers are running. DS4 can also select an investigation
+from an ordinary Assistant question that calls for several lines of research.
+A simple question can receive a direct answer. Selecting **@prove** still
+starts the usual proof workflow. A planner’s clarification appears as a question in the conversation.
+
+You can also ask DS4 for independent pieces of work in one Assistant message.
+For example, ask for a reference on Markov chains and, in the same message,
+ask Python Lab to simulate a specified chain. The workers can start together.
+When one piece needs the result of another, it starts after it: "find a
+reference for this theorem, then write a short LaTeX note that cites it" runs
+the reference check first, and the note is then written by Write-up with that
+reference. When one objective needs clarification, the other can still proceed.
+A Python result identifies whether the computation actually ran in the enabled
+sandbox. Asking for a short recap of project or conversation findings returns
+an answer in the chat. For a project recap the Assistant consults that project’s
+notebook and findings. You can still ask it to search the workspace.
+Select **@summarize** to create a separate document.
+
+You can include a reading task in the same message. For example, attach your
+lecture notes and ask for a PDE reference, a simulation, and a summary of the
+notes. The reading worker receives the named file. A document that fits the
+model's input is read whole. A longer one is read in part (its opening, main
+statements and as much of the rest as fits), and the answer says that the
+reading was partial. The reader of a partly read document can make one round of
+targeted reads in it before answering. When your whole message is a question
+about the attached documents, the reader's answer is the reply itself: the
+Assistant does not restate it. In a later message you can
+refer to the same PDF without selecting it again. When you ask whether the
+Assistant can read it, the Assistant checks the file and can answer from an
+actual passage. If several earlier PDFs match, name the one you mean.
+When the PDF extraction preserves page breaks, the reader can cite the physical page in the file. The printed page label may differ.
+If the chosen PDF has no extractable text, supply an OCR copy or the TeX source.
+The reader stays with the selected documents unless you ask it to search the folder.
+Asking for a LaTeX conversion of a finished investigation uses the research
+answer shown in the chat, including when several workers contributed.
+
+In the chat, a file chip marks a file you selected for that message. A file
+reused from the conversation appears under **Available for this reply**. You can
+also attach one document and name another readable workspace document in your
+message. A name alone follows the workspace’s file-type permissions.
+Older messages show a neutral source label because they did not record how
+the file was selected.
+
+Up to six tasks can draw on Explore, Check, Literature,
+Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
+effort. Independent tasks can run together when the model server supports it.
+Proof waits for the preceding steps listed in its plan. When the plan calls
+for a special case, the controller selects a precise statement from the evidence
+or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
+experiments are available through Explore when the numerical sandbox is enabled.
+An online investigation that explicitly asks for prior literature includes a
+reference check or literature review in its plan.
+
+Pause saves the investigation. If Explore has already run a numerical check,
+its result remains available on Resume, including checks without figures. **Resume** continues the saved plan. **Stop and
+report** finishes a paused run using its existing evidence, even when the model
+is offline. If the model does not answer while the plan is being prepared, the
+investigation pauses and shows the cause: **Resume** continues it once the
+model is reachable. The report identifies the statements examined, the worker
+records, and work that failed or remains open. The statement at the head of the
+plan is worded by the planner and you are not asked to confirm it: the report
+calls it the **proposed statement** and quotes your request beside it, so
+compare the two. A model-reviewed proof is evidence about
+its exact statement. An exploration or a numerical observation can suggest a
+direction for later work. As findings arrive, the investigation drafts an answer
+in the conversation and revises it using the newer evidence. A draft that is
+finished when another step completes is shown at once and revised next. A
+report requested while a revision was pending says which finished steps its
+answer was written without. Finished findings
+are readable immediately, including while a revision is being written. The
+right-hand notebook lets you read a literature review or an exploration alongside
+the answer. If the writing allowance runs out, the completed findings and the
+latest saved answer remain available. Select **@summarize** for a separate LaTeX write-up.
+
+In the terminal, use `/investigate <question>`, `/investigations`,
+`/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations
+run one worker at a time. Ctrl+C during work requests a pause. When a run pauses
+because the model or a worker failed, the terminal prints the cause above the
+resume command. A terminal investigation uses the
+workspace writer lock shared with the web interface.
+
 ### Prove
 
 Use it for a statement you want proved, with all its hypotheses. Pin the files
 it depends on: proof jobs read nothing by themselves.
+
+For a delegated proof, the solver and verifier receive the same pinned source
+passages, including pages read during that turn. Earlier attempts and numerical
+leads supplied through the research index go only to the solver. For a new
+source-based or delegated proof, the app checks that the model has room for
+a candidate and its review before starting the solver.
 
 How it works: **solve → verify → repair**.
 
@@ -660,10 +811,14 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
   from checked findings: the prose cannot add or drop an objection. If a main
   result's proof was not checked, the recommendation says it is provisional. It
   has twice the working time of a Review.
-- **Explain**: one result and its proof, for a mathematician from another field:
-  what it says, the idea, a walk through the proof (every line of a short proof),
-  the standard facts used, and where each hypothesis matters. An accuracy pass
-  compares the explanation with the source.
+- **Explain**: one result and its proof, or a page, a section or a short text,
+  for a mathematician from another field: what it says, the idea, a walk through
+  the proof or the passage (every line of a short one), the standard facts used,
+  and where each hypothesis matters. An accuracy pass compares the explanation
+  with the source. Name a result ("Theorem 4.4", found with its proof even in an
+  appendix), a page of a PDF ("page 9"), a section ("Section 3", "Appendix A"),
+  or say "explain this page" for a short attachment. When the text states a result
+  in prose or proves it elsewhere, the model locates the lines first.
 
 To discuss a completed report, select `@referee` again and explain which comments
 you dispute. When the target is unambiguous, the follow-up reuses the reviewed
@@ -1021,7 +1176,9 @@ no network, no access to your files and strict limits. Each run is saved
 conversation. Install the sandbox once (see the install guide).
 
 - **Python Lab** runs the computations you ask for: simulations, linear algebra,
-  symbolic work, plots. Only you can start it. Defaults: 30 s, 4 GB, 2 CPUs per
+  symbolic work, plots. It starts from **@python_lab**, or, with DS4, from a
+  message of yours that asks for a computation, simulation or plot to be run;
+  nothing else starts it. Defaults: 30 s, 4 GB, 2 CPUs per
   run. It can ask for up to 300 s, 16 GB and 4 CPUs, and you approve each such
   request.
 - **Sanity check** tries to falsify a claim with cheap experiments: small cases,
@@ -1041,8 +1198,11 @@ built-in maxima: for automatic checks 30 s, 4 GB, 2 CPUs and 10 runs; for anythi
  "lab": {"defaults": {"memory_mb": 4096}, "ceiling": {"memory_mb": 16384}}}
 ```
 
+The experiment record identifies a selected skill as `explicit`, a requested Python Lab run started by the Assistant as `routed`, and an automatic check as `automatic`.
+
 Each run is saved under `.mathagent/experiments/<id>/` (the oldest are pruned
-beyond 200 runs or 256 MB). Manage runs with `python -m mathagent.numerics list`,
+beyond 200 runs or 256 MB; a run whose record is damaged is left in place).
+Manage runs with `python -m mathagent.numerics list`,
 `show <id>`, `rerun <id>` (same code, seed, parameters and limits) and `clean`
 (remove leftover containers), adding `--workspace <folder>` to `list`, `show` and
 `rerun`. `--no-python-sandbox` disables the sandbox entirely.
@@ -1084,7 +1244,8 @@ The Assistant is one level up: a controller whose model may hand a precise
 objective to any of the skills above, within one shared budget.
 
 Python Lab and Sanity check also declare in their `SKILL.md` header *who* may
-start them. Python Lab is explicit (only your command starts it). Sanity check is
+start them. Python Lab is explicit (your command starts it, or a message of
+yours that asks for a run, as described under Conversation). Sanity check is
 automatic (it may be offered to the model in chat). The code enforces this
 declaration, and so do the sandbox limits: the text of a skill cannot raise them.
 
@@ -1118,7 +1279,10 @@ Everything is saved in your folder under `.mathagent/`:
 | `proofs/` | Proof jobs |
 | `research/` | Reports, reviews, literature reviews, write-ups (those made in a conversation are deleted with it) |
 | `checks/` | Literature checks |
-| `chats/` | Conversations |
+| `chats/` | Conversations and saved Assistant checkpoints |
+| `investigations/` | Investigation statements, task records and final reports, removed with their owning conversation |
+| `answers/` | Delegated chat-worker answers, removed with their owning conversation |
+| `index/experiments/` | Compact experiment records retained when older sandbox artifacts are pruned |
 | `experiments/` | Sandbox runs |
 | `literature/` | Cache of downloaded sources |
 

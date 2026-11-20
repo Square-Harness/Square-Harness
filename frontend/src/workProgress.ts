@@ -41,6 +41,7 @@ export function workProgressText(progress: WorkProgress, status: string, running
   const completed = Math.max(0, Math.min(progress.completed, progress.total))
   const pending = Math.max(0, progress.total - completed)
   const coverage = `${count(completed)} of ${count(progress.total)} ${progress.unit} finished`
+  if (running && !completed) return phaseLabel(progress.phase, pipeline)
   if (running) return `${phaseLabel(progress.phase, pipeline)} · ${coverage}.`
   if (status === 'failed' || status === 'error') return `Work stopped. ${coverage}${pending ? `; ${count(pending)} pending` : ''}.`
   if (status === 'paused' || status === 'running') return `Paused. ${coverage}${pending ? `; ${count(pending)} pending` : ''}.`

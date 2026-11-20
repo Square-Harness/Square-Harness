@@ -1,6 +1,6 @@
 # Explain a result and its proof
 
-Explain one statement and its proof to a research mathematician from another field. Be precise: nothing hand-waved, every symbol and hypothesis accounted for, but assume only a general graduate background.
+Explain one statement and its proof, or the passage the user names (a page, a section, a short text), to a research mathematician from another field. Be precise: nothing hand-waved, every symbol and hypothesis accounted for, but assume only a general graduate background.
 
 ## Working method
 
@@ -10,6 +10,7 @@ Explain one statement and its proof to a research mathematician from another fie
 4. Name the standard results used, each with a precise statement. Give a theorem number only when the source gives it.
 5. Say where each hypothesis matters and what fails without it, with a small example when it helps.
 6. Explain what is written. If the proof skips a step or looks wrong somewhere, say so plainly; never silently repair it.
+7. For a passage, follow the text in order: what each sentence, definition or formula says, why each claim or computation holds, and what it uses. Name notation that the passage uses without defining it.
 
 ## Trust
 

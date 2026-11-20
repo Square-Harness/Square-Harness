@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
-import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
+import { api, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
@@ -19,12 +19,17 @@ import { proofLook, researchLook, Square, type Variant } from '../components/Squ
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { literalUnderscores } from '../mathtext'
-import { ago, count } from '../format'
+import { ago } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
+import { WorkPanel } from '../components/WorkPanel'
+import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
 import { go, href } from '../router'
 import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
+
+import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
+import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
 
 type ChatMode = 'critic' | 'explore' | 'free'
 
@@ -68,14 +73,14 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   python_lab: { noun: 'a Python Lab run', label: 'Python Lab', cover: 'python_lab' },
   sanity_check: { noun: 'a numerical sanity check', label: 'Numerical Sanity Check', cover: 'sanity_check' },
 }
-const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' ? 'answer' : mode)
+const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' || mode === 'investigate' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
-type Paged = Exclude<RouteMode, 'check' | 'python_lab' | 'sanity_check'>
+type Paged = Exclude<RouteMode, 'investigate' | 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
-  mode !== 'critic' && mode !== 'free' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
+  mode !== 'critic' && mode !== 'free' && mode !== 'investigate' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
 const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
@@ -85,7 +90,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
   const [ended, setEnded] = useState(0)
-  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended, personalizationTick])
+  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id], [tick, ended, personalizationTick].join('/'))
+  const agentLanes = useMemo(() => data && data.id === id ? deriveAgents(data, app.proofs || [], app.research || []) : [],
+    [data, id, app.proofs, app.research])
   const work = chatWork(app.snapshot, id)
   const task = work.active?.task
   const ours = !!task
@@ -158,6 +165,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const hasImages = attachments.some(isImagePath)
   const budgetDisplay = data?.assistant_budget ? assistantBudgetDisplay(data.assistant_budget) : null
   const paused = free && assistantResumable(data)
+  const pausedInvestigation = paused && !!data?.investigation?.current
   const send = async (text?: string) => {
     let raw = text ?? draft
     let imageOnlyCall: ModeCall | null = null
@@ -174,7 +182,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
-    if (!content.trim() || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
+    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
     setSending(true)
     setSendError('')
     try {
@@ -233,6 +241,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
+  const stopInvestigation = async () => {
+    if (!id || resuming) return
+    setResuming(true)
+    setSendError('')
+    try { await api.stopInvestigation(id, data?.investigation?.id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
+  }
   const transcript = data?.transcript || []
   const lastTask = app.snapshot.task
   const taskError = lastTask?.target === id && lastTask.state === 'error' ? lastTask.error : ''
@@ -244,6 +258,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
 
   return (
     <MathMacrosProvider definitions={data?.math_macros}>
+    <div className="chat-workspace">
     <div className="chat">
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
@@ -252,22 +267,28 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
-          {id && <Transcript items={transcript} mode={mode} chatId={id} />}
+          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} waiting={data?.waiting_for_results} />}
           {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
               <p className="muted routing"><Square variant="running" size={12} /> Reading your request…</p>
             </div>
           )}
-          {live && <LiveTurnView live={live} mode={mode} waitingForOutput={!!task?.waiting_model_calls} />}
-          {free && data?.assistant_progress && <div className="entry">
+          {live && <LiveTurnView live={live} mode={mode} investigating={!!data?.investigation?.current} agentsWorking={agentLanes.some(activeAgent)} waitingForOutput={!!task?.waiting_model_calls} />}
+          {free && data?.assistant_progress && !agentLanes.some(activeAgent) && <div className="entry">
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
           </div>}
           {paused && !ours && (
             <div className="entry message message-model">
-              <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
-              <p className="notice">The assistant is paused. Its work is saved: resume from where it stopped, or send a new message to set this turn aside.</p>
+              <span className={'in-margin speaker speaker-model mode-' + (pausedInvestigation ? 'investigate' : 'free')}><Glyph mode={pausedInvestigation ? 'investigate' : 'free'} /></span>
+              <div>
+                <p className="notice">{pausedInvestigation
+                  ? 'The investigation is paused. Resume the plan or finish with a report on the evidence collected so far.'
+                  : 'The assistant is paused. Resume its saved work or send a new message to set this turn aside.'}</p>
+                {pausedInvestigation && <button type="button" className="btn btn-quiet btn-small" disabled={resuming || work.blocked}
+                  onClick={stopInvestigation}>Stop and report</button>}
+              </div>
             </div>
           )}
         </div>
@@ -289,8 +310,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
-            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !!effortKind(selectedCall.mode)}
-            onSend={() => { send() }} disabled={blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
+            onSend={() => { send() }} disabled={pausedInvestigation || blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Continue the conversation…' : 'Ask about an approach, a reformulation or a connection…'}
@@ -299,7 +320,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
             </button>
-          ) : paused && !draft.trim() && !hasImages ? (
+          ) : paused && (pausedInvestigation || (!draft.trim() && !hasImages)) ? (
             <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending || !!uploading} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
@@ -316,13 +337,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-bar">
           {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           {free && budgetDisplay && (
-            <span className="muted small composer-budget" title={budgetDisplay.title}>
-              {budgetDisplay.output}
-              {budgetDisplay.reserved && <> {' · '}{budgetDisplay.reserved}</>}
-              {budgetDisplay.uncertain && <> {' · '}{budgetDisplay.uncertain}</>}
-              {budgetDisplay.context && <> {' · '}{budgetDisplay.context}</>}
-              {' · '}{budgetDisplay.time}
-            </span>
+            <details className="composer-usage"><summary>Usage details</summary>
+              <p title={budgetDisplay.title}>{[budgetDisplay.output, budgetDisplay.reserved, budgetDisplay.uncertain,
+                budgetDisplay.context, budgetDisplay.time].filter(Boolean).join(' · ')}</p>
+            </details>
           )}
           {free && <span className="composer-hint">@ selects a mode</span>}
         </div>
@@ -331,6 +349,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
+    </div>
+    {data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>
   )
@@ -379,13 +399,50 @@ function group(items: TranscriptItem[]): Turn[] {
   return turns
 }
 
-function Transcript({ items, mode, chatId }: { items: TranscriptItem[]; mode: ChatMode; chatId: string }) {
+function Transcript({ items, mode, chatId, lanes, plan, waiting }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation']; waiting?: Chat['waiting_for_results'] }) {
+  const turns = group(items)
+  const groups = groupsOf(lanes)
+  const byCard = new Map<number, AgentLane[]>()
+  const cardTurns = new Map<number, number>()
+  turns.forEach((turn, index) => turn.steps.forEach(step => cardTurns.set(step.index, index)))
+  const owners = new Map<string, number>()
+  for (const lane of lanes) {
+    const owner = lane.card_index == null ? undefined : cardTurns.get(lane.card_index)
+    if (owner !== undefined) owners.set(lane.turn_id, owner)
+  }
+  const unstarted = new Map<number, AgentLane[][]>()
+  const finalTurn = plan ? turns.findIndex(turn => turn.steps.some(({ item }) => item.investigation_id === plan.id)) : -1
+  const planLane = plan && lanes.find(lane => owners.has(lane.turn_id) &&
+    plan.tasks.some(task => task.child_id === lane.id || (!!task.job_id && task.job_id === (lane.job_id || lane.answer_id))))
+  const planTurn = finalTurn >= 0 ? finalTurn : plan?.current ? (planLane && owners.get(planLane.turn_id)) ?? turns.length - 1 : -1
+  for (const batch of groups) {
+    const cards = batch.flatMap(lane => lane.card_index == null ? [] : [lane.card_index])
+    if (cards.length) {
+      for (const index of cards) byCard.set(index, index === Math.min(...cards) ? batch : [])
+    } else {
+      // An unstarted historical slot may have no transcript position. Always
+      // retain it in Agents; only display it inside a turn of known ownership.
+      const owner = owners.get(batch[0].turn_id) ?? (batch.some(activeAgent) ? turns.length - 1 : undefined)
+      if (owner !== undefined) {
+        const inReport = plan && turns[owner].steps.some(({ item }) => item.investigation_id === plan.id) &&
+          batch.every(lane => !activeAgent(lane) && plan.tasks.some(task => task.child_id === lane.id))
+        if (inReport) continue
+        const previous = unstarted.get(owner)
+        if (previous) previous.push(batch)
+        else unstarted.set(owner, [batch])
+      }
+    }
+  }
   return (
     <>
-      {group(items).map((turn, index) => (
+      {turns.map((turn, index) => (
         <div key={index} className="turn">
           {turn.user && <UserMessage item={turn.user} />}
-          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} />
+          {plan && index === planTurn && <ConversationPlan key={plan.id} plan={plan} finished={finalTurn >= 0} />}
+          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
+          {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} chatId={chatId} />)}
+          {index === turns.length - 1 && <WaitingForResults tasks={waiting} />}
+          {plan && index === planTurn && finalTurn < 0 && <WorkingAnswer plan={plan} chatId={chatId} />}
         </div>
       ))}
     </>
@@ -393,13 +450,22 @@ function Transcript({ items, mode, chatId }: { items: TranscriptItem[]; mode: Ch
 }
 
 function UserMessage({ item }: { item: TranscriptItem }) {
+  const files = (item.files || []).filter(path => !item.images?.length || !isImagePath(path))
+  const attached = files.filter(path => item.attached_files?.includes(path))
+  const available = files.filter(path => !item.attached_files?.includes(path))
   return (
     <div className={'entry message message-user' + (item.discarded ? ' message-discarded' : '')}>
       <span className="in-margin speaker speaker-user">You</span>
       <div className="message-body">
         <Markdown>{literalUnderscores(item.content)}</Markdown>
-        {item.files && item.files.length > 0 && (
-          <div className="attachments">{item.files.filter((path) => !item.images?.length || !isImagePath(path)).map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
+        {attached.length > 0 && (
+          <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
+            <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>
+          )}</div>
+        )}
+        {available.length > 0 && (
+          <p className="message-sources"><span>{item.attached_files ? 'Available for this reply' : available.length === 1 ? 'Source' : 'Sources'}</span>
+            {' · '}{available.join(', ')}</p>
         )}
         {!!item.images?.length && <ImageGallery images={item.images} />}
         {item.time && <span className="message-time">{ago(item.time)}</span>}
@@ -408,30 +474,32 @@ function UserMessage({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; chatId: string }) {
+function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]>; prompt?: string }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
   // An Assistant conversation answers with one voice, whichever engine mode wrote it, except
   // a literature check, which keeps its citation mark; older critique and exploration chats
   // keep their own mark.
-  let mark: ChatMode | 'check' = mode
+  let mark: ChatMode | 'check' | 'investigate' = mode
   const flush = (key: number) => {
     if (!blocks.length) return
     out.push(
       <div key={'answer' + key} className="entry message message-model">
-        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'check' ? 'Literature Check' : MODES[mark].label}><Glyph mode={mark} /></span>
+        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'investigate' ? 'Investigation' : mark === 'check' ? 'Literature Check' : MODES[mark].label}><Glyph mode={mark} /></span>
         <div className="message-body">{blocks}</div>
       </div>,
     )
     blocks = []
   }
-  const markFor = (item: TranscriptItem): ChatMode | 'check' =>
-    item.mode === 'check' ? 'check' : item.mode === 'free' ? 'free' : mode
+  const markFor = (item: TranscriptItem): ChatMode | 'check' | 'investigate' =>
+    item.investigation_id ? 'investigate' : item.mode === 'check' ? 'check' : item.mode === 'free' ? 'free' : mode
   for (let i = 0; i < steps.length; i++) {
     const { item, index } = steps[i]
     if (item.role === 'route') {
       flush(index)
-      out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
+      const batch = mode === 'free' && item.orchestrated ? groups.get(index) : undefined
+      if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
+      else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} prompt={prompt} chatId={chatId} />)
     } else if (item.role === 'assistant') {
       if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
       const calls = item.tool_calls || []
@@ -441,14 +509,15 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
       blocks.push(
         <div key={index} className="step">
           <Thinking text={item.thinking || ''} />
-          {calls.map((call, n) => (
+          {calls.map((call, n) => groups.size > 0 && call.function?.name === 'delegate' ? null : (
             <Collapse key={n} className="tool-step" summary={<span className="tool-line">{toolLine(call)}</span>}>
               <pre className="plain">{results[n]?.content ?? 'No result was recorded.'}</pre>
             </Collapse>
           ))}
-          {item.content && <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>}
-          {final && item.stats?.eval_count !== undefined && (
-            <span className="message-time">{count(item.stats.eval_count)} tokens{item.stats.done_reason === 'length' ? ', stopped at the output limit' : ''}</span>
+          {item.content && (item.investigation_id ? <InvestigationReport content={item.content} chatId={chatId} synthesis={item.synthesis} covered={item.synthesis_steps} />
+            : <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>)}
+          {final && item.stats?.done_reason === 'length' && (
+            <span className="message-time">The answer reached its length limit.</span>
           )}
         </div>,
       )
@@ -569,7 +638,9 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
             {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(item.job_id)} download>References (.bib)</a>}
           </>}
-          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
+            ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
+            : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}
@@ -584,12 +655,36 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
           </Collapse>
         </div>
+        {item.answer_id && <SavedWorkerAnswer key={item.answer_id} chat={chatId} id={item.answer_id} />}
         {item.outcome && item.outcome !== error && !(item.status === 'stopped' && error && item.outcome.includes(error)) &&
           <p className="muted small">{item.outcome}</p>}
         <ErrorNote>{error}</ErrorNote>
       </div>
     </div>
   )
+}
+
+function SavedWorkerAnswer({ chat, id }: { chat: string; id: string }) {
+  const [result, setResult] = useState<{ answer: string; status: string } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const toggle = async () => {
+    if (open || result) { setOpen(!open); return }
+    setLoading(true)
+    setError('')
+    try { setResult(await api.savedChatAnswer(chat, id)); setOpen(true) }
+    catch (reason) { setError((reason as Error).message) }
+    finally { setLoading(false) }
+  }
+  return <div>
+    <button type="button" className="btn btn-small btn-quiet" aria-expanded={open} disabled={loading} onClick={toggle}>
+      {loading ? 'Loading…' : open ? 'Hide worker answer' : 'Read worker answer'}
+    </button>
+    {open && result && (result.answer ? <Markdown>{result.answer}</Markdown> :
+      <p className="muted small">This worker saved no answer. Its final status was {result.status}.</p>)}
+    <ErrorNote>{error}</ErrorNote>
+  </div>
 }
 
 /** The files of one sandbox run, shown where the run happened, each by its MIME type. */
@@ -603,13 +698,12 @@ function ExperimentFigures({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: string }) {
+export function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: string }) {
   const display = displayOf(artifact.mime_type)
   const caption = (
     <figcaption>
       {purpose ? `${purpose} · ` : ''}
       <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.filename}</a>
-      {' · '}<span className="experiment-id">{artifact.artifact_id.split('/')[0]}</span>
     </figcaption>
   )
   if (display === 'image') {
@@ -641,8 +735,10 @@ function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpose?: str
   )
 }
 
-function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: ChatMode; waitingForOutput: boolean }) {
-  const glyph: ChatMode | 'check' = live.mode ?? mode
+function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutput }: { live: LiveTurn; mode: ChatMode; investigating: boolean; agentsWorking: boolean; waitingForOutput: boolean }) {
+  const glyph = investigating ? 'investigate' : live.mode ?? mode
+  const steps = agentsWorking ? live.steps.filter(step => !('progress' in step && step.progress)) : live.steps
+  if (agentsWorking && !steps.length && !live.user && live.kind !== 'review') return null
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}
@@ -650,15 +746,17 @@ function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: 
         <span className={`in-margin speaker speaker-model mode-${glyph}`}><Glyph mode={glyph} /></span>
         <div className="message-body">
           {live.kind === 'review' && <p className="review-label">Fresh-context review in progress</p>}
-          {live.steps.map((step, index) => step.type === 'call' ? (
+          {steps.map((step, index) => step.type === 'call' ? (
             <div key={index} className="step">
               <Thinking text={step.thinking} live={!step.text} />
               {step.text && <StreamingMarkdown text={step.text} className="answer" />}
-              {!step.text && !step.thinking && !waitingForOutput && index === live.steps.length - 1 && (
-                <p className="muted small">Waiting for the first tokens.</p>
+              {!step.text && !step.thinking && !waitingForOutput && index === steps.length - 1 && (
+                <p className="muted small">Preparing a response…</p>
               )}
             </div>
           ) : step.type === 'tool' ? (
+            // The agents block above already shows each delegated task with its own state.
+            step.text.startsWith('Delegating a mathematical task') ? null :
             <p key={index} className="tool-line tool-live">{step.text}</p>
           ) : step.type === 'result' ? (
             <p key={index} className="tool-result-live">{step.text}</p>
@@ -667,7 +765,7 @@ function LiveTurnView({ live, mode, waitingForOutput }: { live: LiveTurn; mode: 
           ) : (
             <p key={index} className="notice">{step.text}</p>
           ))}
-          {!live.steps.length && !waitingForOutput && <p className="muted small">Waiting for the model…</p>}
+          {!steps.length && !agentsWorking && !waitingForOutput && <p className="muted small">Waiting for the model…</p>}
         </div>
       </div>
     </div>

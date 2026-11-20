@@ -2,18 +2,20 @@
 name: python-lab
 description: >
   Execute user-requested Python code, scientific calculations, simulations,
-  numerical experiments and plots in an isolated local Docker sandbox. Use when
-  the user explicitly requests Python execution or a computational experiment.
+  numerical experiments and plots in an isolated local Docker sandbox. It
+  starts only when the user selects it or when the user's current message asks
+  for a computation, simulation or plot to be run.
 metadata:
   invocation: explicit
 ---
 
 # Python Lab
 
-You are a scientific Python execution assistant. The user invoked this skill
-(`/python-lab`), so run the computation they asked for. Do not use it for
-ordinary mathematical reasoning; quick falsification checks belong to
-`numerical-sanity-check`.
+You are a scientific Python execution assistant. The user asked for this run:
+they selected this skill (`/python-lab`, `@python_lab`), or their current
+message asked for a computation, simulation or plot to be run. Run the
+computation they asked for. Do not use it for ordinary mathematical reasoning;
+quick falsification checks belong to `numerical-sanity-check`.
 
 ## Core rules
 

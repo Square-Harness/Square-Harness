@@ -22,7 +22,7 @@ import uuid
 from .reporting import usage_footer
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, TokenBudgetError
-from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID, MAX_STREAM_BYTES
+from .ledger import _atomic_write, _bytes, _directory, _publish_job, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
@@ -227,7 +227,7 @@ class ResearchRunner:
 
     def start(self, goal, *, kind='literature', source_files=(), max_rounds=6,
               max_tokens=None, max_input_tokens=None, max_seconds=None,
-              max_requests=12, max_chars=30000, reference_context=None):
+              max_requests=12, max_chars=30000, reference_context=None, job_id=None):
         if kind not in self.KINDS:
             raise ValueError('Research kind must be ' + ' or '.join(self.KINDS))
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 20000:
@@ -259,7 +259,7 @@ class ResearchRunner:
         if sum(len(s['content'].encode()) for s in sources) > 2_000_000:
             raise ValueError('Pinned manuscripts exceed 2 MB; split this research task')
         skill = files('mathagent').joinpath('skills', self._skill_folder(kind), 'SKILL.md').read_text(encoding='utf-8')
-        return self._create(goal, kind, settings, sources, skill, reference=reference)
+        return self._create(goal, kind, settings, sources, skill, reference=reference, job_id=job_id)
 
     def _inferred_sources(self, goal):
         """A filename mentioned in prose is not an explicit permission to pin it."""
@@ -292,12 +292,14 @@ class ResearchRunner:
             rel = Path(name)
             if rel.is_absolute():
                 rel = rel.resolve().relative_to(self.agent.workspace.root)
+            pages = []  # the first line of each PDF page, for requests such as "explain page 4"
             if rel.suffix.lower() == '.pdf':
                 if not self.literature:
                     raise ValueError('Local PDF reading requires the literature backend')
                 metadata = self.literature.import_local(str(rel))
                 _, lines = self.literature._document(metadata['document_id'])
                 content = '\n'.join(lines)
+                pages = self.literature.page_starts(metadata['document_id'])
             else:
                 path = self.agent.workspace.path(str(rel))
                 content = unicode_source(self.agent.workspace.text(path), self.agent.workspace.encodings.get(path))
@@ -317,10 +319,11 @@ class ResearchRunner:
                                         'member_sha256': member['sha256'], 'archive_warnings': warnings})
                     continue
             sources.append({'id': f'{prefix}{len(sources) + 1}', 'path': str(rel), 'content': content,
-                            'sha256': hashlib.sha256(content.encode()).hexdigest()})
+                            'sha256': hashlib.sha256(content.encode()).hexdigest(),
+                            **({'pages': pages} if pages else {})})
         return sources
 
-    def _create(self, goal, kind, settings, sources, skill, *, reference=None):
+    def _create(self, goal, kind, settings, sources, skill, *, reference=None, job_id=None):
         settings.update(model=self.agent.model, ctx=self.agent.ctx, predict=self.agent.predict,
                         document_output_cap=getattr(self.agent, 'document_output_cap', None),
                         host=getattr(self.agent.client, 'host', None),
@@ -333,7 +336,9 @@ class ResearchRunner:
         root = self.agent.workspace.root / '.mathagent'
         _directory(root, create=True)
         _directory(root / self.FOLDER, create=True)
-        job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4()) if job_id is None else job_id
+        if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+            raise ValueError('Invalid native job ID')
         self.directory = root / self.FOLDER / job_id
         if self.literature:
             self.literature.reset_budget(max_requests=settings['max_requests'], max_chars=settings['max_chars'])
@@ -360,10 +365,8 @@ class ResearchRunner:
         if self.literature:
             self.state['literature_snapshot'] = self.literature.snapshot()
         # Reject oversized initial state before creating an orphan job folder.
-        _bytes(json.dumps(self.state, ensure_ascii=False, indent=2))
-        self.directory.mkdir(mode=0o700)
-        _directory(self.directory / 'artifacts', create=True)
-        self._save()
+        initial = _bytes(json.dumps(self.state, ensure_ascii=False, indent=2, allow_nan=False))
+        _publish_job(self.directory, initial)
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
 
@@ -494,7 +497,11 @@ class ResearchRunner:
             old_callback = getattr(self.literature, 'on_budget_change', None) if self.literature else None
             old_deadline = getattr(self.literature, 'deadline', None) if self.literature else None
             if self.literature:
-                self.literature.on_budget_change = self._save
+                def checkpoint_retrieval():
+                    if old_callback:
+                        old_callback()
+                    self._save()
+                self.literature.on_budget_change = checkpoint_retrieval if old_callback else self._save
                 self.literature.deadline = time.monotonic() + max(0, self.state['settings']['max_seconds'] - self._seconds_before)
             try:
                 images.restore(self.agent, self.state)

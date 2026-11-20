@@ -39,9 +39,13 @@ TEXT_STATEMENT = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(' + TYPE_WORDS + r'
 PROOF_WORD = r'(?:proof|preuve|démonstration|demonstration)'
 TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(?:(?:proposed|attempted)\s+)?' + PROOF_WORD + r'\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})', re.I)
 INLINE_PROOF = re.compile(r'(?<!\w)[*_]{0,2}' + PROOF_WORD + r'\b[*_]{0,2}\s*[.:](?=\s*\S)', re.I)
-TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{2,90})$')
+# Numbered headings in extracted text. Question lists are disambiguated in _parse_text.
+TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{1,89}[^.\s])\s*$')
 TEXT_SUBSECTION = re.compile(r'^\s*((?:\d+|[A-Z])(?:\.\d+)+)\.?\s+([A-Z][^.]{1,90})\.(?:\s|$)')
 MD_HEADING = re.compile(r'^\s*(#{1,6})\s+(.*\S)')
+# "Appendix A. Proofs." or "Appendix B: Title" (a title is required, so that a sentence ending
+# "... in Appendix B." on its own line is not a heading), or "APPENDIX A" with an optional title.
+TEXT_APPENDIX = re.compile(r'^\s*(?:Appendix\s+([A-Z])\s*[.:]\s+([A-Z(].{0,90})|APPENDIX\s+([A-Z])\.?(?:\s*[.:]?\s+(\S.{0,90}))?)\s*$')
 END_MARK = re.compile(r'[□∎■]\s*[*_]*\s*$|\\qed\b|\bQ\.E\.D\.?')
 TEXT_REF = re.compile(r'\b(' + TYPE_WORDS + r')s?\s+(' + NUMBER + r'(?:\s*(?:,|and|&|or)\s*' + NUMBER + r')*)', re.I)
 TEXT_CITE = re.compile(r'\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)(?:\s*,\s*([^\[\]]{1,80}?))?\]')
@@ -385,12 +389,12 @@ def _parse_text(lines, fmt):
     result = {'format': fmt, 'lines': len(lines), 'sections': [], 'units': [], 'bibliography': {},
               'abstract': None, 'labels': {}, 'equations': {}, 'warnings': []}
     units, section, appendix, top = [], None, False, 0
+    letter = 'A'  # the next appendix letter: lettered headings come in order, "G. The usual ..." mid-sentence does not
     boundaries = set()  # lines where a statement, proof or section starts
     events = []
-    for number, line in enumerate(lines, 1):
+    content_lines = [(number, line) for number, line in enumerate(lines, 1) if line.strip()]
+    for i, (number, line) in enumerate(content_lines):
         stripped = line.strip()
-        if not stripped:
-            continue
         heading = MD_HEADING.match(line) if fmt == 'markdown' else None
         statement = TEXT_STATEMENT.match(line)
         if statement and not statement.group(2) and statement.group(1)[0].islower() and not re.match(r'^\s*(?:#|\*\*|__)', line):
@@ -421,12 +425,30 @@ def _parse_text(lines, fmt):
             events.append(('section', number, (num.group(1) if num and len(heading.group(1)) <= 2 else None, title, len(heading.group(1)))))
             boundaries.add(number)
             continue
+        match = TEXT_APPENDIX.match(line)
+        if match and len(stripped) < 100:
+            # An appendix heading also ends the References block that often precedes it.
+            label = match.group(1) or match.group(3)
+            title = (match.group(2) or match.group(4) or '').strip()
+            events.append(('section', number, (label, f'Appendix {label}' + (f'. {title}' if title else ''), 1)))
+            boundaries.add(number)
+            letter = chr(ord(label) + 1)
+            continue
         match = TEXT_SECTION.match(line)
         if match and len(stripped) < 100:
             label = match.group(1)
-            if (label.isdigit() and int(label) == top + 1) or (not label.isdigit() and (appendix or top >= 1) and len(label) == 1):
+            if label.isdigit() and stripped.endswith('?'):
+                # Questions in an enumerated list border another list item.
+                # A question introducing a section has intervening body text.
+                neighbors = content_lines[max(0, i - 1):i] + content_lines[i + 1:i + 2]
+                if any(re.match(r'^\s*\d+\.\s+', other) for _, other in neighbors):
+                    continue
+            if (label.isdigit() and int(label) == top + 1) or (not label.isdigit() and (appendix or top >= 1) and len(label) == 1
+                                                               and 0 <= ord(label) - ord(letter) <= 1):
                 if label.isdigit():
                     top = int(label)
+                else:
+                    letter = chr(ord(label) + 1)
                 events.append(('section', number, (label, match.group(2).strip(), 1)))
                 boundaries.add(number)
                 continue
@@ -503,7 +525,9 @@ def _parse_text(lines, fmt):
         target['proofs'].append([number, stop or end])
         owner = target
     if references_line:
-        result['bibliography'] = _text_bibliography(lines, references_line)
+        # The bibliography ends at the next heading, e.g. appendices placed after the references.
+        after = [n for kind, n, _ in events if kind == 'section' and n > references_line]
+        result['bibliography'] = _text_bibliography(lines[:after[0] - 1] if after else lines, references_line)
     keys = set(result['bibliography'])
     equation_index = _text_equation_index(lines)
     lookup = {(u['type'], u['number']): u for u in units if u['number']}

@@ -28,8 +28,8 @@ export function FeedbackButton({ chatId, chatTitle }: { chatId: string | null; c
     return () => window.removeEventListener('square-feedback', open)
   }, [chatId, chatTitle])
   return <>
-    <button type="button" className="feedback-open" onClick={() => setContext((existing) => existing ?? { id: chatId, title: chatTitle })}>
-      <CommentIcon size={15} /> Feedback
+    <button type="button" className="feedback-open" aria-label="Feedback" title="Feedback" onClick={() => setContext((existing) => existing ?? { id: chatId, title: chatTitle })}>
+      <CommentIcon size={15} /><span>Feedback</span>
     </button>
     {context && <FeedbackDialog chatId={context.id} chatTitle={context.title} onClose={() => setContext(null)} />}
   </>

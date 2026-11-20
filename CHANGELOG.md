@@ -2,12 +2,155 @@
 
 ## Unreleased
 
+- The Assistant sends a named page, section or passage of a document to Explain, and a whole
+  document to Explore. A chapter remembered by a literature check appears in the project
+  findings as memory, never as a checked place.
+
+- Explain works on what you point at: a named result, a page of a PDF ("page 9"),
+  a section or appendix, or a short text as a whole ("explain this page"). When a
+  result is stated in prose, or proved elsewhere without a "Proof" next to it, the
+  model first locates its lines instead of the request being refused. Appendices
+  placed after the references are read again, so their proofs attach to their
+  theorems, and a sentence starting with a capital letter and a period no longer
+  splits a section.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same
   way. The check searches by topic a second time only when no record fits: the
   extra round it used to run did not change the answer in live checks and often
   doubled the wait.
+
+- Show a dependent task while it waits, keep the notebook keyboard path through
+  agents and tabs, and refresh chat activity without repeatedly fetching every
+  job list. The report reader handles old and new section headings.
+- Save the first native job state before making its ID visible. Reuse the
+  worker’s original card and job when recovering an interrupted turn. Explore
+  also resumes with the saved results of completed numerical runs, including
+  runs that only printed a value.
+  Show truncated worker answers as failed with the partial answer available.
+  A worker that exceeded its token allowance ends its branch and the remaining
+  investigation steps can finish. A clarification appears as a question.
+- Distinguish routed Python Lab experiments from explicit selections and automatic
+  numerical checks in the saved record.
+- Read named workspace documents alongside attachments, and reuse a referenced
+  lecture in a later Proof. Both Proof roles receive the same current-turn
+  source passages. Reserve space for the candidate and its review on smaller
+  models. Preserve question-form section titles in numbered manuscripts.
+- Answer conversational recaps in the chat and read project findings when
+  needed. Limit project recall to the current notebook and findings and keep
+  earlier project strategies out of the shared Proof objective. Keep explicit
+  summary documents available. Include a reference
+  search when an online investigation explicitly asks for prior literature.
+- Identify physical PDF pages from the extraction in source overviews, targeted
+  reads and searches, including documents already in the cache.
+
+- An investigation whose plan is being prepared no longer ends as failed when
+  the model does not answer or returns a malformed plan: it asks again, or
+  pauses with the cause shown so that **Resume** continues it. A draft of the
+  research answer that is finished while another step completes is shown at
+  once instead of being discarded.
+- Investigation reports call the planner's wording of the question the
+  "Proposed statement" (it was labelled "Confirmed", although nobody confirms
+  it), keep each step on one line, and say which finished steps a research
+  answer was written without when the run was stopped before its last revision.
+  An investigation that cannot continue because its budget is used up now ends
+  with its report in the conversation.
+- Deleting a conversation also removes its saved investigation records. The
+  terminal `/record` lists findings only, like the Evidence tab, and a paused
+  terminal investigation prints why it paused. In a reviewed plain-text
+  manuscript, a numbered question is no longer taken for a section heading.
+- Give a delegated Proof the conversation it refers to. "Prove the lemma you
+  stated above" now sends the Assistant's earlier answers to the solver and to
+  the reviewer, with your own messages. A reply that reported an earlier proof
+  or review stays out of both: the solver receives that attempt as a labelled
+  lead, its objections first, and the reviewer never sees it.
+- Use the results of the current message in a Proof started after them: an
+  exploration or an earlier attempt as a solver-only lead, and the passages a
+  reference check or a literature review read as pinned sources for the solver
+  and the reviewer alike. An entry ID at the end of a sentence is recognised.
+- Pin a PDF attached to, or named in, the message that asks for a proof, as
+  extracted text, whether or not the Assistant listed it. A proof whose review
+  could not fit the model's context is refused before it starts, and the
+  message names the largest pinned source.
+- Give the Proof solver only leads that are linked to its task, come from the
+  same conversation or share words with the statement. Fix a proof that paused
+  with an internal error when a DeepInfra call was retried after its leads had
+  been left out.
+- Limit a reference check started by an Explore worker to the time of a check
+  at the worker's effort (5, 8 or 12 minutes). On a local model, an attached
+  document is read whole when it fits half of the context left by the answer,
+  instead of a fixed 28,000 characters.
+- Give the Assistant a worker's own written answer in full. A routed Python Lab
+  result now carries the worker's interpretation and, separately, what its runs
+  printed, up to the model's input allowance instead of 4,000 and 2,000
+  characters. An output that is still too long ends with the number of
+  characters shown and the `read_experiment` call that reads the rest, and an
+  archived result read back in a later turn is labelled as an excerpt.
+- When the Assistant itself gives your whole message to one Explore worker (a
+  question about an attached document), the worker's answer is the reply: no
+  second model pass restates it. A reader whose document did not fit whole can
+  make one round of targeted reads in that document before answering.
+- Ask an Explore or Python worker once for its conclusion when it writes nothing
+  after its tool results. A worker that still returns nothing is shown as
+  "did not finish" with the reason, and no empty answer is saved.
+- Stop a turn's tool use only after three operations in a row that repeat an
+  earlier one or fail. Different searches that find nothing no longer count,
+  and the notice is shown only when the turn has no finding.
+- Fix a rare failure of a turn with several parallel workers ("dictionary
+  changed size during iteration"), a server freeze when Resume was pressed on a
+  turn whose attached file had been removed, and a paused turn that could not
+  resume after a worker failed before its job was created.
+- Keep earlier proofs and reviews in the Assistant's index of saved research
+  when literature reviews add many sources: proofs and reviews come first, then
+  checks, exploratory answers and experiments, and the sources of each review
+  share the remaining places. The number of entries left out is recorded.
+- List only findings in Evidence and in the Assistant's index: a proof still
+  without a candidate, an answer that came back empty and a placeholder run
+  without output are left out. A check you typed is no longer marked "asker
+  unknown", and an entry started in another project says so without an
+  identifier.
+- Keep the research record fast in large workspaces: saved jobs are read again
+  only when they change, whatever their number. The data sent to the Evidence
+  and Results tabs is about a third of its former size, and `GET /api/index`
+  answers `If-None-Match` with 304 when the record has not changed.
+- A damaged experiment folder no longer stops the pruning of older sandbox runs.
+- In a DS4 message with several requests, a piece of work that needs the result
+  of another starts after it: "find a reference, then write a LaTeX note that
+  cites it" runs the reference check first, and Write-up then writes the note
+  with it. Independent requests still start together.
+- Start Python Lab from an ordinary message only when that message asks for a
+  computation, simulation or plot to be run. "Now also plot…", "Ok, next
+  simulate…" and their French forms are recognised. A message that declines
+  execution ("do not run code", "by hand", "I will code it myself"), a
+  quotation, a document or an earlier turn never starts it.
+- Read an attached document whole when it fits the model's input, instead of a
+  selection of excerpts. A longer document is still read in part, and the answer
+  says so plainly. A numbered question is no longer listed as a section.
+
+- Keep a PDF-reading task alongside independent reference and simulation
+  requests. The Assistant checks access to a previously supplied document
+  by reading it. The chat distinguishes explicitly selected attachments from
+  earlier sources used again in a reply.
+- Read selected documents within their own file scope. A finished investigation's
+  research answer can be converted directly to LaTeX after parallel work.
+
+- DS4 can launch independent requests together, including a reference search
+  and an explicitly requested Python simulation. In Investigate, Proof waits
+  for its planned evidence and can take up a precise special case.
+- Investigations begin answering as specialist results arrive and revise the
+  same answer with later findings. Read the review or exploration alongside it
+  in the research notebook. The answer and its supporting steps survive reload.
+
+- Follow parallel work in the right-hand research notebook. Open the literature
+  review, proof or experiment from its task. Plans and saved investigation reports
+  show mathematical statements, findings and readable source references.
+- Investigate prepares a bounded plan and starts work automatically. Select it in
+  the Assistant or terminal, or let DS4 choose it for a multi-part research question.
+  Pause, resume or finish with an evidence-linked report.
+- Make saved research available across turns and project conversations through
+  a scoped index. Delegated Proof can reuse pinned source passages, with a
+  separate solver-only channel for strategy leads.
+
 - Make literature reviews several times faster and broader. The source check
   judges every sentence: one call names the source sentences that carry it, a
   second compares it with those passages, and a grounded correction replaces a

@@ -160,6 +160,46 @@ FINE = ('The proof is short: explain it sentence by sentence and formula by form
 COARSE = 'The proof is long: group lines into steps of a few lines, and unfold the key steps in detail.'
 FILL_POLICY = """The walkthrough below misses some proof lines. Explain ONLY the missing lines listed, as steps in the same
 style (what happens, why it is true, what it uses)."""
+# A page, a section or a short text that the request names instead of one result.
+PASSAGE_POLICY = """Explain the passage of mathematics below to a research mathematician from another field: precise,
+nothing hand-waved, but nothing assumed beyond a general graduate background. Return JSON:
+- says: what the passage is about and what it establishes: its objects and notation, its claims and conclusions, in
+  words and then precisely.
+- idea: the thread of the passage, what it sets out to do and how, in two or three sentences.
+- steps: a walkthrough of the passage in order. Each step covers consecutive lines (start_line, end_line), says what
+  is stated or done there (what), why it is true or what it means (why: unfold the computation or the argument the
+  text leaves implicit; for a definition or a statement, its meaning and its role) and what it uses (uses:
+  assumptions, earlier lines, named results). {granularity}
+- facts: the standard results used, each named precisely with its statement (give a theorem number only if the
+  source gives it).
+- hypotheses: the assumptions in force and where each matters (a small example when it helps).
+- gaps: steps the text skips or that look wrong, and notation it uses without defining; empty if none. Never
+  silently repair the text: explain what is written and say plainly where it is incomplete."""
+FINE_PASSAGE = ('The passage is short: explain it sentence by sentence and formula by formula, so that every line '
+                'belongs to a step; one step covers the lines of one sentence or displayed formula, extraction fragments included.')
+COARSE_PASSAGE = 'The passage is long: group lines into steps of a few lines, and unfold the key steps in detail.'
+FILL_PASSAGE_POLICY = """The walkthrough below misses some lines of the passage. Explain ONLY the missing lines listed, as steps
+in the same style (what is stated or done, why it is true or what it means, what it uses)."""
+LOCATE_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'required': ['kind', 'name', 'statement_start', 'statement_end', 'start_line', 'end_line'],
+    'properties': {'kind': {'type': 'string', 'enum': ['result', 'passage', 'none']},
+                   'name': {'type': 'string', 'maxLength': 80},
+                   'statement_start': {'type': 'integer'}, 'statement_end': {'type': 'integer'},
+                   'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'}},
+}
+LOCATE_POLICY = """The request below asks for an explanation of part of the numbered text; [page N] marks where a page
+starts. Find the lines it means. Return kind "result" when it asks about one mathematical statement and its proof:
+statement_start and statement_end are the lines of the statement, even when it is stated in prose without a label,
+and start_line and end_line the lines of its proof (0 and 0 when the text gives none). Return kind "passage" for a
+page, section, computation, paragraph or other stretch of text: start_line and end_line are its first and last lines,
+and the statement lines are 0. Return kind "none", with all lines 0, when the request names no part of the text.
+name: a short name (at most six words) for what will be explained, such as "the main theorem", "Section 4.2" or
+"the computation of (2.4)"."""
+LOCATE_PROOF_POLICY = """The request below asks about {name}, stated at lines {start}-{end} of the numbered text; [page N]
+marks where a page starts. The text proves it elsewhere or in prose, without a "Proof" heading next to the statement.
+Return kind "result", the statement lines as given, and in start_line and end_line the first and last lines of the
+argument that proves it. Return kind "none", with all lines 0, when the text does not prove it. name: "{name}"."""
 EXPLAIN_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['problems'],
     'properties': {'problems': {'type': 'array', 'maxItems': 8, 'items': {
@@ -170,6 +210,9 @@ EXPLAIN_CHECK_SCHEMA = {
 EXPLAIN_CHECK_POLICY = """Check the explanation below against the source statement and proof. Report only real problems: a
 misstated hypothesis or conclusion, a false mathematical claim, a step explained wrongly, or a gap of the proof that
 the explanation hides or silently repairs. Do not report style. Return an empty list when there is no problem."""
+EXPLAIN_CHECK_PASSAGE_POLICY = """Check the explanation below against the source passage. Report only real problems: a
+misstated definition, claim or conclusion, a false mathematical claim, a step explained wrongly, or a gap of the text
+that the explanation hides or silently repairs. Do not report style. Return an empty list when there is no problem."""
 EXPLAIN_FIX_POLICY = """Correct the explanation in light of the problems listed (they are fallible: correct only those that are
 real). Return the whole explanation in the same JSON format."""
 

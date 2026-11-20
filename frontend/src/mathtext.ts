@@ -24,7 +24,21 @@ function prose(text: string): string {
     .replace(/\\(?:eq)?ref\{([^{}\n]*)\}/g, '($1)')
 }
 
-function normalizeText(text: string): string {
+// Some saved planner fields mix prose with undelimited notation such as λ_{n+1}.
+// Recognize individual indexed symbols and operators only. Keep identifiers,
+// destinations, literal code and existing mathematical spans as supplied.
+const SCRIPTED_SYMBOL = /(?<![\p{L}\p{N}_/\\])((?:inf|sup|lim|max|min|[a-zA-Zα-ωΑ-Ω])(?:[_^](?:\{[a-zA-Z0-9α-ωΑ-Ω+−=<>≤≥ -]{1,35}\}|[a-zA-Z0-9α-ωΑ-Ω])){1,2})(?![\p{L}\p{N}_/]|\.[a-zA-Z])/gu
+function typesetSymbols(text: string): string {
+  return text.split(/(https?:\/\/\S+|\]\([^\n)]*\))/g).map((part, index) => index % 2 ? part :
+    part.replace(SCRIPTED_SYMBOL, (_, token: string) => {
+      const tex = token.replace(/^(inf|sup|lim|max|min)/, '\\$1')
+        .replaceAll('−', '-').replaceAll('≥', '\\ge ').replaceAll('≤', '\\le ')
+      return '$' + tex + '$'
+    })).join('')
+}
+
+function normalizeText(text: string, mathProse: boolean): string {
+  const prepareProse = (part: string) => prose(mathProse ? typesetSymbols(part) : part)
   text = text
     .replace(/\\\[([\s\S]+?)\\\]/g, (_m, body: string) => `$$${body}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_m, body: string) => `$${body.trim()}$`)
@@ -37,7 +51,7 @@ function normalizeText(text: string): string {
   let last = 0
   for (const match of text.matchAll(MATH)) {
     const at = match.index ?? 0
-    out += prose(text.slice(last, at))
+    out += prepareProse(text.slice(last, at))
     if (match[1] !== undefined) {
       const lineStart = text.lastIndexOf('\n', at - 1) + 1
       const lineEnd = text.indexOf('\n', at + match[0].length)
@@ -56,11 +70,11 @@ function normalizeText(text: string): string {
     }
     last = at + match[0].length
   }
-  return out + prose(text.slice(last))
+  return out + prepareProse(text.slice(last))
 }
 
-export function normalizeMath(source: string): string {
-  return source.split(CODE).map((part, index) => (index % 2 ? part : normalizeText(part))).join('')
+export function normalizeMath(source: string, mathProse = false): string {
+  return source.split(CODE).map((part, index) => (index % 2 ? part : normalizeText(part, mathProse))).join('')
 }
 
 // -- citations such as [M1:L3-L6] or [doc-0123abcd:L12-L28] -----------------------
@@ -84,16 +98,32 @@ function splitCitations(node: MdNode): MdNode[] {
   return out
 }
 
-function walk(node: MdNode) {
+function walk(node: MdNode, split: (node: MdNode) => MdNode[]) {
   if (!node.children) return
   node.children = node.children.flatMap((child) => {
-    if (child.type === 'text') return splitCitations(child)
-    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link'].includes(child.type)) walk(child)
+    if (child.type === 'text') return split(child)
+    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link', 'linkReference', 'citation'].includes(child.type)) walk(child, split)
     return [child]
   })
 }
 
-export const remarkCitations = () => (tree: MdNode) => walk(tree)
+export const remarkCitations = () => (tree: MdNode) => walk(tree, splitCitations)
+
+export type PaperLinks = Map<number, { url: string; title: string }>
+/** Only link numbers that the saved review assigns to an actual paper. */
+export const remarkPaperLinks = (papers: PaperLinks) => (tree: MdNode) => walk(tree, node => {
+  const text = node.value || ''
+  const children: MdNode[] = []
+  let start = 0
+  for (const match of text.matchAll(/\[(\d+)\]/g)) {
+    const paper = papers.get(Number(match[1]))
+    if (!paper) continue
+    children.push({ type: 'text', value: text.slice(start, match.index) },
+      { type: 'link', ...paper, children: [{ type: 'text', value: match[0] }] })
+    start = match.index + match[0].length
+  }
+  return start ? [...children, { type: 'text', value: text.slice(start) }] : [node]
+})
 
 /** Split streaming text into stable blocks so only the growing tail re-renders. */
 /** A user's message as typed: underscores outside mathematics and code are letters (a_n, b_{n+1}), never Markdown emphasis. */

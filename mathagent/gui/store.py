@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from ..reporting import one_line
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
@@ -33,7 +34,7 @@ from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, sourc
 from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, set_template
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
-from . import personalization, projects
+from . import agent_views, personalization, projects
 
 CHAT_MODES = ('explore', 'free')
 SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
@@ -101,11 +102,6 @@ _cache = {}
 
 class NotFound(LookupError):
     """A requested job, chat, artifact or approval does not exist."""
-
-
-def one_line(text, limit=80):
-    text = ' '.join(str(text).split())
-    return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
 def _cached(path, load, revision=None):
@@ -828,7 +824,8 @@ def delete_chat(root, chat_id):
     """Remove one saved conversation, preserving jobs and workspace sources.
 
     Chat calls have no separate disk streams: their transcript and Assistant
-    checkpoint live in this JSON. Proof/research stream files belong to jobs.
+    checkpoint live in this JSON. Its worker answers and investigation records
+    go with it. Proof/research stream files belong to jobs.
     The Hub guards active work before calling this storage operation.
     """
     if not isinstance(chat_id, str) or not _ID.fullmatch(chat_id):
@@ -848,6 +845,15 @@ def delete_chat(root, chat_id):
         raise NotFound('Unknown chat') from None
     _regular(path)
     load_chat(root, chat_id)  # Validate the record's identity before deletion.
+    answers = private / 'answers'
+    if answers.is_symlink():
+        raise ValueError('Refusing symlink in answer storage')
+    folder = answers / chat_id
+    if folder.exists() or folder.is_symlink():
+        _directory(folder)
+        shutil.rmtree(folder)
+    from ..investigation import delete_records
+    delete_records(root, chat_id)
     path.unlink()
     _sync_directory(base)
     with _cache_lock:
@@ -892,14 +898,17 @@ def list_chats(root, templates_root=None):
         chats.append({'id': chat['id'], 'kind': chat['mode'], 'title': chat['title'] or 'New conversation',
                       'project_id': chat.get('project_id'),
                       'updated_at': chat['updated_at'], 'created_at': chat['created_at'],
+                      'agent_statuses': [{k: lane[k] for k in ('id', 'mode', 'status')}
+                                         for lane in agent_views.agents(chat, current_only=True)]
+                      if (chat.get('assistant_state') or {}).get('status') == 'running' else [],
                       'messages': sum(1 for item in chat['transcript'] if item.get('role') == 'user'),
                       'preview': one_line(last, 140), 'math_macros': chat['_display_macros']})
     return sorted(chats, key=lambda chat: chat['updated_at'], reverse=True)
 
 
 @_locked_chat
-def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), user_content=None,
-                project_snapshot=None, image_refs=()):
+def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
+                project_snapshot=None, image_refs=(), job_id=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -915,6 +924,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
         if message['role'] == 'user':
             item['files'] = list(files)
+            item['attached_files'] = list(attached_files)
             if image_refs:
                 item['images'] = [dict(ref) for ref in image_refs]
             if project_snapshot is not None:
@@ -924,6 +934,8 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
+            if job_id and mode == 'check':
+                item['job_id'] = job_id
             if message.get('tool_calls'):
                 item['tool_calls'] = message['tool_calls']
             if index < len(calls):
@@ -962,13 +974,14 @@ def commit_review(root, chat_id, result, calls, notices):
 
 
 @_locked_chat
-def record_discarded(root, chat_id, content, reason, *, files=(), image_refs=()):
+def record_discarded(root, chat_id, content, reason, *, files=(), attached_files=(), image_refs=()):
     """Keep an unfinished turn visible without adding it to the model context."""
     chat = load_chat(root, chat_id)
     stamp = _now()
     if content:
         chat['transcript'].append({'role': 'user', 'content': content, 'time': stamp, 'discarded': True,
-                                   'files': list(files), 'images': [dict(ref) for ref in image_refs]})
+                                   'files': list(files), 'attached_files': list(attached_files),
+                                   'images': [dict(ref) for ref in image_refs]})
         if not chat['title']:
             chat['title'] = one_line(content, 80)
     chat['transcript'].append({'role': 'notice', 'content': 'Not added to the conversation: ' + reason,
@@ -990,11 +1003,44 @@ def append_items(root, chat_id, items):
 
 
 @_locked_chat
+def start_worker_card(root, chat_id, item, index):
+    """Recover the first card if a crash preceded the checkpoint of its transcript index."""
+    chat = load_chat(root, chat_id)
+    items = chat['transcript']
+    if index is not None and (type(index) is not int or not 0 <= index < len(items)):
+        raise NotFound('Unknown worker card')
+    if index is None:
+        index = next((i for i, old in enumerate(items) if old.get('role') == 'route'
+                      and old.get('child_id') == item['child_id']), len(items))
+    if index == len(items):
+        items.append(item)
+    else:
+        old = items[index]
+        if (old.get('role') != 'route' or old.get('child_id', item['child_id']) != item['child_id']
+                or (old.get('mode'), old.get('request')) != (item['mode'], item['request'])):
+            raise ValueError('Saved worker points to a different card')
+        old.update(status='started', task=item['task'], status_time=item['time'], ended_at=None,
+                   outcome='', error=None, error_code=None, agent_error=None, native_status=None,
+                   child_id=item['child_id'], turn_id=item['turn_id'], batch_id=item['batch_id'])
+    _save_chat(root, chat)
+    return index, items[index].get('job_id')
+
+
+@_locked_chat
 def update_item(root, chat_id, index, **fields):
     chat = load_chat(root, chat_id)
     if type(index) is not int or not 0 <= index < len(chat['transcript']):
         raise NotFound('Unknown conversation item')
-    chat['transcript'][index].update(fields)
+    item = chat['transcript'][index]
+    status = fields.get('status')
+    if item.get('role') == 'route' and status and status != item.get('status'):
+        fields['status_time'] = _now()
+        if status == 'started':
+            fields.setdefault('started_at', item.get('started_at') or fields['status_time'])
+            fields['ended_at'] = None
+        elif status in ('done', 'failed', 'stopped', 'cancelled', 'dismissed'):
+            fields['ended_at'] = fields['status_time']
+    item.update(fields)
     _save_chat(root, chat)
     return chat['transcript'][index]
 
@@ -1003,7 +1049,31 @@ def update_item(root, chat_id, index, **fields):
 def save_assistant(root, chat_id, state):
     """Checkpoint the parent and its child identities in the same atomic chat file."""
     chat = load_chat(root, chat_id)
+    agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
+    _save_chat(root, chat)
+
+
+@_locked_chat
+def checkpoint_investigation(root, chat_id, state):
+    """Commit the final report and checkpoint together, including after a crash or a repeated stop."""
+    chat = load_chat(root, chat_id)
+    agent_views.archive_turn(chat, state)
+    chat['assistant_state'] = state
+    inv = state['investigation']
+    record_id = inv['id']
+    ident = 'clarification_id' if inv['phase'] == 'clarification' else 'investigation_id'
+    if state.get('status') == 'complete' and not any(
+            record_id in (item.get('investigation_id'), item.get('clarification_id')) for item in chat['transcript']):
+        answer = {'role': 'assistant', 'content': state['answer']}
+        prefix = state.get('history_prefix_count', len(state.get('history', ())))
+        user = next((item for item in state.get('messages', [])[prefix:] if item['role'] == 'user'),
+                    {'role': 'user', 'content': state['query']})
+        chat['history'] = list(state.get('history', ())) + [user, answer]
+        chat['transcript'].append({**answer, 'mode': 'free', ident: record_id, 'time': _now(),
+                                   'synthesis': inv.get('synthesis', ''), 'synthesis_steps': inv.get('synthesis_steps', [])})
+        if not chat['title']:
+            chat['title'] = one_line(state['query'], 80)
     _save_chat(root, chat)
 
 
@@ -1053,12 +1123,55 @@ def assistant_accounting(root, state, transcript=()):
     return budget
 
 
+def _agent_receipts(root, chat, lanes):
+    """Fill available timing and counts of older workers from their immutable native identity."""
+    for lane in lanes:
+        if lane['ended_at'] is not None or lane['status'] not in ('finished', 'failed', 'stopped'):
+            continue
+        try:
+            job_id = lane.get('job_id')
+            answer_id = lane.get('answer_id')
+            if answer_id:
+                from ..workers import _answer_path
+                path = _answer_path(root, chat['id'], answer_id)
+                def load():
+                    data = json.loads(_read(path))
+                    if (data.get('id'), data.get('chat_id'), data.get('mode')) != (answer_id, chat['id'], lane['mode']):
+                        raise ValueError('Worker identity differs')
+                    return data.get('created'), {}, None
+            elif isinstance(job_id, str) and _ID.fullmatch(job_id):
+                folder = 'proofs' if lane['mode'] == 'prove' else 'checks' if lane['mode'] == 'check' else 'research'
+                directory = _proof_directory(root, job_id) if folder == 'proofs' else _job_directory(root, job_id, folder)
+                path = directory / 'state.json'
+                def load():
+                    data = ProofStore.load(root, job_id).state if folder == 'proofs' else _read_research(directory, job_id, verify=False)
+                    usage = {dest: data[key] for key, dest in (('tokens_charged', 'output_tokens'),
+                             ('input_tokens_charged', 'input_tokens'), ('seconds_used', 'seconds'))
+                             if type(data.get(key)) in (int, float)}
+                    return data.get('updated_at'), usage, agent_views._progress(data.get('progress'))
+            else:
+                continue
+            ended, usage, progress = _cached(path, load, 'agent-receipt-v1')
+            lane['ended_at'] = ended
+            lane['usage'] = {**usage, **lane['usage']}
+            lane['progress'] = lane['progress'] or progress
+        except (LookupError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
+def budget_view(budget, running=False):
+    reserved = budget.get('reserved_tokens', 0) if running else 0
+    return {'tokens': output_totals(budget.get('tokens', 0), budget.get('max_tokens'),
+                                    reserved, budget.get('measured_tokens', 0)),
+            'input_tokens': _budget(budget.get('input_tokens', 0), budget.get('max_input_tokens')),
+            'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900))}
+
+
 def assistant_view(chat, root=None):
     state = chat.get('assistant_state') or {}
     status = state.get('status')
     status = 'paused' if status in ('interrupted', 'incomplete') else status
     budget = assistant_accounting(root, state, chat.get('transcript', ()))
-    reserved = budget.get('reserved_tokens', 0) if status == 'running' else 0
     progress = state.get('progress') if status != 'set_aside' else None
     if not isinstance(progress, dict) and status != 'set_aside':
         children = state.get('children') or []
@@ -1079,14 +1192,16 @@ def assistant_view(chat, root=None):
             progress = None
     last_call = state.get('last_call') or {}
     context = _live_context(last_call) if status == 'running' and last_call.get('status') == 'running' else {}
-    return {'assistant_status': status,
+    lanes = agent_views.agents(chat)
+    if root is not None:
+        _agent_receipts(root, chat, lanes)
+    from ..mode_calls import waiting_routed_tasks
+    waiting = [{'mode': t['mode'], 'objective': t['request']} for t in waiting_routed_tasks(state)] if status == 'running' else []
+    return {'agents': lanes, 'waiting_for_results': waiting, 'agent_concurrency': (state.get('limits') or {}).get('concurrency'),
+            'assistant_status': status,
             'assistant_resumable': status in ('paused', 'running'),
             'assistant_progress': progress,
-            'assistant_budget': {'tokens': output_totals(budget.get('tokens', 0), budget.get('max_tokens'),
-                                                         reserved, budget.get('measured_tokens', 0)),
-                                 'input_tokens': _budget(budget.get('input_tokens', 0), budget.get('max_input_tokens')),
-                                 'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900)),
-                                 **context}}
+            'assistant_budget': {**budget_view(budget, status == 'running'), **context}}
 
 
 # -- workspace settings, folders, uploads and templates -------------------------------
@@ -1357,15 +1472,25 @@ def previous_writeup_source(root, chat, *, before=None):
     answers = [(i, item['content']) for i, item in turn if item.get('role') == 'assistant'
                and not item.get('tool_calls') and isinstance(item.get('content'), str) and item['content'].strip()]
     routes = [(i, item) for i, item in turn if item.get('role') == 'route']
-    if len(answers) > 1 or len(routes) > 1 or any(item.get('status') != 'done' for _, item in routes):
+    if len(answers) > 1:
         return None
-    if any(item.get('mode') in ('writeup', 'summarize') for _, item in routes):
-        return None
-    experiments = _shown_experiments(item for _, item in turn)
-    if experiments:
-        return {'experiment_ids': experiments}
     bibliography = ''
     origin = {'chat_id': chat['id']}
+    final = turn[-1][1] if answers and turn[-1][0] == answers[0][0] else {}
+    synthesis = final.get('synthesis')
+    if final.get('investigation_id') and isinstance(synthesis, str) and synthesis.strip():
+        # The final research answer is a single deliverable. Its child jobs and
+        # technical evidence report are separate from the narrative shown in chat.
+        origin['investigation_id'] = final['investigation_id']
+        answers = [(answers[0][0], synthesis)]
+        routes = []
+    else:
+        if (len(routes) > 1 or any(item.get('status') != 'done' or item.get('mode') in ('writeup', 'summarize')
+                                  for _, item in routes)):
+            return None
+        experiments = _shown_experiments(item for _, item in turn)
+        if experiments:
+            return {'experiment_ids': experiments}
     if routes and routes[0][1].get('mode') == 'literature':
         index, route = routes[0]
         job = route.get('job_id')
@@ -1529,6 +1654,83 @@ def conversation_references(root, chat_id, before=None, skip=None):
     return references
 
 
+def _card_answer(root, chat, card):
+    from ..workers import _answer_path
+    from ..mode_calls import USER_MODES
+    if card.get('mode') not in ('explore', *USER_MODES):
+        raise NotFound('No small worker answer for this card')
+    ident = card['answer_id']
+    path = _answer_path(root, chat['id'], ident)
+    if not path.exists():
+        raise NotFound('Saved worker answer is unavailable')
+    record = json.loads(_read(path))
+    answer = record.get('answer')
+    if (record.get('id') != ident or record.get('chat_id') != chat['id'] or record.get('mode') != card['mode']
+            or record.get('request') != card.get('request') or not isinstance(answer, str)
+            or not isinstance(record.get('status'), str)):
+        raise ValueError('Saved answer identity differs from its conversation card')
+    for child in (chat.get('assistant_state') or {}).get('children', []):
+        if ident in (child.get('job_id'), child.get('native_id')) and record.get('child_id') != child.get('id'):
+            raise ValueError('Saved answer identity differs from its worker')
+    digest = hashlib.sha256(answer.encode()).hexdigest()
+    if any(known is not None and known != digest for known in (record.get('answer_sha256'), card.get('answer_sha256'))):
+        raise ValueError('Saved answer differs from its recorded digest')
+    return {'answer': answer, 'status': record['status']}
+
+
+def _has_chat_job(root, chat_id, folder, job_id):
+    chat = load_chat(root, chat_id)
+    links = _chat_evidence(chat)
+    if (folder, job_id) in links:
+        return True
+    from ..project_index import collect
+    return any((folder, job_id) in e.get('links', []) and
+               (e.get('chat_id') == chat_id or (e['folder'], e['job_id']) in links) for e in collect(root))
+
+
+def saved_chat_experiment(root, chat_id, experiment_id):
+    """Read native or retained numerical evidence only if this conversation produced or cited the run."""
+    from ..project_index import collect, read_text
+    if not isinstance(experiment_id, str) or not _EXPERIMENT.fullmatch(experiment_id):
+        raise ValueError('Invalid experiment ID')
+    if not _has_chat_job(root, chat_id, 'experiments', experiment_id):
+        raise NotFound('Unknown experiment in this chat')
+    entry = next((e for e in collect(root) if e['folder'] == 'experiments' and e['job_id'] == experiment_id), None)
+    if not entry:
+        raise NotFound('The saved experiment is no longer available')
+    return {'answer': read_text(root, {'entries': [entry]}, entry['id']), 'status': entry['status']}
+
+
+def saved_chat_check(root, chat_id, job_id):
+    """Read a check through its originating conversation, including a recorded nested check."""
+    if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+        raise ValueError('Invalid check ID')
+    if not _has_chat_job(root, chat_id, 'checks', job_id):
+        raise NotFound('Unknown check in this chat')
+    directory = _job_directory(root, job_id, 'checks')
+    record = _read_research(directory, job_id)
+    if record.get('kind') != 'check':
+        raise NotFound('Unknown check in this chat')
+    report = directory / 'report.md'
+    return {'answer': _read(report) if report.exists() else record.get('answer') or '',
+            'status': record['status']}
+
+
+def saved_chat_answer(root, chat_id, answer_id):
+    """Read a durable worker answer through the matching card in its owning chat.
+
+    A failed card that names an answer keeps the partial text its worker wrote.
+    """
+    if not isinstance(answer_id, str) or not _ID.fullmatch(answer_id):
+        raise ValueError('Invalid answer ID')
+    chat = load_chat(root, chat_id)
+    card = next((item for item in chat['transcript'] if item.get('role') == 'route'
+                 and item.get('status') in ('done', 'failed') and item.get('answer_id') == answer_id), None)
+    if card is None:
+        raise NotFound('Unknown answer in this chat')
+    return _card_answer(root, chat, card)
+
+
 def conversation_record(root, chat_id, before=None, skip=None):
     """An Assistant conversation as one text source for a write-up or a summary.
 
@@ -1587,7 +1789,17 @@ def conversation_record(root, chat_id, before=None, skip=None):
             value = next((v for v in queue if item.get('job_id') and v.get('job_id') == item['job_id']), None)
             if value is None and not item.get('job_id') and queue:
                 value = queue[0]
-            if value is not None:
+            if item.get('answer_id'):
+                # A frozen worker receipt may outlive the tool result in the model's history.
+                try:
+                    saved = _card_answer(root, chat, item)
+                except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError):
+                    parts.append('## Worker answer unavailable\n\nThe saved answer could not be verified.')
+                    continue
+                text, status = saved['answer'], saved['status']
+                if value is not None and value.get('job_id') == item['answer_id']:
+                    queue.remove(value)
+            elif value is not None:
                 queue.remove(value)
                 result = value['result']
                 text = result.get('answer') or ''
@@ -1656,3 +1868,103 @@ def set_style_choice(root, mode, style=None, domain=None):
         return save_choice(root, mode, style, domain)
     except FileNotFoundError:
         raise NotFound('Unknown style') from None
+
+
+def _chat_evidence(chat):
+    """Native identifiers only. Use the stored transcript, which survives history compaction."""
+    jobs = set()
+
+    def link(mode, value):
+        if not isinstance(value, str):
+            return
+        if mode == 'experiment' and _EXPERIMENT.fullmatch(value):
+            jobs.add(('experiments', value))
+        elif _ID.fullmatch(value):
+            folder = {'prove': 'proofs', 'check': 'checks', 'answer': 'answers'}.get(mode, 'research')
+            jobs.add((folder, value))
+
+    for item in chat['transcript']:
+        if not isinstance(item, dict):
+            continue
+        role, mode = item.get('role'), item.get('mode')
+        if role == 'route':
+            link(mode, item.get('job_id'))
+            link('answer', item.get('answer_id'))
+        elif role == 'assistant' and mode == 'check':
+            if item.get('job_id'):
+                link('check', item['job_id'])
+            else:
+                # Legacy check chats carried the native ID in the controller-generated footer.
+                match = re.search(r'(?:^|\n)Full log: `\.mathagent/checks/([a-f0-9-]{36})/report\.md`\s*\Z',
+                                  str(item.get('content') or ''))
+                if match:
+                    link('check', match[1])
+        elif role == 'experiment':
+            link('experiment', item.get('experiment'))
+        elif role == 'tool' and item.get('tool_name') in ('check_reference', 'execute_python'):
+            try:
+                data = json.loads(item['content'])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if isinstance(data, dict):
+                if item['tool_name'] == 'check_reference':
+                    link('check', data.get('check_id'))
+                else:
+                    result = data.get('sandbox_result') or data
+                    if isinstance(result, dict):
+                        link('experiment', result.get('experiment_id'))
+    parent = chat.get('assistant_state') or {}
+    for child in (parent.get('children') or []):
+        action = child.get('action') or {}
+        link(action.get('mode') or child.get('mode'), child.get('job_id'))
+    for task in ((parent.get('investigation') or {}).get('tasks') or {}).values():
+        link(task.get('mode'), task.get('job_id'))
+    return jobs
+
+
+def evidence_links(root):
+    """Return chat-derived links alongside each chat's current project or private scope."""
+    links, chats = {}, {}
+    base = _chats(root)
+    if base:
+        for path in sorted(base.iterdir()):
+            if path.suffix != '.json' or not _ID.fullmatch(path.stem) or path.is_symlink():
+                continue
+            def read():
+                chat = load_chat(root, path.stem)
+                return chat.get('project_id'), _chat_evidence(chat)
+            try:
+                info = path.lstat()
+                project, jobs = _cached(path, read, ('evidence-links-v1', info.st_ino, info.st_ctime_ns))
+            except (NotFound, OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                continue
+            chats[path.stem] = 'project:' + project if project else 'chat:' + path.stem
+            for job in jobs:
+                links.setdefault(job, set()).add(path.stem)
+    return links, chats
+
+
+def index_view(root, *, chat=None, project=None, all_scopes=False, limit=None, findings=False):
+    """The research record of one scope. `findings` lists only what a reader can use (see project_index.scoped)."""
+    from .. import project_index
+    if sum(bool(x) for x in (chat is not None, project is not None, all_scopes)) > 1:
+        raise ValueError('Select one research-record scope')
+    if limit is not None and (type(limit) is not int or limit < 0):
+        raise ValueError('Invalid research-record limit')
+    scope = 'all' if all_scopes else 'workspace'
+    links, chats = evidence_links(root)
+    if chat is not None:
+        if not isinstance(chat, str) or not _ID.fullmatch(chat):
+            raise ValueError('Invalid chat ID')
+        if chat not in chats:
+            raise NotFound('Unknown chat')
+        scope = chats[chat]
+    if project is not None:
+        try:
+            projects.read_project(root, project)
+        except FileNotFoundError:
+            raise NotFound('Unknown project') from None
+        scope = 'project:' + project
+    view = project_index.scoped(project_index.collect(root), links, chats, scope, limit, findings)
+    project_index.freeze_documents(root, view)
+    return view

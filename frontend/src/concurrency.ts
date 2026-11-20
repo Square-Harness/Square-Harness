@@ -73,10 +73,10 @@ export type ChatEvent = {
 export function reduceChat(snapshot: TaskSnapshot, event: ChatEvent): TaskSnapshot {
   return updateEntry(snapshot, event.task, event.seq, (entry) => {
     if (!entry.live || entry.live.chat !== event.chat) return entry
-    // A progress line ("Delegating a mathematical task…") lasts until the next output starts.
-    const steps: LiveStep[] = event.kind === 'start' ? entry.live.steps.filter((step) => !('progress' in step && step.progress)) : [...entry.live.steps]
+    // The current phase is replaced, cleared explicitly, or superseded by model output.
+    const steps: LiveStep[] = event.kind === 'start' || event.kind === 'progress' ? entry.live.steps.filter((step) => !('progress' in step && step.progress)) : [...entry.live.steps]
     if (event.kind === 'start') steps.push({ type: 'call', thinking: '', text: '' })
-    else if (event.kind === 'progress') steps.push({ type: 'notice', text: event.text || '', progress: true })
+    else if (event.kind === 'progress' && event.text) steps.push({ type: 'notice', text: event.text, progress: true })
     else if (event.kind === 'delta') {
       const last = steps[steps.length - 1]
       if (last?.type === 'call') steps[steps.length - 1] = { ...last, thinking: last.thinking + (event.thinking || ''), text: last.text + (event.text || '') }

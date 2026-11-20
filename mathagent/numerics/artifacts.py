@@ -19,9 +19,10 @@ import re
 import shutil
 import threading
 import uuid
+import warnings
 
 from .executor import ARTIFACT_NAME
-from ..ledger import _directory, _read, _regular
+from ..ledger import _atomic_write, _directory, _read, _regular
 
 EXPERIMENT_ID = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
 STORED_OUTPUT = 200_000
@@ -58,8 +59,12 @@ class ExperimentStore:
         return folder / name
 
     def save(self, *, code, result, limits, policy, image, seed=None, parameters=None, purpose='',
-             explicit=False, harness_version=''):
+             explicit=False, invocation=None, harness_version=''):
         """Persist one run and return its record (with relative artifact paths)."""
+        if invocation is None:
+            invocation = 'explicit' if explicit else 'automatic'
+        if invocation not in ('explicit', 'routed', 'automatic'):
+            raise ValueError('Unknown experiment invocation')
         now = datetime.now(timezone.utc)
         experiment_id = f'exp-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
         with self._lock:
@@ -74,7 +79,7 @@ class ExperimentStore:
             _write(self.path(experiment_id, 'code.py'), code.encode('utf-8'))
             record = {
                 'id': experiment_id, 'created': now.isoformat(timespec='seconds'),
-                'skill': policy, 'invocation': 'explicit' if explicit else 'automatic',
+                'skill': policy, 'invocation': invocation,
                 'purpose': purpose, 'code': code, 'seed': seed, 'parameters': parameters or {},
                 'image': image, 'limits': limits.as_dict(), 'harness_version': harness_version,
                 'status': result.status, 'exit_code': result.exit_code,
@@ -87,6 +92,10 @@ class ExperimentStore:
             }
             _write(self.path(experiment_id, 'record.json'),
                    json.dumps(record, ensure_ascii=False, indent=1, default=str).encode('utf-8'))
+            try:
+                self._retain(record)
+            except (OSError, ValueError) as exc:
+                warnings.warn(f'Could not retain experiment {experiment_id}: {exc}', RuntimeWarning, stacklevel=2)
             self._prune(keep=experiment_id)
         return record
 
@@ -94,7 +103,10 @@ class ExperimentStore:
         path = self.path(experiment_id, 'record.json')
         for folder in (self.root / '.mathagent', self.directory, path.parent):
             _directory(folder)
-        return json.loads(_read(path))
+        record = json.loads(_read(path))
+        if record.get('id') != experiment_id:
+            raise ValueError('Invalid experiment identity')
+        return record
 
     def figure(self, experiment_id, name):
         """A declared, unchanged graphic of this run, addressed by filename or experiment/filename."""
@@ -134,14 +146,91 @@ class ExperimentStore:
                                                         'elapsed_seconds')})
         return records
 
+    def _retain(self, record):
+        if not isinstance(record.get('id'), str) or not EXPERIMENT_ID.fullmatch(record['id']):
+            raise ValueError('Invalid experiment identity')
+        base = self.root / '.mathagent'
+        _directory(base)
+        directory = base / 'index' / 'experiments'
+        _directory(directory.parent, create=True)
+        _directory(directory, create=True)
+        _atomic_write(directory / (record['id'] + '.json'), _encode(kept(record)))
+
     def _prune(self, keep):
         folders = sorted(p for p in self.directory.iterdir()
                          if EXPERIMENT_ID.match(p.name) and p.is_dir() and not p.is_symlink())
         sizes = {p: sum(f.stat().st_size for f in p.iterdir() if f.is_file() and not f.is_symlink()) for p in folders}
         total = sum(sizes.values())
-        while folders and (len(folders) > self.max_records or total > self.max_bytes):
-            oldest = folders.pop(0)
-            if oldest.name == keep:
+        older = sorted((p for p in folders if p.name != keep), key=lambda p: (p.stat().st_mtime_ns, p.name))
+        while older and (len(older) + 1 > self.max_records or total > self.max_bytes):
+            oldest = older.pop(0)
+            try:
+                original = self.load(oldest.name)
+                compact = _encode(kept(original))
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                # A damaged run (an interrupted save, an invalid record) is left in place: the next oldest is pruned.
+                warnings.warn(f'Left damaged experiment {oldest.name} in place: {exc}', RuntimeWarning, stacklevel=2)
+                continue
+            # Before upgrading, this may be the only copy. Preserve it before pruning.
+            try:
+                copy = self.root / '.mathagent' / 'index' / 'experiments' / (oldest.name + '.json')
+                _directory(self.root / '.mathagent')
+                _directory(copy.parent.parent, create=True)
+                _directory(copy.parent, create=True)
+                try:
+                    intact = _read(copy, 65536).encode() == compact
+                except (OSError, ValueError):
+                    intact = False
+                if not intact:
+                    self._retain(original)
+            except (OSError, ValueError) as exc:
+                warnings.warn(f'Could not retain old experiment {oldest.name}: {exc}', RuntimeWarning, stacklevel=2)
                 break
             total -= sizes[oldest]
             shutil.rmtree(oldest, ignore_errors=True)
+
+
+def _encode(value):
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str).encode('utf-8')
+
+
+def kept(record):
+    """Keep an independently readable, 64 KiB maximum description; binaries remain in the live store."""
+    out = {k: record.get(k) for k in ('id', 'created', 'skill', 'invocation', 'purpose', 'code', 'seed',
+                                      'parameters', 'status', 'exit_code', 'stdout', 'stderr', 'result')}
+    for key in ('id', 'created', 'skill', 'invocation', 'status'):
+        if not isinstance(out[key], str) or len(out[key]) > 256:
+            raise ValueError('Invalid experiment metadata field: ' + key)
+    for key in ('seed', 'exit_code'):
+        if out[key] is not None and (type(out[key]) is not int or out[key].bit_length() > 64):
+            raise ValueError('Invalid numeric experiment field: ' + key)
+    if not all(isinstance(a, dict) for a in record.get('artifacts', [])):
+        raise ValueError('Invalid experiment artifacts')
+    out['artifacts'] = [{k: a.get(k) for k in ('name', 'sha256', 'bytes')} for a in record.get('artifacts', [])]
+    out['truncated'] = bool(record.get('truncated') or record.get('stdout_truncated') or record.get('stderr_truncated'))
+    for key, cap in (('stdout', 20000), ('stderr', 4000), ('code', 24000), ('purpose', 4000)):
+        if isinstance(out[key], str) and len(out[key]) > cap:
+            out[key] = out[key][:cap]
+            out['truncated'] = True
+    while len(_encode(out)) > 65536:
+        key = max(('stdout', 'stderr', 'code', 'parameters', 'result', 'artifacts', 'purpose'),
+                  key=lambda k: len(_encode(out[k])))
+        value = out[key]
+        if isinstance(value, (str, list)):
+            out[key] = value[:len(value) // 2]
+        else:
+            raw = _encode(value)
+            out[key] = {'truncated': True, 'sha256': hashlib.sha256(raw).hexdigest(),
+                        'preview': raw[:2000].decode('utf-8', 'ignore')}
+        out['truncated'] = True
+    return out
+
+
+def export_evidence(record):
+    status = record.get('status') or 'unknown'
+    text = record.get('stdout') or str(record.get('result') or '')
+    return [{'kind': 'experiment', 'mode': 'numerics', 'status': 'ran' if status == 'ok' else status,
+             'text': record.get('purpose') or '', 'summary': ' '.join(text.splitlines()[:1])[:500],
+             'qualifiers': ['bounded record'] if record.get('truncated') else [],
+             'evidence': {'sha256': hashlib.sha256(_encode(kept(record))).hexdigest(),
+                          'artifacts': record.get('artifacts', [])}}]

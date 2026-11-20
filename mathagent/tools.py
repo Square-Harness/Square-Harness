@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Explicit tool registry; workspace-scoped text access and approved mutations."""
+from bisect import bisect_right
 import codecs
 import difflib
 import hashlib
@@ -27,6 +28,14 @@ MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
 _WRITE_LOCK = Lock()
 SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
+
+
+def pdf_page_label(starts, line, *, first=False):
+    """Mark a PDF page boundary, or identify the page of a stand-alone excerpt."""
+    page = bisect_right(starts, line)
+    if page and (first or starts[page - 1] == line):
+        return f'[PDF page {page}] '
+    return ''
 
 
 def is_source_archive(path):
@@ -155,15 +164,21 @@ class Workspace:
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
+        self.index = None
         self.pinned = set()
+        self.selected_files_only = False
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
         self.source_archives = {}  # path -> last bounded, immutable source extraction
         if self.literature is None:
             self.readable.discard('.pdf')  # PDF extraction uses the literature backend
 
-    def pin_files(self, files):
-        """Allow these exact source paths without broadening file discovery."""
+    def pin_files(self, files, *, selected_only=False):
+        """Pin source paths, optionally limiting this engine's local reads to the selection."""
         paths = {self.path(filename, pdf=self.literature is not None) for filename in files}
+        if selected_only:
+            self.selected_files_only = True
+            self.readable.clear()
+            self.pinned.clear()
         self.pinned.update(paths)
 
     def path(self, filename, *, pdf=False):
@@ -182,6 +197,8 @@ class Workspace:
         return p
 
     def _readable(self, p):
+        if self.selected_files_only and p not in self.pinned:
+            raise ValueError('This file is outside the document selection for this request')
         if source_suffix(p) not in self.readable and p not in self.pinned:
             raise ValueError(f'The user has not allowed reading {p.suffix} files in this workspace; '
                              'ask them to pin the file or enable that file type')
@@ -229,6 +246,8 @@ class Workspace:
 
     def files(self, suffixes=None):
         allowed = TEXT if suffixes is None else suffixes
+        if not allowed or self.selected_files_only:
+            return
         count = 0
         for folder, dirs, files in os.walk(self.root, followlinks=False):
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP
@@ -245,7 +264,8 @@ class Workspace:
     def list_files(self, offset=0, limit=100):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError('Use a nonnegative file offset and a limit from 1 to 200')
-        names = [str(p.relative_to(self.root)) for p in self.files(self.readable)]
+        paths = sorted(self.pinned) if self.selected_files_only else self.files(self.readable)
+        names = [str(p.relative_to(self.root)) for p in paths]
         selected, size = [], 0
         for name in names[offset:offset + limit]:
             if selected and size + len(name) + 1 > MAX_RESULT - 300:
@@ -265,20 +285,25 @@ class Workspace:
             raise ValueError('Line bounds must be positive integers with start <= end')
         p = self.path(path, pdf=True)
         self._readable(p)
+        pagination, page_starts = '', ()
         if p.suffix.lower() == '.pdf':
             # Local extraction, cached with the literature evidence; nothing is uploaded.
             summary = self.literature.import_local(str(p.relative_to(self.root)))
-            lines = self.literature._document(summary['document_id'])[1]
+            metadata, lines = self.literature._document(summary['document_id'])
+            page_starts = metadata.get('pdf_page_starts', ())
+            if metadata.get('extracted_pages'):
+                pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
         else:
             lines = self.text(p).splitlines()
         end = min(end_line, start_line + 199, len(lines))
-        result = f'{path}: {len(lines)} total lines; requested excerpt {start_line}-{end}\n'
+        result = f'{path}: {pagination}{len(lines)} total lines; requested excerpt {start_line}-{end}\n'
         remaining = MAX_RESULT - len(result) - 250
         selected = []
         for index in range(start_line - 1, end):
             column = start_column if index == start_line - 1 else 1
             text = lines[index][column - 1:]
             prefix = f'{index + 1}: ' if column == 1 else f'{index + 1} (from column {column}): '
+            prefix = pdf_page_label(page_starts, index + 1, first=index + 1 == start_line) + prefix
             if len(prefix) + len(text) + 1 > remaining:
                 if selected:
                     return result + '\n'.join(selected) + f'\n[Continue read_file at start_line={index + 1}, start_column={column}]'
@@ -307,13 +332,15 @@ class Workspace:
                 raise KeyboardInterrupt()
             if time.monotonic() >= deadline:
                 return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}]'
+            page_starts = ()
             try:
                 if p.suffix.lower() == '.pdf':
                     previous = self.literature.deadline
                     self.literature.deadline = min(deadline, previous) if previous is not None else deadline
                     try:
                         summary = self.literature.import_local(str(p.relative_to(self.root)))
-                        lines = self.literature._document(summary['document_id'])[1]
+                        metadata, lines = self.literature._document(summary['document_id'])
+                        page_starts = metadata.get('pdf_page_starts', ())
                     finally:
                         self.literature.deadline = previous
                 else:
@@ -325,7 +352,8 @@ class Workspace:
                 continue
             for i, line in enumerate(lines, 1):
                 if needle in line.casefold():
-                    hits.append(f'{p.relative_to(self.root)}:{i}: {line[:500]}')
+                    page = pdf_page_label(page_starts, i, first=True)
+                    hits.append(f'{p.relative_to(self.root)}:{i}: {page}{line[:500]}')
                     if len(hits) >= 50:
                         return '\n'.join(hits) + '\n[50-match limit]'
         return '\n'.join(hits) or '(no matches in supported files scanned)'
@@ -442,7 +470,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
     def schemas(self):
         string = {'type': 'string'}
         integer = {'type': 'integer'}
-        kinds = ', '.join(sorted(self.readable))
+        kinds = 'selected documents only' if self.selected_files_only else ', '.join(sorted(self.readable))
         if '.tex' in self.readable:
             kinds += ', .tar.gz/.tgz/.tar/.gz TeX sources'
         result = [] if not self.readable and not self.pinned else [
@@ -472,6 +500,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             web_names = {item['function']['name'] for item in web_schemas}
             result.extend(item for item in self.literature.schemas() if item['function']['name'] not in web_names)
             result.extend(web_schemas)
+        if self.index is not None:
+            result.extend(self.index.schemas())
         if self.numerics is not None:
             result.extend(self.numerics.schemas())
         if self.checker is not None and self.literature is not None and self.literature.online:
@@ -495,6 +525,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
+            if self.index is not None and name in self.index.names:
+                return self.index.execute(name, arguments)
             if self.numerics is not None and name in self.numerics.tool_names:
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:

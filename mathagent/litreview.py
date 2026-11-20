@@ -14,6 +14,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date
 from fractions import Fraction
+import hashlib
 import html
 import json
 import math
@@ -5050,3 +5051,62 @@ class ReviewRunner(ResearchRunner):
                                               for e in s.get('sweep_log', [])]
         footer += ['', usage_footer(s), '']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(header) + (s.get('draft') or '') + '\n'.join(footer)))
+
+
+def review_outcome(state):
+    """A literature review's card line: short, since the review itself is shown in full.
+
+    None before a review is written, and for old reading lists (which have no bibliography).
+    """
+    from .reporting import one_line
+    if state.get('pipeline') != ReviewRunner.PIPELINE:
+        return None
+    if state.get('status') == 'complete':
+        count = len(state.get('bibliography') or [])
+        return f'Review written: {count} reference{"" if count == 1 else "s"}.'
+    if state.get('status') == 'partial':
+        return one_line(state.get('stop_reason') or 'Review written with gaps. See the saved report.', 300)
+    if state.get('status') == 'paused' and state.get('phase') == 'screen':
+        return (f'Screened {len(state["screened"])} of {len(state["pool"])} candidate records. '
+                'Resume continues from the saved screening results.')
+    return None
+
+
+
+
+def export_evidence(state):
+    """Bibliographic records and actual reading ranges, without model-written theorem paraphrases."""
+    if state.get('pipeline') == LEGACY_PIPELINE:
+        return [{'kind': 'source', 'mode': 'literature', 'status': 'legacy reading list', 'qualifiers': ['legacy format']}]
+    if state.get('pipeline') != PIPELINE:
+        return []
+    references = {r['n']: r for r in state.get('references', [])}
+    pool = {r['n']: r for r in state.get('pool', [])}
+    cards, documents = state.get('cards', {}), state.get('documents', {})
+    numbers = list(references) or [n for n in state.get('selected', []) if str(n) in cards]
+    rows = []
+    for n in dict.fromkeys(numbers):
+        if type(n) is not int:
+            continue
+        record = {**pool.get(n, {}), **references.get(n, {})}
+        card = cards.get(str(n), {})
+        read = record.get('read') or card.get('mode')
+        doc = documents.get(str(n)) or {}
+        extractor = doc.get('extractor') or ''
+        passages = []
+        for tag, text in (card.get('passages') or {}).items():
+            if not isinstance(text, str) or not text.strip() or not re.fullmatch(r'L[1-9]\d*-L[1-9]\d*', tag):
+                continue
+            label = (card.get('primary_locators') or {}).get(tag) or ''
+            if label and (not STATEMENT.match(label) or not _has_locator(label.rstrip('.'), text)):
+                label = ''
+            passages.append({'range': tag, 'label': label, 'sha256': hashlib.sha256(text.encode()).hexdigest()})
+        title = record.get('title') or 'Untitled source'
+        status = {'full_text': 'passages read', 'primary_passages': 'passages read', 'abstract': 'abstract only'}.get(read, 'record only')
+        docs = [{'document_id': doc['document_id'], 'title': title, 'extractor': extractor, 'passages': passages}
+                ] if status == 'passages read' and doc.get('document_id') and passages else []
+        evidence = {key: record.get(key) for key in ('title', 'authors', 'year', 'doi', 'arxiv', 'zbl', 'url')}
+        qualifiers = ['pdf extraction'] if extractor.startswith(('pdftotext', 'pypdf')) else []
+        rows.append({'kind': 'source', 'mode': 'literature', 'number': n, 'status': status, 'qualifiers': qualifiers,
+                     'summary': title, 'documents': docs, 'evidence': evidence})
+    return rows

@@ -19,6 +19,8 @@ import { Glyph } from './Glyph'
 import { AutoIcon, ChevronIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SlidersIcon, StackIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
+import { AgentSquares } from './AgentGroup'
+import { activeAgent } from '../agents'
 
 export function BrandMark({ size = 32 }: { size?: number }) {
   return (
@@ -200,11 +202,14 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
       {!chats.length && <p className="side-empty muted">{project ? 'No conversations in this project yet. Start one with New conversation.' : MODES.free.empty}</p>}
       {chats.map((chat) => {
         const work = chatWork(app.snapshot, chat.id)
+        const agents = chat.agent_statuses || []
+        const agentActivity = agents.some(activeAgent)
         return (
           <MathMacrosProvider key={chat.id} definitions={chat.math_macros}>
           <div className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
             <a href={href(chat.kind, chat.id)} className="side-item" aria-current={route.id === chat.id ? 'page' : undefined}>
-              {work.active && <Square variant="running" size={12} label="Active conversation" />}
+              {agentActivity && <AgentSquares agents={agents} />}
+              {!agentActivity && work.active && <Square variant="running" size={12} label="Active conversation" />}
               {work.queued && <Square variant="ready" size={12} label="Queued conversation" />}
               <span className="side-body">
                 <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
@@ -212,7 +217,7 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
                   {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
                   {work.queued && <span>Queued</span>}
                   {projectName(chat.project_id) && <span className="side-project" title={`Project: ${projectName(chat.project_id)}`}><FolderIcon size={12} /><span>{projectName(chat.project_id)}</span></span>}
-                  <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
+                  <span className="side-preview">{/^\s*(?:##\s*)?Investigation report\b/i.test(chat.preview || '') ? 'Investigation report' : chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
                   <span className="side-time">{ago(chat.updated_at)}</span>
                 </span>
               </span>

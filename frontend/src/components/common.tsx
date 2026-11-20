@@ -13,21 +13,35 @@ import { useRoute } from '../router'
 import { CloseIcon, FileIcon, PinIcon } from './Icons'
 import { isImagePath, PinnedImages } from './ImageAttachments'
 
-/** Load data whenever `deps` change; `reload` refetches without clearing. */
-export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
+/** A changing revision queues a single trailing refresh. Changing the resource discards its old requests. */
+export function useLoad<T>(load: () => Promise<T>, deps: unknown[], revision?: string | number) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState('')
-  const latest = useRef(0)
-  const run = useCallback(() => {
-    const ticket = ++latest.current
-    load().then(
-      (value) => { if (ticket === latest.current) { setData(value); setError('') } },
-      (reason: Error) => { if (ticket === latest.current) setError(reason.message) },
-    )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
-  useEffect(() => { run() }, [run])
-  return { data, error, reload: run }
+  const current = useRef<(() => void) | null>(null)
+  const reload = useCallback(() => { current.current?.() }, [])
+  const request = useCallback(load, deps)
+  useEffect(() => {
+    let active = true
+    let busy = false
+    let again = false
+    current.current = async () => {
+      if (busy) { again = true; return }
+      busy = true
+      do {
+        again = false
+        try {
+          const value = await request()
+          if (active) { setData(value); setError('') }
+        } catch (reason) {
+          if (active) setError((reason as Error).message)
+        }
+      } while (active && again)
+      busy = false
+    }
+    return () => { active = false; current.current = null }
+  }, [request])
+  useEffect(reload, [request, revision, reload])
+  return { data, error, reload }
 }
 
 export function Meter({ label, used, limit, unit = '', decimals = 0, title }: { label: string; used: number; limit: number | null; unit?: string; decimals?: number; title?: string }) {

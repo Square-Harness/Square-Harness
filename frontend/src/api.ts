@@ -200,7 +200,21 @@ export type LiveStep =
 
 export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'explore' | 'free' | 'check' }
 
-export type Activity = { kind: 'notice' | 'tool' | 'result'; text: string; time: number }
+export type AgentOrigin = {
+  child_id?: string; card_index?: number; turn_id?: string; batch_id?: string
+}
+export type Activity = AgentOrigin & {
+  kind: 'notice' | 'tool' | 'result'; text: string; time: number; job?: string; id?: string | null
+}
+export type AgentStatus = 'waiting' | 'running' | 'finished' | 'failed' | 'stopped'
+export type Agent = {
+  id: string; turn_id: string; batch_id: string; mode: string; objective: string; effort: string
+  status: AgentStatus; card_index: number | null; job_id: string | null; answer_id: string | null
+  started_at: string | null; ended_at: string | null; progress: WorkProgress | null
+  allowance: number | null; usage: { input_tokens?: number; output_tokens?: number; seconds?: number; requests?: number }
+  error: { code: string; scope?: string; retryable?: boolean; message?: string } | null
+  outcome: string; timeline: Activity[]
+}
 
 export type Concurrency = { chats: number; requests: number; active: number }
 export type TaskEntry = { task: TaskSummary; activity: Activity[]; live: LiveTurn | null }
@@ -490,6 +504,7 @@ export type ResearchDetail = {
 }
 
 export type ChatListItem = {
+  agent_statuses?: Pick<Agent, 'id' | 'mode' | 'status'>[]
   project_id?: string | null
   id: string
   kind: 'critic' | 'explore' | 'free'
@@ -503,10 +518,17 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
+export type RouteMode = 'investigate' | 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 
-export type TranscriptItem = {
+export type TranscriptItem = AgentOrigin & {
+  investigation_id?: string
+  synthesis?: string
+  synthesis_steps?: string[]
+  status_time?: string
+  started_at?: string
+  ended_at?: string
+  error_code?: string
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route' | 'experiment'
   content: string
   time: string
@@ -516,6 +538,7 @@ export type TranscriptItem = {
   tool_name?: string
   discarded?: boolean
   files?: string[]
+  attached_files?: string[]
   images?: ImageRef[]
   mode?: RouteMode | 'critic' | 'clarify' | 'free'
   request?: string
@@ -523,6 +546,7 @@ export type TranscriptItem = {
   question?: string
   status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
+  answer_id?: string
   outputs?: { download?: string; pdf?: boolean; tex?: string; source?: string; body?: string; review?: string; bib?: string }
   task?: string
   error?: string | null
@@ -537,7 +561,20 @@ export type TranscriptItem = {
   artifacts?: import('./artifacts.ts').Artifact[]
 }
 
+export type RecordEntry = {
+  id: string; job_id: string; chat_id: string | null; scope: string; folder: string
+  mode: string; kind: string; status: string; direction: string | null; qualifiers: string[]
+  task: { text: string; text_truncated?: boolean }
+  summary: string; created_at: string; evidence: Record<string, unknown>
+  documents?: { document_id: string; title?: string; passages?: { range: string; label?: string }[] }[]
+}
+export type ResearchIndex = { revision?: string; scope: string; entries: RecordEntry[]; scopes: { key: string; count: number }[] }
 export type Chat = {
+  agents?: Agent[]
+  waiting_for_results?: { mode: string; objective: string }[]
+  agent_concurrency?: number | null
+  images?: ImageRef[]
+  title_source?: string | null
   project_id?: string | null
   id: string
   mode: 'critic' | 'explore' | 'free'
@@ -548,7 +585,13 @@ export type Chat = {
   transcript: TranscriptItem[]
   context_messages: number
   math_macros?: Record<string, string>
-  assistant_status?: 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted' | 'failed'
+  assistant_status?: 'queued' | 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted' | 'failed'
+  investigation?: { id: string; phase: string; statement: string; reading?: string; approved: boolean; can_stop: boolean; current: boolean; usage?: AssistantBudget | null
+    synthesis?: string; synthesis_steps?: string[]; target_reviews?: string[]
+    ceiling: { tokens?: number; input_tokens?: number; seconds?: number; requests?: number; chars?: number } | null
+    tasks: { id: string; mode: string; objective: string; after: string[]; status: string
+      effort?: string; claim?: string; child_id?: string | null; job_id?: string | null; reason?: string | null }[]
+  } | null
   assistant_resumable?: boolean
   assistant_budget?: AssistantBudget
   assistant_progress?: WorkProgress | null
@@ -604,6 +647,27 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T
 }
 
+/** The findings record is large and mostly unchanged between two events: an unchanged revision answers 304. */
+const indexPages = new Map<string, ResearchIndex>()
+async function indexPage(path: string): Promise<ResearchIndex> {
+  const known = indexPages.get(path)
+  let response: Response
+  try {
+    response = await fetch(path, { credentials: 'same-origin', headers: known?.revision ? { 'If-None-Match': '"' + known.revision + '"' } : {} })
+  } catch {
+    throw new ApiError(0, 'The harness is not reachable. Check that square-harness --gui is still running.')
+  }
+  if (response.status === 304 && known) return known
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    if (response.status === 401) authListeners.forEach((listener) => listener())
+    throw new ApiError(response.status, (data && data.error) || response.statusText)
+  }
+  indexPages.set(path, data as ResearchIndex)
+  if (indexPages.size > 12) indexPages.delete(indexPages.keys().next().value!)
+  return data as ResearchIndex
+}
+
 const authListeners = new Set<() => void>()
 export function onUnauthorized(listener: () => void) {
   authListeners.add(listener)
@@ -642,7 +706,7 @@ export const api = {
   },
   login: (token: string) => post<{ ok: boolean }>('/api/login', { token }),
   task: () => get<TaskSnapshot>('/api/task'),
-  pause: (task: string) => post<{ task: TaskSummary }>('/api/task/pause', { task }),
+  pause: (task: string, investigationId?: string, chatId?: string) => post<{ task: TaskSummary }>('/api/task/pause', { task, investigation_id: investigationId, chat_id: chatId }),
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
@@ -705,6 +769,12 @@ export const api = {
   researchBibDownloadUrl: (id: string) => `/api/research/${id}/bib?download=1`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
+  index: (scope: { chat?: string; project?: string }) => indexPage('/api/index?' + new URLSearchParams(scope).toString()),
+  chatExperiment: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/experiments/${job}`),
+  chatCheck: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/checks/${job}`),
+  savedChatAnswer: (chat: string, answer: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/answers/${answer}`),
+  stopInvestigation: (id: string, expectedId?: string) => post<{ status: string; answer: string }>(
+    `/api/chats/${id}/investigation/stop`, expectedId ? { investigation_id: expectedId } : {}),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number | null> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),

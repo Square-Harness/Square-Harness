@@ -12,7 +12,8 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
-import { normalizeMath, remarkCitations, snippet, splitBlocks } from '../mathtext'
+import { normalizeMath, remarkCitations, remarkPaperLinks, snippet, splitBlocks, type PaperLinks } from '../mathtext'
+import type { PluggableList } from 'unified'
 import { experimentImage } from '../artifacts'
 
 const KATEX = { throwOnError: false, strict: 'ignore', trust: false, maxExpand: 500, maxSize: 20 } as const
@@ -48,14 +49,16 @@ type Props = {
   onCite?: (ref: string) => void
   flagged?: Set<string>
   inline?: boolean
+  mathProse?: boolean
+  papers?: PaperLinks
 }
 
-export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline }: Props) {
+export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline, mathProse, papers }: Props) {
   const macros = useContext(MathMacros)
   const katex = useMemo(() => ({ ...KATEX, macros: { ...macros } }), [macros])
   const components = useMemo<Components>(() => ({
-    a: ({ href, children: label }) => (
-      <a href={href} target="_blank" rel="noopener noreferrer nofollow">{label}</a>
+    a: ({ href, title, children: label }) => (
+      <a href={href} title={title} target="_blank" rel="noopener noreferrer nofollow">{label}</a>
     ),
     img: ({ src, alt }) => (typeof src === 'string' && experimentImage(src)
       ? <img className="experiment-inline" src={src} alt={alt || 'Sandbox figure'} loading="lazy" />
@@ -75,12 +78,18 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
       )
     },
   }), [onCite, flagged, inline])
-  const source = useMemo(() => normalizeMath(children || ''), [children])
+  const source = useMemo(() => normalizeMath(children || '', mathProse), [children, mathProse])
+  const plugins = useMemo<PluggableList>(() => {
+    const list: PluggableList = [remarkGfm, remarkMath]
+    if (onCite) list.push(remarkCitations)
+    if (papers?.size) list.push([remarkPaperLinks, papers])
+    return list
+  }, [onCite, papers])
   const Wrapper = inline ? 'span' : 'div'
   return (
     <Wrapper className={(inline ? 'prose-inline' : 'prose') + (className ? ' ' + className : '')}>
       <ReactMarkdown
-        remarkPlugins={onCite ? [remarkGfm, remarkMath, remarkCitations] : [remarkGfm, remarkMath]}
+        remarkPlugins={plugins}
         rehypePlugins={[[rehypeKatex, katex]]}
         components={components}
         urlTransform={safeUrl}
@@ -92,9 +101,9 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
 })
 
 /** One line of text with its mathematics typeset, shortened safely. */
-export function Inline({ children, limit, className }: { children: string; limit?: number; className?: string }) {
+export function Inline({ children, limit, className, mathProse }: { children: string; limit?: number; className?: string; mathProse?: boolean }) {
   const text = limit ? snippet(children, limit) : children.replace(/\s+/g, ' ').trim()
-  return <Markdown inline className={className}>{text}</Markdown>
+  return <Markdown inline mathProse={mathProse} className={className}>{text}</Markdown>
 }
 
 export function StreamingMarkdown({ text, className }: { text: string; className?: string }) {

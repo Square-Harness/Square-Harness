@@ -43,7 +43,9 @@ proof obligation, collect relevant user definitions, notation, hypotheses and
 earlier context, and identify any ambiguity. Put this useful task brief in the
 delegate request. Do not solve the proof in preparation, invent missing
 hypotheses, or promote earlier assistant claims to established facts. The exact
-original request and conversation accompany the brief separately.
+original request, the user's messages and your earlier replies accompany the brief
+separately. Worker results do not: state in the request every statement or
+hypothesis that comes from a worker result.
 Completeness concerns the mathematical obligations of the argument. Use standard
 elementary identities without rederiving field axioms unless explicitly requested.
 Preserve all hypotheses, definitions, quantifiers and the user's language.
@@ -62,7 +64,13 @@ least effort suitable for the objective: low, medium or high. For literature, us
 High is the maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, explore, referee
 and writeup workers the unchanged original user message and conversation, so
-your objective must identify its relationship to that request. writeup and summarize
+your objective must identify its relationship to that request. A prove worker and
+its reviewer receive the user's messages, your earlier replies and the files of the
+request, but no worker result. Results of this turn reach the Proof solver only as
+fallible leads; passages that a check or literature worker of this turn read are
+pinned for both. Put only the statement, necessary assumptions and any method
+the user requires in a Proof objective. Omit previous attempts, verdicts, numerical
+observations and suggested approaches from that shared objective. writeup and summarize
 also receive the conversation's results (proofs, reports) as their source and write
 a .tex file; summarize recaps the important results obtained so far. Delegate a
 write-up only when the user asks for one, with the user's own words as its request
@@ -78,11 +86,12 @@ Recorded sandbox code and figures are supplied automatically to write-up workers
 do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
-its proof; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
+its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
 proofs and is only for an explicit request. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
-with the source file; explain is for one specified result and its proof. Do not spend
+with the source file; explain is for one specified result and its proof, or one specified page, section
+or passage (give the page or section in the request, e.g. "page 4"). Do not spend
 the whole action allowance reading a paper in sequential 100-line excerpts. Start
 with its introduction, results and relevant headings, then read only needed passages.
 Separate the authors' novelty claims from independently verified literature comparisons.
@@ -142,6 +151,9 @@ from worker findings, seek an independent quick_review when the budget permits;
 otherwise explicitly identify the unreviewed assembly and its weakest step.
 The tool result already includes the worker result; read_result can retrieve it
 again by job_id. Do not repeat completed work without a concrete new objective.
+A result marked "[Cut here: ...]" or labelled as an excerpt is not the whole
+record: read the rest with the call it names before saying what a run did or
+did not contain.
 When tools or the shared budget are exhausted, give an honest final answer with
 remaining obligations. Never invent an omitted worker result or a proof of a gap.
 
@@ -165,7 +177,7 @@ experiment with execute_python; skip it when an exact argument is immediate. Num
 agreement is never a proof; heavier computations are for the user's /python-lab.
 """
 WEB_TOOLS = frozenset({'open_url', 'read_page', 'search_page', 'read_references', 'search_web'})
-READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text'}) | WEB_TOOLS
+READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text', 'list_index', 'read_index'}) | WEB_TOOLS
 # Sandbox tools of a controller-bound NumericsSession (automatic sanity checks only here).
 NUMERICS_TOOLS = frozenset({'execute_python', 'read_experiment', 'read_skill_reference'})
 STATE_VERSION = 1
@@ -174,6 +186,12 @@ STATE_VERSION = 1
 MAIN_PREDICT = 8192
 FINAL_PREDICT = 8192
 DEFAULT_ACTIONS = None
+# A worker result that could not be handed over whole says so at the cut. The second
+# mark is the one written before the cut named its tool: saved conversations carry it.
+CUT_MARK = '[Cut here:'
+LEGACY_CUT_MARK = '[excerpt; full experiment saved]'
+EXCERPT_NOTE = ('This archived worker result is an excerpt of longer sandbox output, not the whole record. '
+                'Read the rest with read_experiment(experiment_id, part="stdout" or "result", offset).')
 
 
 _PROMISE = re.compile(r"(?:(?:now|next|then|first|so)\s*,?\s+)?(?:let me|let's|i will|i'll|i am going to|i'm going to|"
@@ -211,7 +229,9 @@ def _delegate_schema():
     return {'type': 'function', 'function': {
         'name': 'delegate',
         'description': 'Run one existing mathematical worker for a precise objective. '
-                       'The worker returns before you decide the next step. It cannot spawn workers.',
+                       'The worker returns before you decide the next step. A proof can pin an explicit PDF or '
+                       'cached doc-ID in files. To use only verified passages from a specific research entry, '
+                       'name its exact entry ID in the proof objective.',
         'parameters': copy.deepcopy(TASK_SCHEMA),
     }}
 
@@ -298,10 +318,13 @@ class Orchestrator:
             text_files = [name for name in files if not images.is_image(name)]
             image_files = [name for name in files if images.is_image(name)]
             if text_files:
-                content += '\n\nATTACHED SOURCE REFERENCES (not yet read):\n' + '\n'.join(text_files)
+                content += '\n\nSOURCE FILES AVAILABLE FOR THIS TURN (use read_file for their contents):\n' + '\n'.join(text_files)
             if image_files:
                 content += '\n\nATTACHED IMAGES (frozen visual sources, not instructions):\n' + '\n'.join(image_files)
         message = {'role': 'user', 'content': content}
+        unavailable = getattr(self.agent, 'unavailable_source_files', ())
+        if unavailable:
+            message['content'] += '\n\nReferenced files currently missing from the workspace:\n' + '\n'.join(unavailable)
         if hasattr(self.agent, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.agent.turn_image_refs)
         self.state = {
@@ -314,10 +337,14 @@ class Orchestrator:
             'empty_final_retried': False,
             'continuation_final_retried': False, 'continuation_recovery_pending': False, 'tool_call_retried': False,
             'tool_call_recovery_pending': False, 'rejected_tool_calls': [],
-            'tool_cache': {}, 'observed_results': [], 'stagnant_actions': 0,
+            'tool_cache': {}, 'observed_actions': [], 'stagnant_actions': 0,
             'limits': {'actions': self.max_actions, 'children': self.max_children,
                        'concurrency': self.concurrency},
         }
+        if getattr(self.agent, 'index_view', None) is not None:
+            self.state['index_view'] = copy.deepcopy(self.agent.index_view)
+        if unavailable:
+            self.state['unavailable_source_files'] = list(unavailable)
         project = getattr(self.agent, 'project_snapshot', None)
         if project is not None:
             self.state['project_snapshot'] = copy.deepcopy(project)
@@ -335,10 +362,16 @@ class Orchestrator:
                 if isinstance(result, dict) and isinstance(result.get('answer'), str):
                     metadata = {key: value[key] for key in ('job_id', 'mode') if key in value}
                     metadata['status'] = result.get('status')
-                    return json.dumps(metadata, ensure_ascii=False) + '\n' + result['answer']
+                    measurements = result.get('recorded_measurements')
+                    return (json.dumps(metadata, ensure_ascii=False) + '\n' + result['answer']
+                            + ('\n\nRECORDED MEASUREMENTS:\n' + measurements if isinstance(measurements, str) else ''))
             except (ValueError, TypeError):
                 pass
         return text
+
+    @staticmethod
+    def _cut(text):
+        return CUT_MARK in text or LEGACY_CUT_MARK in text
 
     def _working_history(self, history):
         """Keep human premises and written answers; archive prior tool payloads.
@@ -350,10 +383,11 @@ class Orchestrator:
         for index, original in enumerate(history):
             item = copy.deepcopy(original)
             if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > input_limit(self.agent, 'working_note', 6000)):
+                text = self._conversation_text(item)
                 archived.append({'index': index, 'tool': item.get('tool_name'),
-                    'role': item['role'],
-                    'lines': len(self._conversation_text(item).splitlines()),
-                    'sha256': hashlib.sha256(item.get('content', '').encode()).hexdigest()})
+                    'role': item['role'], 'lines': len(text.splitlines()),
+                    'sha256': hashlib.sha256(item.get('content', '').encode()).hexdigest(),
+                    **({'excerpt': EXCERPT_NOTE} if self._cut(text) else {})})
                 continue
             item.pop('tool_calls', None)
             item.pop('thinking', None)
@@ -396,7 +430,7 @@ class Orchestrator:
         self.state.setdefault('tool_call_recovery_pending', False)
         self.state.setdefault('rejected_tool_calls', [])
         self.state.setdefault('tool_cache', {})
-        self.state.setdefault('observed_results', [])
+        self.state.setdefault('observed_actions', [])
         self.state.setdefault('stagnant_actions', 0)
         if not isinstance(self.state['blockers'], list):
             raise ValueError('Malformed assistant blockers')
@@ -449,9 +483,16 @@ class Orchestrator:
         args = pending['call']['function']['arguments']
         return self._blocked(args.get('mode'), self._delegate_target(args))
 
+    def _worker_files(self, args):
+        explicit = args.get('files', [])
+        inherited = self.state['files']
+        if args.get('mode') == 'prove':
+            inherited = [name for name in inherited if not name.lower().endswith('.pdf')]
+        return list(dict.fromkeys([*inherited, *explicit]))
+
     def _delegate_target(self, args):
         from .source_tasks import _instruction_text
-        files = list(dict.fromkeys(self.state['files'] + args.get('files', [])))
+        files = self._worker_files(args)
         text = _instruction_text(args.get('request', ''))
         target = re.search(r'\b(theorem|theoreme|thm|lemma|lemme|lem|proposition|corollary|corollaire)\s*[:.]?\s*(\d+(?:\.\d+)*|[a-z])\b', text)
         label = re.search(r'\\(?:ref|eqref)\{([^}]+)\}', args.get('request', ''))
@@ -507,6 +548,16 @@ class Orchestrator:
                 frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
                 values.append([filename, frozen['sha256'] if frozen else None])
                 continue
+            from .briefs import DOC_ID
+            if isinstance(filename, str) and DOC_ID.fullmatch(filename):
+                if workspace is not None and getattr(workspace, 'literature', None):
+                    try:
+                        meta, _ = workspace.literature._document(filename)
+                        digest = meta['text_sha256']
+                    except (OSError, ValueError):
+                        pass
+                values.append([filename, digest])
+                continue
             if workspace is not None and hasattr(workspace, 'path'):
                 try:
                     path = workspace.path(filename, pdf=True)
@@ -527,14 +578,14 @@ class Orchestrator:
             return True
         for message in self.state['messages']:
             if message.get('role') != 'tool' or message.get('tool_name') not in (
-                    READ_ONLY_TOOLS - {'list_files'}) | {'execute_python'}:
+                    READ_ONLY_TOOLS - {'list_files', 'list_index'}) | {'execute_python'}:
                 continue
             try:
                 result = loads(message.get('content', ''))
             except (TypeError, ValueError):
                 continue
             if isinstance(result, dict) and result and not result.get('error'):
-                if message['tool_name'] in ('read_file', 'search_text'):
+                if message['tool_name'] in ('read_file', 'search_text', 'read_index'):
                     excerpt = result.get('source_excerpt')
                     if (not isinstance(excerpt, str) or not excerpt.strip()
                             or excerpt.lstrip().startswith(('Tool error:', 'No matches'))):
@@ -542,7 +593,7 @@ class Orchestrator:
                 return True
         return False
 
-    def _payload(self, tools, instruction='', output_cap=None):
+    def _payload(self, tools, instruction='', output_cap=None, lead_input_limit=None):
         last = self.state.get('last_call') or {}
         partial = last.get('partial') or {}
         capped = (output_cap is None and not last.get('preparation')
@@ -647,18 +698,36 @@ class Orchestrator:
                 ' No further tools are available: report confirmed references with their evidence '
                 'levels and clearly identify details that remain unconfirmed.')})
         if not tools and (self.state.get('empty_final_retried') or not self.state['children']):
-            payload['messages'].append({'role': 'user', 'content':
-                'CONTROLLER FINAL ANSWER REQUEST: give a written answer to the original request now, '
-                'using the saved source excerpts and worker findings above. Tools are unavailable. '
-                'Do not emit a tool call or another reading plan. Identify which sources were only '
-                'partly read and what remains unverified. For an article, explain the main results '
-                'supported by those excerpts and distinguish author-claimed novelty from an '
-                'independent literature comparison. If the evidence is insufficient, say exactly '
-                'what could be established and what is missing.'})
+            instruction = ('CONTROLLER FINAL ANSWER REQUEST: answer the current user request directly. '
+                           'Tools are unavailable. Use earlier findings only when relevant to this request. '
+                           'For an unclear message, ask one brief clarification. Omit unrelated project records '
+                           'and internal record identifiers.')
+            if self.state.get('files') or any(m.get('role') == 'tool' and m.get('tool_name') in
+                    ('read_file', 'search_text', 'read_page', 'read_references') for m in self.state['messages']):
+                instruction += (' Explain any gaps in relevant source coverage. For an article, distinguish its '
+                                'stated results and novelty claims from independent literature evidence.')
+            payload['messages'].append({'role': 'user', 'content': instruction})
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
         explicit = getattr(self.agent, 'document_output_cap', None)
         payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        view = self.state.get('index_view') or {}
+        if view.get('entries'):
+            from .briefs import for_worker
+            digest = for_worker(self.agent.workspace.root, view, self.state['query'], 'assistant',
+                                chat_id=getattr(self.agent, 'scope_chat_id', None),
+                                max_chars=input_limit(self.agent, 'brief_index', 3000))['text']
+            if digest:
+                augmented = dict(payload, messages=[payload['messages'][0], {'role': 'user', 'content': digest},
+                                                   *payload['messages'][1:]])
+                try:
+                    augmented, fit = allocate_call(self.agent.client, augmented, predict, explicit_cap=explicit)
+                    if (augmented['options']['num_predict'] >= payload['options']['num_predict'] and
+                            (lead_input_limit is None or fit['input_tokens'] <= lead_input_limit)):
+                        payload, allocation = augmented, fit
+                except CallContextError:
+                    pass  # Optional prior work cannot displace the current mathematical input.
+
         # A smaller explicit or physical context must still permit several tool
         # rounds. Keep room for synthesis without reserving more than half the
         # context of a locally configured DS4 deployment.
@@ -790,6 +859,7 @@ class Orchestrator:
         previous_ids = {call.get('id') for message in self.state['messages']
                         for call in message.get('tool_calls', [])}
         pending = []
+        batch_id = None
         for index, call in enumerate(calls):
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 raise AgentError('Malformed main-agent tool call')
@@ -810,7 +880,11 @@ class Orchestrator:
                 raise AgentError('Malformed or repeated main-agent tool ID')
             call['id'] = call_id
             previous_ids.add(call_id)
-            pending.append({'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None})
+            if function['name'] != 'delegate':
+                batch_id = None
+            elif batch_id is None:
+                batch_id = f"{self.state['id']}-b{self.state['main_calls']}-{index}"
+            pending.append({'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None, 'batch_id': batch_id})
         self.state['messages'].append(assistant)
         self.state['pending_calls'] = pending
         self._save()
@@ -857,6 +931,12 @@ class Orchestrator:
                     raise ValueError('Use only image snapshots attached to this conversation: ' + filename)
                 images.validate(workspace.root, frozen)
                 continue
+            from .briefs import DOC_ID
+            if args['mode'] == 'prove' and DOC_ID.fullmatch(filename):
+                if workspace is None or workspace.literature is None:
+                    raise ValueError('No cached literature is available')
+                workspace.literature._document(filename)
+                continue
             if experiments is not None and any(experiments.figure(i, filename) for i in experiment_ids):
                 # These are controller-owned conversation artifacts, not general workspace reads.
                 sandbox_files.add(filename)
@@ -873,11 +953,11 @@ class Orchestrator:
         if sandbox_files:
             args['files'] = [f for f in files if f not in sandbox_files]
 
-    def _child(self, pending, args):
+    def _child(self, pending, args, *, shared_proof_objective=None):
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
         if child is not None:
             return child
-        source_key = self._source_key(list(dict.fromkeys(self.state['files'] + args['files'])))
+        source_key = self._source_key(self._worker_files(args))
         request = ' '.join(args['request'].split()).casefold()
         duplicate = next((item for item in self.state['children'] if item['status'] == 'complete'
                           and not _needs_input(item.get('result'))  # a write-up waiting for material is asked again
@@ -897,8 +977,9 @@ class Orchestrator:
         # Preserve the source request independently of the model's objective.
         # Messages include relevant file excerpts and earlier worker findings.
         child = {
-            'id': 'child_' + uuid.uuid4().hex, 'job_id': None, 'status': 'pending',
-            'action': copy.deepcopy(args), 'result': None,
+            'id': 'child_' + uuid.uuid4().hex, 'native_id': str(uuid.uuid4()), 'job_id': None, 'status': 'pending',
+            'action': copy.deepcopy(args), 'result': None, 'turn_id': self.state['id'],
+            'batch_id': pending.get('batch_id') or f"{self.state['id']}-b{self.state['main_calls']}",
             'source_key': source_key,
             'context': {'query': self.state['query'], 'history': copy.deepcopy(self.state['history']),
                         'files': copy.deepcopy(self.state['files']),
@@ -910,11 +991,9 @@ class Orchestrator:
             child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
                 project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
                                     'Preserve assumptions and conjectures; verify mathematical claims when needed.')
-        child['action']['files'] = list(dict.fromkeys(self.state['files'] + args['files']))
-        if args['mode'] == 'prove':
-            child['action']['files'] = [f for f in child['action']['files'] if not f.lower().endswith('.pdf')]
-        elif args['mode'] == 'check':
-            child['action']['files'] = []
+        if shared_proof_objective:
+            child['shared_proof_objective'] = shared_proof_objective
+        child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
         self.state['children'].append(child)
         pending['child_id'] = child['id']
         self._save()
@@ -989,7 +1068,8 @@ class Orchestrator:
                 if not 0 <= index < len(self.state['history']) or not 1 <= start <= end:
                     raise ValueError('Invalid archived conversation range')
                 record = self.state['history'][index]
-                lines = self._conversation_text(record).splitlines()
+                text = self._conversation_text(record)
+                lines = text.splitlines()
                 if start > len(lines) or end > len(lines) or end - start >= 200:
                     raise ValueError('Read an existing range of at most 200 complete lines')
                 key = self._tool_key(name, args)
@@ -998,6 +1078,8 @@ class Orchestrator:
                     return copy.deepcopy(self.state['tool_cache'][key])
                 value = {'index': index, 'role': record['role'], 'start_line': start, 'end_line': end,
                          'source_excerpt': '\n'.join(f'{n}: {lines[n-1]}' for n in range(start, end+1))}
+                if self._cut(text):
+                    value['excerpt'] = EXCERPT_NOTE
                 self.state['tool_cache'][key] = value
                 return value
             if name == 'read_result':
@@ -1173,19 +1255,23 @@ class Orchestrator:
         self.state['messages'].append(message)
         pending['status'] = 'complete'
         outcome = result.get('result', result)
-        substantive = {key: value for key, value in outcome.items() if key not in
-                       ('job_id', 'child_id', 'artifact', 'progress')}
-        digest = hashlib.sha256(json.dumps(substantive, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-        progressed = (not pending.get('cached') and digest not in self.state['observed_results']
-                      and not outcome.get('error') and outcome.get('status') not in
-                      ('invalid_action', 'blocked', 'failed', 'error', 'budget_violation', 'budget_exhausted')
-                      and not str(result.get('source_excerpt', '')).startswith('Tool error'))
-        self.state['stagnant_actions'] = 0 if progressed else self.state['stagnant_actions'] + 1
-        if digest not in self.state['observed_results']:
-            self.state['observed_results'].append(digest)
+        function = pending['call']['function']
+        action = hashlib.sha256(json.dumps([function['name'], function['arguments']],
+                                           ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        # A loop is the same action again, or actions that fail. Different searches that all
+        # return "no match" have the same result text and are not a loop.
+        repeated = pending.get('cached') or action in self.state['observed_actions']
+        failed = (outcome.get('error') or outcome.get('status') in
+                  ('invalid_action', 'blocked', 'failed', 'error', 'budget_violation', 'budget_exhausted')
+                  or str(result.get('source_excerpt', '')).startswith('Tool error'))
+        self.state['stagnant_actions'] = self.state['stagnant_actions'] + 1 if repeated or failed else 0
+        if action not in self.state['observed_actions']:
+            self.state['observed_actions'].append(action)
         if self.state['stagnant_actions'] >= 3:
             self.state['force_final'] = True
-            self._warning('The recent operations did not add usable findings. Giving the supported answer and unresolved points now.')
+            if not self._has_findings():
+                self._warning('The last operations repeated earlier ones or failed. Answering now with what was '
+                              'obtained and what remains unresolved.')
         value = result.get('result') or {}
         error = value.get('error') if isinstance(value, dict) else None
         if (isinstance(error, dict) and error.get('retryable') is False
@@ -1230,7 +1316,8 @@ class Orchestrator:
     def _reference_only_request(self):
         from .source_tasks import _instruction_text
         query = self.state['query']
-        return (not self.state['files']
+        return ((self.state.get('proof_routing') or {}).get('route') != 'workers'
+                and not self.state['files']
                 and not re.search(r'https?://|www\.|(?<![\w.])\S+\.(?:pdf|tex|md|txt)\b', query, re.I)
                 and (self.state.get('automatic_reference_mode') is True
                      or standalone_reference_request(_instruction_text(query))))
@@ -1293,6 +1380,8 @@ class Orchestrator:
         only work of the turn and every review was written, the reviews are the
         reply verbatim: a second pass could re-list them or add recalled works.
         """
+        if (self.state.get('proof_routing') or {}).get('route') == 'workers':
+            return None  # The parent must account for every branch, including a request for clarification.
         reviews = self._reviews()
         if reviews and len(reviews) == len(self.state['children']):
             return self._worker_reply(reviews[-1][0], '\n\n---\n\n'.join(review for _, review in reviews))
@@ -1319,6 +1408,28 @@ class Orchestrator:
             error = value.get('error')
             answer = 'The ' + ('summary' if mode == 'summarize' else 'write-up') + ' could not be made: ' + str(
                 (error.get('message') if isinstance(error, dict) else error) or value.get('status') or 'unknown error')
+        return self._worker_reply(child, answer)
+
+    def _single_worker_answer(self):
+        """The controller gave the user's whole message to one Explore worker: its finished answer is the reply.
+
+        A second model pass would only restate that answer, after a long wait.
+        A worker the model chose, an unfinished answer or a narrower objective
+        still goes through the parent's synthesis.
+        """
+        decision = self.state.get('proof_routing') or {}
+        routed = (decision.get('route') == 'workers' and len(decision.get('tasks') or []) == 1
+                  and not any(decision.get(key) for key in ('later', 'question', 'assignment_recovery')))
+        if (len(self.state['children']) != 1 or self.state.get('access_check_source')
+                or not (routed or self.state.get('automatic_source_mode') == 'explore')):
+            return None
+        child = self.state['children'][0]
+        value = child.get('result') or {}
+        answer = value.get('answer')
+        if (child['action']['mode'] != 'explore' or child['status'] != 'complete' or value.get('status') != 'complete'
+                or not isinstance(answer, str) or not answer.strip()
+                or child['action']['request'].split() != self.state['query'].split()):
+            return None
         return self._worker_reply(child, answer)
 
     def _hand_backs(self):
@@ -1366,8 +1477,10 @@ class Orchestrator:
                 self.state['tool_call_retried'] = True
                 self.state['tool_call_recovery_pending'] = True
                 self._save()
-            self._complete_pending(allow_tools=last.get('tools_enabled') is not False
-                                   and last.get('final_recovery') is not True)
+            handoff = self._complete_pending(allow_tools=last.get('tools_enabled') is not False
+                                             and last.get('final_recovery') is not True)
+            if handoff is not None:
+                return handoff
             # Old reading loops could use every call without retrying their empty
             # final answer. Permit one saved final-only rescue, without resetting
             # actions, usage or the original limits.
@@ -1384,7 +1497,8 @@ class Orchestrator:
             # empty/continuation recovery may follow; bad peers remain bounded.
             while self._call_room() or final_rescue:
                 final_rescue = False
-                qualified = self._qualified_reference_answer() or self._document_answer()
+                qualified = (self._qualified_reference_answer() or self._document_answer()
+                             or self._single_worker_answer())
                 if qualified is not None:
                     return qualified
                 tools = self._tools() if self._action_room() else []

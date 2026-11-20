@@ -48,3 +48,7 @@ def usage_footer(state):
 
     return (output_summary(state) + ' Input tokens charged: ' + amount(state.get('input_tokens_charged', 0), settings.get('max_input_tokens'))
             + '; elapsed seconds: ' + amount(state.get('seconds_used', 0), settings.get('max_seconds'), seconds=True) + '.')
+
+def one_line(text, limit=80):
+    text = ' '.join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'

@@ -308,7 +308,12 @@ def pause(h, body):
     task = body.get('task')
     if task is not None and (not isinstance(task, str) or not re.fullmatch(r'[0-9a-f]{12}', task)):
         raise ValueError('Give a valid task ID to pause.')
-    return {'task': h.server.hub.pause(task).summary()}
+    investigation, chat = body.get('investigation_id'), body.get('chat_id')
+    if investigation is not None or chat is not None:
+        if (not isinstance(investigation, str) or not re.fullmatch('[0-9a-f]{32}', investigation)
+                or not isinstance(chat, str) or not store._ID.fullmatch(chat) or not task):
+            raise ValueError('A guarded pause needs the task, conversation and investigation IDs')
+    return {'task': h.server.hub.pause(task, investigation_id=investigation, chat_id=chat).summary()}
 
 
 @route('POST', '/api/concurrency')
@@ -348,6 +353,49 @@ def image_snapshot(h, body, sha):
     data, mime = images.read(h.server.hub.root, sha)
     h.send_bytes(200, data, mime, [('Cache-Control', 'private, no-store'),
                                   ('Content-Disposition', 'inline')])
+    return Streamed
+
+
+_RECORD_FIELDS = ('id', 'job_id', 'chat_id', 'scope', 'folder', 'mode', 'kind', 'status', 'direction', 'qualifiers',
+                  'summary', 'created_at', 'evidence')
+
+
+def _record_page(view):
+    """The fields the interface reads. The question of a literature review is sent in full with its first
+    source; its other sources carry the opening words, which is all the interface shows beside a source."""
+    told, entries = set(), []
+    for entry in view['entries']:
+        job, text = (entry['folder'], entry['job_id']), entry['task']['text']
+        room = 200 if entry['kind'] == 'source' and job in told else 2000
+        told.add(job)
+        task = {'text': text[:room], 'text_truncated': True} if len(text) > room else {'text': text}
+        documents = [{'document_id': doc['document_id'], 'title': doc.get('title') or '',
+                      'passages': [{'range': passage['range'], 'label': passage.get('label') or ''}
+                                   for passage in doc['passages']]} for doc in entry['documents']]
+        entries.append({**{field: entry[field] for field in _RECORD_FIELDS}, 'task': task, 'documents': documents})
+    return {'scope': view['scope'], 'entries': entries, 'scopes': view['scopes']}
+
+
+@route('GET', '/api/index')
+def research_index(h, body):
+    from ..project_index import digest
+    if set(h.query) - {'chat', 'project'} or any(len(values) != 1 for values in h.query.values()):
+        raise ValueError('Use one chat or project identifier')
+    page = _record_page(store.index_view(h.server.hub.root, findings=True,
+                                         **{key: values[0] for key, values in h.query.items()}))
+    revision = digest(json.dumps(page, ensure_ascii=False, sort_keys=True))[:32]
+    headers = [('Cache-Control', 'no-store'), ('ETag', f'"{revision}"')]
+    known = [tag.strip().removeprefix('W/') for tag in h.headers.get('If-None-Match', '').split(',')]
+    if f'"{revision}"' in known:
+        # The record the client holds is current: no body.
+        h.send_response(304)
+        h.security_headers()
+        for key, value in headers:
+            h.send_header(key, value)
+        h.end_headers()
+    else:
+        h.send_bytes(200, json.dumps({'revision': revision, **page}, ensure_ascii=False).encode('utf-8'),
+                     'application/json; charset=utf-8', headers)
     return Streamed
 
 
@@ -474,7 +522,13 @@ def research_stream(h, body, id, name):
 
 @route('GET', '/api/chats')
 def chats(h, body):
-    return {'chats': store.list_chats(h.server.hub.root, h.server.hub.base)}
+    hub = h.server.hub
+    rows = store.list_chats(hub.root, hub.base)
+    live = {t.target for t in hub.active_tasks() if t.kind == 'chat'}
+    for row in rows:
+        if row['id'] not in live:
+            row['agent_statuses'] = []
+    return {'chats': rows}
 
 
 @route('POST', '/api/chats')
@@ -485,6 +539,21 @@ def chat_create(h, body):
                              hub.args.model, hub.online(online), project_id=body.get('project_id'))
     hub.bus.publish('chat_saved', chat=chat['id'])
     return _chat_view(chat, hub.root)
+
+
+@route('GET', '/api/chats/' + UUID + r'/experiments/(?P<experiment>exp-\d{8}-\d{6}-[0-9a-f]{6})')
+def chat_experiment(h, body, id, experiment):
+    return store.saved_chat_experiment(h.server.hub.root, id, experiment)
+
+
+@route('GET', '/api/chats/' + UUID + '/checks/' + UUID.replace('P<id>', 'P<job_id>'))
+def chat_check_report(h, body, id, job_id):
+    return store.saved_chat_check(h.server.hub.root, id, job_id)
+
+
+@route('GET', '/api/chats/' + UUID + '/answers/' + UUID.replace('P<id>', 'P<answer_id>'))
+def chat_answer(h, body, id, answer_id):
+    return store.saved_chat_answer(h.server.hub.root, id, answer_id)
 
 
 @route('GET', '/api/chats/' + UUID)
@@ -501,6 +570,14 @@ def chat(h, body, id):
         tasks = [entry['task'] for entry in snapshot['tasks']] + snapshot['queue']
         if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
             result['assistant_status'] = 'paused'
+            result['waiting_for_results'] = []
+            turn = (saved.get('assistant_state') or {}).get('id')
+            for lane in result['agents']:
+                if lane['turn_id'] == turn and lane['status'] in ('running', 'waiting'):
+                    lane['status'] = 'stopped'
+            if result['investigation'] and (saved.get('assistant_state') or {}).get('investigation'):
+                from ..investigation import TERMINAL
+                result['investigation']['can_stop'] = result['investigation']['phase'] not in TERMINAL
             tokens = result['assistant_budget']['tokens']
             tokens['uncertain'] += tokens['reserved']
             tokens['reserved'] = 0
@@ -548,6 +625,14 @@ def chat_route(h, body, id):
     content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
     h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode, required_effort=(body.get('mode_call') or {}).get('effort'))
     return {'ok': True}
+
+
+@route('POST', '/api/chats/' + UUID + '/investigation/stop')
+def investigation_stop(h, body, id):
+    expected = body.get('investigation_id')
+    if expected is not None and not isinstance(expected, str):
+        raise ValueError('Invalid investigation ID')
+    return h.server.hub.stop_investigation(id, expected)
 
 
 @route('POST', '/api/chats/' + UUID + '/assistant/resume')
@@ -759,9 +844,9 @@ def research_pdf(h, body, id):
     data = store.research_pdf(h.server.hub.root, id)
     download = (h.query.get('download') or [''])[0] == '1'
     name = store.research_tex(h.server.hub.root, id)[0][:-4] + '.pdf' if download else 'writeup.pdf'
-    # A top-level PDF view: the browser's viewer must not be blocked by the page CSP.
+    # Native browser PDF preview, including the app's authenticated same-origin work panel.
     h.send_bytes(200, data, 'application/pdf', [('Content-Disposition', f'{"attachment" if download else "inline"}; filename="{name}"'),
-                                                ('Cache-Control', 'no-store')], csp=False)
+                                                ('Cache-Control', 'no-store')], csp=False, frame=not download)
     return Streamed
 
 
@@ -822,12 +907,59 @@ def chat_review(h, body, id):
     return {'task': h.server.hub.review(id, queue=bool(_flag(body, 'queue'))).summary()}
 
 
+def _investigation_view(record, can_stop=False, *, current=False, usage=None):
+    if not record:
+        return None
+    from ..investigation import TERMINAL
+    from ..investigation_writing import exact_review
+    tasks = []
+    for task in (record.get('plan') or {}).get('tasks', []):
+        result = record.get('tasks', {}).get(task['id'], {})
+        tasks.append({'id': task['id'], 'mode': task['mode'], 'objective': task['objective'],
+                      'after': task['after'], 'claim': task.get('claim'), 'status': result.get('status', 'pending'), 'effort': task.get('effort'),
+                      'job_id': result.get('job_id'), 'child_id': result.get('child_id'), 'reason': result.get('reason')})
+    budget = usage if current else record.get('usage')
+    totals = store.budget_view(budget or {}, current and record['phase'] == 'running')
+    return {'id': record['id'], 'phase': record['phase'], 'tasks': tasks, 'approved': bool(record.get('approved')),
+            'synthesis': record.get('synthesis', ''), 'synthesis_steps': record.get('synthesis_steps', []),
+            'target_reviews': sorted({v for s in record.get('tasks', {}).values()
+                                      if record.get('target') and (v := exact_review(s, record['target']))}),
+            'current': current, 'usage': totals, 'reading': (record.get('plan') or {}).get('reading', ''),
+            'statement': (record.get('target') or {}).get('statement', ''), 'ceiling': record.get('ceiling') or {},
+            'can_stop': bool(can_stop and record['phase'] not in TERMINAL)}
+
+
 def _chat_view(chat, root):
+    state = chat.get('assistant_state') or {}
+    investigation = state.get('investigation')
+    can_stop = bool(investigation and state.get('status') in ('paused', 'interrupted', 'incomplete'))
+    if not investigation:
+        from ..investigation import load_record
+        for item in reversed(chat['transcript']):
+            if item.get('role') != 'assistant' or not item.get('investigation_id'):
+                continue
+            try:
+                prior = load_record(root, item['investigation_id'])
+                if prior.get('chat_id') == chat['id']:
+                    investigation = prior
+                    break
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+    transcript = chat['transcript']
+    if investigation and investigation['phase'] == 'clarification':
+        # Older releases saved the framing question as the body of an investigation report.
+        heading = '## Investigation report\n\n'
+        transcript = [({**{k: v for k, v in item.items() if k != 'investigation_id'},
+                        'clarification_id': investigation['id'], 'content': item['content'][len(heading):]}
+                       if item.get('investigation_id') == investigation['id'] and item.get('content', '').startswith(heading)
+                       else item) for item in transcript]
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
+            'investigation': _investigation_view(investigation, can_stop, current=bool(state.get('investigation')),
+                                                 usage=state.get('budget')),
             'project_id': chat.get('project_id'), 'title_source': chat.get('title_source'),
             'images': store.chat_images(chat),
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
-            'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat, root)}
+            'transcript': transcript, 'context_messages': len(chat['history']), **store.assistant_view(chat, root)}
 
 
 # -- HTTP plumbing ------------------------------------------------------------
@@ -1102,13 +1234,17 @@ def folder_lock(root):
     """Hold the folder for this interface: two interfaces writing one folder's jobs and chats corrupt them."""
     import fcntl
     path = Path(root) / '.mathagent' / 'gui.lock'
-    path.parent.mkdir(exist_ok=True)
-    handle = open(path, 'a+')
+    _directory(path.parent, create=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    handle = os.fdopen(fd, 'r+')
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        handle.close()
+        raise ValueError('The workspace lock must be a regular file.')
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.seek(0)
-        owner = handle.read().strip()
+        owner = handle.read(40).strip()
         handle.close()
         raise ValueError(f'Another Square Harness interface already serves {root}'
                          + (f' (process {owner})' if owner else '') + '; use it, or stop it first.') from None

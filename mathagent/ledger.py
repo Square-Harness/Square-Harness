@@ -134,6 +134,21 @@ def _atomic_write(path: Path, data: bytes) -> None:
             pass
 
 
+def _publish_job(directory: Path, initial_state: bytes) -> None:
+    """Make the reserved job ID visible only after its first complete checkpoint."""
+    with tempfile.TemporaryDirectory(prefix=".creating-", dir=directory.parent) as temporary:
+        staged = Path(temporary) / directory.name
+        staged.mkdir(mode=0o700)
+        (staged / "artifacts").mkdir(mode=0o700)
+        _atomic_write(staged / "state.json", initial_state)
+        # Concurrent valid publishers always have nonempty directories. Also refuse
+        # an existing empty directory or a dangling symlink left by other software.
+        if os.path.lexists(directory):
+            raise FileExistsError(f"Job already exists: {directory.name}")
+        staged.rename(directory)
+        _sync_directory(directory.parent)
+
+
 def _number(value, name: str, *, positive: bool = False, integer: bool = False) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise LedgerError(f"Invalid numeric ledger field: {name}")
@@ -180,7 +195,7 @@ def _validate(state: dict, proof_id: str) -> None:
     for key in ("max_rounds", "max_tokens", "max_seconds"):
         if key not in state["settings"]:
             raise LedgerError(f"Missing required proof budget: settings.{key}")
-    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict", "verify_tokens", "min_solve_tokens", "initial_min_solve_tokens", "repair_tokens", "specialist_output_cap"):
+    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict", "verify_tokens", "min_solve_tokens", "initial_min_solve_tokens", "repair_tokens", "specialist_output_cap", "reviewable_candidate_tokens"):
         if key in state["settings"]:
             if state['settings'][key] is None and (key == 'specialist_output_cap' or key == 'max_tokens' and state['version'] == 2):
                 continue
@@ -213,9 +228,11 @@ class ProofStore:
         self._recovered = recovered
 
     @classmethod
-    def create(cls, workspace_root, goal: str, settings: dict, sources: list | None = None) -> "ProofStore":
+    def create(cls, workspace_root, goal: str, settings: dict, sources: list | None = None, *, job_id=None) -> "ProofStore":
         workspace = _workspace(workspace_root)
-        proof_id = str(uuid.uuid4())
+        proof_id = job_id if job_id is not None else str(uuid.uuid4())
+        if not isinstance(proof_id, str) or not _ID.fullmatch(proof_id):
+            raise LedgerError('Invalid native proof ID')
         stamp = _now()
         # JSON round-trip detaches caller-owned data and rejects non-JSON values.
         try:
@@ -225,26 +242,23 @@ class ProofStore:
             raise LedgerError(f"Proof settings and sources must be JSON serializable: {exc}") from exc
         state = {
             "version": 2, "id": proof_id, "goal": goal, "settings": settings,
-            "sources": sources, "created_at": stamp, "updated_at": stamp, "revision": 0,
+            "sources": sources, "created_at": stamp, "updated_at": stamp, "revision": 1,
             "status": "ready", "rounds_started": 0, "tokens_charged": 0,
             "seconds_used": 0, "calls": [], "candidates": [], "reviews": [],
             "initial_candidate": None, "selected_candidate": None, "selection_history": [], "pending": None,
         }
         _validate(state, proof_id)
         # Reject oversized accepted material before publishing a job directory.
-        _bytes(json.dumps(state, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        initial = _bytes(json.dumps(state, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
         base = workspace / ".mathagent"
         _directory(base, create=True)
         _directory(base / "proofs", create=True)
         directory = base / "proofs" / proof_id
         try:
-            directory.mkdir(mode=0o700)
+            _publish_job(directory, initial)
         except OSError as exc:
             raise LedgerError(f"Cannot create proof job: {exc}") from exc
-        _directory(directory / "artifacts", create=True)
-        store = cls(workspace, directory, state)
-        store.save()
-        return store
+        return cls(workspace, directory, state)
 
     @classmethod
     def load(cls, workspace_root, proof_id: str) -> "ProofStore":
