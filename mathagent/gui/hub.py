@@ -42,7 +42,7 @@ from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WorkerInterrupted
 from ..numerics import PythonSandbox
-from ..tools import Workspace
+from ..tools import READ_GROUPS, Workspace, source_suffix
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from .. import briefs, images
@@ -74,8 +74,8 @@ class _ChatWorkerHost:
     def engine(self, mode):
         return self.hub._engine(self.task, mode=mode, online=self.online)[0]
 
-    def bind_sandbox(self, skill):
-        return self.hub.sandbox.bind(skill, self.root, explicit=True, cancel=self.cancel,
+    def bind_sandbox(self, skill, *, routed):
+        return self.hub.sandbox.bind(skill, self.root, explicit=not routed, routed=routed, cancel=self.cancel,
                                      approve=lambda preview: self.hub._approve(self.task, preview))
 
     def show_experiments(self, workspace):
@@ -104,16 +104,16 @@ class _ChatWorkerHost:
                     waive_needs=self.hub._handed_back(root, chat))
 
     def start_card(self, child, action, files, image_refs):
-        if child.get('card_index') is None:
-            stamp = store._now()
-            item = dict(role='route', status='started', mode=action['mode'], request=action['request'],
-                        child_id=child['id'], turn_id=child.get('turn_id'), batch_id=child.get('batch_id'),
-                        started_at=stamp, status_time=stamp,
-                        files=files, images=image_refs, effort=action['effort'], reason=action['reason'],
-                        orchestrated=True, task=self.task.id, time=stamp)
-            child['card_index'] = store.append_items(self.root, self.chat_id, [item])
-        else:
-            self.update_card(child, status='started', task=self.task.id, outcome='', error=None)
+        stamp = store._now()
+        item = dict(role='route', status='started', mode=action['mode'], request=action['request'],
+                    child_id=child['id'], turn_id=child.get('turn_id'), batch_id=child.get('batch_id'),
+                    started_at=stamp, status_time=stamp, files=files, images=image_refs,
+                    effort=action['effort'], reason=action['reason'], orchestrated=True, task=self.task.id, time=stamp)
+        index, job = store.start_worker_card(self.root, self.chat_id, item, child.get('card_index'))
+        child['card_index'] = index
+        if job and not child.get('job_id'):
+            # Older turns saved the native ID on the card before checkpointing the child.
+            child['job_id'] = job
 
     def update_card(self, child, **changes):
         store.update_item(self.root, self.chat_id, child['card_index'], child_id=child['id'],
@@ -431,11 +431,12 @@ class ChatCapture:
         steps = self.task.live['steps']
 
         def mutate():
-            if kind == 'start':
-                # New output: the progress line it follows ("Delegating…") is over.
+            if kind in ('start', 'progress'):
+                # Only one transient phase is current. Empty progress explicitly ends it.
                 steps[:] = [step for step in steps if not step.get('progress')]
+            if kind == 'start':
                 steps.append({'type': 'call', 'thinking': '', 'text': ''})
-            elif kind == 'progress':
+            elif kind == 'progress' and data['text']:
                 steps.append({'type': 'notice', 'text': data['text'], 'progress': True})
             elif kind == 'delta':
                 step = steps[-1] if steps and steps[-1]['type'] == 'call' else None
@@ -911,6 +912,35 @@ class Hub:
         attached = [ref for ref in selected_refs if ref and (ref['name'] in explicit or ref['name'] not in by_name)]
         return [images.validate(self.root, ref) for ref in refs.values()], attached
 
+    def _turn_sources(self, content, supplied, chat, *, mode=None):
+        selected = conversation_sources(content, list(supplied), chat['transcript'], mode=mode)
+        if not supplied:
+            return selected
+        # Naming a second document alongside an attachment selects that document
+        # within the normal file-type permissions. Never discover sibling files.
+        allowed = set().union(*(READ_GROUPS[group] for group in store.read_types(self.root)))
+        suffixes = tuple(allowed) + (('.tgz', '.tar', '.gz') if '.tex' in allowed else ())
+        # Include the displayed basenames as well as their stored relative paths:
+        # the last word of "draft notes.tex" does not also select "notes.tex".
+        attached_names = set(supplied) | {Path(name).name for name in supplied}
+        named = conversation_sources(content, [], chat['transcript'], inherit=False, suffixes=suffixes,
+                                     known_names=attached_names)
+        if not named:
+            return selected
+        workspace = Workspace(self.root)
+        for name in named:
+            if name in attached_names or source_suffix(name) not in allowed:
+                continue
+            paths = [name]
+            if chat.get('project_id') and not name.startswith('projects/'):
+                paths.insert(0, f"projects/{chat['project_id']}/{name}")
+            for candidate in paths:
+                path = workspace.path(candidate, pdf=True)
+                if path.is_file() and source_suffix(path) in allowed:
+                    selected.append(path.relative_to(self.root).as_posix())
+                    break
+        return list(dict.fromkeys(selected))
+
     def check_files(self, files, pdf=True, image_refs=()):
         """Workspace-relative files that exist; used before pinning them."""
         if not isinstance(files, (list, tuple)) or len(files) > 20:
@@ -1260,8 +1290,8 @@ class Hub:
         if mode != 'explore' and not legacy:
             raise ValueError('Use Explore for a direct conversation turn')
         turn_mode = 'free' if legacy else mode
-        explicitly_selected = bool(files)
-        selected = conversation_sources(content, list(files), session['transcript'])
+        attached_files = list(files)
+        selected = self._turn_sources(content, files, session)
         selected_documents = any(not images.is_image(name) for name in selected)
         if not files:
             selected = [name for name in selected if (self.root / name).is_file()]
@@ -1295,10 +1325,10 @@ class Hub:
                 answer = agent.run(prompt, capture.emit, instruction='' if legacy else None)
             except BaseException as exc:
                 self._discarded(chat_id, content if echo_user else '', exc, files=files,
-                                attached_files=files if explicitly_selected else (), image_refs=attached_images)
+                                attached_files=attached_files, image_refs=attached_images)
                 raise
             store.commit_turn(self.root, chat_id, agent.history, capture.calls, capture.notices,
-                              echo_user=echo_user, mode=turn_mode, files=files, attached_files=files if explicitly_selected else (),
+                              echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files,
                               user_content=content,
                               project_snapshot=project_snapshot, image_refs=attached_images)
             self.bus.publish('chat_saved', chat=chat_id)
@@ -1522,9 +1552,9 @@ class Hub:
                         or not can_recover_previous_markdown(store.research_state(self.root, child['job_id']), snapshot)):
                     snapshot = None
             previous_markdown = snapshot
-        explicitly_selected = bool(files) and not resume
+        attached_files = list(files) if not resume else []
         selected = (list(files) if resume else [] if review_reference or previous_markdown or previous_experiments or compile_job else
-                    conversation_sources(content, list(files), chat['transcript'], mode=required_mode))
+                    self._turn_sources(content, files, chat, mode=required_mode))
         unavailable_sources = saved.get('unavailable_source_files', []) if resume else []
         if not files and not resume:
             unavailable_sources = [name for name in selected if not (self.root / name).is_file()]
@@ -1572,7 +1602,7 @@ class Hub:
                                    'Jobs it started keep their saved work.'}])
                 if not resume:
                     store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files,
-                        'attached_files': list(files) if explicitly_selected else [],
+                        'attached_files': attached_files,
                         **({'local_conversion': True} if local_conversion else {}),
                         **({'compile_job': compile_job} if compile_job else {}),
                         'images': attached_images, 'project_snapshot': project_snapshot, 'time': store._now()}])
@@ -1641,18 +1671,18 @@ class Hub:
                     with budget.pool.lock:
                         state = _copy(parent.state)
                         state['budget'] = budget.snapshot()
-                        state['online'] = online
-                        state['web_budget'] = main.workspace.literature.snapshot()
-                        if personal_context:
-                            state['personal_context'] = personal_context
-                        if state.get('investigation'):
-                            task.investigation_id = state['investigation']['id']
-                            task.investigation_phase = state['investigation']['phase']
-                            from ..investigation import save_record
-                            store.checkpoint_investigation(root, chat_id, state)
-                            save_record(root, state, chat_id)
-                        else:
-                            store.save_assistant(root, chat_id, state)
+                    state['online'] = online
+                    state['web_budget'] = main.workspace.literature.snapshot()
+                    if personal_context:
+                        state['personal_context'] = personal_context
+                    if state.get('investigation'):
+                        task.investigation_id = state['investigation']['id']
+                        task.investigation_phase = state['investigation']['phase']
+                        from ..investigation import save_record
+                        store.checkpoint_investigation(root, chat_id, state)
+                        save_record(root, state, chat_id)
+                    else:
+                        store.save_assistant(root, chat_id, state)
                     self.bus.publish('chat_saved', chat=chat_id)
 
             concurrency = getattr(self.args, 'assistant_concurrency', 2) if self.args.backend == 'openai' else 1

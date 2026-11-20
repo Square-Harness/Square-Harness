@@ -13,6 +13,7 @@ import re
 import unicodedata
 
 from . import manuscript
+from .tools import pdf_page_label
 
 
 _FILE = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt))(?![\w-]|\.\w)', re.I)
@@ -255,8 +256,8 @@ def _source_lines(workspace, filename):
             raise ValueError('Local PDF extraction is unavailable')
         summary = workspace.literature.import_local(str(path.relative_to(workspace.root)))
         metadata, lines = workspace.literature._document(summary['document_id'])
-        return lines, metadata.get('extracted_pages')
-    return workspace.text(path).splitlines(), None
+        return lines, metadata.get('pdf_page_starts', ())
+    return workspace.text(path).splitlines(), ()
 
 
 def _groups(numbers):
@@ -293,18 +294,23 @@ def _partial_note(read, total):
             'on them. Tell the user plainly that the document was read only in part, naming the parts read, not line counts.\n')
 
 
-def _overview(filename, lines, size, extracted_pages=None):
+def _overview(filename, lines, size, page_starts=()):
     """Return (packet, complete): the whole numbered document when it fits in size, else a partial overview."""
     mapping = manuscript.build('\n'.join(lines), filename)
     total = len(lines)
-    pagination = f'{extracted_pages} extracted PDF pages; ' if extracted_pages else ''
+    pagination = f'{len(page_starts)} extracted PDF pages; ' if page_starts else ''
+
+    def numbered(n, first=False):
+        marker = pdf_page_label(page_starts, n, first=first)
+        return f'L{n}: {marker}{lines[n - 1]}\n'
+
     header = f'SOURCE: {filename}; {pagination}{total} total lines.\n'
     if mapping['format'] == 'source-archive':
         header += 'SOURCE NOTE: Source files are separate, labelled members; TeX includes/macros and cross-file numbering were not expanded.\n'
     if not total:
         return header + 'No extractable text.\n', False
     whole = (header + f'COMPLETE TEXT {filename}:L1-L{total} (the whole extracted document):\n'
-             + ''.join(f'L{n}: {line}\n' for n, line in enumerate(lines, 1)))
+             + ''.join(numbered(n) for n in range(1, total + 1)))
     if len(whole) <= size:
         return whole, True
     # A structural scan creates locators only. It does not establish the truth
@@ -394,7 +400,7 @@ def _overview(filename, lines, size, extracted_pages=None):
             for n in range(max(1, first), min(last, total) + 1):
                 if n in seen or n in numbers:
                     continue
-                line_cost = len(f'L{n}: {lines[n - 1]}\n')
+                line_cost = len(numbered(n, first=n == first))
                 # Keep complete lines. A line that does not fit is omitted,
                 # never sliced into a silently incomplete formula or claim.
                 if cost + line_cost + 100 > allowance:
@@ -404,7 +410,7 @@ def _overview(filename, lines, size, extracted_pages=None):
         groups = _groups(numbers)
         for first, last in groups:
             block_header = f'EXACT EXCERPT {filename}:L{first}-L{last} ({label}; partial source):\n'
-            block = block_header + ''.join(f'L{n}: {lines[n - 1]}\n' for n in range(first, last + 1))
+            block = block_header + ''.join(numbered(n, first=n == first) for n in range(first, last + 1))
             selected.append(block)
         seen.update(numbers)
         spare = max(0, allowance - cost - sum(100 for _ in groups))

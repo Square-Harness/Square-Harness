@@ -13,6 +13,7 @@ import hashlib
 from html import unescape
 from html.parser import HTMLParser
 import http.client
+from bisect import bisect_right
 from functools import lru_cache
 import ipaddress
 import json
@@ -1382,7 +1383,12 @@ class LiteratureTools:
         # feed, including blank pages. Read it before splitlines loses the
         # boundaries. This also works for verified extractions cached by older builds.
         if metadata.get('extractor') in ('pdftotext -layout', 'pypdf subprocess') and text.rstrip('\r\n').endswith('\f'):
-            metadata['extracted_pages'] = text.count('\f')
+            starts, next_line = [], 1
+            for page in text.rstrip('\r\n').removesuffix('\f').split('\f'):
+                starts.append(next_line)
+                next_line += len((page + '\f').splitlines())
+            metadata['extracted_pages'] = len(starts)
+            metadata['pdf_page_starts'] = starts
         return metadata, text.splitlines()
 
     def read_paper(self, document_id, start_line=1, end_line=80):
@@ -1402,10 +1408,15 @@ class LiteratureTools:
             selected.append(numbered)
             size += len(numbered) + 1
         actual_end = start_line + len(selected) - 1
+        pages = {}
+        if selected and (starts := metadata.get('pdf_page_starts')):
+            for page in range(bisect_right(starts, start_line), bisect_right(starts, actual_end) + 1):
+                pages[page] = max(start_line, starts[page - 1])
         return {'document_id': document_id, 'source_url': metadata['source_url'],
                 'text_sha256': metadata['text_sha256'], 'total_lines': len(lines),
                 'citation': f'{document_id}:L{start_line}-L{actual_end}',
                 'start_line': start_line, 'end_line': actual_end,
+                **({'pdf_pages_first_excerpt_line': pages} if pages else {}),
                 'passage': '\n'.join(selected), 'truncated': clipped or end < min(end_line, len(lines)),
                 'evidence_kind': 'untrusted_cached_extraction'}
 
@@ -1414,7 +1425,10 @@ class LiteratureTools:
         metadata, lines = self._document(document_id)
         hits = []
         for match in line_matches(lines, query):
-            hits.append({**match, 'citation': f'{document_id}:L{match["line"]}-L{match["end_line"]}'})
+            hit = {**match, 'citation': f'{document_id}:L{match["line"]}-L{match["end_line"]}'}
+            if starts := metadata.get('pdf_page_starts'):
+                hit['pdf_page'] = bisect_right(starts, match['line'])
+            hits.append(hit)
             if len(hits) == 8:
                 break
         return {'document_id': document_id, 'source_url': metadata['source_url'],

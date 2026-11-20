@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Explicit tool registry; workspace-scoped text access and approved mutations."""
+from bisect import bisect_right
 import codecs
 import difflib
 import hashlib
@@ -27,6 +28,14 @@ MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
 _WRITE_LOCK = Lock()
 SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
+
+
+def pdf_page_label(starts, line, *, first=False):
+    """Mark a PDF page boundary, or identify the page of a stand-alone excerpt."""
+    page = bisect_right(starts, line)
+    if page and (first or starts[page - 1] == line):
+        return f'[PDF page {page}] '
+    return ''
 
 
 def is_source_archive(path):
@@ -276,11 +285,12 @@ class Workspace:
             raise ValueError('Line bounds must be positive integers with start <= end')
         p = self.path(path, pdf=True)
         self._readable(p)
-        pagination = ''
+        pagination, page_starts = '', ()
         if p.suffix.lower() == '.pdf':
             # Local extraction, cached with the literature evidence; nothing is uploaded.
             summary = self.literature.import_local(str(p.relative_to(self.root)))
             metadata, lines = self.literature._document(summary['document_id'])
+            page_starts = metadata.get('pdf_page_starts', ())
             if metadata.get('extracted_pages'):
                 pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
         else:
@@ -293,6 +303,7 @@ class Workspace:
             column = start_column if index == start_line - 1 else 1
             text = lines[index][column - 1:]
             prefix = f'{index + 1}: ' if column == 1 else f'{index + 1} (from column {column}): '
+            prefix = pdf_page_label(page_starts, index + 1, first=index + 1 == start_line) + prefix
             if len(prefix) + len(text) + 1 > remaining:
                 if selected:
                     return result + '\n'.join(selected) + f'\n[Continue read_file at start_line={index + 1}, start_column={column}]'
@@ -321,13 +332,15 @@ class Workspace:
                 raise KeyboardInterrupt()
             if time.monotonic() >= deadline:
                 return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}]'
+            page_starts = ()
             try:
                 if p.suffix.lower() == '.pdf':
                     previous = self.literature.deadline
                     self.literature.deadline = min(deadline, previous) if previous is not None else deadline
                     try:
                         summary = self.literature.import_local(str(p.relative_to(self.root)))
-                        lines = self.literature._document(summary['document_id'])[1]
+                        metadata, lines = self.literature._document(summary['document_id'])
+                        page_starts = metadata.get('pdf_page_starts', ())
                     finally:
                         self.literature.deadline = previous
                 else:
@@ -339,7 +352,8 @@ class Workspace:
                 continue
             for i, line in enumerate(lines, 1):
                 if needle in line.casefold():
-                    hits.append(f'{p.relative_to(self.root)}:{i}: {line[:500]}')
+                    page = pdf_page_label(page_starts, i, first=True)
+                    hits.append(f'{p.relative_to(self.root)}:{i}: {page}{line[:500]}')
                     if len(hits) >= 50:
                         return '\n'.join(hits) + '\n[50-match limit]'
         return '\n'.join(hits) or '(no matches in supported files scanned)'

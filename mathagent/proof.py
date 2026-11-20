@@ -282,14 +282,23 @@ class ProofRunner:
         if solver_leads and solver_leads.get('text'):
             settings['solver_leads'] = copy.deepcopy(solver_leads)
         if verifier_reference is not None or any(src.get('document_id') for src in sources):
-            # Validate the essential first dispatch using the same policy as the native solver.
             self._fits('The first solve', initial_request(goal, sources), reference_context, max_predict,
                        initial_min_solve_tokens, settings, sources)
-            # The review quotes the same task and sources. Refuse now a job whose review
-            # could not fit beside an empty candidate, instead of after its solve is spent.
-            self._fits('The review of this proof', review_request(goal, sources, ''),
-                       reference_context if verifier_reference is None else verifier_reference,
-                       verify_tokens, 128, settings, sources, VERIFIER_SCHEMA)
+            # The verifier must be able to read the candidate as well as generate a
+            # review. Share the remaining window in the requested solve/review ratio,
+            # respecting both output floors. DS4 requires both full allowances.
+            explicit = settings['specialist_output_cap']
+            candidate = min(max_predict, explicit or max_predict)
+            review = min(verify_tokens, explicit or verify_tokens)
+            floor = max(initial_min_solve_tokens, min_solve_tokens)
+            combined = candidate + review
+            required = combined if settings['full_output_ceiling'] else floor + 128
+            room = self._fits('The whole-candidate review', review_request(goal, sources, ''),
+                              reference_context if verifier_reference is None else verifier_reference,
+                              verify_tokens, 128, settings, sources, VERIFIER_SCHEMA, window_floor=required)
+            if room < combined:
+                settings['reviewable_candidate_tokens'] = min(candidate, room - 128,
+                    max(floor, room * candidate // combined))
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources, job_id=job_id)
         if getattr(self.agent, 'image_refs', None):
             self.state['images'] = copy.deepcopy(self.agent.image_refs)
@@ -297,7 +306,7 @@ class ProofRunner:
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
 
-    def _fits(self, call, messages, context, cap, floor, settings, sources, format_schema=None):
+    def _fits(self, call, messages, context, cap, floor, settings, sources, format_schema=None, *, window_floor=0):
         """Dry run of one call of a job that is not created yet, under the rule its dispatch will apply."""
         messages = self._append_reference(messages, context)
         if getattr(self.agent, 'image_refs', None):
@@ -306,8 +315,13 @@ class ProofRunner:
         minimum = min(cap, explicit or cap) if settings['full_output_ceiling'] else floor
         try:
             # Only the counted input matters here: the solver's sampling options stand in for either role.
-            allocate_call(self.agent.client, self._payload('solver', messages, cap, format_schema), cap,
-                          minimum=minimum, explicit_cap=explicit)
+            _, allocation = allocate_call(self.agent.client, self._payload('solver', messages, cap, format_schema),
+                                          cap, minimum=minimum, explicit_cap=explicit)
+            room = allocation['available_output_tokens']
+            if room < window_floor:
+                raise CallContextError(f'The complete review request leaves {room} tokens for its candidate '
+                                       f'and response together, below the required {window_floor}.', allocation)
+            return room
         except CallContextError as exc:
             largest = max(sources, key=lambda source: len(source['content']), default=None)
             hint = (f' The largest pinned source is {largest["path"]} ({len(largest["content"])} characters).'
@@ -383,7 +397,8 @@ class ProofRunner:
 
     def _attempt_cap(self, kind):
         settings = self.state['settings']
-        return settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
+        cap = settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
+        return min(cap, settings.get('reviewable_candidate_tokens', cap))
 
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']

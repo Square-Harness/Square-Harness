@@ -28,7 +28,7 @@ from .deepinfra import generation_attempts
 from .ledger import _atomic_write, _directory, _read
 from .investigation_writing import ProgressiveAnswer, WRITING_INPUT, WRITING_OUTPUT, WRITING_SECONDS, exact_review
 from .orchestrator import Orchestrator, WorkerInterrupted
-from .source_tasks import excludes_external_sources
+from .source_tasks import _instruction_text, excludes_external_sources
 from .tools import schema
 
 VERSION = 1
@@ -53,6 +53,9 @@ for a genuinely conditional non-Proof follow-up and explain its condition in the
 the user explicitly asks to run as optional. Explore supports numerical checks
 when the sandbox is available. Check looks up a bibliographic reference. Use Explore or Proof for a mathematical
 calculation or an internal consistency check. When external sources are excluded, omit reference-search workers.
+When the request includes prior work, schedule a nonoptional Check for a focused lookup or Literature for a survey,
+alongside independent mathematics. Distinguish external prior work from findings in the conversation, project or
+an attached paper. Explore can reason about the mathematics but its recollection does not check the literature.
 Literature surveys sources, quick_review requires a file.
 Every prove task MUST include "claim":"target" for the exact target, or "claim":"variant" for a special case.
 For a variant Proof, list the evidence tasks in after AND supply candidate = {statement, relation, reason}:
@@ -113,6 +116,26 @@ def _digest(text):
 
 def _normalized_statement(statement):
     return ' '.join(statement.split())
+
+
+def _requests_literature(query):
+    """Recognize explicit instructions to look up prior work, excluding a local recap or a prohibition."""
+    text = _instruction_text(query)
+    if excludes_external_sources(query) or re.search(r"\b(?:only|solely|uniquement|seulement)\b.{0,45}\b"
+            r"(?:attached|provided|lecture|notes|documents?|project|conversation|ci-joint|fourni|projet)\b", text):
+        return False
+    for clause in re.split(r'[.;!?\n,]|\b(?:and|then|puis|et)\b', text):
+        if re.search(r"\b(?:not|no|never|don't|without|avoid|sans|pas|evite)\b|"
+                     r"\b(?:our|this|the current|the attached|ce|notre) (?:project|conversation|discussion|notes|projet|workspace|folder|files?|paper|lecture)\b", clause):
+            continue
+        if re.search(r"\b(?:look (?:at|up|into)|check|survey|search|consult|review|explore|"
+                     r"cherche\w*|consult\w*|examin\w*)\s+(?:(?:the|existing|recent|scholarly|published|"
+                     r"la|les|dans|deja)\s+)*(?:literature|litterature|prior work|what is (?:already )?known|"
+                     r"ce (?:qui est (?:deja )?connu|que l.on sait))\b|"
+                     r"\b(?:find|give|cite|locate|trouve\w*|cite\w*)\s+(?:me |us |des |a |some |primary |published )*"
+                     r"(?:references?|sources?(?! of\b)|papers?|articles?)\b", clause):
+            return True
+    return False
 
 
 def _validate_case(case, target):
@@ -262,6 +285,8 @@ def report(state):
     by earlier versions say "Confirmed statement".
     """
     inv = state['investigation']
+    if inv.get('phase') == 'clarification':
+        return inv['reason']
     target = inv.get('target')
     lines = ['## Investigation report', '', inv.get('reason', 'Investigation finished.')]
     if inv.get('synthesis'):
@@ -279,7 +304,7 @@ def report(state):
     # The framing model worded this statement and no user confirmed it.
     lines += ['', '### Proposed statement', '', target['statement'], '', 'SHA-256 ' + target['sha256']]
     if inv.get('variants'):
-        lines += ['', '### Model-declared variants']
+        lines += ['', '### Related statements']
         for v in inv['variants']:
             lines += ['', f"**{v['id']}** ({v['relation']}) · {v['sha256']}", v['statement'], v['reason']]
     lines += ['', '### Work and evidence', '']
@@ -295,7 +320,7 @@ def report(state):
         if slot.get('entry_line'):
             row += '\n  ' + slot['entry_line']
         elif slot.get('native_status'):
-            row += ' · native status ' + slot['native_status'] + ' (index evidence unavailable)'
+            row += ' · Worker status: ' + slot['native_status'].replace('_', ' ') + ' (supporting finding unavailable)'
         if slot.get('lead_excerpt'):
             row += '\n  Model-written lead (excerpt): ' + slot['lead_excerpt']
         for entry in slot.get('other_entries', []):
@@ -312,7 +337,7 @@ def report(state):
         lines.extend('• ' + line for line in exact_reviews)
         lines.append('These are the saved model review outcomes for this exact statement. A formal certificate requires separate verification.')
     elif inv.get('approved'):
-        lines.append('No indexed model-reviewed proof or refutation of this exact statement is recorded. It remains unresolved here.')
+        lines.append('No model-reviewed proof or refutation of this exact statement is recorded.')
     else:
         lines.append('The plan was not started, so no work examined this statement.')
     return '\n'.join(lines)
@@ -519,6 +544,9 @@ class Investigation(Orchestrator):
         if (excludes_external_sources(query) and not re.search(r'\b(?:cached|cache|en cache)\b', query, re.I)
                 and any(t['mode'] in ('check', 'literature') for t in tasks)):
             raise ValueError('The user excluded external sources. Use Explore or Proof for mathematical checks and omit reference searches.')
+        if (self.agent.workspace.literature.online and _requests_literature(query)
+                and not any(t['mode'] in ('check', 'literature') and not t.get('optional') for t in tasks)):
+            raise ValueError('The request asks for prior work. Include a reference check or literature survey as a required task.')
         candidates = set()
         for task in tasks:
             if task.get('claim') == 'variant' and 'candidate' not in task:

@@ -164,7 +164,12 @@ def requests_scoped_record(query):
     """Recognize a request to consult this project's saved research record."""
     from ..source_tasks import _instruction_text, requests_workspace_search
     text = _instruction_text(query)
-    return (bool(re.search(r'\b(?:this project|ce projet)\b', text))
-            and bool(re.search(r'\b(?:research (?:records?|results?|index)|saved (?:results?|findings)|'
-                               r'resultats? (?:sauvegardes?|enregistres?)|registre de recherche)\b', text))
-            and not requests_workspace_search(query))
+    named_record = (re.search(r'\b(?:this project|ce projet)\b', text)
+                    and re.search(r'\b(?:research (?:records?|results?|index)|saved (?:results?|findings)|'
+                                  r'resultats? (?:sauvegardes?|enregistres?)|registre de recherche)\b', text))
+    earlier_work = re.search(
+        r"\b(?:what (?:have|did) we (?:already |previously )?(?:establish(?:ed)?|find|found|prove[dn]?|obtain(?:ed)?|learn(?:ed|t)?|conclude[d]?)"
+        r"|(?:our|this project['’]s) (?:previous|earlier|saved) (?:results?|findings?|work)"
+        r"|(?:qu['’]avons[- ]nous|avons[- ]nous|a-t-on|qu['’]est-ce qu['’]on a) (?:deja )?(?:etabli|prouve|montre|obtenu|trouve)\w*)\b",
+        text)
+    return bool(named_record or earlier_work) and not requests_workspace_search(query)

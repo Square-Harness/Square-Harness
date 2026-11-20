@@ -41,7 +41,7 @@ export function RecordTab({ chat, onOutput }: { chat: Chat; onOutput: (id: strin
   const tick = useTick(chat.id)
   const [query, setQuery] = useState('')
   const [mode, setMode] = useState('')
-  const { data, error, reload } = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id, tick])
+  const { data, error, reload } = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id], tick)
   const project = projects?.find(item => item.id === chat.project_id)
   const entries = data?.entries || []
   const needle = query.toLocaleLowerCase().trim()

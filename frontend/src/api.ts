@@ -571,6 +571,7 @@ export type RecordEntry = {
 export type ResearchIndex = { revision?: string; scope: string; entries: RecordEntry[]; scopes: { key: string; count: number }[] }
 export type Chat = {
   agents?: Agent[]
+  waiting_for_results?: { mode: string; objective: string }[]
   agent_concurrency?: number | null
   images?: ImageRef[]
   title_source?: string | null

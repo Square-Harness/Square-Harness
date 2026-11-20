@@ -14,6 +14,7 @@ import uuid
 from . import briefs, images
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
+from .backends import TokenBudgetError
 from .call_policy import CallContextError
 from .deepinfra import DeepInfraGenerationError, TesterAllowanceInsufficient
 from .ledger import ProofStore, _ID, _atomic_write, _bytes, _directory, _now, _read, _regular
@@ -150,6 +151,7 @@ def _sandbox_observations(session, child, room):
 def run_worker(host, parent, budget, action, child, save):
     """Run one native mode. Host supplies workspace, engine, cards, approvals and write-up inputs."""
     from .gui import effort
+    from .gui.agent_views import FAILED
     root, online, state_lock = host.root, host.online, parent._state_lock
     mode = action['mode']
     # A sibling may be copying the shared state for a checkpoint: a child record
@@ -209,14 +211,20 @@ def run_worker(host, parent, budget, action, child, save):
                 candidate.setdefault('usage', {'tokens': 0, 'input_tokens': 0})
             save()
         allocation = child['allocation']
+        error = (child.get('result') or {}).get('error')
+        if isinstance(error, dict) and error.get('retryable') is True:
+            child['result'] = None
         host.start_card(child, action, selected_files, image_refs)
         save()
     native = child.get('native_id')
     answer_id = native
     if mode in ('explore',) + USER_MODES and answer_id is None:
         answer_id = str(uuid.UUID(child['id'].removeprefix('child_')))
+    use_original = (mode in ('writeup', 'summarize') and (parent.state.get('proof_routing') or {}).get('route') != 'workers') or (
+        mode == 'literature' and parent.state.get('required_mode') == 'literature')
+    native_request = context['query'] if use_original else child.get('shared_proof_objective', action['request'])
     if native and (not isinstance(native, str) or not _ID.fullmatch(native)):
-        raise ValueError('Invalid investigation native job ID')
+        raise ValueError('Invalid native worker job ID')
     if mode in ('explore',) + USER_MODES:
         path = _answer_path(root, host.chat_id, answer_id)
         if path.exists():
@@ -227,8 +235,11 @@ def run_worker(host, parent, budget, action, child, save):
             answer_sha = hashlib.sha256(saved['answer'].encode()).hexdigest()
             if saved.get('answer_sha256', answer_sha) != answer_sha:
                 raise ValueError('Saved answer digest mismatch')
-            host.update_card(child, status='done', outcome='Worker answer restored.', answer_id=answer_id,
-                             answer_sha256=answer_sha)
+            incomplete = saved['status'] == 'incomplete'
+            outcome = (saved.get('warnings') or ['The worker answer is incomplete.'])[-1] if incomplete else 'Worker answer restored.'
+            host.update_card(child, status='failed' if incomplete else 'done', outcome=outcome,
+                             native_status=saved['status'], error=outcome if incomplete else None,
+                             answer_id=answer_id, answer_sha256=answer_sha)
             host.saved()
             return dict(job_id=answer_id, status=saved['status'], answer=saved['answer'],
                         warnings=saved['warnings'], **saved.get('result_fields', {}))
@@ -238,11 +249,12 @@ def run_worker(host, parent, budget, action, child, save):
         if directory.exists() or directory.is_symlink():
             state = (ProofStore.load(root, native).state if mode == 'prove'
                      else _read_state(_job_directory(root, native, folder), native))
-            if state['goal'] != action['request']:
+            if state['goal'] != (native_request if mode == 'prove' else native_request.strip()):
                 raise ValueError('Saved native job has a different mathematical objective')
-            child['job_id'] = native
-            host.update_card(child, job_id=native)
-            save()
+            with state_lock:
+                child['job_id'] = native
+                host.update_card(child, job_id=native)
+                save()
     agent = host.engine(mode)
     if mode == 'explore':
         agent.personal_context = parent.agent.personal_context
@@ -252,14 +264,16 @@ def run_worker(host, parent, budget, action, child, save):
                      bool(local_files) and not requests_workspace_search(context['query']))
     agent.workspace.pin_files(local_files, selected_only=selected_only)
     sandbox_error, unanswered = None, False
+    numerical_assignment = routed_python_task(parent.state, action)
     if mode in USER_MODES:
         # Failures are raised inside the worker's try below, so the card reports them.
-        if parent.state.get('required_mode') != mode and not routed_python_task(parent.state, action):
+        selected = parent.state.get('required_mode') == mode
+        if not selected and not numerical_assignment:
             sandbox_error = f'@{mode} runs only when you select it yourself'
         else:
             skill = 'python-lab' if mode == 'python_lab' else 'numerical-sanity-check'
             try:
-                agent.workspace.numerics = host.bind_sandbox(skill)
+                agent.workspace.numerics = host.bind_sandbox(skill, routed=not selected)
             except SandboxUnavailable as exc:
                 sandbox_error = f'@{mode} needs the Python sandbox on this computer. {exc}'
     scoped = parent.state.get('index_view')
@@ -296,8 +310,7 @@ def run_worker(host, parent, budget, action, child, save):
         if mode == 'explore' and (child.get('brief') or {}).get('text'):
             agent.optional_leads = child['brief']['text']
     host.show_experiments(agent.workspace)
-    numerical_assignment = routed_python_task(parent.state, action)
-    if mode in USER_MODES and agent.workspace.numerics is not None:
+    if mode in ('explore',) + USER_MODES and agent.workspace.numerics is not None:
         session = agent.workspace.numerics
         show_record = session.on_record
         def record_experiment(record):
@@ -381,6 +394,16 @@ def run_worker(host, parent, budget, action, child, save):
         input_limit = min(input_limit, limits['input_tokens']) if input_limit is not None else limits['input_tokens']
     runner = None
 
+    def clear_progress():
+        with state_lock:
+            child.pop('progress', None)
+            parent.state.pop('progress', None)
+            for sibling in reversed(parent.state['children']):
+                if sibling.get('progress') and sibling.get('status') == 'running':
+                    parent.state['progress'] = copy.deepcopy(sibling['progress'])
+                    break
+            save()
+
     def emit(kind, value):
         if runner is not None:
             ident = runner.state['id'] if runner.state else None
@@ -451,9 +474,14 @@ def run_worker(host, parent, budget, action, child, save):
                 repair = min(solve, host.args.proof_repair_tokens or solve)
                 minimum = min(repair, host.args.proof_min_solve_tokens or 128)
                 clean = briefs.proof_reference(context) if scoped is not None else None
+                if clean is not None and child.get('shared_proof_objective') and context.get('project_snapshot'):
+                    questions = briefs.earlier_project_questions(root, local_view,
+                        set((child.get('brief') or {}).get('entries', [])), host.chat_id)
+                    if questions:
+                        clean['earlier_user_questions_in_project'] = questions
                 passages = (briefs.primary_sources(local_view, [*deps, *briefs.named_entries(local_view, action['request'])])
                             if scoped is not None else [])
-                result = runner.start(action['request'], job_id=native,
+                result = runner.start(native_request, job_id=native,
                     reference_context=context if clean is None else clean, verifier_reference=clean,
                     solver_leads=child.get('brief'), source_passages=passages, source_files=files, max_rounds=level['tries'],
                     max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
@@ -514,8 +542,9 @@ def run_worker(host, parent, budget, action, child, save):
                 # "Fix this error" after a write-up that did not compile repairs that document; it is not rewritten.
                 previous = host.previous_writeup()
                 if previous and WriteupRunner.reopen_for_repair(root, previous, hint=context['query']):
-                    child['job_id'], extra = previous, max(0.1, seconds)
-                    save()
+                    with state_lock:
+                        child['job_id'], extra = previous, max(0.1, seconds)
+                        save()
             if compile_job:
                 result = runner.compile_saved(compile_job, parent.state['id'])
             elif child.get('job_id'):
@@ -552,10 +581,7 @@ def run_worker(host, parent, budget, action, child, save):
                         'images': copy.deepcopy(context.get('images', [])),
                         **({key: copy.deepcopy(context[key]) for key in ('project_snapshot', 'project_note_status')}
                            if context.get('project_snapshot') is not None else {})}
-                use_original = (mode in ('writeup', 'summarize') and (parent.state.get('proof_routing') or {}).get('route') != 'workers') or (
-                    mode == 'literature' and parent.state.get('required_mode') == 'literature')
-                request = context['query'] if use_original else action['request']
-                result = runner.start(request, job_id=native, **kwargs)
+                result = runner.start(native_request, job_id=native, **kwargs)
             verdict = (runner.state or {}).get('verdict')
             outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
                        + '; see the saved report.')
@@ -630,7 +656,8 @@ def run_worker(host, parent, budget, action, child, save):
             try:
                 answer = agent.run(goal, emit, fresh=True, recover_empty_tool_answer=True)
             except (AgentError, OSError, ValueError) as exc:
-                if not child.get('experiment_ids') or not _sandbox_observations(agent.workspace.numerics, child, room):
+                if (mode not in USER_MODES or not child.get('experiment_ids')
+                        or not _sandbox_observations(agent.workspace.numerics, child, room)):
                     raise
                 # Execution and its interpretation are separate outcomes.
                 answer = ''
@@ -643,7 +670,7 @@ def run_worker(host, parent, budget, action, child, save):
                       'job_id': answer_id, 'warnings': [] if complete else [
                           narration_error or agent.last_stop_reason or 'The worker answer is incomplete.']}
             unanswered = not complete and not answer.strip()
-            if numerical_assignment or child.get('experiment_ids'):
+            if mode in USER_MODES and (numerical_assignment or child.get('experiment_ids')):
                 observations = _sandbox_observations(agent.workspace.numerics, child, room)
                 if numerical_assignment and not observations:
                     complete, unanswered = False, True
@@ -676,18 +703,15 @@ def run_worker(host, parent, budget, action, child, save):
             host.update_card(child, status='stopped', outcome='Paused; work is saved.')
             save()
             raise KeyboardInterrupt
-        with state_lock:
-            child.pop('progress', None)
-            parent.state.pop('progress', None)
-            save()
+        clear_progress()
         answered = mode in ('explore',) + USER_MODES and not unanswered
         if answered:
             _save_answer(root, host.chat_id, child, result, agent, answer_id)
-        # A worker that wrote nothing failed: its card says so and no empty answer is saved.
-        host.update_card(child, status='stopped' if result['status'] == 'paused' else 'failed' if unanswered else 'done',
+        failed = result['status'] in FAILED or bool(result.get('error'))
+        host.update_card(child, status='stopped' if result['status'] == 'paused' else 'failed' if failed else 'done',
                           **({'answer_id': answer_id, 'answer_sha256': hashlib.sha256(result['answer'].encode()).hexdigest()}
                              if answered else {}), outcome=outcome,
-                          error=(result.get('error') or {}).get('message') or (outcome if unanswered else None),
+                          error=(result.get('error') or {}).get('message') or (outcome if failed else None),
                           native_status=result['status'], error_code=(result.get('error') or {}).get('code'),
                           job_id=result['job_id'] if mode not in ('explore',) + USER_MODES else None,
                           **({'outputs': runner.state.get('outputs') or {}}
@@ -695,23 +719,17 @@ def run_worker(host, parent, budget, action, child, save):
         host.saved()
         return result
     except KeyboardInterrupt:
-        with state_lock:
-            child.pop('progress', None)
-            parent.state.pop('progress', None)
-            save()
+        clear_progress()
         host.update_card(child, status='stopped', outcome='Paused; work is saved.')
         host.saved()
         raise
     except (AgentError, ValueError, OSError) as exc:
-        with state_lock:  # a failed worker's progress line must not stay under the turn (B13)
-            child.pop('progress', None)
-            parent.state.pop('progress', None)
-            save()
+        clear_progress()
         if isinstance(exc, WorkerInputError):
             error = exc.as_dict()
         elif isinstance(exc, ValueError):
             error = WorkerInputError(str(exc), details={'mode': mode}).as_dict()
-        elif isinstance(exc, (AssistantBudget, TesterAllowanceInsufficient)):
+        elif isinstance(exc, (AssistantBudget, TokenBudgetError, TesterAllowanceInsufficient)):
             error = {'code': 'worker_budget_exhausted', 'message': str(exc), 'retryable': False,
                      'scope': 'budget', 'details': {'mode': mode}}
         elif isinstance(exc, DeepInfraGenerationError):

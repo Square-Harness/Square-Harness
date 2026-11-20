@@ -706,11 +706,32 @@ The frontend research notebook uses the saved chat and attributed activity
 events to show worker groups and their outputs. Keep agent IDs, batch IDs,
 card indices and output IDs stable on reload. An old card can lack exact
 timing or an answer artifact. Display the evidence available on that card.
+The notebook coalesces chat checkpoints and refreshes the chat list independently
+of the proof, research and project lists. Preserve saved tab targets, keyboard
+focus and headings when the report format changes. Pending routed objectives
+come from the saved decision until their corresponding children exist.
 The panel location uses the chat URL's `panel` and `selected` parameters.
 New output types should reuse the authenticated native preview or download
 endpoint and preserve keyboard navigation and both themes.
 
+Worker cards and native jobs reuse saved child identifiers after interruption.
+Publish a new Proof, Check or research job directory by rename once its first
+state is durable. Older cards can hold the native UUID before the child checkpoint.
+A model output overrun marks the lane and card failed while retaining any saved
+partial answer. Checkpoint numerical experiment IDs on the Explore child as
+soon as the sandbox saves the record and provide its saved output on Resume.
+A worker that has exhausted its token budget is terminal for
+that task. Other investigation branches can finish independently.
+New scoped Proof jobs check the combined candidate and review window. Where
+the profile permits fitting, the saved candidate cap also applies to subsequent
+attempts. Recount the actual request before verifier dispatch. Preserve old job
+settings on resume. Share source-bearing web reads from this turn with both
+roles and keep indexed strategy leads in the solver-only channel.
+
 A guided investigation enters through a mode selection or a DS4 routing decision.
+A plan for an online request to look up prior work must include a required
+Check or Literature task. An ordinary recap of saved results can use the
+project and conversation readers without launching a document job.
 The hub constructs `Investigation` for that turn. Its frame persists an exact
 target and validates a bounded plan before starting its workers. The GUI renders
 the plan as it runs. File writes and other permission prompts retain their own checks. A changed
@@ -752,12 +773,18 @@ at 2.5 characters per token). A longer
 document becomes a selection of excerpts labelled as a partial reading, and the
 worker is told to say so plainly. A numbered question or list item is not
 indexed as a section heading. The review parser's `manuscript.TEXT_SECTION`
-likewise ignores a numbered line that ends with a question mark.
+distinguishes numbered questions in a list from question-form section titles.
+PDF page numbers are physical, one-based positions derived from the verified
+extraction’s form feeds. Keep the cached text, line locators and hashes stable.
 
 Keep the user's explicit attachment selection separate from the effective files
 available to a turn. New GUI user messages record `attached_files` for the
 selection and `files` for source resolution. Preserve older records without
-guessing their origin. Independent workers receive their assigned sources.
+guessing their origin. Combine explicitly named readable documents with selected
+attachments and resolve later document references against the conversation.
+For a project recall question without selected files, use the scoped index and
+notebook. An explicit file or a request to search the workspace keeps its usual
+scope. Independent workers receive their assigned sources.
 When the user asks whether an earlier document is readable, record a real
 `read_file` result before making an access claim. A filename, or a child job
 that merely received the path, does not establish that any text was read.
@@ -785,7 +812,7 @@ the index reader. Exercise the mode both standalone and as a delegated child
 before changing that boundary. Derived findings belong in `project_index.py`.
 `collect` remembers the rows of each record while its files are unchanged and
 forgets the records that are gone. `scoped(..., findings=True)`, used by the
-Evidence tab and the Assistant's frozen view, leaves out what carries nothing
+Findings tab and the Assistant's frozen view, leaves out what carries nothing
 (a worker's empty answer, a proof without a candidate yet, a placeholder run
 without output); internal readers keep the full view, since those entries'
 links place their nested checks and runs. A `limit` keeps proofs and reviews,

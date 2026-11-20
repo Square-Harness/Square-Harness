@@ -570,6 +570,7 @@ def chat(h, body, id):
         tasks = [entry['task'] for entry in snapshot['tasks']] + snapshot['queue']
         if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
             result['assistant_status'] = 'paused'
+            result['waiting_for_results'] = []
             turn = (saved.get('assistant_state') or {}).get('id')
             for lane in result['agents']:
                 if lane['turn_id'] == turn and lane['status'] in ('running', 'waiting'):
@@ -944,13 +945,21 @@ def _chat_view(chat, root):
                     break
             except (OSError, ValueError, TypeError, KeyError):
                 continue
+    transcript = chat['transcript']
+    if investigation and investigation['phase'] == 'clarification':
+        # Older releases saved the framing question as the body of an investigation report.
+        heading = '## Investigation report\n\n'
+        transcript = [({**{k: v for k, v in item.items() if k != 'investigation_id'},
+                        'clarification_id': investigation['id'], 'content': item['content'][len(heading):]}
+                       if item.get('investigation_id') == investigation['id'] and item.get('content', '').startswith(heading)
+                       else item) for item in transcript]
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
             'investigation': _investigation_view(investigation, can_stop, current=bool(state.get('investigation')),
                                                  usage=state.get('budget')),
             'project_id': chat.get('project_id'), 'title_source': chat.get('title_source'),
             'images': store.chat_images(chat),
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
-            'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat, root)}
+            'transcript': transcript, 'context_messages': len(chat['history']), **store.assistant_view(chat, root)}
 
 
 # -- HTTP plumbing ------------------------------------------------------------

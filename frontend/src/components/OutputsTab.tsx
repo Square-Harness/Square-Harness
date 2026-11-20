@@ -44,7 +44,7 @@ function ResultMark({ mode }: { mode: string }) {
 export function OutputsTab({ chat, selected, onSelect }: Props) {
   const { proofs, research } = useApp()
   const tick = useTick(chat.id)
-  const index = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id, tick])
+  const index = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id], tick)
   const [formats, setFormats] = useState<JobFormats>({})
   const legacy = [...new Set(chat.transcript.filter(item => item.role === 'route' && !item.outputs && item.job_id &&
     ['writeup', 'summarize', 'literature'].includes(item.mode || '')).map(item => item.job_id!))].join(',')
@@ -246,7 +246,8 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
     return links
   }, [data?.references])
   const [cite, setCite] = useState('')
-  const issues = data ? [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])] : []
+  const issues = useMemo(() => data ? [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])] : [], [data])
+  const flagged = useMemo(() => data ? flaggedCitations(data) : undefined, [data])
   const status = data?.status || output.status
   return <article className="work-output-preview literature-reading" aria-label="Literature review">
     <div className="literature-reading-head"><ResultMark mode="literature" /><h3>Literature review</h3>
@@ -254,7 +255,7 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
     {output.page && <a className="btn btn-small literature-full-link" href={output.page}>Open full review <span aria-hidden="true">→</span></a>}
     <ErrorNote>{error}</ErrorNote>
     {data?.draft ? <Markdown mathProse className="literature-text" papers={papers} onCite={setCite}
-      flagged={flaggedCitations(data)}>{data.draft}</Markdown>
+      flagged={flagged}>{data.draft}</Markdown>
       : !error && <p role="status" className="muted">{!data ? 'Loading the review…' : data.running
         ? 'The literature search is underway. Its review will appear here as soon as a draft is saved.'
         : 'This review has no saved draft.'}</p>}
@@ -275,6 +276,10 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   const [value, setValue] = useState<Preview | null>(null)
   const [cite, setCite] = useState('')
   const { proof, research, text } = value || {}
+  const flagged = useMemo(() => research ? flaggedCitations(research) : new Set<string>(), [research])
+  const issues = useMemo(() => research ? [...new Set([...research.citation_issues, ...research.review_context_issues, ...research.warnings])] : [], [research])
+  const errorLines = useMemo(() => new Set((output.kind === 'body' ? [] : research?.compile?.errors || []).flatMap(
+    err => err.file === 'document.tex' && err.line ? [err.line] : [])), [output.kind, research])
   const [error, setError] = useState('')
   const [localDownload, setLocalDownload] = useState('')
   useEffect(() => {
@@ -308,12 +313,11 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
       proof ? <ProofResponse proof={proof} /> :
       output.kind === 'experiment' ? <ExperimentPreview text={text} /> :
       output.kind === 'check' ? <Markdown>{checkReading(text)}</Markdown> :
-      research && output.kind === 'report' ? <Report data={research} flagged={flaggedCitations(research)}
-        issues={[...new Set([...research.citation_issues, ...research.review_context_issues, ...research.warnings])]} onCite={setCite} /> :
+      research && output.kind === 'report' ? <Report data={research} flagged={flagged}
+        issues={issues} onCite={setCite} /> :
       research && (output.kind === 'tex' || output.kind === 'body') ? <TexSource text={text}
-        onCite={setCite} flagged={flaggedCitations(research)}
-        errorLines={new Set(output.kind === 'body' ? [] : (research.compile?.errors || []).flatMap(
-          err => err.file === 'document.tex' && err.line ? [err.line] : []))} /> :
+        onCite={setCite} flagged={flagged}
+        errorLines={errorLines} /> :
       ['tex', 'body', 'bib'].includes(output.kind) ? <pre className="work-output-source">{text}</pre> : <Markdown>{text}</Markdown>)}
     {cite && research && <CitedPassage data={research} cite={cite} onClose={() => setCite('')} />}
     {output.file && output.url && <ArtifactView artifact={{ ...output.file, url: output.url }} purpose={output.objective} />}

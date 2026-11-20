@@ -40,7 +40,7 @@ export function PlanSteps({ tasks, renderAfter }: { tasks: PlanStep[]; renderAft
 export function ConversationPlan({ plan, finished }: { plan: Plan; finished: boolean }) {
   const [choice, setChoice] = useState<boolean | null>(null)
   const open = choice ?? (!finished && !plan.tasks.some(task => task.status === 'complete'))
-  if (!plan.statement && !plan.tasks.length && finished) return null
+  if (plan.phase === 'clarification' || (!plan.statement && !plan.tasks.length && finished)) return null
   return <div className="entry message message-model investigation-plan-entry">
     <span className="in-margin speaker speaker-model mode-investigate" title="Investigation"><Glyph mode="investigate" /></span>
     <div className="message-body investigation-reading investigation-plan">
@@ -270,7 +270,7 @@ export function InvestigationReport({ content, chatId, synthesis, covered }: { c
   const reportKey = useId()
   const report = useMemo(() => readInvestigationReport(content), [content])
   if (!report) return <Markdown className="answer">{content}</Markdown>
-  const { reviewed, unresolved, statement, approved, reason } = report
+  const { reviewed, missingReview, statement, reason } = report
   const finished = report.work.filter(step => step.state === 'complete').length
   const skipped = report.work.filter(step => step.state === 'skipped').length
   const activeSteps = report.work.filter(step => step.job)
@@ -286,10 +286,11 @@ export function InvestigationReport({ content, chatId, synthesis, covered }: { c
       <Markdown className="investigation-synthesis" mathProse>{narrative}</Markdown>
       <FindingLinks steps={report.work} chat={chatId} />
     </> : statement && <Markdown mathProse className="investigation-report-statement">{statement}</Markdown>}
-    {(outcome || unresolved) && <div className="investigation-conclusion">
-      <Square variant={unresolved ? 'uncertain' : 'reviewed'} size={18} />
-      <div><strong>{outcome || 'Full statement unresolved here'}</strong>
-        <p>{unresolved ? [(finished === 1 ? '1 step finished' : finished + ' steps finished'), skipped ? skipped + ' skipped' : ''].filter(Boolean).join(' · ') : 'The model reviewed this exact statement. Formal verification is separate.'}</p></div>
+    {(outcome || missingReview) && <div className="investigation-conclusion">
+      <Square variant={missingReview || new Set(reviewed.map(e => e.label)).size > 1 ? 'uncertain'
+        : reviewed[0]?.label === 'model-reviewed refutation' ? 'refuted' : 'reviewed'} size={18} />
+      <div><strong>{outcome || 'No model-reviewed proof or refutation for this statement'}</strong>
+        <p>{missingReview ? [(finished === 1 ? '1 step finished' : finished + ' steps finished'), skipped ? skipped + ' skipped' : ''].filter(Boolean).join(' · ') : 'The model reviewed this exact statement. Formal verification is separate.'}</p></div>
     </div>}
     {!narrative && activeSteps.length > 1 && <nav className="investigation-jumps" aria-label="Jump to a finding">
       {activeSteps.map(step => <button key={step.id} type="button" onClick={() => {
@@ -298,11 +299,10 @@ export function InvestigationReport({ content, chatId, synthesis, covered }: { c
       }}>{taskReference(report.work, step.id)} <span aria-hidden="true">↓</span></button>)}
     </nav>}
     {reason && !/^The (?:approved )?research plan finished\.$/.test(reason) && <Markdown>{taskNotice(humanReason(reason), report.work)}</Markdown>}
-    {report.variants && <section><h3 className="investigation-subhead">Special cases</h3><Markdown mathProse>{report.variants}</Markdown></section>}
+    {report.variants && <section><h3 className="investigation-subhead">Related statements</h3><Markdown mathProse>{report.variants}</Markdown></section>}
     {report.work.length > 0 && (narrative ? <details className="investigation-sources"><summary>Evidence and scope</summary>
       {statement && <Markdown mathProse className="investigation-report-statement">{statement}</Markdown>}{evidence}</details>
       : <section><h3 className="investigation-subhead">Findings</h3>{evidence}</section>)}
     {report.original && <details className="investigation-sources"><summary>Original question</summary><Markdown mathProse>{report.original}</Markdown></details>}
-    {!approved && !reason && <p>The proposed question was not approved.</p>}
   </article>
 }

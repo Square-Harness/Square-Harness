@@ -8,11 +8,12 @@ import unicodedata
 from .worker_errors import WorkerInputError
 
 
-_NAMED = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt|sty|cls|bib|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
+_NAMED = re.compile(r'(?<![\w./-])([\w-][\w.-]*(?:/[\w.-]+)*\.(?:tar\.gz|tgz|tar|gz|pdf|tex|md|txt|sty|cls|bib|py|json|ya?ml|toml|csv|png|jpe?g|webp))(?![\w-]|\.\w)', re.I)
 _DOCUMENTS = ('.pdf', '.tex', '.md', '.txt', '.tar.gz', '.tgz', '.tar', '.gz')
 _TEMPLATES = ('.bib', '.sty', '.cls')
 _IMAGES = ('.png', '.jpg', '.jpeg', '.webp')
-_DOCUMENT = r'(?:articles?|papers?|manuscripts?|documents?|preprints?|manuscrits?|fichiers?)'
+_DOCUMENT = (r'(?:articles?|papers?|manuscripts?|documents?|preprints?|(?:lecture )?notes?|lectures?|'
+             r'handouts?|chapters?|texts?|sources?|manuscrits?|fichiers?|cours|polycopies?|chapitres?|textes?)')
 _IMAGE = r'(?:images?|screenshots?|pictures?|captures?)'
 _POINTER = (r'\b(?:this|that|attached|same|previous|earlier|the|my|your|these|those|all(?: the)?|'
             r'cet|cette|ce|le|la|les|au|aux|du|mon|ma|meme|precedent|ces|tous les|toutes les)\s+'
@@ -37,18 +38,17 @@ def references_previous_pdf(query):
     return bool(_PDF_POINTER.search(_prose(_instruction(query))))
 
 
-def _named_sources(query, attachments):
+def _named_sources(query, attachments, suffixes):
     # A dropped file may contain spaces. Prefer the whole recorded name over
     # the last word of that name, including when the user uses inline code.
     inline = list(re.finditer(r'`([^`\n]*)`', query))
     plain = re.sub(r'`[^`\n]*`', lambda m: ' ' * len(m[0]), query)
-    explicit = [(m.start(), m.end(), m[1]) for m in inline if m[1] in attachments or _NAMED.fullmatch(m[1])]
+    explicit = [(m.start(), m.end(), m[1]) for m in inline if m[1] in attachments or _NAMED.fullmatch(m[1].replace(' ', '-'))]
     for name in attachments:
         if name not in plain:
             continue
-        match = re.search(r'(?<![\w./-])' + re.escape(name) + r'(?![\w/-]|\.\w)', plain)
-        if match:
-            explicit.append((match.start(), match.end(), name))
+        matches = re.finditer(r'(?<![\w./-])' + re.escape(name) + r'(?![\w/-]|\.\w)', plain)
+        explicit.extend((match.start(), match.end(), name) for match in matches)
     explicit = sorted(explicit, key=lambda value: (value[0], -value[1]))
     full_names = []
     for start, end, name in explicit:
@@ -56,10 +56,12 @@ def _named_sources(query, attachments):
             full_names.append((start, end, name))
     matches = [(m.start(), m.end(), m[0]) for m in _NAMED.finditer(plain)
                if not any(start < m.end() and m.start() < end for start, end, _ in full_names)]
-    return list(dict.fromkeys(name for _, _, name in sorted(full_names + matches)))
+    return list(dict.fromkeys(name for _, _, name in sorted(full_names + matches)
+                              if name in attachments or name.lower().endswith(suffixes)))
 
 
-def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True):
+def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True,
+                         suffixes=_DOCUMENTS + _TEMPLATES + _IMAGES, known_names=()):
     """Inherit only an unambiguous user attachment for a source-dependent follow-up.
 
     Worker output, workspace discovery and attached document contents cannot
@@ -76,8 +78,8 @@ def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True
     history = [list(dict.fromkeys(item['files'])) for item in reversed(transcript)
                if item.get('role') == 'user' and item.get('files')]
     instruction = _instruction(query)
-    attached = dict.fromkeys(name for group in history for name in group)
-    named = _named_sources(instruction, attached)
+    attached = dict.fromkeys(name for group in [known_names, *history] for name in group)
+    named = _named_sources(instruction, attached, suffixes)
     if named or not inherit:
         return named
     if corrected:
@@ -87,7 +89,7 @@ def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True
     text = _prose(instruction)
     target = bool(re.search(r'\b(?:theorem|lemma|proposition|corollary|theoreme|lemme)\s+(?:\d+(?:\.\d+)*|[a-z])\b', text))
     plural = bool(re.search(r'\b(?:these|those|all(?: the)?|ces|tous les|toutes les)\s+'
-                            r'(?:pdfs?|articles|papers|manuscripts|documents|preprints|manuscrits|fichiers)\b', text))
+                            r'(?:pdfs?|' + _DOCUMENT + r')\b', text))
     if _PDF_POINTER.search(text):
         suffixes = ('.pdf',)
         if not plural and _OLDER_PDF.search(text):
@@ -98,6 +100,8 @@ def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True
     elif re.search(_POINTER + _IMAGE + r'\b', text):
         suffixes = _IMAGES
     elif (target or mode in ('referee', 'detailed_review')
+          or re.search(r'\b(?:its|son|sa|ses)\s+(?:(?:first|main|next|last|premier|premiere|principal|principale)\s+)?'
+                       r'(?:theorem|lemma|proposition|corollary|result|theoreme|lemme|corollaire|resultat)\b', text)
           or re.search(_POINTER + r'(?:' + _DOCUMENT + r'|proof|result|preuve|resultat)\b', text)):
         suffixes = _DOCUMENTS
     else:

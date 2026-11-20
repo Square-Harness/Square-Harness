@@ -40,12 +40,13 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
     const operational = status === 'failed' || status === 'stopped'
     let look = { label: agentLabels[status], variant: agentSquares[status] }
     if (operational && agent.error?.code) {
-      if (agent.error.code === 'worker_budget_exhausted') look.label = 'Work limit reached'
+      if (agent.error.code === 'worker_budget_exhausted') look = { label: 'Work limit reached', variant: 'spent' }
     } else if (status === 'finished') {
       if (proof) {
         look = proofLook(proof.status, proof.running, proof.version)
         if (proof.status === 'candidate_complete' && proof.version !== 1) look.label = 'Answer reviewed'
       } else if (job) look = (job.verdict && VERDICTS[job.verdict]) || researchLook(job.status, job.running, job.kind)
+      else if (agent.mode === 'prove') look = { label: 'Review status unavailable', variant: 'uncertain' }
       else if (agent.answer_id || (agent.card_index != null && oldAnswers.has(agent.card_index))) look.label = 'Done'
       else if (agent.mode === 'check') look.label = 'Done'
     }
@@ -66,7 +67,7 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
         : href(book, agent.job_id, null, chat.id),
       label: book === 'literature' ? 'Read literature review' : 'Open ' + skillName(agent.mode).toLowerCase(),
     } : null
-    return { ...agent, step, notebook, stateLabel: agentLabels[status], result: { ...look, outputId } }
+    return { ...agent, step, notebook, stateLabel: look.label, result: { ...look, outputId } }
   })
 }
 

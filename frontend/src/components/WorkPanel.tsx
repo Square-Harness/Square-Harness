@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
+import { agentLabels, skillName } from '../agents'
 import type { Chat } from '../api'
 import { rememberWorkPanel, workPreferences } from '../panels'
 import { closeWorkPanel, openWorkPanel, useRoute, WORK_TABS, type WorkTab } from '../router'
@@ -23,7 +24,8 @@ const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Ma
 export function WorkPanel({ chat }: { chat: Chat }) {
   const route = useRoute()
   const selection = route.panel
-  const tabs = WORK_TABS.filter((tab) => tab !== 'plan' || !!chat.investigation)
+  const investigation = chat.investigation?.phase === 'clarification' ? null : chat.investigation
+  const tabs = WORK_TABS.filter((tab) => tab !== 'plan' || !!investigation)
   const tab = selection && tabs.includes(selection.tab) ? selection.tab : 'agents'
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches)
   const [width, setWidth] = useState(() => clampWidth(workPreferences().width ?? DEFAULT_WIDTH))
@@ -37,11 +39,19 @@ export function WorkPanel({ chat }: { chat: Chat }) {
   const running = activeLanes.filter(lane => lane.status === 'running').length
   const waiting = activeLanes.length - running
   const activity = [running ? running + ' working' : '', waiting ? waiting + ' waiting' : ''].filter(Boolean).join(' · ')
-  const investigation = chat.investigation
   const lastTab = workPreferences().tab
   const defaultTab = lastTab && tabs.includes(lastTab) ? lastTab
     : activeLanes.length ? 'agents' : investigation ? 'plan' : (chat.agents || []).length ? 'outputs' : 'record'
-  const announcement = activeLanes.map(agent => (agent.mode === 'prove' ? 'Proof' : agent.mode.replaceAll('_', ' ')) + ' ' + agent.status).join('. ')
+  const [announcement, announce] = useState('')
+  const previous = useRef<Map<string, string> | null>(null)
+  useEffect(() => {
+    const lanes = chat.agents || []
+    const before = previous.current
+    previous.current = new Map(lanes.map(lane => [lane.id, lane.status]))
+    if (!before) return
+    const changes = lanes.filter(lane => before.get(lane.id) !== lane.status)
+    if (changes.length) announce(changes.map(lane => skillName(lane.mode) + ': ' + agentLabels[lane.status].toLowerCase() + '.').join(' '))
+  }, [chat.agents])
   useEffect(() => {
     const query = window.matchMedia(WIDE)
     const changed = () => setWide(query.matches)
@@ -70,7 +80,9 @@ export function WorkPanel({ chat }: { chat: Chat }) {
   useEffect(() => {
     if (!selection) return
     returnFocus.current = document.activeElement as HTMLElement | null
-    if (!wide) tablist.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus()
+    const inspector = selection.tab === 'agents' && selection.selected ? pane.current?.querySelector<HTMLElement>('.agent-back') : null
+    if (inspector) inspector.focus()
+    else if (!wide) tablist.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus()
     const release = () => {
       const old = returnFocus.current
       if (old?.isConnected && old !== document.body) old.focus()

@@ -22,7 +22,7 @@ import uuid
 from .reporting import usage_footer
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, TokenBudgetError
-from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID, MAX_STREAM_BYTES
+from .ledger import _atomic_write, _bytes, _directory, _publish_job, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
@@ -362,10 +362,8 @@ class ResearchRunner:
         if self.literature:
             self.state['literature_snapshot'] = self.literature.snapshot()
         # Reject oversized initial state before creating an orphan job folder.
-        _bytes(json.dumps(self.state, ensure_ascii=False, indent=2))
-        self.directory.mkdir(mode=0o700)
-        _directory(self.directory / 'artifacts', create=True)
-        self._save()
+        initial = _bytes(json.dumps(self.state, ensure_ascii=False, indent=2, allow_nan=False))
+        _publish_job(self.directory, initial)
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
 

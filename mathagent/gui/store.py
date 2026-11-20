@@ -1003,6 +1003,30 @@ def append_items(root, chat_id, items):
 
 
 @_locked_chat
+def start_worker_card(root, chat_id, item, index):
+    """Recover the first card if a crash preceded the checkpoint of its transcript index."""
+    chat = load_chat(root, chat_id)
+    items = chat['transcript']
+    if index is not None and (type(index) is not int or not 0 <= index < len(items)):
+        raise NotFound('Unknown worker card')
+    if index is None:
+        index = next((i for i, old in enumerate(items) if old.get('role') == 'route'
+                      and old.get('child_id') == item['child_id']), len(items))
+    if index == len(items):
+        items.append(item)
+    else:
+        old = items[index]
+        if (old.get('role') != 'route' or old.get('child_id', item['child_id']) != item['child_id']
+                or (old.get('mode'), old.get('request')) != (item['mode'], item['request'])):
+            raise ValueError('Saved worker points to a different card')
+        old.update(status='started', task=item['task'], status_time=item['time'], ended_at=None,
+                   outcome='', error=None, error_code=None, agent_error=None, native_status=None,
+                   child_id=item['child_id'], turn_id=item['turn_id'], batch_id=item['batch_id'])
+    _save_chat(root, chat)
+    return index, items[index].get('job_id')
+
+
+@_locked_chat
 def update_item(root, chat_id, index, **fields):
     chat = load_chat(root, chat_id)
     if type(index) is not int or not 0 <= index < len(chat['transcript']):
@@ -1036,16 +1060,17 @@ def checkpoint_investigation(root, chat_id, state):
     chat = load_chat(root, chat_id)
     agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
-    record_id = state['investigation']['id']
+    inv = state['investigation']
+    record_id = inv['id']
+    ident = 'clarification_id' if inv['phase'] == 'clarification' else 'investigation_id'
     if state.get('status') == 'complete' and not any(
-            item.get('investigation_id') == record_id for item in chat['transcript']):
+            record_id in (item.get('investigation_id'), item.get('clarification_id')) for item in chat['transcript']):
         answer = {'role': 'assistant', 'content': state['answer']}
         prefix = state.get('history_prefix_count', len(state.get('history', ())))
         user = next((item for item in state.get('messages', [])[prefix:] if item['role'] == 'user'),
                     {'role': 'user', 'content': state['query']})
         chat['history'] = list(state.get('history', ())) + [user, answer]
-        inv = state['investigation']
-        chat['transcript'].append({**answer, 'mode': 'free', 'investigation_id': record_id, 'time': _now(),
+        chat['transcript'].append({**answer, 'mode': 'free', ident: record_id, 'time': _now(),
                                    'synthesis': inv.get('synthesis', ''), 'synthesis_steps': inv.get('synthesis_steps', [])})
         if not chat['title']:
             chat['title'] = one_line(state['query'], 80)
@@ -1170,7 +1195,9 @@ def assistant_view(chat, root=None):
     lanes = agent_views.agents(chat)
     if root is not None:
         _agent_receipts(root, chat, lanes)
-    return {'agents': lanes, 'agent_concurrency': (state.get('limits') or {}).get('concurrency'),
+    from ..mode_calls import waiting_routed_tasks
+    waiting = [{'mode': t['mode'], 'objective': t['request']} for t in waiting_routed_tasks(state)] if status == 'running' else []
+    return {'agents': lanes, 'waiting_for_results': waiting, 'agent_concurrency': (state.get('limits') or {}).get('concurrency'),
             'assistant_status': status,
             'assistant_resumable': status in ('paused', 'running'),
             'assistant_progress': progress,

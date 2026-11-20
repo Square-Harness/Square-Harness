@@ -39,6 +39,17 @@ function requestText(value: string) {
   return value.replace(/^\s*@\w+\s*/u, '').replace(/\s+/gu, ' ').trim()
 }
 
+export function WaitingForResults({ tasks }: { tasks: Chat['waiting_for_results'] }) {
+  if (!tasks?.length) return null
+  return <section className="agent-task-section waiting-for-results"><h3>Waiting for an earlier result</h3>
+    <ul className="agent-picker">{tasks.map((task, index) =>
+      <li key={index} className="agent-choice"><Square variant="waiting" size={13} />
+        <span className="agent-choice-copy"><strong>{skillName(task.mode)}</strong>
+          <span className="agent-choice-objective"><Inline mathProse limit={210}>{task.objective}</Inline></span></span>
+      </li>)}</ul>
+  </section>
+}
+
 function SingleAgent({ lane, prompt }: { lane: AgentLane; prompt?: string }) {
   const showObjective = !!lane.objective && requestText(lane.objective) !== requestText(prompt || '')
   return <section className="agent-single" aria-label={skillName(lane.mode) + ' activity'}>
@@ -209,10 +220,11 @@ export function AgentsTab({ chat, selected, onSelect }: { chat: Chat; selected: 
     if (selected) backButton.current?.focus({ preventScroll: true })
     else if (previous) inspector.current?.querySelector<HTMLButtonElement>('[data-task="' + CSS.escape(previous) + '"]')?.focus({ preventScroll: true })
   }, [selected])
-  if (!lanes.length) return <p className="empty-note">No agent has worked in this conversation yet. When the assistant delegates a proof, a search or an experiment, you can follow it here.</p>
+  if (!lanes.length && !chat.waiting_for_results?.length) return <p className="empty-note">No agent has worked in this conversation yet. When the assistant delegates a proof, a search or an experiment, you can follow it here.</p>
   if (!selected) return <div className="agent-inspector" ref={inspector}>
     <TaskList title="Working now" lanes={lanes.filter(l => l.status === 'running')} onSelect={onSelect} />
     <TaskList title="Waiting" lanes={lanes.filter(l => l.status === 'waiting')} onSelect={onSelect} />
+    <WaitingForResults tasks={chat.waiting_for_results} />
     <TaskList title="Finished" lanes={lanes.filter(l => !activeAgent(l)).sort((a, b) =>
       (stamp(b.ended_at || b.started_at) || 0) - (stamp(a.ended_at || a.started_at) || 0))} onSelect={onSelect} />
   </div>

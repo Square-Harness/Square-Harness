@@ -5,8 +5,8 @@
 
 Only controller code calls ``PythonSandbox.bind``. The skill, and therefore the
 policy, is fixed for the session: a model sends code and may lower the limits,
-but cannot choose a skill, policy, image or container flag. ``python-lab`` is an
-explicit skill, bound only with ``explicit=True`` (the user's own command).
+but cannot choose a skill, policy, image or container flag. ``python-lab`` is a
+user-requested skill, bound by a selected command or a validated routing decision.
 """
 import json
 import threading
@@ -57,9 +57,10 @@ class NumericsSession:
 
     tool_names = TOOL_NAMES
 
-    def __init__(self, executor, store, policy, skill, *, explicit, approve=None, cancel=None):
+    def __init__(self, executor, store, policy, skill, *, explicit, routed=False, approve=None, cancel=None):
         self.executor, self.store, self.policy, self.skill = executor, store, policy, skill
         self.explicit, self.approve, self.cancel = explicit, approve, cancel
+        self.invocation = 'routed' if routed else 'explicit' if explicit else 'automatic'
         self.runs = 0
         self.on_run_change = None
         self.on_record = None  # Set by the interface to show each saved run in the conversation.
@@ -77,7 +78,8 @@ class NumericsSession:
         if self.policy.escalation:
             c = self.policy.ceiling
             budget += f' More (up to {c.timeout_seconds:g} s, {c.memory_mb} MB, {c.cpus:g} CPU) needs the user\'s approval.'
-        how = 'The user invoked this skill.' if self.explicit else 'Decide whether a check is worthwhile.'
+        how = {'automatic': 'Decide whether a check is worthwhile.', 'routed': 'The user requested this calculation.',
+               'explicit': 'The user invoked this skill.'}[self.invocation]
         core = self.skill.section('Core rules') or self.skill.body.strip()
         refs = ', '.join(('skill',) + self.skill.references)
         return (f'SKILL {self.skill.name}: {self.skill.description} {how}\n{core}\n{budget}\n'
@@ -158,7 +160,7 @@ class NumericsSession:
             return {'status': 'sandbox_unavailable',
                     'message': f'{exc} Continue without numerical evidence and say that no computation was run.'}
         record = self.store.save(code=code, result=result, limits=limits, policy=self.policy.name, image=image,
-                                 seed=seed, parameters=parameters, purpose=purpose, explicit=self.explicit,
+                                 seed=seed, parameters=parameters, purpose=purpose, invocation=self.invocation,
                                  harness_version=__version__)
         if self.on_record is not None:
             try:
@@ -265,17 +267,19 @@ class PythonSandbox:
             self._failure = failure
         return failure and failure[1]
 
-    def bind(self, skill_name, workspace_root, *, explicit, approve=None, cancel=None):
+    def bind(self, skill_name, workspace_root, *, explicit, routed=False, approve=None, cancel=None):
         """A session for ``skill_name``; only code reacting to the user's own command passes explicit=True."""
         skill = skill_catalog.load(skill_name)
         if skill.name not in self.policies:
             raise ValueError(f'{skill.name} does not use the Python sandbox')
-        if skill.invocation == 'explicit' and explicit is not True:
+        if routed and (skill.name != LAB or explicit):
+            raise ValueError('Only a validated Python Lab assignment can be routed')
+        if skill.invocation == 'explicit' and explicit is not True and routed is not True:
             raise PermissionError(f'{skill.name} runs only when the user invokes it')
         if reason := self.unavailable():
             raise SandboxUnavailable(reason)
         return NumericsSession(self.executor, ExperimentStore(workspace_root), self.policies[skill.name], skill,
-                               explicit=bool(explicit), approve=approve if skill.name == LAB else None, cancel=cancel)
+                               explicit=bool(explicit), routed=routed, approve=approve if skill.name == LAB else None, cancel=cancel)
 
     def automatic_session(self, workspace_root, cancel=None, ctx=None):
         """The sanity-check binding for ordinary chat, or None when off, unavailable or the context is small."""

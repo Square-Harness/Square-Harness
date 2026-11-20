@@ -39,8 +39,8 @@ TEXT_STATEMENT = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(' + TYPE_WORDS + r'
 PROOF_WORD = r'(?:proof|preuve|démonstration|demonstration)'
 TEXT_PROOF = re.compile(r'^\s*(?:#{1,6}\s*)?[*_]{0,2}\s*(?:(?:proposed|attempted)\s+)?' + PROOF_WORD + r'\b[*_]{0,2}\s*(?=[.:(]|of\b|that\b|for\b|sketch\b|$)(.{0,160})', re.I)
 INLINE_PROOF = re.compile(r'(?<!\w)[*_]{0,2}' + PROOF_WORD + r'\b[*_]{0,2}\s*[.:](?=\s*\S)', re.I)
-# A numbered line that ends with a question mark is a list item, not a heading.
-TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{1,89}[^.?\s])\s*$')
+# Numbered headings in extracted text. Question lists are disambiguated in _parse_text.
+TEXT_SECTION = re.compile(r'^\s*(\d+|[A-Z])\.\s+([A-Z][^.]{1,89}[^.\s])\s*$')
 TEXT_SUBSECTION = re.compile(r'^\s*((?:\d+|[A-Z])(?:\.\d+)+)\.?\s+([A-Z][^.]{1,90})\.(?:\s|$)')
 MD_HEADING = re.compile(r'^\s*(#{1,6})\s+(.*\S)')
 END_MARK = re.compile(r'[□∎■]\s*[*_]*\s*$|\\qed\b|\bQ\.E\.D\.?')
@@ -388,10 +388,9 @@ def _parse_text(lines, fmt):
     units, section, appendix, top = [], None, False, 0
     boundaries = set()  # lines where a statement, proof or section starts
     events = []
-    for number, line in enumerate(lines, 1):
+    content_lines = [(number, line) for number, line in enumerate(lines, 1) if line.strip()]
+    for i, (number, line) in enumerate(content_lines):
         stripped = line.strip()
-        if not stripped:
-            continue
         heading = MD_HEADING.match(line) if fmt == 'markdown' else None
         statement = TEXT_STATEMENT.match(line)
         if statement and not statement.group(2) and statement.group(1)[0].islower() and not re.match(r'^\s*(?:#|\*\*|__)', line):
@@ -425,6 +424,12 @@ def _parse_text(lines, fmt):
         match = TEXT_SECTION.match(line)
         if match and len(stripped) < 100:
             label = match.group(1)
+            if label.isdigit() and stripped.endswith('?'):
+                # Questions in an enumerated list border another list item.
+                # A question introducing a section has intervening body text.
+                neighbors = content_lines[max(0, i - 1):i] + content_lines[i + 1:i + 2]
+                if any(re.match(r'^\s*\d+\.\s+', other) for _, other in neighbors):
+                    continue
             if (label.isdigit() and int(label) == top + 1) or (not label.isdigit() and (appendix or top >= 1) and len(label) == 1):
                 if label.isdigit():
                     top = int(label)

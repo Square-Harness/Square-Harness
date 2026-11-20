@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -63,7 +63,10 @@ for a mathematical explanation without a source, and prove for a nontrivial proo
 Use writeup when the user asks for a document: a LaTeX note, a write-up, a .tex
 or PDF file of results. It writes the file from the results of the conversation,
 so it waits (after_results) for the tasks whose results it states or cites.
-Use summarize for a LaTeX summary of the conversation. explore never writes a document.
+Use summarize only when the user wants a separate summary document. A request to recap findings, including
+what is already known in the current conversation or project, asks for a chat reply. Use direct for the
+recap alone. With other independent work, let the parent recap the saved findings alongside those results.
+Explore never writes a document.
 Use workers also for a single explicitly requested numerical experiment. Only
 authorize python_lab when the current user message itself asks for a computation,
 simulation or plot to be run: not for a question about code, an example, a quotation,
@@ -227,6 +230,26 @@ _DOCUMENT_REQUEST = re.compile(
     r"(?:a|an|the|short|brief) write-?up)\b|\bwrite (?:it|this|that|them|these|those) up\b")
 
 
+def wants_summary_document(query):
+    """Look for a requested deliverable rather than the format of a source being summarized."""
+    query = re.sub(r'`([\w./-]+\.(?:tex|pdf))`', r'\1', query, flags=re.I)
+    text = _instruction_text(query)
+    for clause in re.split(r'[;!?\n]|\.(?=\s|$)|,|\b(?:but|mais)\b', text):
+        if re.search(r"\b(?:no|not|never|without|avoid|sans|pas|inutile)\b|don.t\b", clause):
+            continue
+        if (_DOCUMENT_REQUEST.search(clause) or re.search(
+            r"\b(?:as|into|en|au format) (?:a |an |un |une )?(?:separate |downloadable )?"
+            r"(?:pdf|latex|tex|document|file|handout|fichier|rapport)\b|"
+            r"\b(?:in (?:latex|tex|pdf)(?: format)?|(?:pdf|latex|tex|standalone|downloadable|printable) summar(?:y|ies)"
+            r"|summary (?:file|document|mode)|mode resume)\b|"
+            r"\b(?:give|provide|make|write|prepare|produce|export|create|generate|redige\w*|cree\w*|fournis\w*) "
+            r"(?:(?:me|us|a|an|the|un|une|le|la|separate|short|brief|standalone|downloadable|formatted) )*"
+            r"(?:pdf|document|report|file|handout|write-?up|fichier|rapport)\b|"
+            r"\b(?:save|export|download|enregistr\w*|export\w*)\b.{0,65}\.(?:tex|pdf)\b", clause)):
+            return True
+    return False
+
+
 def _asks_to_run(clause, lead, code_only):
     """Whether one clause, with its lead-in removed, asks the application to execute something."""
     by_computer = bool(re.search(r'\b' + _BY_COMPUTER + r'\b', clause))
@@ -283,14 +306,21 @@ def _python_requests(query):
 def _validated_tasks(decision, query, files=(), reading=()):
     tasks = decision.get('tasks') or []
     questions = []
+    summary_document = wants_summary_document(query)
+    recap = (not reading and not summary_document and bool(re.search(
+        r"\b(?:what (?:have|did) we (?:already |previously |actually )?(?:establish(?:ed)?|prove[dn]?|find|found|learn(?:ed)?)|"
+        r"what do we (?:already know|know (?:now|so far|from (?:our|the previous)))|"
+        r"(?:summari[sz]e|recap|sum up|resum(?:e|er|ez)|recapitul\w*)\b.{0,70}\b"
+        r"(?:so far|what we|our (?:results|findings)|this (?:discussion|conversation|project)|"
+        r"ce que|nos resultats|cette (?:conversation|discussion)))\b", _instruction_text(query))))
     if decision['route'] != 'workers':
-        # Some services return extra assignments beside an otherwise valid direct/proof
-        # decision. Only a workers decision has authority to start that batch.
-        return {}
+        # Only a workers decision authorizes a batch. A recap can still read saved findings.
+        return {'chat_recap': True} if recap and decision['route'] in ('direct', 'prove') else {}
     incomplete = not isinstance(tasks, list) or not 1 <= len(tasks) <= 6
     if incomplete:
         tasks = []
     validated = []
+    chat_recap = recap
     python_requests = _python_requests(query) if any(isinstance(t, dict) and t.get('mode') == 'python_lab' for t in tasks) else []
     own_words = _own_words(query)
     for task in tasks:
@@ -304,6 +334,12 @@ def _validated_tasks(decision, query, files=(), reading=()):
             incomplete = True
             continue
         refs = list(dict.fromkeys(refs or named_attachments(task['request'], files)))
+        if task['mode'] == 'summarize' and not summary_document:
+            if refs and not any(set(refs) <= set(source['files']) for source in reading):
+                task = {**task, 'mode': 'explore'}
+            else:
+                chat_recap = chat_recap or not reading
+                continue
         if task['mode'] == 'clarify':
             # For an explicit reading task the sourced worker can resolve questions
             # about the attached document's identity, contents or topic itself.
@@ -355,11 +391,15 @@ def _validated_tasks(decision, query, files=(), reading=()):
         (later if waits or document and other_work else assignments).append(assignment)
     if later and not assignments and not questions:
         assignments.append(later.pop(0))  # Nothing in this turn precedes it.
+    if chat_recap and not validated and not questions and not incomplete:
+        return {'route': 'direct', 'chat_recap': True}
     if len(validated) > 6 or (not assignments and not questions):
         # Recover through the scoped ordinary tools. A malformed batch is never
         # authority to run Python, and the normal child/action ceilings still apply.
         return {'route': 'other', 'assignment_recovery': True}
     outcome = {'tasks': assignments, 'question': ' '.join(questions)}
+    if chat_recap:
+        outcome['chat_recap'] = True
     if later:
         # Started by the Assistant once the results they need exist (mode_calls).
         outcome['later'] = later

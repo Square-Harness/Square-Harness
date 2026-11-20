@@ -59,8 +59,12 @@ class ExperimentStore:
         return folder / name
 
     def save(self, *, code, result, limits, policy, image, seed=None, parameters=None, purpose='',
-             explicit=False, harness_version=''):
+             explicit=False, invocation=None, harness_version=''):
         """Persist one run and return its record (with relative artifact paths)."""
+        if invocation is None:
+            invocation = 'explicit' if explicit else 'automatic'
+        if invocation not in ('explicit', 'routed', 'automatic'):
+            raise ValueError('Unknown experiment invocation')
         now = datetime.now(timezone.utc)
         experiment_id = f'exp-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
         with self._lock:
@@ -75,7 +79,7 @@ class ExperimentStore:
             _write(self.path(experiment_id, 'code.py'), code.encode('utf-8'))
             record = {
                 'id': experiment_id, 'created': now.isoformat(timespec='seconds'),
-                'skill': policy, 'invocation': 'explicit' if explicit else 'automatic',
+                'skill': policy, 'invocation': invocation,
                 'purpose': purpose, 'code': code, 'seed': seed, 'parameters': parameters or {},
                 'image': image, 'limits': limits.as_dict(), 'harness_version': harness_version,
                 'status': result.status, 'exit_code': result.exit_code,

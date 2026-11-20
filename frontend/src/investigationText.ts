@@ -27,7 +27,7 @@ export function readInvestigationReport(content: string) {
   const head = '## Investigation report'
   if (!content.startsWith(head + '\n')) return null
   const sections = new Map<string, string>()
-  const names = /\n### (Research answer|Original request|Confirmed statement|Proposed statement|Model-declared variants|Work and evidence|Status of the (?:confirmed|proposed) target)\n/g
+  const names = /\n### (Research answer|Original request|Confirmed statement|Proposed statement|Related statements|Model-declared variants|Work and evidence|Status of the (?:confirmed|proposed) target)\n/g
   let start = head.length, section = 'reason'
   for (const m of content.matchAll(names)) {
     sections.set(section, content.slice(start, m.index).trim())
@@ -40,7 +40,7 @@ export function readInvestigationReport(content: string) {
     if (match) {
       const state = match[3], mode = match[2] as RouteMode
       let objective = match[4]
-      const native = / · native status ([\w-]+) \(index evidence unavailable\)$/.exec(objective)
+      const native = / · (?:Worker status: [\w -]+ \(supporting finding unavailable\)|native status [\w-]+ \(index evidence unavailable\))$/.exec(objective)
       if (native) objective = objective.slice(0, native.index)
       const job = jobEnd.exec(objective)
       if (job) objective = objective.slice(0, job.index)
@@ -68,11 +68,10 @@ export function readInvestigationReport(content: string) {
       else last.notes.push(text)
     }
   }
-  const approved = sections.has('Confirmed statement')
-  const statement = (sections.get(approved ? 'Confirmed statement' : 'Proposed statement') || '').replace(digestLine, '').trim()
-  const verdict = sections.get('Status of the ' + (approved ? 'confirmed' : 'proposed') + ' target') || ''
+  const statement = (sections.get('Proposed statement') || sections.get('Confirmed statement') || '').replace(digestLine, '').trim()
+  const verdict = sections.get('Status of the proposed target') || sections.get('Status of the confirmed target') || ''
   const reviewed = verdict.split('\n').filter(line => line.startsWith('• ')).map(line => finding(line.slice(2))).filter(entry => entry !== null)
-  const variants = (sections.get('Model-declared variants') || '').replace(/^\*\*v(\d+)\*\* \((.*?)\) · [0-9a-f]{64}$/gm, '**Special case $1** ($2)\n')
-  return { statement, approved, synthesis: sections.get('Research answer') || '', reason: sections.get('reason') || '', work, reviewed, variants,
-    unresolved: verdict.startsWith('No indexed model-reviewed proof'), original: sections.get('Original request') || '' }
+  const variants = (sections.get('Related statements') || sections.get('Model-declared variants') || '').replace(/^\*\*v(\d+)\*\* \((.*?)\) · [0-9a-f]{64}$/gm, '**Related statement $1** ($2)\n')
+  return { statement, synthesis: sections.get('Research answer') || '', reason: sections.get('reason') || '', work, reviewed, variants,
+    missingReview: /^No (?:indexed )?model-reviewed proof/.test(verdict), original: sections.get('Original request') || '' }
 }

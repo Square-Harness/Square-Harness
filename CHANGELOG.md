@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Show a dependent task while it waits, keep the notebook keyboard path through
+  agents and tabs, and refresh chat activity without repeatedly fetching every
+  job list. The report reader handles old and new section headings.
+- Save the first native job state before making its ID visible. Reuse the
+  worker’s original card and job when recovering an interrupted turn. Explore
+  also resumes with the saved results of completed numerical runs, including
+  runs that only printed a value.
+  Show truncated worker answers as failed with the partial answer available.
+  A worker that exceeded its token allowance ends its branch and the remaining
+  investigation steps can finish. A clarification appears as a question.
+- Distinguish routed Python Lab experiments from explicit selections and automatic
+  numerical checks in the saved record.
+- Read named workspace documents alongside attachments, and reuse a referenced
+  lecture in a later Proof. Both Proof roles receive the same current-turn
+  source passages. Reserve space for the candidate and its review on smaller
+  models. Preserve question-form section titles in numbered manuscripts.
+- Answer conversational recaps in the chat and read project findings when
+  needed. Limit project recall to the current notebook and findings and keep
+  earlier project strategies out of the shared Proof objective. Keep explicit
+  summary documents available. Include a reference
+  search when an online investigation explicitly asks for prior literature.
+- Identify physical PDF pages from the extraction in source overviews, targeted
+  reads and searches, including documents already in the cache.
+
 - An investigation whose plan is being prepared no longer ends as failed when
   the model does not answer or returns a malformed plan: it asks again, or
   pauses with the cause shown so that **Resume** continues it. A draft of the

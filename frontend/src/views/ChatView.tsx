@@ -29,7 +29,7 @@ import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
-import { AgentGroup } from '../components/AgentGroup'
+import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
 
 type ChatMode = 'critic' | 'explore' | 'free'
 
@@ -90,7 +90,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
   const [ended, setEnded] = useState(0)
-  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick, ended, personalizationTick])
+  const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id], [tick, ended, personalizationTick].join('/'))
   const agentLanes = useMemo(() => data && data.id === id ? deriveAgents(data, app.proofs || [], app.research || []) : [],
     [data, id, app.proofs, app.research])
   const work = chatWork(app.snapshot, id)
@@ -267,14 +267,14 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
-          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} />}
+          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} waiting={data?.waiting_for_results} />}
           {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
               <p className="muted routing"><Square variant="running" size={12} /> Reading your request…</p>
             </div>
           )}
-          {live && <LiveTurnView live={live} mode={mode} investigating={!!data?.investigation?.current} waitingForOutput={!!task?.waiting_model_calls} />}
+          {live && <LiveTurnView live={live} mode={mode} investigating={!!data?.investigation?.current} agentsWorking={agentLanes.some(activeAgent)} waitingForOutput={!!task?.waiting_model_calls} />}
           {free && data?.assistant_progress && !agentLanes.some(activeAgent) && <div className="entry">
             <span className="in-margin" />
             <WorkProgressNote progress={data.assistant_progress} status={data.assistant_status || ''} running={ours} />
@@ -399,7 +399,7 @@ function group(items: TranscriptItem[]): Turn[] {
   return turns
 }
 
-function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation'] }) {
+function Transcript({ items, mode, chatId, lanes, plan, waiting }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation']; waiting?: Chat['waiting_for_results'] }) {
   const turns = group(items)
   const groups = groupsOf(lanes)
   const byCard = new Map<number, AgentLane[]>()
@@ -441,6 +441,7 @@ function Transcript({ items, mode, chatId, lanes, plan }: { items: TranscriptIte
           {plan && index === planTurn && <ConversationPlan key={plan.id} plan={plan} finished={finalTurn >= 0} />}
           <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
           {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} chatId={chatId} />)}
+          {index === turns.length - 1 && <WaitingForResults tasks={waiting} />}
           {plan && index === planTurn && finalTurn < 0 && <WorkingAnswer plan={plan} chatId={chatId} />}
         </div>
       ))}
@@ -734,8 +735,10 @@ export function ArtifactView({ artifact, purpose }: { artifact: Artifact; purpos
   )
 }
 
-function LiveTurnView({ live, mode, investigating, waitingForOutput }: { live: LiveTurn; mode: ChatMode; investigating: boolean; waitingForOutput: boolean }) {
+function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutput }: { live: LiveTurn; mode: ChatMode; investigating: boolean; agentsWorking: boolean; waitingForOutput: boolean }) {
   const glyph = investigating ? 'investigate' : live.mode ?? mode
+  const steps = agentsWorking ? live.steps.filter(step => !('progress' in step && step.progress)) : live.steps
+  if (agentsWorking && !steps.length && !live.user && live.kind !== 'review') return null
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}
@@ -743,11 +746,11 @@ function LiveTurnView({ live, mode, investigating, waitingForOutput }: { live: L
         <span className={`in-margin speaker speaker-model mode-${glyph}`}><Glyph mode={glyph} /></span>
         <div className="message-body">
           {live.kind === 'review' && <p className="review-label">Fresh-context review in progress</p>}
-          {live.steps.map((step, index) => step.type === 'call' ? (
+          {steps.map((step, index) => step.type === 'call' ? (
             <div key={index} className="step">
               <Thinking text={step.thinking} live={!step.text} />
               {step.text && <StreamingMarkdown text={step.text} className="answer" />}
-              {!step.text && !step.thinking && !waitingForOutput && index === live.steps.length - 1 && (
+              {!step.text && !step.thinking && !waitingForOutput && index === steps.length - 1 && (
                 <p className="muted small">Preparing a response…</p>
               )}
             </div>
@@ -762,7 +765,7 @@ function LiveTurnView({ live, mode, investigating, waitingForOutput }: { live: L
           ) : (
             <p key={index} className="notice">{step.text}</p>
           ))}
-          {!live.steps.length && !waitingForOutput && <p className="muted small">Waiting for the model…</p>}
+          {!steps.length && !agentsWorking && !waitingForOutput && <p className="muted small">Waiting for the model…</p>}
         </div>
       </div>
     </div>

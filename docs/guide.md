@@ -429,13 +429,16 @@ the same child job; cancelled queued turns leave a clear notice in the chat.
 Open **Notebook** on the right of the conversation. On desktop its four shortcuts
 take you straight to a section. Workers that start together share a group in the
 conversation. Select a specialist to follow its work or open its result. Timing
-bars share a scale so you can see when two tasks overlapped.
+bars share a scale so you can see when two tasks overlapped. A dependent task
+appears as waiting until its prerequisite returns. A finished agent’s answer
+can be opened while the other agents continue. If an answer reached its output
+limit, the agent shows the failure and its partial text remains readable.
 
-- **Activity** shows what each specialist is doing. From a Literature task,
+- **Agents** shows what each specialist is doing. From a Literature task,
   **Open literature review** takes you into the review itself.
 - **Results** collects investigation reports, saved answers, proof attempts, reviews, experiments and
   Write-Up downloads.
-- **Evidence** shows findings and sources available in this conversation or project.
+- **Findings** shows results and sources available in this conversation or project.
   Work that has produced nothing yet (a proof still without a candidate, an
   answer that came back empty) is not listed.
 - **Plan** lists the research question, the steps and their dependencies in
@@ -465,7 +468,7 @@ a statement, or `/prove <statement>`. Other commands:
 | `/researches`, `/research-report <id>`, `/research-resume <id>` | The same for reports and other jobs |
 | `/investigate <question>`, `/investigations` | Start a guided investigation or list saved runs |
 | `/investigate-resume <id>`, `/investigate-report <id>` | Resume or finish with the evidence already saved |
-| `/record`, `/record all`, `/record <chat-or-project-uuid>` | Inspect unfiled workspace jobs, every scope, or the research record of one conversation or project. A filed conversation opens its project’s record. As in the Evidence tab, work that has produced nothing yet is not listed. |
+| `/record`, `/record all`, `/record <chat-or-project-uuid>` | Inspect unfiled workspace jobs, every scope, or the research record of one conversation or project. A filed conversation opens its project’s record. As in the Findings tab, work that has produced nothing yet is not listed. |
 | `/experiments`, `/skills`, `/status`, `/help` | Saved experiments, skill files, settings, help |
 
 For scripts, run one job and exit:
@@ -572,7 +575,7 @@ conversation and work starts automatically. You can follow the steps in the
 notebook or pause while the workers are running. DS4 can also select an investigation
 from an ordinary Assistant question that calls for several lines of research.
 A simple question can receive a direct answer. Selecting **@prove** still
-starts the usual proof workflow.
+starts the usual proof workflow. A planner’s clarification appears as a question in the conversation.
 
 You can also ask DS4 for independent pieces of work in one Assistant message.
 For example, ask for a reference on Markov chains and, in the same message,
@@ -582,7 +585,10 @@ reference for this theorem, then write a short LaTeX note that cites it" runs
 the reference check first, and the note is then written by Write-up with that
 reference. When one objective needs clarification, the other can still proceed.
 A Python result identifies whether the computation actually ran in the enabled
-sandbox.
+sandbox. Asking for a short recap of project or conversation findings returns
+an answer in the chat. For a project recap the Assistant consults that project’s
+notebook and findings. You can still ask it to search the workspace.
+Select **@summarize** to create a separate document.
 
 You can include a reading task in the same message. For example, attach your
 lecture notes and ask for a PDE reference, a simulation, and a summary of the
@@ -596,13 +602,16 @@ Assistant does not restate it. In a later message you can
 refer to the same PDF without selecting it again. When you ask whether the
 Assistant can read it, the Assistant checks the file and can answer from an
 actual passage. If several earlier PDFs match, name the one you mean.
+When the PDF extraction preserves page breaks, the reader can cite the physical page in the file. The printed page label may differ.
 If the chosen PDF has no extractable text, supply an OCR copy or the TeX source.
 The reader stays with the selected documents unless you ask it to search the folder.
 Asking for a LaTeX conversion of a finished investigation uses the research
 answer shown in the chat, including when several workers contributed.
 
 In the chat, a file chip marks a file you selected for that message. A file
-reused from the conversation appears under **Available for this reply**.
+reused from the conversation appears under **Available for this reply**. You can
+also attach one document and name another readable workspace document in your
+message. A name alone follows the workspace’s file-type permissions.
 Older messages show a neutral source label because they did not record how
 the file was selected.
 
@@ -613,8 +622,11 @@ Proof waits for the preceding steps listed in its plan. When the plan calls
 for a special case, the controller selects a precise statement from the evidence
 or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
 experiments are available through Explore when the numerical sandbox is enabled.
+An online investigation that explicitly asks for prior literature includes a
+reference check or literature review in its plan.
 
-Pause saves the investigation. **Resume** continues the saved plan. **Stop and
+Pause saves the investigation. If Explore has already run a numerical check,
+its result remains available on Resume, including checks without figures. **Resume** continues the saved plan. **Stop and
 report** finishes a paused run using its existing evidence, even when the model
 is offline. If the model does not answer while the plan is being prepared, the
 investigation pauses and shows the cause: **Resume** continues it once the
@@ -645,6 +657,12 @@ workspace writer lock shared with the web interface.
 
 Use it for a statement you want proved, with all its hypotheses. Pin the files
 it depends on: proof jobs read nothing by themselves.
+
+For a delegated proof, the solver and verifier receive the same pinned source
+passages, including pages read during that turn. Earlier attempts and numerical
+leads supplied through the research index go only to the solver. For a new
+source-based or delegated proof, the app checks that the model has room for
+a candidate and its review before starting the solver.
 
 How it works: **solve → verify → repair**.
 
@@ -1170,6 +1188,8 @@ built-in maxima: for automatic checks 30 s, 4 GB, 2 CPUs and 10 runs; for anythi
 {"sanity": {"limits": {"timeout_seconds": 5, "memory_mb": 2048}, "max_runs": 3},
  "lab": {"defaults": {"memory_mb": 4096}, "ceiling": {"memory_mb": 16384}}}
 ```
+
+The experiment record identifies a selected skill as `explicit`, a requested Python Lab run started by the Assistant as `routed`, and an automatic check as `automatic`.
 
 Each run is saved under `.mathagent/experiments/<id>/` (the oldest are pruned
 beyond 200 runs or 256 MB; a run whose record is damaged is left in place).

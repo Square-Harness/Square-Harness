@@ -78,8 +78,7 @@ export function setProjectFilter(projectFilter: string) {
 
 /** Changes whenever the server reports a change to this job or chat. */
 export function useTick(id: string | null | undefined): number {
-  const app = useApp()
-  return id ? app.ticks[id] || 0 : 0
+  return useSyncExternalStore(subscribe, () => id ? state.ticks[id] || 0 : 0)
 }
 
 function bump(id: string | null | undefined) {
@@ -105,27 +104,40 @@ export function onStream(job: string, id: string, file: string, listener: Stream
 
 let listTimer: number | undefined
 let listGeneration = 0
+let loadingLists = false
+let pendingLists: 'all' | 'chats' | null = null
+const pendingChatTicks = new Set<string>()
 const deletedChats = new Set<string>()
 function resetChatDeletionCache() {
   deletedChats.clear()
   ++listGeneration
 }
-export function refreshLists(delay = 0) {
-  if (listTimer !== undefined) return
+export function refreshLists(delay = 0, scope: 'all' | 'chats' = 'all') {
+  if (pendingLists !== 'all') pendingLists = scope
+  if (listTimer !== undefined || loadingLists) return
   listTimer = window.setTimeout(async () => {
     listTimer = undefined
-    const generation = ++listGeneration
-    const results = await Promise.allSettled([api.proofs(), api.researches(), api.chats(), api.projects()])
-    if (generation !== listGeneration) return
-    const [proofs, research, chats, projects] = results
-    const errors = results.filter((result) => result.status === 'rejected').map((result) => String((result as PromiseRejectedResult).reason?.message || 'Could not load saved work.'))
-    set({
-      ...(proofs.status === 'fulfilled' ? { proofs: proofs.value.jobs } : {}),
-      ...(research.status === 'fulfilled' ? { research: research.value.jobs } : {}),
-      ...(chats.status === 'fulfilled' ? { chats: chats.value.chats.filter((chat) => !deletedChats.has(chat.id)) } : {}),
-      ...(projects.status === 'fulfilled' ? { projects: projects.value.projects } : {}),
-      listError: errors.join(' '),
-    })
+    loadingLists = true
+    const all = pendingLists === 'all'
+    pendingLists = null
+    const generation = listGeneration
+    try {
+      const results = await Promise.allSettled([all ? api.proofs() : null, all ? api.researches() : null,
+        api.chats(), all ? api.projects() : null] as const)
+      if (generation !== listGeneration) return
+      const [proofs, research, chats, projects] = results
+      const errors = results.flatMap(result => result.status === 'rejected' ? [String(result.reason?.message || 'Could not load saved work.')] : [])
+      set({
+        ...(proofs.status === 'fulfilled' && proofs.value ? { proofs: proofs.value.jobs } : {}),
+        ...(research.status === 'fulfilled' && research.value ? { research: research.value.jobs } : {}),
+        ...(chats.status === 'fulfilled' ? { chats: chats.value.chats.filter(chat => !deletedChats.has(chat.id)) } : {}),
+        ...(projects.status === 'fulfilled' && projects.value ? { projects: projects.value.projects } : {}),
+        listError: errors.join(' '),
+      })
+    } finally {
+      loadingLists = false
+      if (pendingLists) refreshLists(200, pendingLists)
+    }
   }, delay)
 }
 
@@ -252,8 +264,14 @@ function handle(event: ServerEvent) {
       set((s) => ({ snapshot: reduceChat(s.snapshot, event) }))
       break
     case 'chat_saved':
-      refreshLists(100)
-      bump(event.chat)
+      refreshLists(450, 'chats')
+      if (!pendingChatTicks.has(event.chat)) {
+        pendingChatTicks.add(event.chat)
+        window.setTimeout(() => {
+          pendingChatTicks.delete(event.chat)
+          if (!deletedChats.has(event.chat)) bump(event.chat)
+        }, 250)
+      }
       break
     case 'personalization':
       refreshLists(100)

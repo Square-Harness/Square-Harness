@@ -68,7 +68,9 @@ your objective must identify its relationship to that request. A prove worker an
 its reviewer receive the user's messages, your earlier replies and the files of the
 request, but no worker result. Results of this turn reach the Proof solver only as
 fallible leads; passages that a check or literature worker of this turn read are
-pinned for both. writeup and summarize
+pinned for both. Put only the statement, necessary assumptions and any method
+the user requires in a Proof objective. Omit previous attempts, verdicts, numerical
+observations and suggested approaches from that shared objective. writeup and summarize
 also receive the conversation's results (proofs, reports) as their source and write
 a .tex file; summarize recaps the important results obtained so far. Delegate a
 write-up only when the user asks for one, with the user's own words as its request
@@ -694,14 +696,15 @@ class Orchestrator:
                 ' No further tools are available: report confirmed references with their evidence '
                 'levels and clearly identify details that remain unconfirmed.')})
         if not tools and (self.state.get('empty_final_retried') or not self.state['children']):
-            payload['messages'].append({'role': 'user', 'content':
-                'CONTROLLER FINAL ANSWER REQUEST: give a written answer to the original request now, '
-                'using the saved source excerpts and worker findings above. Tools are unavailable. '
-                'Do not emit a tool call or another reading plan. Identify which sources were only '
-                'partly read and what remains unverified. For an article, explain the main results '
-                'supported by those excerpts and distinguish author-claimed novelty from an '
-                'independent literature comparison. If the evidence is insufficient, say exactly '
-                'what could be established and what is missing.'})
+            instruction = ('CONTROLLER FINAL ANSWER REQUEST: answer the current user request directly. '
+                           'Tools are unavailable. Use earlier findings only when relevant to this request. '
+                           'For an unclear message, ask one brief clarification. Omit unrelated project records '
+                           'and internal record identifiers.')
+            if self.state.get('files') or any(m.get('role') == 'tool' and m.get('tool_name') in
+                    ('read_file', 'search_text', 'read_page', 'read_references') for m in self.state['messages']):
+                instruction += (' Explain any gaps in relevant source coverage. For an article, distinguish its '
+                                'stated results and novelty claims from independent literature evidence.')
+            payload['messages'].append({'role': 'user', 'content': instruction})
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
         explicit = getattr(self.agent, 'document_output_cap', None)
@@ -948,7 +951,7 @@ class Orchestrator:
         if sandbox_files:
             args['files'] = [f for f in files if f not in sandbox_files]
 
-    def _child(self, pending, args):
+    def _child(self, pending, args, *, shared_proof_objective=None):
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
         if child is not None:
             return child
@@ -972,7 +975,7 @@ class Orchestrator:
         # Preserve the source request independently of the model's objective.
         # Messages include relevant file excerpts and earlier worker findings.
         child = {
-            'id': 'child_' + uuid.uuid4().hex, 'job_id': None, 'status': 'pending',
+            'id': 'child_' + uuid.uuid4().hex, 'native_id': str(uuid.uuid4()), 'job_id': None, 'status': 'pending',
             'action': copy.deepcopy(args), 'result': None, 'turn_id': self.state['id'],
             'batch_id': pending.get('batch_id') or f"{self.state['id']}-b{self.state['main_calls']}",
             'source_key': source_key,
@@ -986,6 +989,8 @@ class Orchestrator:
             child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
                 project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
                                     'Preserve assumptions and conjectures; verify mathematical claims when needed.')
+        if shared_proof_objective:
+            child['shared_proof_objective'] = shared_proof_objective
         child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
         self.state['children'].append(child)
         pending['child_id'] = child['id']

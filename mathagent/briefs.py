@@ -189,12 +189,13 @@ def _reports_verdict(turn):
                for message in turn for call in message.get('tool_calls') or [])
 
 
-def _shared(messages, *, replies):
+def _shared(messages, *, replies, current=False):
     for message in messages:
         role = message.get('role')
         if role == 'user':
             yield {k: message[k] for k in ('role', 'content', 'images') if k in message}
-        elif role == 'tool' and message.get('tool_name') in ('read_file', 'search_text'):
+        elif role == 'tool' and (message.get('tool_name') in ('read_file', 'search_text') or
+                                 current and message.get('tool_name') in ('read_page', 'search_page', 'read_references')):
             yield {k: message[k] for k in ('role', 'tool_name', 'content') if k in message}
         elif role == 'assistant' and replies and (message.get('content') or '').strip():
             yield {'role': 'assistant', 'content': message['content']}
@@ -204,15 +205,44 @@ def proof_reference(context):
     """The conversation a delegated Proof's solver and reviewer both receive, beside the task and its pinned sources.
 
     The human's messages, the Assistant's replies of earlier turns (a statement to
-    prove may live there) and the file excerpts the controller read. Worker records,
+    prove may live there) and the file and web excerpts the controller read. Worker records,
     tool traffic, hidden reasoning and a reply that reports an earlier proof or
     review are strategy: they reach the solver alone, as leads.
     """
     clean = {k: v for k, v in context.items() if k in ('query', 'files', 'images', 'project_snapshot', 'project_note_status')}
     clean['history'] = [message for turn in _turns(context.get('history', []))
                         for message in _shared(turn, replies=not _reports_verdict(turn))]
-    clean['messages'] = list(_shared(context.get('messages', []), replies=False))
+    clean['messages'] = list(_shared(context.get('messages', []), replies=False, current=True))
     return clean
+
+
+def earlier_project_questions(root, view, entry_ids, chat_id):
+    """Recover the human's actual questions behind relevant findings of other project chats."""
+    from .gui.store import NotFound, load_chat
+    if not view or not view.get('scope', '').startswith('project:'):
+        return []
+    questions = []
+    chats = {}
+    for entry in view['entries']:
+        owner = entry.get('chat_id')
+        original = entry['task'].get('original_request')
+        if entry['id'] not in entry_ids or not owner or owner == chat_id or not original:
+            continue
+        if owner not in chats:
+            try:
+                chat = load_chat(root, owner)
+            except (NotFound, ValueError, OSError):
+                chat = {}
+            transcript = chat.get('transcript', []) if view['scope'] == 'project:' + str(chat.get('project_id')) else []
+            chats[owner] = [item.get('content', '') for item in transcript if item.get('role') == 'user']
+        # The frozen index stores up to 1400 characters. Resolve a prefix only
+        # if it identifies one exact original. A shortened theorem is ambiguous.
+        matches = {query for query in chats[owner] if query == original or len(original) == 1400 and query.startswith(original)}
+        if len(matches) == 1:
+            question = matches.pop()
+            if question not in questions:
+                questions.append(question)
+    return questions
 
 
 def named_entries(view, text):
