@@ -116,7 +116,9 @@ class HostedQuotaTests(unittest.TestCase):
             client.cancel.clear()
             before = len(fake.completions)
             fake.replies = [ending]
-            with patch('mathagent.deepinfra.time.monotonic', return_value=100) as clock:
+            # A faked clock: the shared cooldown left by the 429s above was set on the real clock.
+            with patch.dict('mathagent.deepinfra._cooldown', {'until': 0.0}), \
+                    patch('mathagent.deepinfra.time.monotonic', return_value=100) as clock:
                 with self.assertRaises(DeepInfraGenerationError):
                     list(generation_stream(client, payload, lambda *_: setattr(clock, 'return_value', 110)))
             self.assertEqual(len(fake.completions) - before, 1)
