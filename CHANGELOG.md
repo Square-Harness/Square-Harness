@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Title a conversation from the user's own words and, for a LaTeX document
+  pasted or attached, its title and abstract, instead of the first 1,400 bytes
+  of the message: a pasted preamble of packages and macros made the model
+  title conversations in Chinese. A title is in the language the user writes
+  in, and in English when the message has none (code, LaTeX, formulas).
 - Provider robustness on DeepInfra, for every mode and every key (tester accounts included):
   a request refused with HTTP 429 or 5xx is retried with growing pauses (and the other calls
   wait out the provider's pause); a request accepted but silent for about 30 seconds is closed
