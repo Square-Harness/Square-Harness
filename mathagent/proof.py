@@ -1002,9 +1002,9 @@ class ProofRunner:
                 call['charged_tokens'] = cap
                 if isinstance(exc, DeepInfraGenerationError):
                     call.update(provider_error=exc.category, stream_progress=exc.stream_progress)
-                    if exc.retry_before_output:
-                        # A fresh admission must never reopen an interrupted call's journal.
-                        pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
+                    # A replacement (before or after output started) is a fresh admission: it must never
+                    # reopen an interrupted call's journal.
+                    pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
                 if isinstance(exc, (DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
                     call.update(stats=exc.stats, charged_tokens=exc.stats['eval_count'])
                     self.state['tokens_charged'] += call['charged_tokens'] - cap

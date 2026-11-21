@@ -350,6 +350,7 @@ def _parse_tex(lines):
         result['warnings'].append(f'A statement starting at line {open_unit["statement"][0]} is not closed.')
     if any(re.search(r'\\begin\{pf\}|\\(?:textbf|emph)\{Proof[.:]', line, re.I) for line in clean):
         result['warnings'].append('Proofs outside the proof environment were detected; their ownership is not mapped. Inspect those passages separately.')
+    _section_proofs(result, units, clean)
     by_label = {u['label']: u for u in units if u['label']}
     for unit in units:
         unit['equations'] = [result['equations'][r] for r in dict.fromkeys(unit['refs']) if r in result['equations']]
@@ -362,6 +363,40 @@ def _parse_tex(lines):
         unit['refs'] = [ids[r] for r in unit['refs']]
         unit['statement_refs'] = [ids[r] for r in unit['statement_refs']]
     return result
+
+
+def _section_proofs(result, units, clean):
+    """A section titled "Proof of Theorem 1.1" (or "Proof of Theorem~\\ref{...}") is the proof of a result stated
+    without one: it runs to the next section. Papers often prove their main theorems this way."""
+    sections = result['sections']
+    for index, sec in enumerate(sections):
+        match = re.match(r'\s*proofs?\s+of\s+(.+)$', sec['title'], re.I)
+        if not match:
+            continue
+        labels = [lab.strip() for group in TEX_REF.findall(match.group(1)) for lab in group.split(',')]
+        owners = [u for u in units if u['label'] and u['label'] in labels]
+        if not owners and not labels:
+            owner = _owner_by_name(units, match.group(1)) or resolve({'units': units}, match.group(1))
+            owners = [owner] if owner else []
+        if len(owners) != 1 or owners[0]['proofs']:
+            continue
+        owner = owners[0]
+        end = sections[index + 1]['line'] - 1 if index + 1 < len(sections) else len(clean)
+        for n in range(sec['line'] + 1, end + 1):
+            if re.search(r'\\begin\{thebibliography\}|\\bibliography\{|\\printbibliography', clean[n - 1]):
+                end = n - 1
+                break
+        while end > sec['line'] and not clean[end - 1].strip():
+            end -= 1
+        if end <= sec['line']:
+            continue
+        owner['proofs'].append([sec['line'] + 1, end])
+        for line in clean[sec['line']:end]:
+            for group in TEX_REF.findall(line):
+                owner['refs'] += [g.strip() for g in group.split(',')]
+            for note, note2, keys in TEX_CITE.findall(line):
+                for key in keys.split(','):
+                    owner['cites'].append({'key': key.strip(), 'note': (note2 or note).strip(), 'line': sec['line']})
 
 
 def _owner_by_name(units, text):
@@ -699,19 +734,14 @@ def priority(mapping, depth=None, main_ids=None, appendix=True):
     return order
 
 
-def chunks(total, size=120):
-    """Fixed-size line ranges, the fallback when no structure was recognised."""
-    return [[a, min(total, a + size - 1)] for a in range(1, total + 1, size)]
-
-
 def outline(mapping, limit=80):
     """A compact list of statements for a model prompt."""
     rows = []
-    for u in mapping['units'][:limit]:
+    for u in mapping['units'][:limit]:  # limit None: every statement
         where = f'L{u["statement"][0]}' if u['statement'] else 'no statement'
         proof = ', proof ' + ', '.join(f'L{a}-L{b}' for a, b in u['proofs']) if u['proofs'] else ', no proof here'
         title = f' ({u["title"]})' if u['title'] else ''
         rows.append(f'{u["id"]}: {u["name"]}{title}, section {u["section"]}, {where}{proof}{", appendix" if u["appendix"] else ""}')
-    if len(mapping['units']) > limit:
+    if limit is not None and len(mapping['units']) > limit:
         rows.append(f'… and {len(mapping["units"]) - limit} more statements.')
     return '\n'.join(rows)

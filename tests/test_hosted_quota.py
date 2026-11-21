@@ -14,7 +14,7 @@ from unittest.mock import patch
 from mathagent.agent import Agent, AgentError
 from mathagent.assistant_budget import BudgetClient
 from mathagent.backends import MeasuredStreamCancellation
-from mathagent.deepinfra import (DeepInfra, DeepInfraGenerationError, DeepInfraRateLimit, MODEL,
+from mathagent.deepinfra import (DeepInfra, DeepInfraGenerationError, DeepInfraRateLimit, MODEL, RETRIES,
                                  TesterAllowanceInsufficient, generation_stream, rejected_before_inference)
 from mathagent.gui import store
 from mathagent.hosted_quota import HostedQuota, quota_status
@@ -69,10 +69,10 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
             self.assertEqual((guarded.snapshot()['tokens'], len(fake.completions)), (4096, 5))
 
-    def test_recovery_requires_terminal_failure_before_all_model_output_and_shares_one_retry(self):
+    def test_conversation_retries_only_failures_before_output_within_one_shared_allowance(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
-        with patch.dict(os.environ, {'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key,
+        with patch('mathagent.deepinfra.BACKOFF', (0,) * 5), patch.dict(os.environ, {'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key,
                                      'DEEPINFRA_API_KEY_FILE': '', 'SH_DEEPINFRA_QUOTA_FILE': ''}):
             client = DeepInfra(fake.host, timeout=5)
             payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Synthetic example'}],
@@ -92,12 +92,21 @@ class HostedQuotaTests(unittest.TestCase):
                     with self.assertRaises(DeepInfraGenerationError):
                         list(generation_stream(client, payload, lambda *_: self.fail('Unexpected retry')))
                     self.assertEqual(len(fake.completions) - before, 1)
-            for sequence in ([busy, ending], [ending, busy], [ending, ending]):
+            # Refusals and failures before any output share RETRIES replacements; then the call fails.
+            for sequence in ([busy] + [ending] * RETRIES, [ending, busy] + [ending] * (RETRIES - 1), [ending] * (RETRIES + 1)):
                 before = len(fake.completions)
                 fake.replies = list(sequence)
                 with self.assertRaises(DeepInfraGenerationError):
                     list(generation_stream(client, payload, lambda *_: None))
-                self.assertEqual(len(fake.completions) - before, 2)
+                self.assertEqual(len(fake.completions) - before, RETRIES + 1)
+            before = len(fake.completions)
+            fake.replies = [ending, busy, ending, ('Recovered', '', 4)]
+            self.assertTrue(list(generation_stream(client, payload, lambda *_: None))[-1]['done'])
+            self.assertEqual(len(fake.completions) - before, 4)
+            # A replacement differs only by leading spaces, which made silent starts rarer on DeepInfra; a refused
+            # request is sent again unchanged.
+            self.assertEqual([c['messages'][0]['content'] for c in fake.completions[-4:]],
+                             ['Synthetic example', ' Synthetic example', ' Synthetic example', '   Synthetic example'])
             before = len(fake.completions)
             client.cancel = threading.Event()
             fake.replies = [ending]
@@ -203,7 +212,7 @@ class HostedQuotaTests(unittest.TestCase):
     def test_pre_stream_rejection_retries_and_settles_only_one_reservation(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+        with tempfile.TemporaryDirectory() as directory, patch('mathagent.deepinfra.BACKOFF', (0,) * 5), patch.dict(os.environ, {
             'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key, 'DEEPINFRA_API_KEY_FILE': '',
             'SH_DEEPINFRA_SERVICE_TIER': 'standard', 'SH_DEEPINFRA_QUOTA_USD': '4',
             'SH_DEEPINFRA_QUOTA_FILE': str(Path(directory).resolve() / 'quota.sqlite'),
@@ -229,7 +238,7 @@ class HostedQuotaTests(unittest.TestCase):
                 self.assertTrue(rejected_before_inference(stopped.exception))
                 self.assertIn(reason, str(stopped.exception))
                 self.assertNotIn(fake.key, str(stopped.exception))
-            fake.replies = [busy, busy]
+            fake.replies = [busy] * (RETRIES + 1)
             with self.assertRaises(DeepInfraRateLimit):
                 list(client.stream(payload))
             client.timeout = .5
@@ -243,7 +252,7 @@ class HostedQuotaTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt) as stopped:
                 list(client.stream(payload))
             self.assertTrue(rejected_before_inference(stopped.exception))
-            self.assertEqual(len(fake.completions), 10)
+            self.assertEqual(len(fake.completions), 9 + RETRIES)
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
                 rows = db.execute('SELECT id, input_tokens, output_tokens FROM calls ORDER BY rowid').fetchall()
             self.assertEqual([(i, o) for _, i, o in rows], [(200, 5)] + [(0, 0)] * 7)
@@ -251,7 +260,8 @@ class HostedQuotaTests(unittest.TestCase):
             quota.settle(rows[-1][0], 0, 0)  # repeated settlement is harmless
             self.assertEqual(quota_status()['reserved_nanos'], 0)
 
-            # A failure in an accepted stream is ambiguous; it retains the reservation.
+            # A failure in an accepted stream has unknown usage: it is charged an estimate (the whole input and
+            # the streamed characters plus a margin), never left holding the whole reservation.
             client.cancel.clear()
             fake.replies = [busy, {'events': [{'choices': [{'index': 0, 'delta': {'content': 'Partial'}, 'finish_reason': None}]},
                                         {'error': {'code': 429, 'message': fake.key}}]}]
@@ -259,10 +269,12 @@ class HostedQuotaTests(unittest.TestCase):
                 list(client.stream(payload))
             self.assertFalse(rejected_before_inference(stopped.exception))
             self.assertNotIn(fake.key, str(stopped.exception))
-            self.assertEqual(len(fake.completions), 12)
-            self.assertGreater(quota_status()['reserved_nanos'], 0)
+            self.assertEqual(len(fake.completions), 11 + RETRIES)
+            status = quota_status()
+            self.assertEqual(status['reserved_nanos'], 0)
+            self.assertGreater(status['charged_nanos'], 0)
 
-    def test_real_http_stream_settles_reported_usage_and_holds_unknown_usage(self):
+    def test_real_http_stream_settles_reported_usage_and_estimates_unknown_usage(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
@@ -293,8 +305,10 @@ class HostedQuotaTests(unittest.TestCase):
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0], 3)
             status = quota_status()
+            # Reported usage only in the counters; the broken third stream is charged an estimate.
             self.assertEqual((status['input_tokens'], status['output_tokens']), (400, 10))
-            self.assertGreater(status['reserved_nanos'], 200000000)
+            self.assertEqual(status['reserved_nanos'], 0)
+            self.assertLess(status['charged_nanos'], 2000000)
             self.assertEqual(len(fake.completions), 3)
             os.environ['SH_DEEPINFRA_SERVICE_TIER'] = 'priority'
             with self.assertRaisesRegex(AgentError, 'Standard service tier'):

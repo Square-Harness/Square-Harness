@@ -20,9 +20,15 @@ OUTPUTS = dict.fromkeys((
     'research_plan', 'research_investigate', 'research_draft', 'research_review', 'research_revise',
 ), MODEL_OUTPUT_TOKENS)
 OUTPUTS.update(review_metadata=16_384, router=4_096, writeup_min=32_768)
+# Review calls that answer in JSON get a finite ceiling, three times the largest measured need: on DS4
+# (November 2026) a proof check used at most 44k tokens of reasoning and answer. The ceiling never binds
+# a real check; it ends a reasoning loop in minutes instead of hours (the whole ceiling is also reserved
+# from the job's budget while the call runs).
+OUTPUTS.update(review_check=131_072, review_confirm=131_072, review_scope=131_072, review_read=131_072,
+               review_write=32_768)
 INPUTS = {
     'brief_index': 24_000, 'brief_solver': 60_000,
-    'source_overview': 224_000, 'review_packet': 56_000, 'review_lines': 600,
+    'source_overview': 224_000, 'review_packet': 56_000, 'review_lines': 600, 'review_whole': 400_000,
     'research_excerpt': 36_000, 'research_lines': 400, 'style_packet': 1_000_000, 'style_guidelines': 12_000,
     'working_note': 10_000, 'recovery_note': 16_000,
     'writeup_conversation': 800_000, 'router_context': 32_768,

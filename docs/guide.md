@@ -51,8 +51,10 @@ output-equivalent tokens; each input token consumes one third of an output token
 This is conservative allowance accounting, not the provider's bill: cached input
 uses the uncached price and promotional charges may be lower. Active calls reserve
 their worst-case allowance. Complete usage releases the unused part. When DeepInfra
-rejects a generation request with HTTP 429 before streaming, the entire reservation
-is released. An interrupted stream with unknown usage retains its reservation.
+rejects a generation request with HTTP 429 or 5xx before streaming, the entire reservation
+is released. A stream that fails without reporting its usage (a silent, stalled or
+broken stream) is charged a conservative estimate: its whole input and every
+streamed character plus a margin, not the whole reservation.
 A small remaining balance may therefore
 be insufficient to start a full-length call. This pilot limit is separate from
 each Proof job's existing solve/review budgets.
@@ -812,9 +814,23 @@ The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper av
 
 Every sentence of a section is checked against the available evidence. A first pass names the source sentences that carry it, and a second compares it with those passages. A checker can correct a local error or withhold a sentence it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
 
-When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. On a personal DeepInfra key, a request that the provider accepts without starting to answer is submitted again after 25 seconds; hosted tester accounts wait for the provider's own answer. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
+When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
 Low, Medium and High allow up to 55, 110 and 165 public source requests. Local-model profiles normally allow 6, 12 and 20 minutes respectively. Hosted DS4 uses the workflow time allowances described above. All three efforts check the written sections. Higher effort broadens discovery and allows more source passages: Low, Medium and High screen up to 100, 250 and 500 candidates and plan the reading of 3, 9 and 14 papers; the works the plan relies on can add up to three more, and papers already in the workspace cache are reused. Most of a review's time is spent waiting for sources, because arXiv asks for a pause between two requests; the job report lists the time of each step. Explicit time and request limits apply.
+
+### When the model provider is busy
+
+With the hosted model (DS4 on DeepInfra), every mode and every key handles provider
+failures the same way. A request the provider refuses (HTTP 429, 500, 502, 503 or
+504 before answering) is sent again after a growing pause (about 2, 5, 15, 30 and
+60 seconds, or the wait the provider asks for, up to two minutes), and the other
+calls of the server wait out that pause too. A request the provider accepts but does
+not start to answer within about 30 seconds (longer for a long prompt) is closed and
+sent again at once. A stream that stalls or breaks in the middle of its answer is
+sent again by a background job (Proof, the reviews, write-ups, literature checks),
+at most twice; in a conversation, where the answer was already shown, it is not.
+Each logical call gets at most four replacements within its own time allowance;
+the job shows "sending it again (k of 4 retries)" and pauses only when they are used.
 
 ### Quick review, Review, Detailed review, Explain
 
@@ -822,23 +838,39 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
 (TeX gives the best results: formulas extracted from a PDF can be garbled).
 
 - **Quick review**: is this proof correct? Independent verifier passes read it
-  through different lenses: line by line, adversarially, the results it uses, its
-  overall structure. Effort sets the number of passes, from 1 to 5. From Medium
-  up, each alleged error is re-checked by a fresh call. The verdict is *no issue
-  found*, *issues found* or *uncertain*. Each issue quotes the exact proof lines
-  and comes with a suggested repair. The proof itself is never rewritten.
-- **Review**: a referee report for understanding and presentation. The whole paper
-  is read part by part. The report has an overview (question, main results,
-  strategy, how the sections fit), notes on each part, typos and presentation
-  problems with corrections, an assessment, a recommendation and a confidential
-  note to the editor. The proofs are not checked.
-- **Detailed review**: the review, then checks of the proofs, main results first.
-  The code first maps the manuscript: sections, numbered statements, their proofs,
-  and what each proof uses. Each check sees one proof with only what it needs, so
-  a moderate context suffices. The numbered comments are assembled by the code
-  from checked findings: the prose cannot add or drop an objection. If a main
-  result's proof was not checked, the recommendation says it is provisional. It
-  has twice the working time of a Review.
+  through different lenses: line by line, adversarially, the results it uses.
+  Effort sets the number of passes: 1, 2 or 3. From Medium up, each alleged error
+  is re-checked by a fresh call. The verdict is *no issue found*, *issues found* or
+  *uncertain*; *uncertain* always names the step that was not settled. Each issue
+  quotes the exact proof lines and comes with a suggested repair. The proof itself
+  is never rewritten. When the proof is in an attached file and the model has a
+  large context (DS4), every pass also sees the whole file, so definitions and
+  standing assumptions made elsewhere are in force.
+- **Review**: a referee report. The paper is read for understanding and
+  presentation, the proofs of its main results are checked (one pass each, each
+  alleged error re-checked from Medium up), and every result it cites is compared
+  with the result as known in the literature (a theorem applied outside its
+  hypotheses, a misstated or misattributed result). The report has a summary, an
+  assessment, numbered major and minor comments, typos and presentation problems
+  grouped by kind, a recommendation and a confidential note to the editor. It says
+  which proofs were not checked, and never recommends acceptance with a confirmed
+  major error.
+- **Detailed review**: the same report with checks of the other proofs too, main
+  results first (Low: the main results; Medium: and the results their proofs use,
+  two passes on each main result; High: every proof outside the appendices). With
+  a large context (DS4) the whole paper is read at once, and every check and
+  re-check sees the whole manuscript before the proof it checks; with a small
+  local context the paper is read in parts and each check sees one proof with
+  the statements and equations it cites. When online search is on, the cited
+  results most at stake are also looked up in their sources (Medium 2, High 4).
+  The numbered comments are assembled by the code from checked findings: the
+  prose cannot add or drop an objection, and the same problem found in two places
+  is reported once. Severity follows the consequence: *major* when a result as
+  stated is false or its proof needs a new idea or hypothesis, *minor* when an
+  expert can fill the gap or a misprint's meaning is clear. If a main result's
+  proof was not checked, the recommendation says it is provisional. The first
+  line of the report says how many proofs were checked and what was found for
+  each main result.
 - **Explain**: one result and its proof, or a page, a section or a short text,
   for a mathematician from another field: what it says, the idea, a walk through
   the proof or the passage (every line of a short one), the standard facts used,

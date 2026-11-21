@@ -154,11 +154,13 @@ These settings are immutable for an existing ledger. Pair this with a separately
 model-restricted provider credential; reuse credentials and ledgers on restart.
 Priority is refused for a quota-enabled instance. An exhausted allowance is an
 operational stop and does not authorize another allowance automatically.
-The ledger records zero usage when DeepInfra returns HTTP 429 before opening
+The ledger records zero usage when DeepInfra returns HTTP 429 or 5xx before opening
 a generation stream. If an accepted stream fails, a valid final usage record
-settles the reservation. Streams with unknown usage keep their reservations.
-If an accepted generation ends with a transient provider error before its first
-output, a replacement needs a fresh reservation within the same tester allowance.
+settles the reservation. A failed stream with unknown usage is charged a
+conservative estimate (its whole input, every streamed character plus 256 output
+tokens) instead of keeping its reservation. Provider failures are retried for
+tester keys as for personal keys; each replacement needs a fresh reservation
+within the same tester allowance.
 The job and chat meters list these amounts separately from reported output.
 
 For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's

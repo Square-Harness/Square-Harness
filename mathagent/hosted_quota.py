@@ -3,9 +3,11 @@
 
 """Optional durable allowance for a hosted tester; stores amounts, never content.
 
-Calls reserve their worst-case cost before dispatch. Only complete, bounded
-provider usage releases an unused reservation. Crashes and unknown usage keep
-the reservation, and opening an existing ledger never grants a new allowance.
+Calls reserve their worst-case cost before dispatch. Complete, bounded provider
+usage releases an unused reservation. A provider failure with unknown usage (a
+silent, stalled or broken stream) is charged a conservative estimate: the whole
+input and every streamed character plus a margin. Crashes keep the reservation,
+and opening an existing ledger never grants a new allowance.
 The administrator must place this file outside every served workspace.
 """
 from contextlib import contextmanager
@@ -143,7 +145,9 @@ class HostedQuota:
             db.execute('INSERT INTO calls VALUES (?,?,?,?,NULL,NULL,NULL)', (identifier, input_cap, output_cap, reservation))
         return identifier
 
-    def settle(self, identifier, input_tokens, output_tokens):
+    def settle(self, identifier, input_tokens, output_tokens, estimated=False):
+        """Charge reported usage, or with estimated=True an upper estimate for a stream whose usage the
+        provider never reported (recorded as such)."""
         with self._transaction() as db:
             row = db.execute('SELECT input_cap, output_cap, reserved, charged, input_tokens, output_tokens FROM calls WHERE id=?',
                              (identifier,)).fetchone()
@@ -160,7 +164,7 @@ class HostedQuota:
             if charged > row[2]:
                 raise AgentError('Tester allowance usage exceeded its reservation; reservation retained')
             db.execute('UPDATE calls SET charged=?, input_tokens=?, output_tokens=? WHERE id=?',
-                       (charged, input_tokens, output_tokens, identifier))
+                       (charged, None if estimated else input_tokens, None if estimated else output_tokens, identifier))
 
     def status(self):
         with self._transaction() as db:

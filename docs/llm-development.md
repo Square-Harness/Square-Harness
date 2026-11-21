@@ -788,7 +788,7 @@ started). `frontend/src/investigationText.ts` reads the report's section
 headings, task rows and markers back, so reword them in both places and keep
 reading the headings of saved reports ("Confirmed statement"). A framing
 request the model does not answer pauses the turn for Resume, as an ordinary
-turn does, after the one replacement `generation_attempts` allows; only
+turn does, after the replacements `generation_attempts` allows; only
 answered requests count against `FRAME_CALLS`. A rejected tool call spends one
 framing call and is asked again with a correction message. Budget and context
 limits still end the investigation with a report: when an interruption leaves
@@ -1051,14 +1051,51 @@ and competing reviewed targets require clarification. The ordinary Review runner
 uses a focused follow-up phase for replies to comments: first select source line
 ranges, then reassess the quoted previous comments against those passages.
 Unsupported quotes remain unresolved. Keep the original report, the existing
-budgets and pipeline identity, and ordinary Review's exclusion of proof checking.
+budgets and pipeline identity, and the follow-up's exclusion of proof checking.
 Only an explicit request for a full new review follows the complete-review path.
 Each response is headed with the number of its comment in the previous report
 (`review._numbered_comment`), so a disputed comment keeps the number the user read.
 A review worker's result (`ReviewBase._result`) carries `report.md` without its
-status line (job ID, phase, effort) and its usage and storage footer
+usage footer, which holds the status line (job ID, phase, effort)
 (`review._shown_report`): that text reaches the Assistant, the conversation and
-the terminal; `report.md` and the job page keep the rest. Every review call carries
+the terminal; `report.md` and the job page keep the rest.
+
+Provider failures on DeepInfra are handled in `deepinfra.py`, for every key and
+mode. `_request_url` sends a request refused before streaming (429 with a transient
+reason, 500/502/503/504) again after `BACKOFF` or a `Retry-After` of at most
+`LONGEST_RETRY_AFTER`, and sets a process-wide cooldown that other completions wait
+out. `DeepInfra.stream` gives every request a start limit (`START_SECONDS` plus
+prefill time), so a silent accepted stream raises `DeepInfraSilentStart` instead of
+waiting for the provider's own error. `generation_attempts` replaces a failed logical
+call up to `RETRIES` times within its window's deadline: a failure before output at
+once (silent start) or after a short pause, a failure after output started only when
+the caller restarts the whole call (`replay=True`, the worker wrapper
+`retry_generation_call`) and at most `REPLAYS` times. Conversation streams
+(`generation_stream`, the orchestrator, investigations) pass `replay=False`. Every
+replacement's first message starts with one more space (measured to start silent
+requests more often). The tester ledger settles a failed stream with unknown usage
+at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus framing,
+streamed characters plus 256), so retries do not drain allowances with
+full-context reservations. Proof gives every replacement a fresh dispatch key.
+
+Review and Detailed review (`JournalRunner`; `SummaryReviewRunner` sets `LIGHT`
+and checks only the proofs of the main results) decide at mapping time whether the
+whole manuscript fits `model_limits.INPUTS['review_whole']` (DS4 only; `state['whole']`).
+Whole mode reads the paper in one call and runs the reading, the scope and the
+citations comparison side by side in one `_wave`; every check and re-check packet
+starts with the whole numbered manuscript (`P.WHOLE_CONTEXT`), the same prefix for
+every call. Without whole mode (small local contexts) the paper is read in
+section-following parts and a check sees its proof with the statements and equations
+it cites. Misuses of cited results are issues of the pseudo-unit `review.CITE`, so
+they are re-checked, merged and numbered like proof issues; `_cited_candidates`
+sends the ones at stake to `refcheck.CheckRunner` lookups, which run concurrently
+with the novelty search. Before the prose call, `_merge` asks one small call which
+comments share a root cause; `_comments` then reports each root cause once and
+labels comments `Major n` / `Minor n`, the labels `_write` accepts in the prose.
+Severity comes from the check and, after a valid re-check, from the re-check; a
+confirmed major comment never leaves an `accept` or `minor_revision`
+recommendation. `_wave` is a continuous pool (`admit(running)` is asked before each
+start); provider failures are replaced by the shared DeepInfra policy above. Every review call carries
 the delegation context except the novelty comparison (`_ask(reference=False)`),
 which sees only the field, the claimed contribution and the search hits.
 

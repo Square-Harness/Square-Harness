@@ -1202,9 +1202,9 @@ class ReviewRunner(ResearchRunner):
             if payload['think'] and hosted and getattr(self.agent.client, 'reasoning_effort', 'high') != 'none':
                 # A short, bounded prompt: a higher effort spends the allowance without a better answer.
                 payload['reasoning_effort'] = 'low'
-            if hosted and not os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
-                # Not under the tester ledger: there a stream is never replaced on keep-alives alone,
-                # because every closed stream would keep a full-context reservation.
+            if hosted:
+                # Under the tester ledger too: a closed silent stream is charged an estimate of its input,
+                # not a full-context reservation (hosted_quota).
                 payload['_start_seconds'] = START_SECONDS
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)

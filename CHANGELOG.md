@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Provider robustness on DeepInfra, for every mode and every key (tester accounts included):
+  a request refused with HTTP 429 or 5xx is retried with growing pauses (and the other calls
+  wait out the provider's pause); a request accepted but silent for about 30 seconds is closed
+  and sent again; a background job's stream that stalls mid-answer is replayed (at most twice).
+  Each call gets up to four replacements before the job pauses (before: one, and stalls paused
+  the job). A failed stream with unknown usage is charged an estimate in the tester allowance
+  instead of a full-context reservation.
+- Review and Detailed review, reworked after a benchmark on six manuscripts with planted
+  errors (DS4): with a large context the whole paper is read at once and every proof check
+  and re-check sees the whole manuscript, so definitions and standing assumptions made
+  elsewhere no longer produce false objections (7 to 12 per paper before); every cited
+  result is compared with the literature (a theorem applied outside its hypotheses was
+  missed before); the Review now checks the proofs of its main results and never
+  recommends acceptance with a confirmed major error (it recommended "minor revision" for
+  papers whose main theorem was false); the report has one numbering, one comment per root
+  cause, severity by consequence, typos grouped and capped (each one checked before it is listed:
+  the list fell from about 45 mostly pedantic items to a handful), no remarks on the LaTeX source,
+  locations as "Lemma 3.2, proof, lines 154–156" and no job identifiers at the top; checks,
+  re-checks and source lookups start as soon as a slot frees instead of in batches.
+- Quick review: a pass that found no gap but answered "uncertain" no longer makes the
+  verdict uncertain (live: a correct lemma was labelled Uncertain).
 - Proof: when the Assistant hands your request to Proof without restating it, the agent
   card, the Proof page, its report and the findings show your request, not the
   controller's instructions to the solver (live: "You are the Proof child. Prove the exact

@@ -785,7 +785,8 @@ class Orchestrator:
             self._save()
             return True
 
-        with generation_attempts(self.agent.client, self.emit, before_retry=before_retry) as attempts:
+        # The answer is shown as it streams: only a request that produced nothing is sent again.
+        with generation_attempts(self.agent.client, self.emit, before_retry=before_retry, replay=False) as attempts:
             for attempt in attempts:
                 with attempt:
                     return self._stream_once(payload)

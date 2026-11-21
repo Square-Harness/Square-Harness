@@ -11,7 +11,9 @@ import copy
 import ipaddress
 import json
 import os
+import random
 import stat
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -35,6 +37,18 @@ LEGACY_MODEL = 'deepseek-ai/DeepSeek-V4-Flash-0731'
 SUPPORTED_MODELS = (MODEL, LEGACY_MODEL)
 CONTEXT_TOKENS = 1_048_576
 MAX_OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
+# Provider failures at scale (measured on DS4.1 Flash, November 2026): about 3% of accepted calls go silent,
+# in bursts of a few minutes, and a fresh request usually starts at once; HTTP 429 and 503 refuse a request
+# before any generation. A logical call is therefore sent up to RETRIES more times within its own deadline,
+# for every key: at once after a silent start, after a growing pause after a refusal. A call whose output
+# had started (a stream that stalled or broke mid-answer) is replayed at most REPLAYS times, and only by a
+# caller that restarts the whole call (a worker); a conversation already showing text is never replayed.
+RETRIES, REPLAYS = 4, 2
+BACKOFF = (2, 5, 15, 30, 60)  # seconds before a new request after a refusal without Retry-After
+LONGEST_RETRY_AFTER = 120  # a provider asking for a longer wait is not retried automatically
+START_SECONDS = 30  # an accepted stream silent this long (plus prefill time) is closed and sent again
+_cooldown = {'until': 0.0}
+_cooldown_lock = threading.Lock()
 
 
 class DeepInfraGenerationError(AgentError):
@@ -54,14 +68,27 @@ class DeepInfraGenerationError(AgentError):
     @property
     def retry_before_output(self):
         return (self.confirmed_terminal and not self.retry_spent and self.category in {'server_error', 'service_unavailable'}
-                and not self.output_started and not any(self.stream_progress.values())
-                and not self.stats.get('eval_count'))
+                and not self.started)
+
+    @property
+    def started(self):
+        """Whether the provider had produced output for this request (reasoning counts)."""
+        return bool(self.output_started or any(self.stream_progress.values()) or self.stats.get('eval_count'))
 
 
 @dataclass
 class _GenerationWindow:
+    """One logical call: its deadline and the replacements it has used (a litreview replacement window starts
+    spent). retry_spent means no replacement is left."""
     deadline: float
     retry_spent: bool
+    retries: int = 0
+    replays: int = 0
+
+    def spend(self, replay=False):
+        self.retries += 1
+        self.replays += bool(replay)
+        self.retry_spent = self.retry_spent or self.retries >= RETRIES
 
 
 _generation_window = ContextVar('deepinfra_generation_window', default=None)
@@ -88,17 +115,42 @@ def generation_window(client, *, replacement=False, deadline=None):
         _generation_window.reset(previous)
 
 
+def replaceable(exc, window, replay):
+    """Whether a failed request may be sent again: a transient provider failure, replacements left, and
+    (for a request whose output had started) a caller that restarts the whole call."""
+    if (window is None or window.retry_spent or isinstance(exc, DeepInfraRateLimit)
+            or exc.category not in {'server_error', 'service_unavailable', 'interrupted', 'rate_limit'}):
+        return False
+    return not exc.started or (replay and window.replays < REPLAYS)
+
+
+def _pause(client, seconds, deadline):
+    """Wait before a replacement; False when the deadline would pass first. A cancellation interrupts."""
+    seconds = max(0.0, seconds)
+    if time.monotonic() + seconds >= deadline:
+        return False
+    cancel = getattr(client, 'cancel', None)
+    if cancel is None:
+        time.sleep(seconds)
+    elif cancel.wait(seconds):
+        raise KeyboardInterrupt
+    return True
+
+
 @contextmanager
-def generation_attempts(client, emit, *, before_retry=None):
-    """One owner retries outside all its admission, reservation and journal steps."""
+def generation_attempts(client, emit, *, before_retry=None, replay=True):
+    """One owner retries outside all its admission, reservation and journal steps.
+
+    replay=False: the caller already showed the partial output (a conversation), so only a request that
+    produced nothing is sent again.
+    """
     if getattr(client, 'profile', None) != 'deepinfra' or _generation_window.get() is not None:
         yield (nullcontext(),)
         return
-    retry = None
+    failed = []
 
     @contextmanager
-    def first():
-        nonlocal retry
+    def attempt():
         try:
             yield
         except DeepInfraGenerationError as exc:
@@ -106,22 +158,28 @@ def generation_attempts(client, emit, *, before_retry=None):
             if cancel is not None and cancel.is_set():
                 raise KeyboardInterrupt from None
             window = _generation_window.get()
-            if (not exc.retry_before_output or window.retry_spent or time.monotonic() >= window.deadline
+            if (not replaceable(exc, window, replay) or time.monotonic() >= window.deadline
                     or (before_retry and not before_retry(exc))):
                 raise
-            retry = exc
-            window.retry_spent = True
+            window.spend(replay=exc.started)
+            failed.append(exc)
 
     def attempts():
-        yield first()
-        if retry:
-            emit('notice', 'The provider ended the request before producing output. Retrying once within the remaining budget.')
-            cancel = getattr(client, 'cancel', None)
-            if cancel is not None and cancel.is_set():
-                raise KeyboardInterrupt
-            if time.monotonic() >= _generation_window.get().deadline:
-                raise retry
-            yield nullcontext()
+        while True:
+            count = len(failed)
+            yield attempt()
+            if len(failed) == count:
+                return
+            exc, window = failed[-1], _generation_window.get()
+            what = ('stopped in the middle of its answer' if exc.started else
+                    'accepted the request but did not start' if isinstance(exc, DeepInfraSilentStart) else
+                    'ended the request before producing output')
+            emit('notice', f'The provider {what}; sending it again ({window.retries} of {RETRIES} retries).')
+            # A silent or broken stream is usually served at once by a fresh request; a provider error
+            # reported for the request itself gets a short pause.
+            pause = 0 if isinstance(exc, DeepInfraSilentStart) else BACKOFF[min(window.retries, len(BACKOFF)) - 1]
+            if not _pause(client, pause * random.uniform(.8, 1.2), window.deadline):
+                raise exc
 
     with generation_window(client):
         yield attempts()
@@ -139,8 +197,9 @@ def retry_generation_call(method):
 
 
 def generation_stream(client, payload, emit):
-    """Plain Agent turns have no separate worker journal; re-enter the budgeted client."""
-    with generation_attempts(client, emit) as attempts:
+    """Plain Agent turns have no separate worker journal; re-enter the budgeted client. Their output is
+    shown as it arrives, so only a request that produced nothing is sent again."""
+    with generation_attempts(client, emit, replay=False) as attempts:
         for attempt in attempts:
             with attempt:
                 yield from client.stream(payload)
@@ -162,6 +221,15 @@ class DeepInfraRateLimit(DeepInfraGenerationError):
 
     def __init__(self, hint, *, completion_rejected):
         super().__init__('DeepInfra HTTP 429: ' + hint, category='rate_limit')
+        self.completion_rejected = completion_rejected
+
+
+class DeepInfraUnavailable(DeepInfraRateLimit):
+    """A definitive HTTP 5xx response before any stream: the provider refused the request without generating."""
+
+    def __init__(self, code, *, completion_rejected):
+        DeepInfraGenerationError.__init__(self, f'DeepInfra HTTP {code}: the provider is temporarily unavailable.',
+                                          category='service_unavailable')
         self.completion_rejected = completion_rejected
 
 
@@ -267,10 +335,11 @@ def _rate_limit(exc, deadline):
     return 'The provider rate, capacity or spending limit was reached.', False
 
 
-def _retry_delay(header):
-    """Seconds to wait, or None when the provider requests a long or invalid wait."""
+def _retry_delay(header, attempt=0):
+    """Seconds to wait, or None when the provider requests a long or invalid wait. Without Retry-After the
+    wait grows with each refusal (with jitter, so that parallel calls do not return together)."""
     if header is None:
-        return 1.0
+        return BACKOFF[min(attempt, len(BACKOFF) - 1)] * random.uniform(.8, 1.2)
     header = header.strip()
     if len(header) > 128:
         return None
@@ -284,7 +353,7 @@ def _retry_delay(header):
             seconds = max(0, date.timestamp() - time.time())
     except (ValueError, TypeError, OverflowError, OSError):
         return None
-    return seconds if seconds <= 5 else None
+    return seconds if seconds <= LONGEST_RETRY_AFTER else None
 
 
 def read_api_key():
@@ -315,7 +384,7 @@ class DeepInfra(OpenAICompatible):
     profile = 'deepinfra'
     require_terminal_usage = True
     # DS4 streams about 150 tokens/s once started; three minutes with only keep-alives is a stalled
-    # stream. It is ended, never resent: its output had started, so the job pauses for the user.
+    # stream. It is ended; a worker call is then replayed (see REPLAYS), a conversation is not.
     stall_seconds = 180
 
     def __init__(self, host=BASE_URL, timeout=600):
@@ -382,26 +451,49 @@ class DeepInfra(OpenAICompatible):
         if timeout <= 0:
             raise ModelNotDispatched('The DeepInfra request time allowance elapsed before dispatch.')
         cancel = getattr(self, 'cancel', None)
-        for attempt in (0, 1):
+        for attempt in range(RETRIES + 1):
             if attempt and cancel is not None and cancel.is_set():
                 raise _RejectedRetryCancelled(completion)
+            if completion:
+                # After a refusal every call of this process waits out the provider's pause, so parallel
+                # calls do not keep hitting an overloaded provider.
+                with _cooldown_lock:
+                    wait = _cooldown['until'] - time.monotonic()
+                if 0 < wait <= LONGEST_RETRY_AFTER:
+                    if time.monotonic() + wait >= deadline:
+                        raise ModelNotDispatched('The provider asked to wait beyond this request\'s time allowance.')
+                    if cancel is not None and cancel.wait(wait):
+                        raise _RejectedRetryCancelled(completion)
+                    if cancel is None:
+                        time.sleep(wait)
+                    timeout = deadline - time.monotonic()
             try:
                 return self.opener.open(request, timeout=timeout)
             except HTTPError as exc:
                 with exc:
                     if optional and exc.code in {404, 405}:
                         return None
-                    if exc.code != 429:
+                    if exc.code in {500, 502, 503, 504}:
+                        # Refused before any generation: the provider or its gateway is overloaded.
+                        rejection = DeepInfraUnavailable(exc.code, completion_rejected=completion)
+                        transient = True
+                        delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
+                    elif exc.code != 429:
                         hint = hints.get(exc.code, 'The provider request failed; check its service status.')
                         raise AgentError(f'DeepInfra HTTP {exc.code}: {hint}') from None
-                    hint, transient = _rate_limit(exc, deadline)
-                    delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None)
-                rejection = DeepInfraRateLimit(hint, completion_rejected=completion)
+                    else:
+                        hint, transient = _rate_limit(exc, deadline)
+                        delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
+                        rejection = DeepInfraRateLimit(hint, completion_rejected=completion)
                 window = _generation_window.get() if completion else None
-                if attempt or (window and window.retry_spent) or not transient or delay is None or time.monotonic() + delay >= deadline:
+                if ((window.retry_spent if window else attempt) or not transient or delay is None
+                        or time.monotonic() + delay >= deadline):
                     raise rejection from None
                 if window:
-                    window.retry_spent = True
+                    window.spend()
+                if completion:
+                    with _cooldown_lock:
+                        _cooldown['until'] = max(_cooldown['until'], time.monotonic() + delay)
                 try:
                     if cancel is None:
                         time.sleep(delay)
@@ -452,6 +544,11 @@ class DeepInfra(OpenAICompatible):
             self._quota_input_cap(payload, data)
         if refs and include_images:
             data['messages'] = images.materialize(self.image_root, refs, data['messages'], originals=payload['messages'])
+        window = _generation_window.get()
+        if window is not None and window.retries and data['messages'] and isinstance(data['messages'][0].get('content'), str):
+            # Measured on DeepInfra: after a silent start, a request whose first characters differ starts more
+            # often than an identical one. Leading spaces change nothing for the model.
+            data['messages'][0] = {**data['messages'][0], 'content': ' ' * window.retries + data['messages'][0]['content']}
         return data
 
     @staticmethod
@@ -582,6 +679,11 @@ class DeepInfra(OpenAICompatible):
 
     def stream(self, payload):
         with generation_window(self):
+            if payload.get('_start_seconds') is None:
+                # A silent accepted stream is closed and replaced instead of waiting minutes for the provider's
+                # own error. Prefill of a long prompt comes first: about 2,500 input tokens a second.
+                size = sum(len(str(m.get('content') or '').encode()) for m in payload.get('messages') or [])
+                payload = {**payload, '_start_seconds': START_SECONDS + size / 3 / 2500}
             yield from self._generation(payload)
 
     def _generation(self, payload):
@@ -591,7 +693,8 @@ class DeepInfra(OpenAICompatible):
             from .hosted_quota import HostedQuota
             quota = HostedQuota.from_environment(self.service_tier)
             data = self._payload(payload)
-            reservation = quota.reserve(self._quota_input_cap(payload, data), data['max_tokens'])
+            input_cap = self._quota_input_cap(payload, data)
+            reservation = quota.reserve(input_cap, data['max_tokens'])
         try:
             if quota is None:
                 yield from super().stream(payload)
@@ -622,6 +725,17 @@ class DeepInfra(OpenAICompatible):
             if quota is not None and isinstance(exc, (ToolCallError, DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
                 try:
                     quota.settle(reservation, exc.stats['prompt_eval_count'], exc.stats['eval_count'])
+                except AgentError:
+                    exc.args = (str(exc) + ' Tester allowance settlement failed; the full reservation was retained.',)
+            elif quota is not None and isinstance(exc, DeepInfraGenerationError):
+                # Usage unknown (a silent, stalled or broken stream). Charge a conservative estimate, not the
+                # whole reservation: the whole input (its UTF-8 bytes bound its tokens) and every character
+                # streamed plus a margin. A provider failure and its replacement then cost about what the
+                # provider bills, instead of a full-context reservation each.
+                framing = 1024 + 128 * len(data['messages'])
+                try:
+                    quota.settle(reservation, min(input_cap, self._bytes(data['messages']) + framing),
+                                 min(data['max_tokens'], sum(exc.stream_progress.values()) + 256), estimated=True)
                 except AgentError:
                     exc.args = (str(exc) + ' Tester allowance settlement failed; the full reservation was retained.',)
             redacted = self._redact(exc)

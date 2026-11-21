@@ -547,7 +547,7 @@ class Investigation(Orchestrator):
             stream.state = {key: copy.deepcopy(self.state[key]) for key in fields}
         try:
             # As in an ordinary turn, a request the provider ends before any output is sent once more.
-            with generation_attempts(client, self.emit) as attempts:
+            with generation_attempts(client, self.emit, replay=False) as attempts:
                 for attempt in attempts:
                     with attempt:
                         return stream._stream(payload, output_char_limit=4 * cap + 4096)
