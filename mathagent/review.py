@@ -767,6 +767,9 @@ class ReviewBase(ResearchRunner):
                 except (ValueError, OSError, UnicodeError):
                     self._warn('The bibliography source could not be read: ' + name)
             for bib_source in bibliography_sources:
+                if bib_source.get('id'):
+                    # A pinned .bib or .bbl is read whole into the references every call can use.
+                    self._mark(bib_source['id'], [[1, max(1, len(bib_source['content'].splitlines()))]])
                 if bib_source['path'].lower().endswith('.bbl'):
                     mapping['bibliography'].update(manuscript.build(bib_source['content'], 'references.tex')['bibliography'])
                 else:
@@ -2076,9 +2079,11 @@ class JournalRunner(ReviewBase):
         if phase == 'plan':
             if not self.state['sources']:
                 raise WorkerInputError('Pin the manuscript to review.', code='invalid_worker_input')
-            if len(self.state['sources']) > 1:
-                self._warn('Only the first pinned file is reviewed as the manuscript; the others were not read.')
-            self._map()
+            self._map()  # chooses the manuscript among the pinned files
+            others = [s['path'] for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() not in ('.bib', '.bbl')]
+            if others:  # a bibliography file is read into the references (see _map)
+                self._warn(f'Only {self.state["sources"][0]["path"]} is reviewed as the manuscript; '
+                           f'{", ".join(others)} {"was" if len(others) == 1 else "were"} not read.')
             if not manuscript.checkable(self.state['map']):
                 self._warn('No proofs were recognised in the manuscript map. Excerpt checks cannot establish complete proof coverage.')
                 self.state['source_incomplete'] = True
