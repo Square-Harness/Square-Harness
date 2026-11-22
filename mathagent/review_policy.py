@@ -66,7 +66,9 @@ SWEEP_SCHEMA = {
 _EFFECT_SCALE = """- statement_false: the result as stated is false (a counterexample satisfying every hypothesis, or a calculation);
 - breaks_proof: a step fails and the proof cannot be completed without a new idea, an extra hypothesis or a
   different argument;
-- gap: a step is unjustified or incomplete, but an expert can fill it with standard arguments (say how);
+- gap: a step is unjustified or incomplete, but an expert can fill it with standard arguments (say how); when filling
+  it needs a fact the manuscript neither proves nor cites (a density, a regularity up to the boundary or the initial
+  time, a uniform bound, a new lemma), the proof fails as written: breaks_proof;
 - imprecision: a wrong constant, a missing case, a quantifier or a dependence stated loosely, where the intended
   statement is clear and true;
 - misprint: a misprinted formula, sign, index or reference whose correct form is clear from the context (give it)."""

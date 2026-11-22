@@ -83,7 +83,7 @@ EFFORT = {
                    sweeps=('consistency', 'completeness'), adjudicate='major', adjudications=10, repair=True, typos=True,
                    explain_check=True, fills=1),
     'high': dict(passes=3, confirm=True, proofs=True, main_passes=2, other_passes=1, depth=1, think=True,
-                 sweeps=('consistency', 'completeness'), adjudicate='major', adjudications=20, repair=True, typos=True,
+                 sweeps=('consistency', 'completeness'), adjudicate='near', adjudications=16, repair=True, typos=True,
                  explain_check=True, fills=2),
 }
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
@@ -2857,8 +2857,11 @@ class PaperReviewRunner(ReviewBase):
     # -- second opinions -----------------------------------------------------------------------------------
 
     def _eligible(self, cluster):
+        """Findings that get a second opinion: those alleged major; at High also the gaps in the main results and what
+        they use directly (a checker can call a broken step a gap: the judge applies the new-ingredient rule)."""
         rule = self.effort['adjudicate']
-        return rule == 'all' or cluster['effect'] in P.MAJOR_EFFECTS or (rule == 'substantive' and cluster['effect'] == 'gap')
+        return (rule == 'all' or cluster['effect'] in P.MAJOR_EFFECTS or (rule == 'substantive' and cluster['effect'] == 'gap')
+                or (rule == 'near' and cluster['effect'] == 'gap' and self._host(cluster) in self._near_chain()))
 
     def _adjudication_jobs(self, chain):
         """Second opinions on the findings of every proof (or sweep) whose checks are complete: a defence of the
@@ -3429,11 +3432,14 @@ class PaperReviewRunner(ReviewBase):
                 'for a literature review' + (f', for example: `@literature {topic}`.' if topic else '.'), '']
         return out
 
-    def _recommendation_floor(self, major, questions):
+    def _recommendation_floor(self, major, questions, minor=()):
         """The mildest recommendation the findings allow: a major comment upheld after a defence of the paper rules
         out acceptance as it stands."""
         confirmed = [c['label'] for c in major if c['status'] == 'confirmed']
-        return ('major_revision', confirmed) if confirmed else ('accept', [])
+        if confirmed:
+            return 'major_revision', confirmed
+        # Comments to address rule out acceptance as it stands (live: "accept" with 45 minor comments).
+        return ('minor_revision', ['the comments of this report']) if major or minor or questions else ('accept', [])
 
     def _write(self, draft=False):
         """The prose parts, from the findings (they cannot add, drop or renumber a comment). draft: a first version
@@ -3447,7 +3453,7 @@ class PaperReviewRunner(ReviewBase):
                 if i not in hidden:
                     kinds[c['kind']] = kinds.get(c['kind'], 0) + 1
             citations = self.state.get('citations') or []
-            floor, raised = self._recommendation_floor(major, questions)
+            floor, raised = self._recommendation_floor(major, questions, minor)
             findings = {'overview': scope.get('overview'), 'field': scope.get('field'), 'claimed_contribution': scope.get('contribution'),
                         'proofs_scope': self._proofs_scope() + ('; the review is still running, more checks will follow' if draft else ''),
                         'main_results': [{'name': r['name'], 'status': r['status']} for r in self._main_status(major, minor, questions, verdicts)],
@@ -3655,7 +3661,9 @@ class PaperReviewRunner(ReviewBase):
         if open_main:
             gaps.append('the main results depend on points not settled (' + ', '.join(open_main) + ')')
         body += ['## Recommendation', '', f'**{recommendation}**' + (' (provisional)' if (gaps or write.get('draft')) and write else '')]
-        if write.get('raised'):
+        if write.get('raised') == 'the comments of this report':
+            body += ['', 'Raised to minor revision by the review itself: the comments of this report are to be addressed.']
+        elif write.get('raised'):
             body += ['', f'Raised to major revision by the review itself: {write["raised"]} '
                          f'{"was" if "," not in write["raised"] else "were"} upheld after a defence of the paper.']
         if write.get('draft'):
