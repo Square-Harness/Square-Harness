@@ -133,7 +133,9 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     try { window.localStorage.setItem(VARIANT_KEY, next) } catch { /* a convenience only */ }
   }
   // Quick checks and explanations never search: they read the proof and what it cites.
-  const searching = online && !status?.online_locked && !pasted
+  // No review searches online: the paper review suggests a literature review instead.
+  const offline = review
+  const searching = online && !status?.online_locked && !offline
 
   const running = capacityFull(snapshot, status)
   const noun = copy.noun
@@ -189,6 +191,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             <p className="lede">{copy.lede}</p>
             {pasted ? (
               <p className="network-note">Works on this computer only: the {noun} reads the text and the statements it cites, and searches nothing online.</p>
+            ) : offline ? (
+              <p className="network-note">The {noun} searches nothing online. To place the paper's results in the literature, it suggests a literature review.</p>
             ) : (
               <p className={'network-note' + (searching ? ' network-online' : '')}>
                 {searching
@@ -229,8 +233,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
           <span className="in-margin" />
           <div>
             {d && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
-            {review && manuscript && <p className="field-hint">A review checks every proof: it allows {d?.api_profile === 'deepinfra' ? 'three times the input' : 'twice the working time'} of the other modes at the same effort.</p>}
-            {!pasted && (
+            {review && manuscript && <p className="field-hint">A review reads the whole paper in every call: it allows {d?.api_profile === 'deepinfra' ? 'four times the input' : 'twice the working time'} of the other modes at the same effort.</p>}
+            {!offline && (
               <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
                 hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />
             )}
@@ -240,7 +244,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />
-                {!pasted && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
+                {!offline && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
                 {review && !pasted && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
               </div>
             </Collapse>

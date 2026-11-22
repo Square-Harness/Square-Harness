@@ -1142,7 +1142,7 @@ High, the second pass on the near chain and the second opinions (`EFFORT['think'
 `_deep`): DS4 on DeepInfra generates about 550 tokens per second per account and a
 thinking proof check writes 15–30k tokens, so reasoning, not concurrency, sets the
 duration (a live Medium review with reasoning everywhere took 40–64 minutes; the
-"low" reasoning level made checks think longer, not shorter). On DS4 a review gets three times the
+"low" reasoning level made checks think longer, not shorter). On DS4 a review gets four times the
 input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
 `inference.MAX_CAPACITY` (16) concurrent calls (`Hub.review_concurrency`, within the
 model-request limit). Pool admission counts only the new call: running calls have

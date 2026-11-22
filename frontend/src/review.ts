@@ -44,9 +44,9 @@ export const VARIANT_STEP_NAMES: Record<string, string> = {
 /** The effort each kind starts from. */
 export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'medium', journal: 'medium', explain: 'medium' }
 
-/** A review checks every proof: twice the working time on a local model, three times the input on DS4 (gui/effort.py). */
+/** A review checks every proof: twice the working time on a local model, four times the input on DS4 (gui/effort.py). */
 export const VARIANT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 2, journal: 2, explain: 1 }
-export const VARIANT_INPUT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 3, journal: 3, explain: 1 }
+export const VARIANT_INPUT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 4, journal: 4, explain: 1 }
 
 export const VARIANT_CAVEATS: Record<ReviewVariant, string> = {
   quick: 'Model check, not a certificate. Each objection links to the proof lines it concerns; the proof was not rewritten.',

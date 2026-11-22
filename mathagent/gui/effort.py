@@ -21,16 +21,16 @@ LEGACY_EFFORTS = {
     'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=160, chars=150_000),
 }
 LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
-# A review checks every proof with the whole paper in each call: about 30 calls of some 70k input tokens for a
-# 3,000-line paper at Medium, three times the input allowance of other DS4 workers. ('detailed_review' is the
-# former name of a review at high effort.)
+# A review reads the whole paper in each call, many calls at once: some 50 calls of 80k input tokens for a
+# 3,000-line paper at Medium, each reserving about three times that while it runs (no DS4 tokenizer: UTF-8 bytes).
+# Four times the input allowance of other DS4 workers. ('detailed_review' is the former name of a review at High.)
 REVIEW_MODES = ('referee', 'detailed_review')
-REVIEW_INPUT = 3
+REVIEW_INPUT = 4
 
 
 def level(mode, name, args=None):
     """Legacy workload estimates; a review (which checks every proof) allows twice the working time on a local model and
-    three times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
+    four times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
     value = dict(table.get(name, legacy.get(name, table['medium'])))

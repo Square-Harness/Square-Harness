@@ -32,7 +32,7 @@
     and the report is rewritten after each one: the overview and first findings within minutes, a
     first prose report once the main results are checked and judged. Every call opens with the
     same text (the paper, its package, its cited bibliography), for providers that cache prompt
-    prefixes. On DS4 a review gets three times the input allowance of other workers and up to
+    prefixes. On DS4 a review gets four times the input allowance of other workers and up to
     16 concurrent calls (the model-request limit now goes to 16).
   - Speed: hidden reasoning is most of a model's output and the provider caps an account's
     throughput, so Low and Medium calls answer at once (no hidden reasoning); High reasons only

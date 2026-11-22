@@ -2342,7 +2342,9 @@ class PaperReviewRunner(ReviewBase):
     def _audit(self):
         """Run every call the review needs, each as soon as what it depends on is done (the overview, its proof's
         other passes, the reading). The report is rewritten after every call."""
-        estimate = (self._whole_tokens() or 6000) + 4000
+        # What _ask will reserve for a call: without a tokenizer the provider client counts UTF-8 bytes (about three
+        # times the real tokens of a TeX paper), and a call that does not fit what is left fails.
+        estimate = (len(self._block().encode()) if self.state.get('whole') else 6000) + 20000
         with self._mutex:
             for comment in self.state['presentation']:  # batches of an earlier run are checked again
                 comment.pop('check_pending', None)
