@@ -77,13 +77,13 @@ def full_review_requested(query):
 # major finding minor is checked, whether the typo list is checked, cited results looked up in their source and
 # literature queries; explanation extras. Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
 EFFORT = {
-    'low': dict(passes=1, confirm=False, proofs=False, main_passes=1, other_passes=1, sweeps=(), adjudicate='major',
+    'low': dict(passes=1, confirm=False, proofs=False, main_passes=1, other_passes=1, depth=0, sweeps=(), adjudicate='major',
                 adjudications=0, repair=False, typos=True, cited=0, queries=0, explain_check=False, fills=1),
-    'medium': dict(passes=2, confirm=True, proofs=True, main_passes=2, other_passes=1, sweeps=('consistency', 'completeness'),
-                   adjudicate='substantive', adjudications=30, repair=True, typos=True, cited=2, queries=2,
+    'medium': dict(passes=2, confirm=True, proofs=True, main_passes=2, other_passes=1, depth=1, sweeps=('consistency', 'completeness'),
+                   adjudicate='major', adjudications=20, repair=True, typos=True, cited=2, queries=2,
                    explain_check=True, fills=1),
-    'high': dict(passes=3, confirm=True, proofs=True, main_passes=3, other_passes=2, sweeps=('consistency', 'completeness'),
-                 adjudicate='all', adjudications=60, repair=True, typos=True, cited=4, queries=3, explain_check=True, fills=2),
+    'high': dict(passes=3, confirm=True, proofs=True, main_passes=3, other_passes=1, depth=None, sweeps=('consistency', 'completeness'),
+                 adjudicate='substantive', adjudications=40, repair=True, typos=True, cited=4, queries=3, explain_check=True, fills=2),
 }
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
 # Explain: the part of a text a request names when it names no numbered result.
@@ -326,7 +326,7 @@ class ReviewBase(ResearchRunner):
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
-        concurrency_limit = 8 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        concurrency_limit = 16 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
         self.concurrency = max(1, min(concurrency_limit, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
@@ -2201,23 +2201,31 @@ class PaperReviewRunner(ReviewBase):
         wanted = set(scope.get('main') or []) | {u['id'] for u in self._units() if u.get('main')}
         return [u['id'] for u in self._units() if u['id'] in wanted and (u['type'] in manuscript.PROVABLE or u.get('prose'))][:8]
 
-    def _chain(self, uid):
-        """A result and every result its proof (or statement) uses, through the map's references."""
+    def _chain(self, uid, depth=None):
+        """A result and every result its proof (or statement) uses, through the map's references; depth 1: only
+        the results it uses directly."""
         by_id = {u['id']: u for u in self._units()}
-        seen, frontier = set(), [uid]
-        while frontier:
-            current = frontier.pop()
-            if current in seen or current not in by_id:
-                continue
-            seen.add(current)
-            frontier += by_id[current].get('refs', []) + by_id[current].get('statement_refs', [])
+        seen, frontier, level = set(), [uid], 0
+        while frontier and (depth is None or level <= depth):
+            following = []
+            for current in frontier:
+                if current in seen or current not in by_id:
+                    continue
+                seen.add(current)
+                following += by_id[current].get('refs', []) + by_id[current].get('statement_refs', [])
+            frontier, level = following, level + 1
         return seen
 
-    def _main_chain(self):
+    def _main_chain(self, depth=None):
         chain = set()
         for uid in self._main_ids():
-            chain |= self._chain(uid)
+            chain |= self._chain(uid, depth)
         return chain
+
+    def _near_chain(self):
+        """The results that get the effort's extra passes: the main results and, at Medium, what they use directly
+        (the whole chain of a paper often covers nearly every proof)."""
+        return self._main_chain(self.effort.get('depth'))
 
     def _host(self, cluster):
         """The result a finding concerns: its unit, or for a sweep the result whose proof (or statement) holds it."""
@@ -2364,8 +2372,11 @@ class PaperReviewRunner(ReviewBase):
                 comment.pop('check_failed', None)
 
         def admit(running):
-            return self._affordable(self._check_cap(), estimate * (running + 1), reserve_out=self._write_reserve(),
-                                    reserve_in=12000, share=.9, jobs=running + 1)
+            # Running calls have already reserved their output and input in the job's counters: a new call needs
+            # only its own share (counting them again stopped a 16-call pool with 1% of the budget used).
+            return (self._elapsed() < self.state['settings']['max_seconds'] * .9
+                    and self._tokens_left(self._write_reserve()) >= min(self._cap(self._check_cap()), 32768)
+                    and self._input_left(12000) >= estimate)
         started, left = self._pool(self._audit_jobs, admit)
         if left:
             self._warn(f'{left} planned call(s) were not started: the time or token budget ran out. '
@@ -2406,7 +2417,7 @@ class PaperReviewRunner(ReviewBase):
                             errors.append(PhaseBudget('The phase working-time share is used; pending checks were retained for resume.'))
                             break
                         if not admit(len(running)):
-                            stopped = True
+                            stopped = not running  # running calls release their reservations: try again after them
                             break
                         _, _, _, fn = heapq.heappop(pending)
                         running.add(pool.submit(fn))
@@ -2454,7 +2465,7 @@ class PaperReviewRunner(ReviewBase):
         if whole:
             for name in effort['sweeps']:
                 if not self._checks_complete(SWEEP_UNITS[name]):
-                    jobs.append((7, 'sweep:' + name, self._sweep_job(name)))
+                    jobs.append((3, 'sweep:' + name, self._sweep_job(name)))  # long calls: started early
         if whole or scope_done:
             for uid in s['plan_units']:
                 for item in self._audit_plan(uid, scope_done):
@@ -2471,7 +2482,7 @@ class PaperReviewRunner(ReviewBase):
         if online and effort['cited'] and (not whole or self._citations_done()) and all(
                 self._checks_complete(uid) for uid in s['plan_units'] if uid in chain):
             jobs += [(9, key, fn) for key, fn in self._cited_jobs()]
-        if s.get('write') is None and scope_done and not self._unread_parts() and self._chain_settled(chain):
+        if s.get('write') is None and scope_done and self._chain_settled(self._near_chain()):
             jobs.append((2, 'write:draft', lambda: self._write(draft=True)))
         return jobs
 
@@ -2657,7 +2668,7 @@ class PaperReviewRunner(ReviewBase):
     def _lenses(self, uid):
         if uid in PSEUDO_UNITS:
             return [uid.lower()]
-        main = uid in self._main_chain()
+        main = uid in self._near_chain()
         count = self.effort['main_passes'] if main else self.effort['other_passes']
         return ['line', 'adversarial', 'global'][:max(1, count)]
 
@@ -2912,11 +2923,19 @@ class PaperReviewRunner(ReviewBase):
             return None
         if not adjudication.get('defense'):
             return 'defend'
-        if adjudication['defense']['position'] != 'conceded' and not adjudication.get('arbiter'):
+        if PaperReviewRunner._contested(adjudication) and not adjudication.get('arbiter'):
             return 'arbiter'
         if adjudication.get('repair_wanted') and not adjudication.get('repair_check'):
             return 'repair'
         return None
+
+    @staticmethod
+    def _contested(adjudication):
+        """A judge is needed when the defence holds the paper right, or makes the finding less serious than alleged; a
+        defence that concedes, or agrees on the effect, settles the finding."""
+        defense = adjudication['defense']
+        return defense['position'] == 'defended' or (
+            defense['position'] == 'partly' and _effect_rank(defense['effect']) < _effect_rank(adjudication['effect']))
 
     def _allegation(self, cluster):
         sid = self.state['sources'][0]['id']
@@ -2991,9 +3010,10 @@ class PaperReviewRunner(ReviewBase):
         alleged to break a proof or a statement is made minor only by a repair that a separate check found to work
         (models tend to give way when challenged; a downgrade must be earned)."""
         defense = adjudication['defense']
-        if defense['position'] == 'conceded':
+        if not self._contested(adjudication):
             verdict, effect, repair, argument = 'valid', defense['effect'], defense['repair'], defense['argument']
-            said = 'The defence of the paper conceded: '
+            said = ('The defence of the paper conceded: ' if defense['position'] == 'conceded'
+                    else 'The defence of the paper agreed on the problem: ')
         else:
             arbiter = adjudication.get('arbiter')
             if arbiter is None:

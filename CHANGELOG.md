@@ -33,7 +33,7 @@
     first prose report once the main results are checked and judged. Every call opens with the
     same text (the paper, its package, its cited bibliography), for providers that cache prompt
     prefixes. On DS4 a review gets three times the input allowance of other workers and up to
-    eight concurrent calls.
+    16 concurrent calls (the model-request limit now goes to 16).
   - Quick review chooses the manuscript among a pinned `.tex`, `.bib` and `.sty`; bibliography
     keys such as `[Savare]` are no longer reported as unknown source citations; the novelty
     comparison ignores the manuscript's own preprint and refers only to the hits listed.

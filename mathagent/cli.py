@@ -236,7 +236,7 @@ def parser():
     p.add_argument('--gui-concurrency', type=int, default=2,
                    help='Maximum active interface chats/jobs (1–8; each keeps its full token budget)')
     p.add_argument('--gui-model-concurrency', type=int, default=2,
-                   help='Maximum simultaneous model requests across interface jobs and workers (1–8)')
+                   help='Maximum simultaneous model requests across interface jobs and workers (1–16)')
     p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
@@ -290,8 +290,8 @@ def main():
         p.error('Request timeout must be finite and positive')
     if not math.isfinite(args.proof_call_seconds) or args.proof_call_seconds <= 0:
         p.error('Proof call seconds must be finite and positive')
-    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 8:
-        p.error('Use gui-concurrency and gui-model-concurrency from 1 to 8')
+    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 16:
+        p.error('Use gui-concurrency from 1 to 8 and gui-model-concurrency from 1 to 16')
     assistant_limit = 5 if remote_profile else 4
     if (not 1 <= args.assistant_concurrency <= assistant_limit
             or args.assistant_tokens is not None and args.assistant_tokens < 4096

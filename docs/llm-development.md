@@ -1139,8 +1139,16 @@ call never sees a search hit that is the manuscript's own preprint (`own`), and 
 prose may refer only to listed hits. Every review call carries the delegation context
 except the novelty comparison (`_ask(reference=False)`), which sees only the field,
 the claimed contribution and the search hits. On DS4 a review gets three times the
-input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to eight
-concurrent calls (`Hub.review_concurrency`).
+input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
+`inference.MAX_CAPACITY` (16) concurrent calls (`Hub.review_concurrency`, within the
+model-request limit). Pool admission counts only the new call: running calls have
+already reserved their output and input in the job's counters. Extra passes go to
+`_near_chain()` (the main results and, at Medium, what they use directly:
+`EFFORT['depth']`); the judge runs only when the defence is `_contested`; the repair
+check treats a fact the paper neither proves nor cites as a new ingredient. Reading in
+whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with
+the whole paper in view; typo remarks are checked `TYPO_BATCH` per call
+(`_typo_jobs`).
 
 The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
 text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a

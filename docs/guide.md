@@ -847,17 +847,18 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
 - **Review**: a referee report on the whole paper. At **Low** it is a typo and
-  presentation check only: the paper is read for typos, misprinted formulas,
+  presentation check only: the paper is proofread in parts of about 220 lines
+  (each call with the whole paper in view) for typos, misprinted formulas,
   undefined symbols, wrong cross-references and unclear sentences, every
-  suggested correction is checked against the paper, and no proof is checked (two
-  model calls with DS4). From **Medium**, every proof is checked, appendices
-  included; effort sets how deeply:
+  suggested correction is checked against the paper, and no proof is checked
+  (about 16 calls and two minutes with DS4 for a 3,000-line paper). From
+  **Medium**, every proof is checked, appendices included; effort sets how deeply:
 
   | | Medium | High |
   | --- | --- | --- |
-  | Passes on the main results and the results their proofs use / on the others | 2 / 1 | 3 / 2 |
+  | Passes on the main results / on the results their proofs use / on the others | 2 / 2 (those used directly) / 1 | 3 / 3 (all) / 1 |
   | Read across the whole paper | cited results, consistency, unproved claims | the same |
-  | Second opinion on | major findings and gaps | every finding |
+  | Second opinion on | findings said to break a proof or a statement | those and the gaps |
   | Repairs that would make a major finding minor are checked | yes | yes |
   | Cited results looked up online | 2 | 4 |
 
@@ -874,10 +875,12 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   reports every problem with its effect: the statement is false, the proof fails,
   a gap an expert can fill, an imprecision, or a misprint. As soon as a proof's
   checks are done, each of its findings gets a **second opinion**: a defence of the
-  paper, then, if the defence holds or partly holds, an independent judge. A
+  paper, then, if the defence holds the paper right or makes the finding less
+  serious, an independent judge. A
   finding said to make a statement false or a proof fail becomes minor only when a
-  separate check finds the proposed repair to work; otherwise it stays major (the
-  report says so). Typo corrections are checked against the paper (a formula
+  separate check finds the proposed repair to work with standard arguments: a
+  repair that needs a fact the paper neither proves nor cites (a density, a
+  regularity up to the boundary, a new lemma) leaves it major (the report says so). Typo corrections are checked against the paper (a formula
   change with its computation; names and bibliography entries are never
   "corrected").
 
@@ -897,7 +900,7 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   across the paper need a large context (DS4). On DS4 a Medium review of a
   3,000-line paper makes several dozen calls, each reading the whole paper; how
   long it takes depends on how many run at once (the model-request limit in
-  Settings, up to 8).
+  Settings, up to 16; with DS4, set it to 16 for reviews).
 - **Explain**: one result and its proof, or a page, a section or a short text,
   for a mathematician from another field: what it says, the idea, a walk through
   the proof or the passage (every line of a short one), the standard facts used,

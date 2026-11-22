@@ -169,7 +169,9 @@ fails. valid: the problem is real; effect: its consequence for the result, on th
 """ + _EFFECT_SCALE + """
 When you judge it less serious than the allegation claims (for instance a gap instead of a broken proof), give in
 repair the complete argument that fixes it under the manuscript's hypotheses: without a repair the claimed
-consequence stands. rejected: the manuscript is right as written; give the derivation in argument. undecided: you
+consequence stands. A repair that needs a fact the manuscript neither proves nor cites (a density, a regularity up to
+the boundary or the initial time, a uniform bound, a new lemma), beyond a textbook theorem that applies verbatim, is
+a new ingredient: the proof fails as written (breaks_proof). rejected: the manuscript is right as written; give the derivation in argument. undecided: you
 cannot decide; say in argument what would decide it."""
 
 REPAIR_CHECK_SCHEMA = {
@@ -178,9 +180,13 @@ REPAIR_CHECK_SCHEMA = {
                    'argument': {'type': 'string', 'maxLength': 2000}},
 }
 REPAIR_CHECK_POLICY = """A referee found the problem below in the manuscript and proposes a repair that would make it
-a small issue. Check the repair step by step under the manuscript's hypotheses: does it close the problem completely
-with standard arguments, without a new hypothesis and without changing the statement? works: yes only when every step
-holds; no when a step fails or something essential is missing (say what); unsure when you cannot decide."""
+a small issue. Your task is to find what the repair still needs. Check it step by step under the manuscript's
+hypotheses, and list every fact it uses that the manuscript neither proves nor cites (the existence of a density or a
+kernel, regularity up to the boundary or the initial time, uniform bounds, interchanges of limits, measurability).
+Such a fact is acceptable only if it is a textbook theorem whose hypotheses you can check here verbatim (name it and
+check them); otherwise the repair adds a new ingredient, and the authors would have to prove a new lemma. works: yes
+only when every step holds with standard arguments, without a new ingredient, a new hypothesis or a change of the
+statement; no when a step fails or a new ingredient is needed (name it); unsure when you cannot decide."""
 
 TYPO_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],

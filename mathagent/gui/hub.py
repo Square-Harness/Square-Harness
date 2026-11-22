@@ -49,7 +49,7 @@ from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from .. import briefs, images
 from . import effort, personalization, projects, store
-from .inference import InferencePool
+from .inference import MAX_CAPACITY, InferencePool
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
@@ -549,9 +549,9 @@ class Hub:
             return self._capacity()
 
     def set_concurrency(self, *, chats=None, requests=None):
-        for value in (chats, requests):
-            if value is not None and (type(value) is not int or not 1 <= value <= 8):
-                raise ValueError('Concurrency limits must be integers from 1 to 8.')
+        for value, most in ((chats, 8), (requests, MAX_CAPACITY)):
+            if value is not None and (type(value) is not int or not 1 <= value <= most):
+                raise ValueError(f'Concurrency limits must be integers from 1 to 8 (conversations) and to {MAX_CAPACITY} (model requests).')
         with self._lock:
             if chats is not None:
                 self.concurrency = chats
@@ -1243,7 +1243,7 @@ class Hub:
     def review_concurrency(self):
         """Independent review calls run together only on a server that batches requests (vLLM); the
         shared inference pool still admits them within the interface's model-request limit."""
-        limit = 8 if getattr(self.args, 'api_profile', None) == 'deepinfra' else 4
+        limit = MAX_CAPACITY if getattr(self.args, 'api_profile', None) == 'deepinfra' else 4
         return min(limit, self.inference.capacity) if self.args.backend == 'openai' else 1
 
     def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None,
