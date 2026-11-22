@@ -115,6 +115,8 @@ EFFECT_LABEL = {'statement_false': 'The statement is false', 'breaks_proof': 'Th
                 'imprecision': 'Imprecision', 'misprint': 'Misprint'}
 BLOCK_LINES = 150  # a longer proof environment is checked line by line in parts, with the whole paper in view
 PART_LINES = 110
+READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
+TYPO_BATCH = 40  # remarks checked against the paper per call
 
 
 def _few(labels, shown=4):
@@ -2356,6 +2358,10 @@ class PaperReviewRunner(ReviewBase):
         """Run every call the review needs, each as soon as what it depends on is done (the overview, its proof's
         other passes, the reading). The report is rewritten after every call."""
         estimate = (self._whole_tokens() or 6000) + 4000
+        with self._mutex:
+            for comment in self.state['presentation']:  # batches of an earlier run are checked again
+                comment.pop('check_pending', None)
+                comment.pop('check_failed', None)
 
         def admit(running):
             return self._affordable(self._check_cap(), estimate * (running + 1), reserve_out=self._write_reserve(),
@@ -2372,7 +2378,9 @@ class PaperReviewRunner(ReviewBase):
         sequence = iter(range(10 ** 9))
 
         def refill():
-            for priority, key, fn in generate():
+            with self._mutex:  # the generator reads and marks the state while calls finish in other threads
+                found = generate()
+            for priority, key, fn in found:
                 if key not in scheduled:
                     scheduled.add(key)
                     heapq.heappush(pending, (priority, next(sequence), key, fn))
@@ -2432,9 +2440,7 @@ class PaperReviewRunner(ReviewBase):
         if not effort['proofs']:
             # Low: the paper is read for typos and presentation, and the list is checked against the paper.
             jobs = [(1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)) for a, b in reads if not self._reading_usable(f'L{a}')]
-            if whole and s.get('typo_check') is None and s['presentation'] and not self._unread_parts():
-                jobs.append((2, 'typo-check', self._typo_check))
-            return jobs
+            return jobs + (self._typo_jobs(2) if whole else [])
         chain = self._main_chain()
         scope_done = s.get('scope') is not None
         jobs = []
@@ -2442,7 +2448,7 @@ class PaperReviewRunner(ReviewBase):
             jobs.append((0, 'scope', self._scope))
         for a, b in reads:
             if not self._reading_usable(f'L{a}'):
-                jobs.append((1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)))
+                jobs.append((1 if not whole else 4, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)))
         if whole and not self._citations_done():
             jobs.append((3, 'citations', self._citations))
         if whole:
@@ -2457,8 +2463,8 @@ class PaperReviewRunner(ReviewBase):
                     priority = (2 if item['pass_index'] == 0 else 5) if uid in chain else 6
                     jobs.append((priority, item['key'], self._audit_job(uid, item)))
         jobs += self._adjudication_jobs(chain)
-        if whole and effort['typos'] and s.get('typo_check') is None and s['presentation'] and not self._unread_parts():
-            jobs.append((6, 'typo-check', self._typo_check))
+        if whole and effort['typos']:
+            jobs += self._typo_jobs(6)
         online = bool(self.literature and self.literature.online)
         if online and scope_done and s.get('novelty') is None and (s['scope'] or {}).get('queries') and effort['queries']:
             jobs.append((9, 'novelty', self._novelty))
@@ -3020,34 +3026,49 @@ class PaperReviewRunner(ReviewBase):
 
     # -- typos ---------------------------------------------------------------------------------------------
 
-    def _typo_check(self):
-        """Every typo and presentation remark checked against the paper in one call: a wrong correction (a formula
-        "fixed" into an error, a colleague's name "corrected") is worse than none."""
-        items = sorted(enumerate(self.state['presentation']), key=lambda e: (e[1].get('importance') != 'error', e[0]))[:60]
-        rows = [f'R{n} (lines {c["start_line"]}-{c["end_line"]}, {c["kind"]}): "{c["quote"]}" — {c["comment"]}'
-                + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
-        self.emit('notice', f'Checking {len(rows)} typo and presentation remarks')
-        result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
-                             cap=self._check_cap(), schema=P.TYPO_CHECK_SCHEMA, key='typo-check')
-        value = result['value']
-        with self._mutex:
-            if value is None:
-                self.state['typo_check'] = {'checked': 0, 'rejected': 0, 'error': 'no usable answer'}
+    def _typo_jobs(self, priority):
+        """Typo and presentation remarks checked against the paper, TYPO_BATCH per call, as soon as a batch is full
+        (or the reading is over): a wrong correction (a formula "fixed" into an error, a colleague's name "corrected")
+        is worse than none."""
+        s = self.state
+        waiting = [i for i, c in enumerate(s['presentation']) if not ({'checked', 'check_pending', 'check_failed'} & set(c))]
+        reading_over = all(f'L{a}' in s['reading'] for a, _ in s.get('read_parts') or [])
+        jobs = []
+        while waiting and (len(waiting) >= TYPO_BATCH or reading_over):
+            batch, waiting = waiting[:TYPO_BATCH], waiting[TYPO_BATCH:]
+            for i in batch:
+                s['presentation'][i]['check_pending'] = True
+            jobs.append((priority, f'typo-check:{batch[0]}', self._typo_check_job(batch)))
+        return jobs
+
+    def _typo_check_job(self, batch):
+        def run():
+            items = [(i, self.state['presentation'][i]) for i in batch]
+            rows = [f'R{n} (lines {c["start_line"]}-{c["end_line"]}, {c["kind"]}): "{c["quote"]}" — {c["comment"]}'
+                    + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
+            self.emit('notice', f'Checking {len(rows)} typo and presentation remarks against the paper')
+            result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
+                                 cap=self._check_cap(), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}')
+            value = result['value']
+            with self._mutex:
+                verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
+                for n, (_, comment) in enumerate(items, 1):
+                    comment.pop('check_pending', None)
+                    verdict = verdicts.get(f'R{n}')
+                    if verdict is None:
+                        comment['check_failed'] = True  # shown unchecked; a resumed review checks it again
+                        continue
+                    comment['checked'] = True
+                    if verdict.get('keep') is False:
+                        comment['rejected'] = str(verdict.get('reason') or '')[:300]
+                self._typo_counts()
                 self._save()
-                return
-            verdicts = {str(v.get('id')): v for v in value.get('items') or [] if isinstance(v, dict)}
-            rejected = 0
-            for n, (index, comment) in enumerate(items, 1):
-                verdict = verdicts.get(f'R{n}')
-                if verdict is None:
-                    continue
-                comment['checked'] = True
-                if verdict.get('keep') is False:
-                    comment['rejected'] = str(verdict.get('reason') or '')[:300]
-                    rejected += 1
-            self.state['typo_check'] = {'checked': sum(f'R{n}' in verdicts for n in range(1, len(items) + 1)),
-                                        'rejected': rejected, 'listed': len(items)}
-            self._save()
+        return run
+
+    def _typo_counts(self):
+        items = self.state['presentation']
+        self.state['typo_check'] = {'checked': sum(bool(c.get('checked')) for c in items),
+                                    'rejected': sum(bool(c.get('rejected')) for c in items), 'listed': len(items)}
 
     # -- literature --------------------------------------------------------------------------------------------
 
@@ -3247,13 +3268,17 @@ class PaperReviewRunner(ReviewBase):
                 end = n - 1
                 break
         begin = next((n for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 1) if mapping['format'] == 'tex' else 1
-        if self.state.get('whole') if whole is None else whole:
-            return [[begin, end]] if any(lines[n - 1].strip() for n in range(begin, end + 1)) else []
+        focused = self.state.get('whole') if whole is None else whole
         starts = sorted({begin} | {sec['line'] for sec in mapping['sections'] if begin < sec['line'] <= end})
         parts = []
-        part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
-                         max(512, self._room(self._read_cap(), P.READ_POLICY) - 1500))
-        part_lines = input_limit(self.agent, 'review_lines', 150)
+        if focused:
+            # The whole paper is in every call; each call proofreads one part of it closely (one reading of
+            # 3,000 lines listed a dozen problems, a third of the misprints and slips a careful reader finds).
+            part_bytes, part_lines = READ_FOCUS_BYTES, READ_FOCUS_LINES
+        else:
+            part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
+                             max(512, self._room(self._read_cap(), P.READ_POLICY) - 1500))
+            part_lines = input_limit(self.agent, 'review_lines', 150)
         for index, a in enumerate(starts):
             b = (starts[index + 1] - 1) if index + 1 < len(starts) else end
             while a <= b:
@@ -3264,7 +3289,17 @@ class PaperReviewRunner(ReviewBase):
                 stop = max(stop, a + 1)
                 parts.append([a, stop - 1])
                 a = stop
-        return [r for r in parts if any(lines[n - 1].strip() for n in range(r[0], r[1] + 1))]
+        parts = [r for r in parts if any(lines[n - 1].strip() for n in range(r[0], r[1] + 1))]
+        if focused:
+            # Short sections share a call: every call reads the whole paper, so a call per short section is waste.
+            packed = []
+            for a, b in parts:
+                if packed and (b - packed[-1][0] < part_lines or b - a < part_lines // 4 or packed[-1][1] - packed[-1][0] < part_lines // 4):
+                    packed[-1][1] = b
+                else:
+                    packed.append([a, b])
+            parts = packed
+        return parts
 
     def _read_cap(self):
         return self._model_cap('review_read', self._analysis_cap())
@@ -3293,9 +3328,9 @@ class PaperReviewRunner(ReviewBase):
     def _read_job(self, key, sid, a, b, pdf):
         def run():
             whole = bool(self.state.get('whole'))
-            self.emit('notice', 'Reading the paper' if whole else f'Reading lines {a}-{b}')
+            self.emit('notice', f'Reading lines {a}-{b}')
             if whole:
-                prompt = self._block() + '\n\n' + P.READ_WHOLE_POLICY + ('\n' + P.PDF_READING if pdf else '')
+                prompt = self._block() + '\n\n' + P.READ_FOCUS_POLICY.format(start=a, end=b) + ('\n' + P.PDF_READING if pdf else '')
             else:
                 prompt = P.READ_POLICY + ('\n' + P.PDF_READING if pdf else '') + '\n\nPART OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b)
             schema = P.READ_SCHEMA if whole else P.READ_PART_SCHEMA
@@ -3632,7 +3667,7 @@ class PaperReviewRunner(ReviewBase):
             return self.state.get('followup_usable', False)
         self._warn_reading_gaps()
         if not self.effort['proofs']:
-            return not self._unread_parts() and (not self.state.get('whole') or bool((self.state.get('typo_check') or {}).get('checked')))
+            return not self._unread_parts() and (not self.state.get('whole') or all(c.get('checked') for c in self.state['presentation']))
         missing, no_proof = self._provisional()
         whole = self.state.get('whole')
         return (bool(self.state.get('write')) and not self.state['write'].get('draft') and not self._unread_parts()
@@ -3803,8 +3838,10 @@ class PaperReviewRunner(ReviewBase):
         body = []
         if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
             body += ['*Reading in progress; this list is rewritten as each step finishes.*', '']
-        summaries = [s['reading'][f'L{a}']['summary'] for a, _ in read if s['reading'][f'L{a}'].get('summary')]
-        body += ['## Summary', '', '\n\n'.join(summaries) or '*Written once the paper is read.*', '']
+        parts = [s['reading'][f'L{a}'] for a, _ in read if s['reading'][f'L{a}'].get('summary')]
+        body += ['## The paper part by part', '']
+        body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] or ['*Written once the paper is read.*']
+        body += ['']
         body += ['## Typos and presentation', '']
         body += self._presentation_section(presentation, sid, unread, bool(read))
         if self._source(sid)['path'].lower().endswith('.pdf'):

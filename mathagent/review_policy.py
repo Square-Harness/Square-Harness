@@ -418,6 +418,15 @@ READ_WHOLE_POLICY = """Read the whole manuscript above as a referee for a mathem
   and how the sections fit together. Four to ten precise sentences.
 """ + _READ_COMMENTS + """ You see the whole paper: check each cross-reference against what it points to and each
   symbol against its definition."""
+READ_FOCUS_POLICY = """The whole manuscript is above. Read its lines {start}-{end} slowly, as a referee and a careful
+proofreader: sentence by sentence and formula by formula. Return JSON:
+- summary: what these lines do, in the paper's own terms (the objects, the results stated with their numbers, the
+  steps of the arguments), in two to five sentences.
+""" + _READ_COMMENTS + """ Report every problem inside lines {start}-{end}, the small ones too: each misspelling,
+  each grammar slip, each misprinted index, sign, exponent or constant (check every displayed formula against the
+  definitions and the lines before it), each wrong cross-reference. Use the rest of the manuscript to check
+  definitions, notation and references, but report nothing outside these lines. At most forty comments."""
+
 PDF_READING = """This text was extracted from a PDF: formulas are broken across lines, symbols and accents are split,
 words are hyphenated at line ends, and page headers are mixed in. You cannot see the real formulas, so comment only
 on words and sentences (spelling, grammar, repeated or missing words, unclear phrasing, wrong cross-references in
