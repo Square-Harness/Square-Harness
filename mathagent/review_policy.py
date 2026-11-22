@@ -79,8 +79,10 @@ hypothesis: a wrong counterexample discredits a correct objection."""
 AUDIT_POLICY = """You audit one proof of the manuscript as a referee for a mathematics journal. Its definitions,
 standing assumptions, notation and earlier results are in force: do not object that something is undefined or
 unverified when the manuscript provides it; do object when the proof uses more than the manuscript provides.
-Report every problem you find in the lines under review, the small ones too: there is no separate list of notes,
-and a referee wants all of them. Give each its effect, the consequence for the result:
+Report every problem a careful referee would ask the authors to fix in the lines under review, the small ones too:
+there is no separate list of notes. A step that a specialist fills in a line or two is not a gap, a notation the
+reader cannot misread is not an imprecision, and another way to write the same argument is not a problem: report
+none of these. Give each problem its effect, the consequence for the result:
 """ + _EFFECT_SCALE + """
 Method: follow the logical chain to the conclusion and check that it reaches exactly the statement (all quantifiers,
 all cases, how the constants depend on the data). Spend your effort on nonstandard implications, the hypotheses of
@@ -119,7 +121,9 @@ time does not see: a constant, normalisation or scaling used with different valu
 coefficient, the normalisation of a measure or of an eigenfunction); sign and orientation conventions; a symbol or
 notion defined twice or used with two meanings; a result stated differently in the abstract, the introduction and the
 body; hypotheses that change between the statement of a result and its later uses; a numerical claim that does not
-match the formula it comes from. Report each inconsistency where it makes a statement or a proof wrong, with the
+match the formula it comes from; numerical experiments run in a setting the results they illustrate do not cover (an
+initial distribution, a regularity of the domain or a range of parameters outside the hypotheses), without a word
+on it. Report each inconsistency where it makes a statement or a proof wrong, with the
 other place in the evidence. Give each its effect:
 """ + _EFFECT_SCALE + """
 """ + _ISSUE_FIELDS + """ Report nothing when the manuscript is consistent; never report a choice the
@@ -536,7 +540,8 @@ NOVELTY_POLICY = """Compare the claimed contribution with the search results bel
 full). Say which results look closest and how they relate (earlier special case, same method, competing result,
 background). Search hits do not establish or refute novelty; say what a referee should still check. There are
 exactly {count} search results, numbered 1 to {count}: refer to them by these numbers only, never to a result that is
-not listed, and do not describe works you only recall. The manuscript itself is not part of this task: the field and
+not listed, and do not describe works you only recall. A result marked "same authors" shares an author with the
+manuscript: it is the authors' own earlier or companion work, never a competing result. The manuscript itself is not part of this task: the field and
 claimed contribution stand for it, and other calls review it, so do not comment on its absence."""
 
 WRITE_SCHEMA = {
@@ -578,8 +583,9 @@ MERGE_SCHEMA = {
 MERGE_POLICY = """Below are the comments of a referee report on one manuscript, each with an id. Group the comments
 that describe the same underlying problem: the same wrong formula or misprint seen from two places, the same missing
 hypothesis reported in a lemma and in a theorem that uses it, a typo comment and a proof comment about the same slip.
-Comments about different problems stay apart, even in the same proof. Return only groups of two or more ids, with a
-short reason; an empty list when every comment is about a different problem."""
+Comments about different problems stay apart, even in the same proof, and so do similar-sounding problems at
+different places: group two comments only when fixing one fixes the other. When unsure, keep them apart. Return only
+groups of two or more ids, with a short reason; an empty list when every comment is about a different problem."""
 
 RECOMMENDATIONS = {'accept': 'Accept', 'minor_revision': 'Minor revision', 'major_revision': 'Major revision',
                    'reject': 'Reject', 'no_recommendation': 'No recommendation'}

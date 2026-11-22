@@ -2893,11 +2893,13 @@ class PaperReviewRunner(ReviewBase):
         paper, a judge when the defence holds or partly holds, and a check of any repair that would make a major
         finding minor. The most serious findings and those on the main results' chain come first."""
         s = self.state
+        near = self._near_chain()
         ready = [uid for uid in s['plan_units'] + list(PSEUDO_UNITS) if self._checks_complete(uid)]
         candidates = []
         for uid in ready:
             for cluster in self._clusters(uid):
-                if cluster['kind'] != 'uncertainty' and not cluster['unlocated'] and self._eligible(cluster):
+                question = cluster['kind'] == 'uncertainty'  # an open point near a main result makes the report provisional
+                if not cluster['unlocated'] and (self._eligible(cluster) if not question else self._host(cluster) in near):
                     cluster['on_chain'] = self._host(cluster) in chain
                     candidates.append(cluster)
         candidates.sort(key=lambda c: (c['severity'] != 'major', not c['on_chain'], -_effect_rank(c['effect']), -RANK[c['kind']]))
@@ -2928,6 +2930,13 @@ class PaperReviewRunner(ReviewBase):
         if adjudication.get('repair_wanted') and not adjudication.get('repair_check'):
             return 'repair'
         return None
+
+    def _settle(self, cluster):
+        """An open question given a second opinion becomes a finding, is rejected, or stays a question."""
+        confirm = self.state['confirms'].get(cluster['key'])
+        if cluster['kind'] == 'uncertainty':
+            return {'valid': 'confirmed', 'rejected': 'rejected'}.get((confirm or {}).get('assessment'), 'uncertainty')
+        return super()._settle(cluster)
 
     @staticmethod
     def _contested(adjudication):
@@ -3210,6 +3219,19 @@ class PaperReviewRunner(ReviewBase):
             return re.sub(r'\\[a-zA-Z]+|[{}$]', ' ', manuscript._braced(source['content'], match.end() - 1))
         return next((line for line in source['content'].splitlines() if len(line.split()) >= 3), '')
 
+    def _author_names(self):
+        """Surnames of the manuscript's authors (TeX \\author fields), folded, to recognise their own work."""
+        source = self.state['sources'][0]['content']
+        names = set()
+        for match in re.finditer(r'\\author\s*(?:\[[^\]]*\])?\s*\{', source):
+            text = re.sub(r'\\(?:thanks|footnote|email|address|affil\w*)\s*\{[^{}]*\}|\\[a-zA-Z]+|[{}~$]', ' ',
+                          manuscript._braced(source, match.end() - 1))
+            for person in re.split(r',|\band\b|\\and|;', text):
+                words = [w for w in re.findall(r'[A-Za-zÀ-ÿ\'’-]+', person) if len(w) > 1]
+                if words:
+                    names.add(_fold(words[-1]))
+        return names
+
     def _novelty(self):
         scope = self.state['scope'] or {}
         if self.state.get('novelty') is not None or not scope.get('queries') or not self.effort['queries']:
@@ -3218,6 +3240,7 @@ class PaperReviewRunner(ReviewBase):
             results, seen = list(self.state['search_results']), {r['title'].lower() for r in self.state['search_results']}
             done = {e['arguments'].get('query') for e in self.state['evidence'] if e['tool'] == 'search_papers'}
         title = set(_words(self._title()))
+        authors = self._author_names()
         for query in scope['queries'][:self.effort['queries']]:
             if query in done:
                 continue
@@ -3241,7 +3264,8 @@ class PaperReviewRunner(ReviewBase):
                     words = set(_words(name))
                     # The manuscript's own preprint is not related work.
                     own = bool(title) and len(words & title) >= .8 * max(len(words), len(title))
-                    results.append({'title': name[:300], 'year': str(hit.get('year') or hit.get('published') or '')[:10],
+                    surnames = {_fold(str(a).split()[-1]) for a in hit.get('authors') or [] if str(a).split()}
+                    results.append({'same_authors': bool(authors & surnames),'title': name[:300], 'year': str(hit.get('year') or hit.get('published') or '')[:10],
                                     'authors': ', '.join(map(str, (hit.get('authors') or [])[:4]))[:200],
                                     'abstract': str(hit.get('abstract') or hit.get('summary') or '')[:500],
                                     'url': str(hit.get('url') or hit.get('source_url') or '')[:300], 'query': query, 'own': own})
@@ -3257,7 +3281,8 @@ class PaperReviewRunner(ReviewBase):
             return
         if not self._affordable(self._analysis_cap(1500), 6000, reserve_out=self._write_reserve(), share=.86):
             return
-        listing = '\n'.join(f'{k}. {r["title"]} ({r["authors"]}, {r["year"]}). {r["abstract"][:350]}' for k, (_, r) in enumerate(others, 1))
+        listing = '\n'.join(f'{k}. {r["title"]} ({r["authors"]}, {r["year"]})' + (' [same authors]' if r.get('same_authors') else '')
+                            + f'. {r["abstract"][:350]}' for k, (_, r) in enumerate(others, 1))
         prompt = (P.NOVELTY_POLICY.format(count=len(others)) + '\n\nFIELD: ' + scope.get('field', '') + '\nCLAIMED CONTRIBUTION: '
                   + scope.get('contribution', '') + '\n\nSEARCH RESULTS:\n' + listing)
         result = self._ask('novelty', prompt, cap=self._analysis_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty',
@@ -4005,6 +4030,8 @@ class PaperReviewRunner(ReviewBase):
                 relation = next((x['relation'] for x in (s.get('novelty') or {}).get('related', []) if x['n'] == n), '')
                 if r.get('own'):
                     relation = 'the manuscript itself (a preprint)'
+                elif r.get('same_authors'):
+                    relation = 'by the same authors' + (f'; {relation}' if relation else '')
                 link = f'[{r["title"]}]({r["url"]})' if r['url'].startswith('http') else r['title']
                 appendix += [f'{n}. {link} ({r["authors"]}, {r["year"]})' + (f' — {relation}' if relation else '')]
             if (s.get('novelty') or {}).get('assessment'):
