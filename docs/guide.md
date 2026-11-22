@@ -864,7 +864,11 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
 
   Hidden reasoning is most of what a model writes (15–30k tokens for one proof
   check) and the provider limits how much an account generates per second, so it,
-  not the number of calls, sets how long a review takes. The review does not
+  not the number of calls, sets how long a review takes. Measured with DS4 on a
+  3,100-line paper: Low 2.5 minutes, Medium 4, High 15–18. Medium is a fast
+  screen: without reasoning its checks find about half of what High finds and
+  raise more false alarms, and it can miss an error that breaks a main result;
+  use High for a report you would rely on. The review does not
   search the literature: it names the closest works the paper cites and suggests
   a literature review (`@literature …`), which the Assistant can start.
 
