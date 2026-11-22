@@ -650,8 +650,8 @@ documented together when releasing these features.
    ┌───────────── controllers ("runners"), one per skill ─────────────────────────┐
    │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (literature review)
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
-   │ agent.Agent (Explore and ordinary chat)      ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
-   │ numerics.session (sandbox skills)             │   / JournalRunner (Detailed review) / ExplainRunner
+   │ agent.Agent (Explore and ordinary chat)      ├ review.QuickReviewRunner / PaperReviewRunner (Review)
+   │ numerics.session (sandbox skills)             │   / ExplainRunner
    │                                               ├ writeup.WriteupRunner (write-up, summary)
    │                                               └ style.StyleRunner (writing styles)
    └───────────────┬─────────────────────────────────────────┬───────────────────┘
@@ -1084,26 +1084,61 @@ at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus fram
 streamed characters plus 256), so retries do not drain allowances with
 full-context reservations. Proof gives every replacement a fresh dispatch key.
 
-Review and Detailed review (`JournalRunner`; `SummaryReviewRunner` sets `LIGHT`
-and checks only the proofs of the main results) decide at mapping time whether the
-whole manuscript fits `model_limits.INPUTS['review_whole']` (DS4 only; `state['whole']`).
-Whole mode reads the paper in one call and runs the reading, the scope and the
-citations comparison side by side in one `_wave`; every check and re-check packet
-starts with the whole numbered manuscript (`P.WHOLE_CONTEXT`), the same prefix for
-every call. Without whole mode (small local contexts) the paper is read in
-section-following parts and a check sees its proof with the statements and equations
-it cites. Misuses of cited results are issues of the pseudo-unit `review.CITE`, so
-they are re-checked, merged and numbered like proof issues; `_cited_candidates`
-sends the ones at stake to `refcheck.CheckRunner` lookups, which run concurrently
-with the novelty search. Before the prose call, `_merge` asks one small call which
-comments share a root cause; `_comments` then reports each root cause once and
-labels comments `Major n` / `Minor n`, the labels `_write` accepts in the prose.
-Severity comes from the check and, after a valid re-check, from the re-check; a
-confirmed major comment never leaves an `accept` or `minor_revision`
-recommendation. `_wave` is a continuous pool (`admit(running)` is asked before each
-start); provider failures are replaced by the shared DeepInfra policy above. Every review call carries
-the delegation context except the novelty comparison (`_ask(reference=False)`),
-which sees only the field, the claimed contribution and the search hits.
+The Review (`PaperReviewRunner`, pipeline `review-v2`) checks every proof at every
+effort; `EFFORT` sets the depth only (passes on the main chain and elsewhere, sweeps,
+which findings get a second opinion, repair checks, the typo check, lookups). Saved
+`review-v1` and `journal-v1` jobs (the retired Review / Detailed review split) are read
+as reviews (`LEGACY_PIPELINES`); resuming one migrates it (`resume`: earlier re-checks
+move to `legacy_confirms`, the phase becomes `audit`). `@detailed_review` and
+`/detailed_review` are aliases of `referee` at High (`router.OFFERED_MODES` leaves it
+out of the schemas; `workers.REVIEW_MODES` maps it to the review).
+
+Phases: `plan` (map, reading parts, plan of all proofs), `audit`, `write`. The map
+reads the paper's own packages and `.aux` (`ReviewBase._packages`: theorem numbers),
+attaches section-long proofs (`manuscript._section_proofs`; the nested results are
+`nested` spans) and does not count `\input` figure files as missing source.
+`audit` is one continuous pool (`_pool`): after every finished call it asks
+`_audit_jobs()` (under the mutex) for every call that can now run, with a priority:
+the scope call (overview, main results, and the inventory the map missed:
+`_apply_inventory` validates located proofs and results stated in prose), the
+reading, the checks of the main chain (`_main_chain`: the main results, the union of
+the map's flags and the scope's choice restricted to provable statements, and every
+result their proofs use through `refs`), the citations comparison (`CITE`), the
+other checks, the sweeps (`SWEEP_UNITS`: consistency and completeness, pseudo-units
+like `CITE`), the typo check, the literature, and a first prose report
+(`write:draft`) once the main chain is checked and judged. A check plan is pinned per
+unit (`_audit_plan`): one pass before the scope is known, then the effort's passes;
+a proof longer than `BLOCK_LINES` is checked line by line in parts (`_blocks`) and
+whole by the other lenses; a section-long proof is read whole with a note naming its
+nested results. With a large context (DS4, `state['whole']`) every call starts with
+the same text, `_block()` (the numbered manuscript, its packages and the cited
+bibliography), so a provider that caches prompt prefixes reads it once; without it
+(small local contexts) the paper is read in section-following parts, the scope waits
+for the reading and the checks for the scope, and a check sees its proof with the
+statements and equations it cites (`P.AUDIT_PARTS_NOTE`).
+
+Checks answer `P.AUDIT_SCHEMA`: every problem, with an `effect` (`P.EFFECTS`);
+severity is derived (`P.MAJOR_EFFECTS` are major). Findings are clusters of the
+passes' issues (`_clusters`, which carry the gravest effect). As soon as a unit's
+checks are complete, its eligible findings get a second opinion
+(`_adjudication_jobs`, at most `EFFORT['adjudications']`, the main chain's major
+findings first): `defend` (the paper's advocate), `arbiter` when the defence holds
+or partly holds, and `repair` when the verdict would make a major finding minor;
+`_conclude` applies the downgrade rule (no verified repair, no downgrade) and writes
+the verdict into `state['confirms']` in the format the Quick review uses, with the
+history in `state['adjudications']`. `_comments` numbers the comments (`Major n`,
+`Minor n`, `Question n`), keeps every merged member's content under its lead, and
+names the main results each one affects (`_affects`); `_main_status` gives each
+main result one status; `state['ledger']` saves the numbered findings with the job.
+`_recommendation_floor` keeps a major comment upheld after a defence out of an
+`accept` or `minor_revision` recommendation. The report is rewritten after every
+call of the pool (`_report`), with a progress line while the job runs. The novelty
+call never sees a search hit that is the manuscript's own preprint (`own`), and its
+prose may refer only to listed hits. Every review call carries the delegation context
+except the novelty comparison (`_ask(reference=False)`), which sees only the field,
+the claimed contribution and the search hits. On DS4 a review gets three times the
+input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to eight
+concurrent calls (`Hub.review_concurrency`).
 
 The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
 text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a

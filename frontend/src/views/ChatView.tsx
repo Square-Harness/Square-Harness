@@ -65,7 +65,7 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
   literature: { noun: 'a literature review', label: 'Literature Review', cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
-  detailed_review: { noun: 'a detailed review', label: 'Detailed Review', cover: 'referee' },
+  detailed_review: { noun: 'a review', label: 'Review', cover: 'referee' },
   quick_review: { noun: 'a quick review', label: 'Quick Review', cover: 'referee' },
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'explain' },
   writeup: { noun: 'a write-up', label: 'Write-Up', cover: 'writeup' },

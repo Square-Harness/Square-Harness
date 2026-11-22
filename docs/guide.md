@@ -374,10 +374,11 @@ one with a message.
   Each job has a card in the conversation and a page of its own showing
   everything it did.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
-  `@literature`, `@quick_review`, `@referee`, `@detailed_review`, `@explain`,
+  `@literature`, `@quick_review`, `@referee`, `@explain`,
   `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
   Hover over the chip above the text box to read what the skill does and to
-  choose its effort. **Auto** means Medium, or High for a detailed review.
+  choose its effort. **Auto** means Medium. (`@detailed_review`, the former
+  detailed review, still works: it is `@referee` at High.)
 - **Your folder** is shown above the text box. Click it to open another folder
   (below `--gui-root`; by default only the workspace itself). Drop files onto the
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
@@ -474,7 +475,7 @@ a statement, or `/prove <statement>`. Other commands:
 | `/explore` | Switch to exploration chat |
 | `/check <result>` | Find or verify a reference (needs `--online`) |
 | `/literature <topic>` | Write a literature review of a topic |
-| `/quick_review`, `/referee`, `/detailed_review`, `/explain` | The four review kinds (the manuscript comes from `--research-file`) |
+| `/quick_review`, `/referee`, `/explain` | The three review kinds (the manuscript comes from `--research-file`; `/detailed_review` is `/referee` at High) |
 | `/writeup <instructions>` | LaTeX write-up of `--research-file` notes in the `--template-file` style |
 | `/python-lab`, `/sanity-check` | Python in the sandbox |
 | `/review` | Fresh-context critique of the last answer |
@@ -488,8 +489,8 @@ a statement, or `/prove <statement>`. Other commands:
 For scripts, run one job and exit:
 
 ```bash
-square-harness --workspace ~/research/my-paper --mode detailed_review \
-  --research-file paper.tex --prompt "Check the proofs too." --output report.md
+square-harness --workspace ~/research/my-paper --mode referee \
+  --research-file paper.tex --prompt "Referee this paper." --output report.md
 ```
 
 The exit status is 0 when the job completed, 1 when it was unsuccessful and 130
@@ -507,8 +508,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Referee report: overview, typos, presentation | `@referee`, New review | `/referee` |
-| Detailed review | The review, plus checks of the proofs | `@detailed_review` | `/detailed_review` |
+| Review | Referee report: every proof checked, typos, presentation, a recommendation | `@referee`, New review | `/referee` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
@@ -832,9 +832,9 @@ at most twice; in a conversation, where the answer was already shown, it is not.
 Each logical call gets at most four replacements within its own time allowance;
 the job shows "sending it again (k of 4 retries)" and pauses only when they are used.
 
-### Quick review, Review, Detailed review, Explain
+### Quick review, Review, Explain
 
-The four review kinds work on a proof you paste, or on a manuscript you attach
+The three review kinds work on a proof you paste, or on a manuscript you attach
 (TeX gives the best results: formulas extracted from a PDF can be garbled).
 
 - **Quick review**: is this proof correct? Independent verifier passes read it
@@ -846,31 +846,55 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review**: a referee report. The paper is read for understanding and
-  presentation, the proofs of its main results are checked (one pass each, each
-  alleged error re-checked from Medium up), and every result it cites is compared
-  with the result as known in the literature (a theorem applied outside its
-  hypotheses, a misstated or misattributed result). The report has a summary, an
-  assessment, numbered major and minor comments, typos and presentation problems
-  grouped by kind, a recommendation and a confidential note to the editor. It says
-  which proofs were not checked, and never recommends acceptance with a confirmed
-  major error.
-- **Detailed review**: the same report with checks of the other proofs too, main
-  results first (Low: the main results; Medium: and the results their proofs use,
-  two passes on each main result; High: every proof outside the appendices). With
-  a large context (DS4) the whole paper is read at once, and every check and
-  re-check sees the whole manuscript before the proof it checks; with a small
-  local context the paper is read in parts and each check sees one proof with
-  the statements and equations it cites. When online search is on, the cited
-  results most at stake are also looked up in their sources (Medium 2, High 4).
-  The numbered comments are assembled by the code from checked findings: the
-  prose cannot add or drop an objection, and the same problem found in two places
-  is reported once. Severity follows the consequence: *major* when a result as
-  stated is false or its proof needs a new idea or hypothesis, *minor* when an
-  expert can fill the gap or a misprint's meaning is clear. If a main result's
-  proof was not checked, the recommendation says it is provisional. The first
-  line of the report says how many proofs were checked and what was found for
-  each main result.
+- **Review**: a referee report on the whole paper. **Every proof is checked at
+  every effort**, appendices included; effort sets how deeply, never what:
+
+  | | Low | Medium | High |
+  | --- | --- | --- | --- |
+  | Passes on the main results and the results their proofs use / on the others | 1 / 1 | 2 / 1 | 3 / 2 |
+  | Read across the whole paper | cited results | and consistency, unproved claims | the same |
+  | Second opinion on | major findings | major findings and gaps | every finding |
+  | Repairs that would make a major finding minor are checked | no (it stays major) | yes | yes |
+  | Typo list checked against the paper | no | yes | yes |
+  | Cited results looked up online | 0 | 2 | 4 |
+
+  How it works. The code maps the paper: its statements and proofs (theorem
+  numbers come from your `.sty` and, when present, the `.aux` file), proofs that
+  run over a whole section ("Proof of Theorem 1", "In this section we prove
+  Theorem 1.2"), and which result uses which. A first call writes the overview,
+  names the main results (those proved only in an appendix stay main) and locates
+  the proofs the map missed. Then all the calls run in one pool, the main results
+  and what they use first: a reading for typos and presentation, a check of each
+  proof (a long proof line by line in parts, with the whole paper in view), and
+  reads across the paper for inconsistent constants or conventions, claims never
+  established and cited results applied outside their hypotheses. Each check
+  reports every problem with its effect: the statement is false, the proof fails,
+  a gap an expert can fill, an imprecision, or a misprint. As soon as a proof's
+  checks are done, each of its findings gets a **second opinion**: a defence of the
+  paper, then, if the defence holds or partly holds, an independent judge. A
+  finding said to make a statement false or a proof fail becomes minor only when a
+  separate check finds the proposed repair to work; otherwise it stays major (the
+  report says so). Typo corrections are checked against the paper (a formula
+  change with its computation; names and bibliography entries are never
+  "corrected").
+
+  The report is **rewritten after every call**: within minutes it shows the
+  overview, the first findings and the main-results table, then a first prose
+  report once the main results are checked and judged, and the final report at
+  the end. It has a summary, the status of each main result (checked with no
+  issue, affected by a comment and where it comes from, open, or not checked), an
+  assessment, numbered major and minor comments (assembled by the code from the
+  findings: the prose cannot add, drop or renumber one; the same problem found
+  twice is one comment), questions to the authors, typos grouped by kind, a
+  recommendation and a confidential note to the editor. A major comment upheld
+  after a defence of the paper rules out "accept" and "minor revision"; the
+  recommendation is provisional while a main result rests on an unchecked proof or
+  an open point. With a small local context the paper is read in parts and each
+  check sees one proof with the statements and equations it cites; the sweeps
+  across the paper need a large context (DS4). On DS4 a Medium review of a
+  3,000-line paper makes several dozen calls, each reading the whole paper; how
+  long it takes depends on how many run at once (the model-request limit in
+  Settings, up to 8).
 - **Explain**: one result and its proof, or a page, a section or a short text,
   for a mathematician from another field: what it says, the idea, a walk through
   the proof or the passage (every line of a short one), the standard facts used,
@@ -879,6 +903,9 @@ The four review kinds work on a proof you paste, or on a manuscript you attach
   appendix), a page of a PDF ("page 9"), a section ("Section 3", "Appendix A"),
   or say "explain this page" for a short attachment. When the text states a result
   in prose or proves it elsewhere, the model locates the lines first.
+
+Reviews saved before the review and the detailed review became one stay readable;
+resuming one continues it as a review.
 
 To discuss a completed report, select `@referee` again and explain which comments
 you dispute. When the target is unambiguous, the follow-up reuses the reviewed
@@ -1297,8 +1324,8 @@ your request
    and the checks. It chooses which passage the model sees, asks one focused
    question, parses the answer and checks it against the sources. Then it saves
    everything, so the job can stop and resume at any point.
-3. **The model calls.** Each one sees only what it needs: for example, in a
-   detailed review, one proof with the statements it uses. The answer comes back
+3. **The model calls.** Each one has one task: for example, in a review, the
+   check of one proof, with the whole paper in view. The answer comes back
    in a fixed format, usually JSON, which the code validates. Independent calls
    can run in parallel.
 

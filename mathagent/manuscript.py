@@ -202,9 +202,10 @@ def _active_tex(lines):
     return clean
 
 
-def _parse_tex(lines):
+def _parse_tex(lines, preamble=''):
     clean = _active_tex(lines)
-    envs, declared = _tex_theorems(clean)
+    # Theorem declarations may sit in a package of the paper's own (\usepackage{preamble}): read them too.
+    envs, declared = _tex_theorems(clean + _active_tex(preamble.splitlines()))
     result = {'format': 'tex', 'lines': len(lines), 'sections': [], 'units': [], 'bibliography': {},
               'abstract': None, 'labels': {}, 'equations': {}, 'warnings': []}
     if not declared:
@@ -365,38 +366,90 @@ def _parse_tex(lines):
     return result
 
 
-def _section_proofs(result, units, clean):
-    """A section titled "Proof of Theorem 1.1" (or "Proof of Theorem~\\ref{...}") is the proof of a result stated
-    without one: it runs to the next section. Papers often prove their main theorems this way."""
+# "In this section we prove Theorem 1.1", "This section is devoted to the proof of Theorem 2", "we conclude the
+# proof of Proposition 2.1": the opening lines of a section that proves a result stated elsewhere.
+SECTION_PROVES = re.compile(r'\b(?:(?:we|will)\s+(?:now\s+)?(?:prove|establish|conclude\s+the\s+proofs?\s+of|complete\s+the\s+proofs?\s+of|'
+                            r'give\s+the\s+proofs?\s+of)|(?:devoted|dedicated)\s+to\s+(?:the\s+)?proofs?\s+of|'
+                            r'contains?\s+the\s+proofs?\s+of|is\s+the\s+proof\s+of)\s+(.{0,160})', re.I)
+
+
+def _owners_named(units, text):
+    """The results a heading or sentence names: by \\ref labels, by "Theorem 1.1" / "Theorems 2 and 3", or "the main
+    theorem" when exactly one result is main."""
+    labels = [lab.strip() for group in TEX_REF.findall(text) for lab in group.split(',')]
+    if labels:
+        return [u for u in units if u['label'] and u['label'] in labels]
+    owners = []
+    for word, numbers in TEXT_REF.findall(text):
+        for number in re.findall(NUMBER, numbers):
+            owner = next((u for u in units if u['type'] == _kind(word) and u['number'] == number), None)
+            if owner and owner not in owners:
+                owners.append(owner)
+    if not owners and re.search(r'\bmain\s+(?:theorem|result)s?\b', text, re.I):
+        mains = [u for u in units if u['main']]
+        owners = mains if len(mains) == 1 else []
+    return owners
+
+
+def nested_spans(units, owner, a, b):
+    """Line ranges of [a, b] that hold another result's statement or proof (those are checked on their own)."""
+    taken = set()
+    for unit in units:
+        if unit is owner:
+            continue
+        for x, y in ([unit['statement']] if unit.get('statement') else []) + list(unit.get('proofs') or []):
+            if y >= a and x <= b and not (x <= a and b <= y):
+                taken.update(range(max(a, x), min(b, y) + 1))
+    spans = []
+    for n in sorted(taken):
+        if spans and n == spans[-1][1] + 1:
+            spans[-1][1] = n
+        else:
+            spans.append([n, n])
+    return spans
+
+
+def _section_proofs(result, units, clean, inside=False):
+    """A section titled "Proof of Theorem 1.1", "Existence: proof of Theorem 1" (or with \\ref{...}), or whose
+    opening lines say "In this section we prove Theorem 1.1", is the proof of a result stated without one: it runs
+    to the next section. Papers often prove their main theorems this way. Statements and proofs nested in that
+    section are checked on their own; the result's proof is the argument around them."""
     sections = result['sections']
+    _mark_main({'units': units, 'sections': sections})
     for index, sec in enumerate(sections):
-        match = re.match(r'\s*proofs?\s+of\s+(.+)$', sec['title'], re.I)
-        if not match:
-            continue
-        labels = [lab.strip() for group in TEX_REF.findall(match.group(1)) for lab in group.split(',')]
-        owners = [u for u in units if u['label'] and u['label'] in labels]
-        if not owners and not labels:
-            owner = _owner_by_name(units, match.group(1)) or resolve({'units': units}, match.group(1))
-            owners = [owner] if owner else []
-        if len(owners) != 1 or owners[0]['proofs']:
-            continue
-        owner = owners[0]
         end = sections[index + 1]['line'] - 1 if index + 1 < len(sections) else len(clean)
         for n in range(sec['line'] + 1, end + 1):
-            if re.search(r'\\begin\{thebibliography\}|\\bibliography\{|\\printbibliography', clean[n - 1]):
+            if re.search(r'\\begin\{thebibliography\}|\\bibliography\{|\\printbibliography', clean[n - 1]) or \
+                    re.match(r'^\s*(?:#{1,6}\s*)?(?:\d+\.\s+)?(references|bibliography)\s*$', clean[n - 1], re.I):
                 end = n - 1
                 break
         while end > sec['line'] and not clean[end - 1].strip():
             end -= 1
         if end <= sec['line']:
             continue
-        owner['proofs'].append([sec['line'] + 1, end])
-        for line in clean[sec['line']:end]:
-            for group in TEX_REF.findall(line):
-                owner['refs'] += [g.strip() for g in group.split(',')]
-            for note, note2, keys in TEX_CITE.findall(line):
-                for key in keys.split(','):
-                    owner['cites'].append({'key': key.strip(), 'note': (note2 or note).strip(), 'line': sec['line']})
+        match = re.search(r'\bproofs?\s+of\s+(.+)$', sec['title'], re.I)
+        owners = _owners_named(units, match.group(1)) if match else []
+        if not owners:
+            opening = ' '.join(line.strip() for line in clean[sec['line']:min(end, sec['line'] + 12)] if line.strip())
+            said = SECTION_PROVES.search(opening[:1200])
+            owners = _owners_named(units, said.group(1)) if said else []
+        for owner in owners:
+            if owner.get('statement') and sec['line'] <= owner['statement'][0] <= end:
+                continue  # a result stated in this very section is proved by its own proof environment
+            # A proof already mapped inside this section ("2.2. Proof of Theorem 1.") is a part of it.
+            if owner['proofs'] and not (inside and all(sec['line'] <= a and b <= end for a, b in owner['proofs'])):
+                continue
+            owner['proofs'] = [[sec['line'] + 1, end]]
+            owner['proof_from'] = 'section'
+            owner['nested'] = nested_spans(units, owner, sec['line'] + 1, end)
+            for a, b in owner['proofs']:
+                for number in range(a, b + 1):
+                    line = clean[number - 1]
+                    for group in TEX_REF.findall(line):
+                        owner['refs'] += [g.strip() for g in group.split(',')]
+                    for note, note2, keys in TEX_CITE.findall(line):
+                        for key in keys.split(','):
+                            owner['cites'].append({'key': key.strip(), 'note': (note2 or note).strip(), 'line': number})
 
 
 def _owner_by_name(units, text):
@@ -489,7 +542,12 @@ def _parse_text(lines, fmt):
                 continue
         match = TEXT_SUBSECTION.match(line)
         if match and match.group(1).split('.')[0] in (str(top), section or ''):
-            events.append(('subsection', number, (match.group(1), match.group(2).strip())))
+            opening = TEXT_PROOF.match(re.sub(r'(?i)^proofs\b', 'Proof', match.group(2).strip()) + '.')
+            if opening and re.match(r'of\b', opening.group(1), re.I):
+                # "3.4.4. Proof of Proposition 18." opens the proof of that result.
+                events.append(('proof', number, opening))
+            else:
+                events.append(('subsection', number, (match.group(1), match.group(2).strip())))
             boundaries.add(number)
     if result['abstract']:
         nxt = min([b for b in boundaries if b > result['abstract'][0]] or [len(lines) + 1])
@@ -563,6 +621,7 @@ def _parse_text(lines, fmt):
         # The bibliography ends at the next heading, e.g. appendices placed after the references.
         after = [n for kind, n, _ in events if kind == 'section' and n > references_line]
         result['bibliography'] = _text_bibliography(lines[:after[0] - 1] if after else lines, references_line)
+    _section_proofs(result, units, lines, inside=True)
     keys = set(result['bibliography'])
     equation_index = _text_equation_index(lines)
     lookup = {(u['type'], u['number']): u for u in units if u['number']}
@@ -653,15 +712,54 @@ def _text_bibliography(lines, start):
 
 # -- public interface ---------------------------------------------------------------
 
-def build(content, path=''):
-    """Map a manuscript; `content` is the pinned text, `path` only helps guess its format."""
+def build(content, path='', preamble='', aux=''):
+    """Map a manuscript; `content` is the pinned text, `path` only helps guess its format.
+
+    preamble: the text of the paper's own packages (theorem declarations); aux: its LaTeX .aux file, whose
+    \\newlabel entries give the numbers LaTeX printed."""
     lines = content.splitlines()
     if str(path).lower().endswith(('.tar.gz', '.tgz', '.tar', '.gz')):
         mapping = _parse_text(lines, 'source-archive')
         mapping['warnings'].append('This source archive is a labelled collection of files, not an assembled TeX document. Inclusion order, macros and cross-file numbering were not reconstructed.')
         return mapping
     fmt = detect_format(path, lines)
-    return _parse_tex(lines) if fmt == 'tex' else _parse_text(lines, fmt)
+    mapping = _parse_tex(lines, preamble) if fmt == 'tex' else _parse_text(lines, fmt)
+    if fmt == 'tex' and aux:
+        apply_aux(mapping, aux)
+    return mapping
+
+
+AUX_LABEL = re.compile(r'\\newlabel\{([^}]+)\}\{\{([^{}]*)\}')
+
+
+def apply_aux(mapping, aux):
+    """Use the numbers LaTeX printed (from the .aux file) for the labelled statements."""
+    numbers = {label: number.strip() for label, number in AUX_LABEL.findall(aux)
+               if number.strip() and '\\' not in number and len(number) <= 12}
+    found = 0
+    for unit in mapping['units']:
+        number = numbers.get(unit['label'])
+        if number and unit['type'] in KNOWN:
+            unit['number'], unit['name'] = number, f'{unit["type"].capitalize()} {number}'
+            found += 1
+    if found:
+        mapping['warnings'] = [w for w in mapping['warnings'] if not w.startswith('No \\newtheorem declarations')]
+        mapping['numbers_from'] = 'aux'
+    return found
+
+
+def refs_in(mapping, lines, spans):
+    """Ids of the results that the given lines refer to (\\ref labels in TeX, "Lemma 2.3" in text)."""
+    found = []
+    by_label = {u['label']: u['id'] for u in mapping['units'] if u['label']}
+    by_number = {(u['type'], u['number']): u['id'] for u in mapping['units'] if u['number']}
+    for a, b in spans:
+        text = '\n'.join(lines[max(0, a - 1):b])
+        for group in TEX_REF.findall(text):
+            found += [by_label[g.strip()] for g in group.split(',') if g.strip() in by_label]
+        for word, numbers in TEXT_REF.findall(text):
+            found += [by_number[(_kind(word), n)] for n in re.findall(NUMBER, numbers) if (_kind(word), n) in by_number]
+    return list(dict.fromkeys(found))
 
 
 def unit(mapping, unit_id):

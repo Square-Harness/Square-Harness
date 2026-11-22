@@ -14,6 +14,8 @@ import re
 from .model_limits import output_limit
 
 JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
+# detailed_review is the former name of a review at high effort: still accepted (saved chats, explicit calls), never offered.
+OFFERED_MODES = tuple(mode for mode in JOB_MODES if mode != 'detailed_review')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high')
 LEGACY_EFFORTS = ('xhigh', 'poincare')  # Read saved jobs without offering these levels for new work.
@@ -24,7 +26,7 @@ TASK_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['mode', 'request', 'files', 'effort', 'reason'],
     'properties': {
-        'mode': {'type': 'string', 'enum': list(JOB_MODES)},
+        'mode': {'type': 'string', 'enum': list(OFFERED_MODES)},
         'request': {'type': 'string', 'maxLength': 8000},
         'files': {'type': 'array', 'maxItems': 20, 'items': {'type': 'string', 'maxLength': 300}},
         'effort': {'type': 'string', 'enum': list(EFFORTS)},
@@ -54,10 +56,9 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   hypotheses, competing examples and sources. Preserve the topic and scope the user requested.
   Treat any proposed theorem or status as a question to investigate. Select low for a brief focused
   review, medium for an ordinary survey and high for broad or explicitly in-depth coverage.
-- referee: a referee review of a whole manuscript file the user names or attaches: an overview of the paper and
-  its typos and presentation problems, without checking the proofs.
-- detailed_review: the same review plus a check of the proofs (costs more); only when the user asks for a
-  detailed or thorough review or for the proofs of a paper to be checked.
+- referee: a referee report on a whole manuscript file the user names or attaches: an overview of the paper,
+  a check of every proof, its typos and presentation problems, and a recommendation. Select high when the user
+  asks for a detailed or thorough review, low for a first quick look.
 - quick_review: check whether a given proof of a given statement is correct, with a saved verdict and
   located issues, e.g. "is this proof right?", "check the proof of Lemma 3.2 in paper.tex". The request
   must contain the statement and its proof word for word, or name the file and the result.
@@ -68,8 +69,8 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
 - summarize: a LaTeX summary of the important results obtained so far in the conversation.
 A question (why, what, how, is it true that) is answered with explore. A request for a
 reference or citation to a known result is a check, not a literature review. A given proof to verify is
-a quick_review; a whole manuscript to referee is a referee report (detailed_review when its proofs should be
-checked too). Choose prove, literature, referee, detailed_review, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
+a quick_review; a whole manuscript to referee, or all of its proofs to check, is a referee report. Choose prove,
+literature, referee, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
 statement or request is exactly one task. Give several (at most 4) only when the message
@@ -99,11 +100,12 @@ def clarify(message, files=(), question='', reason=''):
 def _task(value, message, files):
     request = value.get('request') if isinstance(value.get('request'), str) else ''
     proposed = [f for f in value.get('files') or [] if isinstance(f, str) and f.strip()]
+    legacy = value['mode'] == 'detailed_review'  # the review at high effort
     return {
-        'mode': value['mode'],
+        'mode': 'referee' if legacy else value['mode'],
         'request': repair_latex(request.strip() or message)[:8000],
         'files': list(dict.fromkeys([*files, *proposed]))[:20],
-        'effort': value.get('effort') if value.get('effort') in EFFORTS else 'medium',
+        'effort': 'high' if legacy else value.get('effort') if value.get('effort') in EFFORTS else 'medium',
         'reason': repair_latex(str(value.get('reason') or ''))[:400],
         'question': '',
     }

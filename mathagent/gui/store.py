@@ -40,7 +40,7 @@ CHAT_MODES = ('explore', 'free')
 SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
 # How the interface names a suggestion in chat previews, including saved suggestions.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature review',
-               'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
+               'referee': 'Review', 'detailed_review': 'Review', 'quick_review': 'Quick review', 'explain': 'Explanation',
                'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
                'sanity_check': 'Numerical sanity check'}
 _EXPERIMENT = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
@@ -1491,7 +1491,7 @@ def set_style_template(root, workspace, name, paths):
 
 
 _RESULT_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'check': 'Literature check',
-                 'literature': 'Literature review', 'referee': 'Review', 'detailed_review': 'Detailed review',
+                 'literature': 'Literature review', 'referee': 'Review', 'detailed_review': 'Review',
                  'quick_review': 'Quick review', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
 _PROOF_STATUS = {'candidate_complete': 'response reviewed; it may be a proof or counterexample', 'uncertain': 'the model review is uncertain',
                  'review_unavailable': 'not reviewed'}

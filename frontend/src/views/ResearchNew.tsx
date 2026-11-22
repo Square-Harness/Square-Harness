@@ -11,7 +11,7 @@ import { go } from '../router'
 import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 import { capacityFull } from '../concurrency'
-import { VARIANT_EFFORT, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
+import { VARIANT_EFFORT, VARIANT_INPUT_SCALE, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
 import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
@@ -25,7 +25,7 @@ const LITERATURE: Copy = {
   field: 'Scope and request', files: 'Pinned sources', noun: 'literature review',
 }
 
-// The Review notebook holds four kinds of review; the engine kind stays 'referee'.
+// The Review notebook holds three kinds of review; the engine kind stays 'referee'.
 const REVIEW: Record<ReviewVariant, Copy> = {
   quick: {
     title: 'Check a proof',
@@ -36,17 +36,15 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The harness reads the whole paper to understand it and to list typos and presentation problems, and drafts a referee report: an overview of the paper, the typos with corrections, an assessment, a recommendation and a note to the editor. The proofs are not checked: use the detailed review for that.',
-    placeholder: 'Optional focus, e.g. pay attention to the introduction and how the results are presented.',
+    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, gives every objection a second opinion (a defence of the paper, then a judge), and lists the typos with checked corrections. The report is rewritten as checks finish: a first draft is readable within minutes. Effort sets how deeply each part is checked, not what is checked.',
+    placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
   },
   journal: {
-    title: 'Detailed Review',
-    lede: 'Everything the review does, then the proofs are checked one at a time, main results first, with each alleged error re-checked. The report identifies the checks completed and any work still pending. It allows twice the working time of a review at the same effort.',
-    placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
-    pinHint: 'Pin the manuscript (TeX, Markdown, text or PDF). Its snapshot stays fixed for the whole job.',
-    field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'detailed review',
+    title: 'Review a manuscript',
+    lede: 'The former detailed review, now the review.',
+    placeholder: '', pinHint: '', field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
   },
   explain: {
     title: 'Explain a result',
@@ -96,8 +94,10 @@ export function ResearchNew({ kind }: { kind: Kind }) {
 
   const scaled = (next: EffortLevel, kind: ReviewVariant = variant) => {
     const limits = effortLimits(review ? 'research' : 'literature', d!, next)
-    const scale = review && d?.api_profile !== 'deepinfra' ? VARIANT_SCALE[kind] : 1
-    return { ...limits, seconds: limits.seconds * scale }
+    const ds4 = d?.api_profile === 'deepinfra'
+    const scale = review && !ds4 ? VARIANT_SCALE[kind] : 1
+    const input = review && ds4 && limits.input_tokens ? VARIANT_INPUT_SCALE[kind] : 1
+    return { ...limits, seconds: limits.seconds * scale, input_tokens: limits.input_tokens && limits.input_tokens * input }
   }
   const applyLevel = (next: EffortLevel, kind: ReviewVariant = variant) => {
     if (!d) return
@@ -229,7 +229,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
           <span className="in-margin" />
           <div>
             {d && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
-            {review && VARIANT_SCALE[variant] > 1 && <p className="field-hint">A detailed review allows twice this working time for proof checks.</p>}
+            {review && manuscript && <p className="field-hint">A review checks every proof: it allows {d?.api_profile === 'deepinfra' ? 'three times the input' : 'twice the working time'} of the other modes at the same effort.</p>}
             {!pasted && (
               <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
                 hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />

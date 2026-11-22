@@ -44,7 +44,7 @@ MODES = {
         "evidence and identify what still needs checking."
     ),
     "referee": "Audit assumptions, definitions, lemma dependencies and proof completeness. Rank objections by severity.",
-    "detailed_review": "Referee the whole manuscript: understand it, list typos, then check its proofs.",
+    "detailed_review": "Audit assumptions, definitions, lemma dependencies and proof completeness. Rank objections by severity.",
     "quick_review": "Check whether the given proof is correct. Locate each issue in the proof lines; do not rewrite the proof.",
     "explain": "Explain the given result and its proof precisely, step by step, for a mathematician from another field.",
     "literature": "Research the literature with source-linked comparisons of precise results, hypotheses and methods; report search scope and limitations.",

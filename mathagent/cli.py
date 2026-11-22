@@ -112,8 +112,8 @@ HELP = '''Commands
   /explore [query]                     Explore approaches and connections
   /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
-  /referee [task]                     Review of the --research-file manuscript: overview, typos, presentation
-  /detailed_review [task]             The same review plus a check of the proofs (more tokens and time)
+  /referee [task]                     Referee report on the --research-file manuscript: every proof checked,
+                                      typos and presentation, a recommendation (/detailed_review: at high effort)
   /quick_review [statement + proof]   Is this proof correct? Verdict and located issues; or name a
                                       result of the --research-file manuscript, e.g. "Lemma 3.2"
   /explain [result + proof]           Precise step-by-step explanation of a result and its proof
@@ -515,10 +515,11 @@ def main():
             if agent.mode == 'literature':
                 runner, kind = ReviewRunner(agent, ui.emit, concurrency=review_concurrency()), 'literature'
             else:
-                variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
+                variant = {'referee': 'review', 'detailed_review': 'review', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
             result = runner.start(query, kind=kind,
-                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('literature', 'quick_review', 'explain') else 3),
+                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit else
+                    5 if agent.mode == 'detailed_review' else args.research_rounds if agent.mode not in ('literature', 'quick_review', 'explain') else 3),
                 max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
                 max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds if args.research_seconds_explicit or
@@ -586,7 +587,7 @@ def main():
                     from .terminal_investigation import command as investigation_command
                     last_job_status = investigation_command(command, rest, args, ui)
                 elif command == '/skills':
-                    for name in ('check', 'literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
+                    for name in ('check', 'literature', 'review', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
                         how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore and /review, or /sanity-check'

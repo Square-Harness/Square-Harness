@@ -14,7 +14,7 @@ import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, roleInfo, useJobClass, useLiveStream } from './shared'
-import { VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
+import { LEGACY_REVIEW_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review: code searches and follows citations; the model screens the records,
@@ -109,7 +109,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const extensionLabel = Number.isInteger(additionalMinutes) ? additionalMinutes : additionalMinutes.toFixed(1)
   const resumable = (data.progress?.resumable ?? researchResumable(data.status)) || (data.status === 'budget_exhausted' && additionalSeconds > 0)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const steps = data.variant ? VARIANT_STEPS[data.variant] : data.pipeline === REVIEW_PIPELINE ? REVIEW_STEPS : data.pipeline ? LIST_STEPS : STEPS
+  const steps = data.variant ? (data.pipeline && LEGACY_REVIEW_STEPS[data.pipeline]) || VARIANT_STEPS[data.variant] : data.pipeline === REVIEW_PIPELINE ? REVIEW_STEPS : data.pipeline ? LIST_STEPS : STEPS
   const names = data.variant ? VARIANT_STEP_NAMES : STEP_NAMES
   const current = steps.indexOf(data.phase === 'plan' && data.pipeline && !data.variant ? 'scope' : data.phase)
   return (
@@ -251,8 +251,8 @@ function Checks({ data, sources, issues, cite, onCite }: {
         <h3 className="aside-title">Usage</h3>
         <UsageMeters budget={b} />
         {!data.variant && <Meter label={data.pipeline ? "Model calls" : "Rounds"} used={b.rounds.used} limit={b.rounds.limit} />}
-        {(!data.variant || data.variant === 'journal') && <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />}
-        {data.pipeline !== REVIEW_PIPELINE && (!data.variant || data.variant === 'journal') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
+        {(!data.variant || data.variant === 'journal' || data.variant === 'review') && <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />}
+        {data.pipeline !== REVIEW_PIPELINE && (!data.variant || data.variant === 'journal' || data.variant === 'review') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
       </section>
     </div>
   )

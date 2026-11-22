@@ -39,7 +39,8 @@ REPAIR_REQUEST = re.compile(r"\A(?=.{0,300}\Z)(?=.*\b(?:fix|repair|correct|corri
                             r"(?!.*\b(?:proof|preuve|d[ée]monstration|lemma|lemme|theorem|th[ée]or[èe]me|argument)\b)",
                             re.I | re.S)
 
-REVIEW_MODES = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}
+# detailed_review, the former name of a review at high effort, runs the review.
+REVIEW_MODES = {'referee': 'review', 'detailed_review': 'review', 'quick_review': 'quick', 'explain': 'explain'}
 
 def worker_limits(mode, level_name, args):
     """Concrete native reservations for a bounded investigation task."""

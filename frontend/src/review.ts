@@ -5,12 +5,12 @@ import type { Budget, ReviewVariant } from './api'
 import type { EffortLevel } from './effort'
 import type { Variant } from './components/Square'
 
-/** The four kinds of review behind the Review notebook; the engine kind stays 'referee'. */
-// 'journal' is the detailed review: the review plus a check of the proofs.
-export const VARIANTS: ReviewVariant[] = ['quick', 'review', 'journal', 'explain']
+/** The three kinds of review behind the Review notebook; the engine kind stays 'referee'. */
+// 'journal' is the former detailed review: saved jobs stay readable and resume as a review.
+export const VARIANTS: ReviewVariant[] = ['quick', 'review', 'explain']
 
 export const VARIANT_NAMES: Record<ReviewVariant, string> = {
-  quick: 'Quick Check', review: 'Review', journal: 'Detailed Review', explain: 'Explanation',
+  quick: 'Quick Check', review: 'Review', journal: 'Review', explain: 'Explanation',
 }
 
 /** A quick check ends with a verdict on the proof, shown with the notebook's squares. */
@@ -25,26 +25,33 @@ export const VERDICTS: Record<string, { variant: Variant; label: string }> = {
 /** Workflow steps of each kind, as the engine names its phases. */
 export const VARIANT_STEPS: Record<ReviewVariant, string[]> = {
   quick: ['plan', 'extract', 'verify', 'confirm', 'done'],
-  review: ['plan', 'read', 'scope', 'literature', 'write', 'done'],
+  review: ['plan', 'audit', 'write', 'done'],
   journal: ['plan', 'read', 'scope', 'check', 'confirm', 'literature', 'write', 'done'],
   explain: ['plan', 'extract', 'explain', 'fill', 'check', 'fix', 'done'],
+}
+/** Steps of reviews saved before the review and the detailed review became one. */
+export const LEGACY_REVIEW_STEPS: Record<string, string[]> = {
+  'review-v1': ['plan', 'read', 'scope', 'literature', 'write', 'done'],
+  'journal-v1': VARIANT_STEPS.journal,
 }
 
 export const VARIANT_STEP_NAMES: Record<string, string> = {
   plan: 'Map', extract: 'Find', verify: 'Check', confirm: 'Re-check', read: 'Read', scope: 'Overview', check: 'Proofs',
+  audit: 'Read and check',
   literature: 'Literature', presentation: 'Presentation', write: 'Write', explain: 'Explain', fill: 'Fill', fix: 'Fix', done: 'Done',
 }
 
-/** The effort each kind starts from: a quick check wants two passes, a referee report depth. */
-export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'medium', journal: 'high', explain: 'medium' }
+/** The effort each kind starts from. */
+export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'medium', journal: 'medium', explain: 'medium' }
 
-/** A detailed review also checks the proofs: twice the working time of a review (gui/effort.py). */
-export const VARIANT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 1, journal: 2, explain: 1 }
+/** A review checks every proof: twice the working time on a local model, three times the input on DS4 (gui/effort.py). */
+export const VARIANT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 2, journal: 2, explain: 1 }
+export const VARIANT_INPUT_SCALE: Record<ReviewVariant, number> = { quick: 1, review: 3, journal: 3, explain: 1 }
 
 export const VARIANT_CAVEATS: Record<ReviewVariant, string> = {
   quick: 'Model check, not a certificate. Each objection links to the proof lines it concerns; the proof was not rewritten.',
-  review: 'Model draft of a referee report on understanding and presentation; the proofs were not checked. Links open the manuscript lines.',
-  journal: 'Model draft of a detailed referee report. The comments on proofs come from checked findings; links open the manuscript lines they cite.',
+  review: 'Model draft of a referee report. Every proof is checked and every objection gets a second opinion; the draft is rewritten as checks finish. Links open the manuscript lines.',
+  journal: 'Model draft of a referee report (an earlier detailed review). The comments on proofs come from checked findings; links open the manuscript lines they cite.',
   explain: 'Model explanation. Links open the source lines each step explains; an accuracy pass checks it against the source when the effort allows.',
 }
 

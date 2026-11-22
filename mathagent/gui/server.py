@@ -475,7 +475,7 @@ def researches(h, body):
 def research_start(h, body):
     variant = body.get('variant')
     if variant is not None and variant not in ('quick', 'review', 'journal', 'explain'):
-        raise ValueError('variant must be quick, review, journal (the detailed review) or explain')
+        raise ValueError('variant must be quick, review or explain (journal, the former detailed review, is the review)')
     target = body.get('target') or ''
     if not isinstance(target, str) or len(target) > 200:
         raise ValueError('target is a short text, at most 200 characters')

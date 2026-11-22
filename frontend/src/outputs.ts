@@ -19,7 +19,7 @@ export function modeLabel(mode?: string) {
 
 const researchNames: Record<string, string> = {
   prove: 'Proof', explore: 'Exploration', check: 'Literature check', literature: 'Literature review',
-  quick_review: 'Quick review', detailed_review: 'Detailed review', referee: 'Manuscript review',
+  quick_review: 'Quick review', detailed_review: 'Manuscript review', referee: 'Manuscript review',
   explain: 'Explanation', writeup: 'Write-up', summarize: 'Summary', numerics: 'Numerical check',
   python_lab: 'Python lab', sanity_check: 'Numerical check',
 }

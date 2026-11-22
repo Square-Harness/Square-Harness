@@ -55,8 +55,8 @@ from .store import one_line
 RUNNING = ('starting', 'running', 'pausing')
 LABELS = {'literature': 'Literature review', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
           'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
-LABELS['detailed_review'] = 'Review · detailed'
-VARIANT_LABELS = {'review': 'Review', 'journal': LABELS['detailed_review'], 'quick': LABELS['quick_review'], 'explain': LABELS['explain']}
+LABELS['detailed_review'] = 'Review'  # the former detailed review is the review at high effort
+VARIANT_LABELS = {'review': 'Review', 'journal': 'Review', 'quick': LABELS['quick_review'], 'explain': LABELS['explain']}
 
 
 
@@ -1243,7 +1243,7 @@ class Hub:
     def review_concurrency(self):
         """Independent review calls run together only on a server that batches requests (vLLM); the
         shared inference pool still admits them within the interface's model-request limit."""
-        limit = 5 if getattr(self.args, 'api_profile', None) == 'deepinfra' else 4
+        limit = 8 if getattr(self.args, 'api_profile', None) == 'deepinfra' else 4
         return min(limit, self.inference.capacity) if self.args.backend == 'openai' else 1
 
     def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None,
@@ -1261,7 +1261,7 @@ class Hub:
             if self.args.research_requests is not None:
                 budgets['max_requests'] = min(self.args.research_requests, budgets['max_requests'])
         online = self.online(online)
-        variant = (variant or 'review') if kind == 'referee' else None
+        variant = ('review' if variant in (None, 'journal') else variant) if kind == 'referee' else None
         if budgets['max_requests'] is None and kind != 'literature':
             budgets['max_requests'] = 12
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)

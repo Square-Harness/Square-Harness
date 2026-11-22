@@ -21,10 +21,16 @@ LEGACY_EFFORTS = {
     'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=160, chars=150_000),
 }
 LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
+# A review checks every proof with the whole paper in each call: about 30 calls of some 70k input tokens for a
+# 3,000-line paper at Medium, three times the input allowance of other DS4 workers. ('detailed_review' is the
+# former name of a review at high effort.)
+REVIEW_MODES = ('referee', 'detailed_review')
+REVIEW_INPUT = 3
 
 
 def level(mode, name, args=None):
-    """Legacy workload estimates; detailed reviews allow twice the working time, literature uses its own search and writing budget."""
+    """Legacy workload estimates; a review (which checks every proof) allows twice the working time on a local model and
+    three times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
     value = dict(table.get(name, legacy.get(name, table['medium'])))
@@ -45,8 +51,11 @@ def level(mode, name, args=None):
         cap = getattr(args, 'research_requests', None)
         if cap is not None:
             value['requests'] = min(cap, value['requests'])
-    if mode == 'detailed_review' and table is not DS4_EFFORTS:
-        value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
+    if mode in REVIEW_MODES:
+        if table is DS4_EFFORTS:
+            value.update(input=REVIEW_INPUT * value['input'])
+        else:
+            value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
     return value
 
 
@@ -89,8 +98,10 @@ def limits(mode, level, args):
     if mode == 'check':
         # A literature check has its own small budgets (refcheck.EFFORTS), chosen by level.
         return dict(effort=level if level in EFFORTS else 'medium')
-    if mode == 'detailed_review':
-        # More checking time, without silently increasing an explicit token cap.
+    if mode in REVIEW_MODES:
+        # More checking time and input, without silently increasing an explicit token cap.
+        if ds4:
+            input_tokens = ceiling('research_input_tokens', REVIEW_INPUT * effort['input'])
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds if ds4 else 2 * seconds,
                     requests=effort['requests'], chars=effort['chars'])
@@ -100,7 +111,7 @@ def limits(mode, level, args):
             seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
         return dict(rounds=effort['tries'], tokens=output, input_tokens=input_tokens, seconds=seconds,
                     requests=ceiling('research_requests', review['requests']), chars=effort['chars'])
-    if mode in ('referee', 'quick_review', 'explain'):
+    if mode in ('quick_review', 'explain'):
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds,
                     requests=effort['requests'], chars=effort['chars'])

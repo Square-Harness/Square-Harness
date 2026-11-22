@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- One Review instead of Review and Detailed review: every proof of the paper is checked at
+  every effort, appendices included; effort sets how deeply (passes, second opinions, repair
+  checks, typo check, lookups), never what is checked. `@detailed_review` and
+  `/detailed_review` remain as aliases of the review at High; saved reviews and detailed
+  reviews stay readable and resume as reviews. Driven by live tests on DS4 against answer keys:
+  a detailed review missed a major error of a main theorem because its proof was in an appendix
+  (never checked), filed a confirmed main-result-breaking error as minor after a re-check
+  accepted an unchecked repair, and printed 2 of the 35 known problems while its checks had
+  noted about 14 in a field the report never read.
+  - Every check reports every problem with its effect (the statement is false, the proof
+    fails, a gap, an imprecision, a misprint); severity follows from the effect.
+  - Each finding gets a second opinion as soon as its proof is checked: a defence of the paper,
+    then a judge; a finding said to break a proof or a statement becomes minor only when a
+    separate check finds the proposed repair to work.
+  - Reads across the whole paper for constants and conventions that change between sections and
+    for claims the paper never establishes; the typo list is checked against the paper (no
+    formula "corrected" into an error, no colleague's name "corrected").
+  - The main results are those the map flags and those the overview names (an appendix-only
+    proof stays main); the report gives each one a status and says which comment affects it and
+    where that comment comes from.
+  - The map reads the paper's own package (`\usepackage{preamble}`) and `.aux` for theorem
+    numbers (Quick review and Explain too: "Lemma A.4" no longer resolves to another lemma), and
+    attaches proofs that run over a whole section ("…: proof of Theorem 1", "In this section we
+    prove Theorem 1.2"); the overview locates the proofs the map still misses and results stated
+    in prose. `\input` files that are only figures no longer make a review partial.
+  - One continuous pool runs every call as soon as what it needs is done, the main results first,
+    and the report is rewritten after each one: the overview and first findings within minutes, a
+    first prose report once the main results are checked and judged. Every call opens with the
+    same text (the paper, its package, its cited bibliography), for providers that cache prompt
+    prefixes. On DS4 a review gets three times the input allowance of other workers and up to
+    eight concurrent calls.
+  - Quick review chooses the manuscript among a pinned `.tex`, `.bib` and `.sty`; bibliography
+    keys such as `[Savare]` are no longer reported as unknown source citations; the novelty
+    comparison ignores the manuscript's own preprint and refers only to the hits listed.
+
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model
