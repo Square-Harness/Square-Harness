@@ -3308,6 +3308,9 @@ class PaperReviewRunner(ReviewBase):
                         verdicts[inside] = found
                 if cluster['status'] == 'rejected':
                     rejected.append(entry)
+                elif cluster['status'] == 'undecided' and cluster.get('severity') == 'major' and cluster['kind'] != 'uncertainty':
+                    major.append(entry)  # alleged major and not refuted: a downgrade must be earned (live: the
+                    # Feynman-Kac error became a question when the judge could not decide)
                 elif cluster['status'] in ('undecided', 'uncertainty'):
                     questions.append(entry)
                 elif cluster.get('severity') == 'major':
@@ -3454,7 +3457,7 @@ class PaperReviewRunner(ReviewBase):
     def _recommendation_floor(self, major, questions, minor=()):
         """The mildest recommendation the findings allow: a major comment upheld after a defence of the paper rules
         out acceptance as it stands."""
-        confirmed = [c['label'] for c in major if c['status'] == 'confirmed']
+        confirmed = [c['label'] for c in major if c['status'] in ('confirmed', 'undecided')]
         if confirmed:
             return 'major_revision', confirmed
         # Comments to address rule out acceptance as it stands (live: "accept" with 45 minor comments).
@@ -3684,7 +3687,7 @@ class PaperReviewRunner(ReviewBase):
             body += ['', 'Raised to minor revision by the review itself: the comments of this report are to be addressed.']
         elif write.get('raised'):
             body += ['', f'Raised to major revision by the review itself: {write["raised"]} '
-                         f'{"was" if "," not in write["raised"] else "were"} upheld after a defence of the paper.']
+                         f'{"was" if "," not in write["raised"] else "were"} upheld after a defence of the paper, or not refuted by it.']
         if write.get('draft'):
             body += ['', 'Written when the main results were checked; the other proofs are still being checked.']
         if gaps:
