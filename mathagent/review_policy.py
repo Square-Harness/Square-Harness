@@ -195,16 +195,17 @@ statement; no when a step fails or a new ingredient is needed (name it); unsure 
 TYPO_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
     'properties': {'items': {'type': 'array', 'maxItems': 60, 'items': {
-        'type': 'object', 'additionalProperties': False, 'required': ['id', 'keep', 'reason'],
-        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'keep': {'type': 'boolean'},
-                       'reason': {'type': 'string', 'maxLength': 300}}}}},
+        'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
+        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+                       'keep': {'type': 'boolean'}}}}},
 }
 TYPO_CHECK_POLICY = """Below are remarks on the writing of the manuscript above, each with an id. Check each one against
 the manuscript and keep it only when the problem is real and the suggested correction is right. For a remark that
 changes a formula, a constant, an exponent, an index or a sign, do the computation, and reject it when the original is
 right or the correction is wrong. Reject a remark that corrects the spelling of a person's or a place's name or an
-entry of the bibliography, and a remark about a symbol or macro that the manuscript or its packages define. Give
-every id once; reason: one short sentence."""
+entry of the bibliography, a remark about a symbol or macro that the manuscript or its packages define, and a matter
+of taste or an optional rephrasing. Give every id once. check comes before keep: write there first what you verified
+(the computation done in full, the definition the symbol has, the sentence as corrected), then decide."""
 
 
 # Each pass reads the same proof through a different lens; disagreement between them is informative.

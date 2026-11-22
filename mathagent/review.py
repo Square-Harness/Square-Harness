@@ -3064,7 +3064,7 @@ class PaperReviewRunner(ReviewBase):
                         continue
                     comment['checked'] = True
                     if verdict.get('keep') is False:
-                        comment['rejected'] = str(verdict.get('reason') or '')[:300]
+                        comment['rejected'] = str(verdict.get('check') or verdict.get('reason') or '')[:400]
                 self._typo_counts()
                 self._save()
         return run
@@ -3689,7 +3689,7 @@ class PaperReviewRunner(ReviewBase):
         body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] or ['*Written once the paper is read.*']
         body += ['']
         body += ['## Typos and presentation', '']
-        body += self._presentation_section(presentation, sid, unread, bool(read))
+        body += self._presentation_section(presentation, sid, unread, bool(read), capped=False)
         if self._source(sid)['path'].lower().endswith('.pdf'):
             dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
             body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
@@ -3705,8 +3705,9 @@ class PaperReviewRunner(ReviewBase):
             appendix += ['', 'Packages read for the theorem numbering and the macros: ' + ', '.join(Path(p['path']).name for p in s['packages']) + '.']
         return body, appendix
 
-    def _presentation_section(self, items, sid, unread, read_any):
-        """Typos and presentation comments grouped by kind, errors first; long lists of small remarks are capped."""
+    def _presentation_section(self, items, sid, unread, read_any, capped=True):
+        """Typos and presentation comments grouped by kind, errors first; in a referee report, long lists of small
+        remarks are capped (a typo check lists everything)."""
         if not items:
             return [('None found in the parts read.' if unread else 'None found.') if read_any else
                     'The paper has not been read for presentation yet.', '']
@@ -3722,6 +3723,10 @@ class PaperReviewRunner(ReviewBase):
             if not chosen:
                 continue
             out += [f'### {title}', '']
+            if not capped:
+                cap = None
+            if title.startswith('Errors'):
+                out += ['*Each correction was checked against the paper; check it again before changing a formula.*', '']
             for c in chosen[:cap]:
                 text = f'- {self._place(sid, c["start_line"], c["end_line"])}: ' + (f'"{c["quote"]}" — ' if c['quote'] else '') + c['comment']
                 out.append(text + (f' *Suggested:* {c["suggestion"]}' if c.get('suggestion') else ''))
