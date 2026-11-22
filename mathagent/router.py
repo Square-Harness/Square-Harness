@@ -58,7 +58,7 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   review, medium for an ordinary survey and high for broad or explicitly in-depth coverage.
 - referee: a referee report on a whole manuscript file the user names or attaches: an overview of the paper,
   a check of every proof, its typos and presentation problems, and a recommendation. Select high when the user
-  asks for a detailed or thorough review, low for a first quick look.
+  asks for a detailed or thorough review, low when they ask only for typos or the presentation.
 - quick_review: check whether a given proof of a given statement is correct, with a saved verdict and
   located issues, e.g. "is this proof right?", "check the proof of Lemma 3.2 in paper.tex". The request
   must contain the statement and its proof word for word, or name the file and the result.

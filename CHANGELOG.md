@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- One Review instead of Review and Detailed review: every proof of the paper is checked at
-  every effort, appendices included; effort sets how deeply (passes, second opinions, repair
-  checks, typo check, lookups), never what is checked. `@detailed_review` and
+- One Review instead of Review and Detailed review. Low is a typo and presentation check (the
+  paper read for typos, every suggested correction checked against the paper, no proof checked);
+  from Medium every proof of the paper is checked, appendices included, and effort sets how
+  deeply (passes, second opinions, repair checks, lookups). `@detailed_review` and
   `/detailed_review` remain as aliases of the review at High; saved reviews and detailed
   reviews stay readable and resume as reviews. Driven by live tests on DS4 against answer keys:
   a detailed review missed a major error of a main theorem because its proof was in an appendix

@@ -1,6 +1,6 @@
 # Review: a referee report on a manuscript
 
-Referee the pinned manuscript as for a mathematics journal and draft a constructive report: understanding, every proof (appendices included), the results it cites, consistency across the paper, and presentation. Effort sets how deeply each part is examined, never which parts: every proof is checked at every effort. This is a model workflow, not a claim to act as a journal's referee.
+Referee the pinned manuscript as for a mathematics journal and draft a constructive report: understanding, every proof (appendices included), the results it cites, consistency across the paper, and presentation. At Low effort the review is a typo and presentation check only (step 5, with a summary); from Medium every proof is checked, and effort sets how deeply. This is a model workflow, not a claim to act as a journal's referee.
 
 ## Working method
 

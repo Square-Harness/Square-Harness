@@ -40,7 +40,7 @@ from .model_limits import input_limit, is_ds4, output_limit, substantive_output,
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
 
-# 'review' is the referee report on a whole paper: every proof is checked at every effort.
+# 'review' is the referee report on a whole paper: a typo check at Low, every proof checked from Medium.
 VARIANTS = ('quick', 'review', 'explain')
 PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v2', 'explain': 'explain-v1'}
 # Saved jobs of the retired split between a review (overview and typos) and a detailed review (also the proofs):
@@ -70,18 +70,19 @@ def full_review_requested(query):
                      r'\b(?:relis|relire)\s+(?:tout\s+)?(?:le\s+|cet\s+|ce\s+|l.)?(?:article|papier|manuscrit)\b', clause):
             return True
     return False
-# Per effort: verifier passes of a quick check; for a paper review, how deeply each part is examined (never which
-# parts: every proof is checked): passes on the main results and the results they use and on the others, the
+# Per effort: verifier passes of a quick check; for a paper review, whether the proofs are checked at all (Low reads
+# the paper for typos and presentation only), then how deeply (from Medium, every proof is checked): passes on the
+# main results and the results they use and on the others, the
 # sweeps across the paper, which findings get a second opinion and how many, whether a repair that would make a
 # major finding minor is checked, whether the typo list is checked, cited results looked up in their source and
 # literature queries; explanation extras. Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
 EFFORT = {
-    'low': dict(passes=1, confirm=False, main_passes=1, other_passes=1, sweeps=(), adjudicate='major', adjudications=8,
-                repair=False, typos=False, cited=0, queries=0, explain_check=False, fills=1),
-    'medium': dict(passes=2, confirm=True, main_passes=2, other_passes=1, sweeps=('consistency', 'completeness'),
+    'low': dict(passes=1, confirm=False, proofs=False, main_passes=1, other_passes=1, sweeps=(), adjudicate='major',
+                adjudications=0, repair=False, typos=True, cited=0, queries=0, explain_check=False, fills=1),
+    'medium': dict(passes=2, confirm=True, proofs=True, main_passes=2, other_passes=1, sweeps=('consistency', 'completeness'),
                    adjudicate='substantive', adjudications=30, repair=True, typos=True, cited=2, queries=2,
                    explain_check=True, fills=1),
-    'high': dict(passes=3, confirm=True, main_passes=3, other_passes=2, sweeps=('consistency', 'completeness'),
+    'high': dict(passes=3, confirm=True, proofs=True, main_passes=3, other_passes=2, sweeps=('consistency', 'completeness'),
                  adjudicate='all', adjudications=60, repair=True, typos=True, cited=4, queries=3, explain_check=True, fills=2),
 }
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
@@ -1445,7 +1446,7 @@ class ReviewBase(ResearchRunner):
     def _write_report(self, body, appendix):
         s = self.state
         previous_draft = s.get('draft')
-        head = [f'# {TITLES[self.VARIANT]}', '',
+        head = [f'# {self._report_title()}', '',
                 '**Model draft — a fallible review by a language model, not a certificate.**', '']
         if s.get('stop_reason') and s['status'] != 'reviewed':
             head += [s['stop_reason'], '']
@@ -1463,6 +1464,9 @@ class ReviewBase(ResearchRunner):
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(head + body + tail)))
         if s['draft'] != previous_draft:
             self._save()  # GUI detail reads state.json, including after the final report is assembled.
+
+    def _report_title(self):
+        return TITLES[self.VARIANT]
 
     def _report(self):
         with self._mutex:  # running jobs change the state; render and save one consistent snapshot
@@ -2321,7 +2325,8 @@ class PaperReviewRunner(ReviewBase):
             if not manuscript.checkable(self.state['map']):
                 self._warn('No proofs were recognised in the manuscript map; the overview may locate them.')
             self.state['read_parts'] = self._read_parts()
-            self._plan_units()
+            if self.effort['proofs']:
+                self._plan_units()
             if not (self.literature and self.literature.online) and (self.effort['queries'] or self.effort['cited']):
                 self._warn('Online search was off: no cited result was looked up in its source and '
                            'novelty was not compared with the literature.')
@@ -2331,8 +2336,9 @@ class PaperReviewRunner(ReviewBase):
             self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
             self.state['phase'] = 'write'
         elif phase == 'write':
-            self._merge()
-            self._write()
+            if self.effort['proofs']:  # Low lists typos only: no comments to merge, no referee prose
+                self._merge()
+                self._write()
             self.state['phase'] = 'done'
         else:
             raise ValueError('Unknown review phase: ' + phase)
@@ -2413,14 +2419,20 @@ class PaperReviewRunner(ReviewBase):
         they use, the reading, then the other proofs, the sweeps, second opinions and the literature."""
         s = self.state
         whole, effort = bool(s.get('whole')), self.effort
+        reads = s.get('read_parts') or []
+        sid = s['sources'][0]['id']
+        pdf = self._source(sid)['path'].lower().endswith('.pdf')
+        if not effort['proofs']:
+            # Low: the paper is read for typos and presentation, and the list is checked against the paper.
+            jobs = [(1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)) for a, b in reads if not self._reading_usable(f'L{a}')]
+            if whole and s.get('typo_check') is None and s['presentation'] and not self._unread_parts():
+                jobs.append((2, 'typo-check', self._typo_check))
+            return jobs
         chain = self._main_chain()
         scope_done = s.get('scope') is not None
         jobs = []
-        reads = s.get('read_parts') or []
         if not scope_done and (whole or all(f'L{a}' in s['reading'] for a, _ in reads)):
             jobs.append((0, 'scope', self._scope))
-        sid = s['sources'][0]['id']
-        pdf = self._source(sid)['path'].lower().endswith('.pdf')
         for a, b in reads:
             if not self._reading_usable(f'L{a}'):
                 jobs.append((1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)))
@@ -3612,6 +3624,8 @@ class PaperReviewRunner(ReviewBase):
         if self._followup_mode():
             return self.state.get('followup_usable', False)
         self._warn_reading_gaps()
+        if not self.effort['proofs']:
+            return not self._unread_parts() and (not self.state.get('whole') or bool((self.state.get('typo_check') or {}).get('checked')))
         missing, no_proof = self._provisional()
         whole = self.state.get('whole')
         return (bool(self.state.get('write')) and not self.state['write'].get('draft') and not self._unread_parts()
@@ -3621,7 +3635,7 @@ class PaperReviewRunner(ReviewBase):
 
     def _at_a_glance(self, major, minor, questions, presentation):
         """The controller's own summary line: what was checked and what was found (no model prose)."""
-        lines = ['**' + self._proofs_scope() + ' (every proof is checked at every effort).**']
+        lines = ['**' + self._proofs_scope() + ' (every proof is checked from Medium).**']
         confirmed = sum(c['status'] == 'confirmed' for c in major)
         lines.append(f'Major comments: {len(major)}' + (f' ({confirmed} upheld after a defence of the paper)' if major else '')
                      + f'. Minor comments: {len(minor)}.' + (f' Questions to the authors: {len(questions)}.' if questions else '')
@@ -3685,6 +3699,8 @@ class PaperReviewRunner(ReviewBase):
         s = self.state
         if not s.get('map'):
             return ['*The manuscript is not mapped yet.*'], []
+        if not self.effort['proofs']:
+            return self._render_typos()
         sid = s['sources'][0]['id']
         write = s.get('write') or {}
         major, minor, questions, rejected, verdicts = self._comments()
@@ -3761,6 +3777,43 @@ class PaperReviewRunner(ReviewBase):
         body += ['', write.get('reasons') or '']
         body += ['', '## Confidential comments to the editor', '', write.get('confidential') or '—']
         return body, self._scope_appendix(verdicts, rejected, no_proof)
+
+    def _report_title(self):
+        return TITLES[self.VARIANT] if self.effort['proofs'] or self._followup_mode() else 'Typos and presentation'
+
+    def _render_typos(self):
+        """Low effort: what the paper is about, then its typos and presentation problems; no proof was checked."""
+        s = self.state
+        sid = s['sources'][0]['id']
+        unread = self._unread_parts()
+        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
+        hidden = self._hidden_presentation()
+        presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
+        typo = s.get('typo_check') or {}
+        removed = f'; {typo["rejected"]} wrong or unnecessary correction(s) removed by a check against the paper' if typo.get('rejected') else ''
+        self._headline = (f'**Typos and presentation only (Low effort): {len(presentation)} remark(s){removed}. '
+                          'The proofs were not checked.**')
+        body = []
+        if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
+            body += ['*Reading in progress; this list is rewritten as each step finishes.*', '']
+        summaries = [s['reading'][f'L{a}']['summary'] for a, _ in read if s['reading'][f'L{a}'].get('summary')]
+        body += ['## Summary', '', '\n\n'.join(summaries) or '*Written once the paper is read.*', '']
+        body += ['## Typos and presentation', '']
+        body += self._presentation_section(presentation, sid, unread, bool(read))
+        if self._source(sid)['path'].lower().endswith('.pdf'):
+            dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
+            body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
+                     f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
+                     'Review the TeX source for typos in formulas and notation.', '']
+        body += ['## What was checked', '', 'At Low effort the review reads the paper for typos and presentation only: '
+                 'its proofs were not checked, and it gives no recommendation. Choose Medium or High for a referee report '
+                 'that checks every proof.']
+        total = sum(b - a + 1 for a, b in s.get('read_parts') or [])
+        appendix = ['## Scope of this review', '', f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines '
+                    'before the bibliography.' + (' Every remark was then checked against the whole paper.' if typo.get('checked') else '')]
+        if s.get('packages'):
+            appendix += ['', 'Packages read for the theorem numbering and the macros: ' + ', '.join(Path(p['path']).name for p in s['packages']) + '.']
+        return body, appendix
 
     def _presentation_section(self, items, sid, unread, read_any):
         """Typos and presentation comments grouped by kind, errors first; long lists of small remarks are capped."""

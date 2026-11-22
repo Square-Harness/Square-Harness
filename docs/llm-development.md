@@ -1084,9 +1084,11 @@ at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus fram
 streamed characters plus 256), so retries do not drain allowances with
 full-context reservations. Proof gives every replacement a fresh dispatch key.
 
-The Review (`PaperReviewRunner`, pipeline `review-v2`) checks every proof at every
-effort; `EFFORT` sets the depth only (passes on the main chain and elsewhere, sweeps,
-which findings get a second opinion, repair checks, the typo check, lookups). Saved
+The Review (`PaperReviewRunner`, pipeline `review-v2`) is a typo and presentation check
+at Low (`EFFORT['low']['proofs']` is false: the reading and the typo check, rendered by
+`_render_typos`) and checks every proof from Medium; `EFFORT` then sets the depth
+(passes on the main chain and elsewhere, sweeps, which findings get a second opinion,
+repair checks, lookups). Saved
 `review-v1` and `journal-v1` jobs (the retired Review / Detailed review split) are read
 as reviews (`LEGACY_PIPELINES`); resuming one migrates it (`resume`: earlier re-checks
 move to `legacy_confirms`, the phase becomes `audit`). `@detailed_review` and

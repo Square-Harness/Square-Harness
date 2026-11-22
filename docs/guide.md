@@ -846,17 +846,20 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review**: a referee report on the whole paper. **Every proof is checked at
-  every effort**, appendices included; effort sets how deeply, never what:
+- **Review**: a referee report on the whole paper. At **Low** it is a typo and
+  presentation check only: the paper is read for typos, misprinted formulas,
+  undefined symbols, wrong cross-references and unclear sentences, every
+  suggested correction is checked against the paper, and no proof is checked (two
+  model calls with DS4). From **Medium**, every proof is checked, appendices
+  included; effort sets how deeply:
 
-  | | Low | Medium | High |
-  | --- | --- | --- | --- |
-  | Passes on the main results and the results their proofs use / on the others | 1 / 1 | 2 / 1 | 3 / 2 |
-  | Read across the whole paper | cited results | and consistency, unproved claims | the same |
-  | Second opinion on | major findings | major findings and gaps | every finding |
-  | Repairs that would make a major finding minor are checked | no (it stays major) | yes | yes |
-  | Typo list checked against the paper | no | yes | yes |
-  | Cited results looked up online | 0 | 2 | 4 |
+  | | Medium | High |
+  | --- | --- | --- |
+  | Passes on the main results and the results their proofs use / on the others | 2 / 1 | 3 / 2 |
+  | Read across the whole paper | cited results, consistency, unproved claims | the same |
+  | Second opinion on | major findings and gaps | every finding |
+  | Repairs that would make a major finding minor are checked | yes | yes |
+  | Cited results looked up online | 2 | 4 |
 
   How it works. The code maps the paper: its statements and proofs (theorem
   numbers come from your `.sty` and, when present, the `.aux` file), proofs that

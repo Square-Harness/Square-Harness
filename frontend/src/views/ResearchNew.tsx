@@ -36,7 +36,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, gives every objection a second opinion (a defence of the paper, then a judge), and lists the typos with checked corrections. The report is rewritten as checks finish: a first draft is readable within minutes. Effort sets how deeply each part is checked, not what is checked.',
+    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, gives every objection a second opinion (a defence of the paper, then a judge), and lists the typos with checked corrections. The report is rewritten as checks finish: a first draft is readable within minutes. Low effort checks the typos and presentation only.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
