@@ -851,16 +851,22 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   (each call with the whole paper in view) for typos, misprinted formulas,
   undefined symbols, wrong cross-references and unclear sentences, every
   suggested correction is checked against the paper, and no proof is checked
-  (about 16 calls and two minutes with DS4 for a 3,000-line paper). From
-  **Medium**, every proof is checked, appendices included; effort sets how deeply:
+  (about 16 calls with DS4 for a 3,000-line paper). From **Medium**, every proof
+  is checked, appendices included; effort sets how deeply:
 
   | | Medium | High |
   | --- | --- | --- |
-  | Passes on the main results / on the results their proofs use / on the others | 2 / 2 (those used directly) / 1 | 3 / 3 (all) / 1 |
+  | Passes on the main results / on the results their proofs use / on the others | 2 / 1 / 1 | 2 / 2 (those used directly) / 1 |
+  | Hidden reasoning (DS4) | none: every call answers at once | the second pass and the second opinions reason first |
   | Read across the whole paper | cited results, consistency, unproved claims | the same |
-  | Second opinion on | findings said to break a proof or a statement | those and the gaps |
+  | Second opinion on | findings said to break a proof or a statement | the same |
   | Repairs that would make a major finding minor are checked | yes | yes |
-  | Cited results looked up online | 2 | 4 |
+
+  Hidden reasoning is most of what a model writes (15–30k tokens for one proof
+  check) and the provider limits how much an account generates per second, so it,
+  not the number of calls, sets how long a review takes. The review does not
+  search the literature: it names the closest works the paper cites and suggests
+  a literature review (`@literature …`), which the Assistant can start.
 
   How it works. The code maps the paper: its statements and proofs (theorem
   numbers come from your `.sty` and, when present, the `.aux` file), proofs that

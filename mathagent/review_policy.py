@@ -527,23 +527,6 @@ precisely, then the consistent ones briefly (used, known and explanation in one 
 Never leave out a misuse to make room for consistent uses. Do not list results that the manuscript proves itself, and do not list a result of the manuscript (a lemma or theorem it states) as a
 cited result."""
 
-NOVELTY_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['assessment', 'related'],
-    'properties': {
-        'assessment': {'type': 'string', 'maxLength': 2000},
-        'related': {'type': 'array', 'maxItems': 6, 'items': {
-            'type': 'object', 'additionalProperties': False, 'required': ['n', 'relation'],
-            'properties': {'n': {'type': 'integer'}, 'relation': {'type': 'string', 'maxLength': 300}}}},
-    },
-}
-NOVELTY_POLICY = """Compare the claimed contribution with the search results below (titles and abstracts only, not read in
-full). Say which results look closest and how they relate (earlier special case, same method, competing result,
-background). Search hits do not establish or refute novelty; say what a referee should still check. There are
-exactly {count} search results, numbered 1 to {count}: refer to them by these numbers only, never to a result that is
-not listed, and do not describe works you only recall. A result marked "same authors" shares an author with the
-manuscript: it is the authors' own earlier or companion work, never a competing result. The manuscript itself is not part of this task: the field and
-claimed contribution stand for it, and other calls review it, so do not comment on its absence."""
-
 WRITE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['summary', 'significance', 'correctness', 'presentation', 'recommendation', 'reasons', 'confidential'],
@@ -564,7 +547,8 @@ comment major or the reverse, and do not repeat them in full. Mention questions 
 search results only when the findings list some; main_results gives the status of each main result, and what you
 say about a main result must match it. summary: one paragraph for the editor and the authors:
 what the paper does and claims, then what this review found. significance: importance and novelty in the field,
-relying only on the findings and the literature evidence listed (say when novelty could not be assessed).
+relying only on the manuscript and the findings: the literature was not searched, so neither claim nor deny
+novelty; say that a literature review would place the results.
 correctness: an overall assessment that matches the checks actually done (proofs_scope) and states what was not
 checked. presentation: overall quality of writing, in a few sentences. recommendation and reasons: accept,
 minor_revision, major_revision or reject, justified by the comments, and never milder than

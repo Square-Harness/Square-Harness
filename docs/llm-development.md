@@ -1134,16 +1134,20 @@ names the main results each one affects (`_affects`); `_main_status` gives each
 main result one status; `state['ledger']` saves the numbered findings with the job.
 `_recommendation_floor` keeps a major comment upheld after a defence out of an
 `accept` or `minor_revision` recommendation. The report is rewritten after every
-call of the pool (`_report`), with a progress line while the job runs. The novelty
-call never sees a search hit that is the manuscript's own preprint (`own`), and its
-prose may refer only to listed hits. Every review call carries the delegation context
-except the novelty comparison (`_ask(reference=False)`), which sees only the field,
-the claimed contribution and the search hits. On DS4 a review gets three times the
+call of the pool (`_report`), with a progress line while the job runs. The review
+does not search the literature: `_literature_section` names the works the overview
+found the paper presents as closest and suggests a literature review. Every review
+call carries the delegation context. Hidden reasoning is off for every call except, at
+High, the second pass on the near chain and the second opinions (`EFFORT['think']`,
+`_deep`): DS4 on DeepInfra generates about 550 tokens per second per account and a
+thinking proof check writes 15–30k tokens, so reasoning, not concurrency, sets the
+duration (a live Medium review with reasoning everywhere took 40–64 minutes; the
+"low" reasoning level made checks think longer, not shorter). On DS4 a review gets three times the
 input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
 `inference.MAX_CAPACITY` (16) concurrent calls (`Hub.review_concurrency`, within the
 model-request limit). Pool admission counts only the new call: running calls have
 already reserved their output and input in the job's counters. Extra passes go to
-`_near_chain()` (the main results and, at Medium, what they use directly:
+`_near_chain()` (the main results, and at High what they use directly:
 `EFFORT['depth']`); the judge runs only when the defence is `_contested`; the repair
 check treats a fact the paper neither proves nor cites as a new ingredient. Reading in
 whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with

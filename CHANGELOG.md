@@ -34,9 +34,13 @@
     same text (the paper, its package, its cited bibliography), for providers that cache prompt
     prefixes. On DS4 a review gets three times the input allowance of other workers and up to
     16 concurrent calls (the model-request limit now goes to 16).
+  - Speed: hidden reasoning is most of a model's output and the provider caps an account's
+    throughput, so Low and Medium calls answer at once (no hidden reasoning); High reasons only
+    for the second pass on the main results and what they use directly, and for second opinions.
+    The review no longer looks up cited results or searches for novelty (slow calls of their
+    own): it names the closest works the paper cites and suggests a literature review.
   - Quick review chooses the manuscript among a pinned `.tex`, `.bib` and `.sty`; bibliography
-    keys such as `[Savare]` are no longer reported as unknown source citations; the novelty
-    comparison ignores the manuscript's own preprint and refers only to the hits listed.
+    keys such as `[Savare]` are no longer reported as unknown source citations.
 
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
