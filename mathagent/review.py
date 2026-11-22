@@ -116,6 +116,9 @@ EFFECT_LABEL = {'statement_false': 'The statement is false', 'breaks_proof': 'Th
                 'imprecision': 'Imprecision', 'misprint': 'Misprint'}
 BLOCK_LINES = 150  # a longer proof environment is checked line by line in parts, with the whole paper in view
 PART_LINES = 110
+# An answer without hidden reasoning: the longest measured (a proofreading part, DS4) was 11k tokens. A call
+# reserves its whole cap from the job's allowance while it runs, so a thinking call's 131k cap would block others.
+DIRECT_CAP = 32_768
 READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
 TYPO_BATCH = 40  # remarks checked against the paper per call
 
@@ -2349,7 +2352,7 @@ class PaperReviewRunner(ReviewBase):
             # Running calls have already reserved their output and input in the job's counters: a new call needs
             # only its own share (counting them again stopped a 16-call pool with 1% of the budget used).
             return (self._elapsed() < self.state['settings']['max_seconds'] * .9
-                    and self._tokens_left(self._write_reserve()) >= min(self._cap(self._check_cap()), 32768)
+                    and self._tokens_left(self._write_reserve()) >= min(self._cap(self._check_cap()), DIRECT_CAP)
                     and self._input_left(12000) >= estimate)
         started, left = self._pool(self._audit_jobs, admit)
         if left:
@@ -2471,9 +2474,7 @@ class PaperReviewRunner(ReviewBase):
     def _scope(self):
         mapping, sid = self.state['map'], self.state['sources'][0]['id']
         lines = self._lines(sid)
-        cap = self._model_cap('review_scope', 8192)
-        if not self._thinks(cap):
-            cap = self._model_cap('review_direct', 3000)
+        cap = self._call_cap(False, self._model_cap('review_scope', 8192))
         self.state['scope_incomplete'] = False
         whole = bool(self.state.get('whole'))
         if whole:
@@ -2735,8 +2736,8 @@ class PaperReviewRunner(ReviewBase):
                 packet, _, ranges = self._packet(unit, room, notation=self._notation(), segment=item['segment'])
                 self._mark(unit['source'], ranges)
                 prompt = P.AUDIT_PARTS_NOTE + '\n\n' + P.audit_prompt(item['lens'], packet)
-            result = self._judge('check', prompt, cap=self._check_cap(), schema=P.AUDIT_SCHEMA, key=item['key'],
-                                 reason=self._deep(item['pass_index']))
+            deep = self._deep(item['pass_index'])
+            result = self._judge('check', prompt, cap=self._call_cap(deep), schema=P.AUDIT_SCHEMA, key=item['key'], reason=deep)
             parsed = self._parse_audit(result, unit, item['segment'])
             parsed.update(lens=item['lens'], unit=uid, pass_index=item['pass_index'], part=item['part'],
                           parts=item['parts'], segment=item['segment'])
@@ -2785,7 +2786,7 @@ class PaperReviewRunner(ReviewBase):
         sid = self.state['sources'][0]['id']
         total = len(self._lines(sid))
         self.emit('notice', 'Comparing the cited results with the literature')
-        result = self._judge('citations', self._block() + '\n\n' + P.CITATIONS_POLICY, cap=self._check_cap(),
+        result = self._judge('citations', self._block() + '\n\n' + P.CITATIONS_POLICY, cap=self._call_cap(False),
                              schema=P.CITATIONS_SCHEMA, key=CITE + '#0', reason=False)
         value = result['value']
         rows, issues = [], []
@@ -2835,7 +2836,7 @@ class PaperReviewRunner(ReviewBase):
             total = len(self._lines(sid))
             self.emit('notice', {'consistency': 'Checking the paper for inconsistencies between its parts',
                                  'completeness': 'Looking for claims the paper does not establish'}[name])
-            result = self._judge(name, self._block() + '\n\n' + P.SWEEPS[name], cap=self._check_cap(),
+            result = self._judge(name, self._block() + '\n\n' + P.SWEEPS[name], cap=self._call_cap(False),
                                  schema=P.SWEEP_SCHEMA, key=uid + '#0', reason=False)
             value = result['value']
             issues = [self._parse_issue(item, sid, set(range(1, total + 1)))
@@ -2955,8 +2956,9 @@ class PaperReviewRunner(ReviewBase):
                            f'{defense["argument"]}\n' + (f'Repair proposed by the defence: {defense["repair"]}\n' if defense['repair'] else ''))
             elif step == 'repair':
                 prompt += f'\nTHE PROPOSED REPAIR (it would make the effect {adjudication["repair_wanted"]["effect"]}):\n{adjudication["repair_wanted"]["repair"]}\n'
-            result = self._judge(role, prompt, cap=self._confirm_cap(), schema=schema, key=f'{step}:{key}',
-                                 reason=bool(self.effort.get('think')))
+            think = bool(self.effort.get('think'))
+            result = self._judge(role, prompt, cap=self._call_cap(think, self._confirm_cap()), schema=schema,
+                                 key=f'{step}:{key}', reason=think)
             value = result['value']
             with self._mutex:
                 if value is None:
@@ -3047,7 +3049,7 @@ class PaperReviewRunner(ReviewBase):
                     + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
             self.emit('notice', f'Checking {len(rows)} typo and presentation remarks against the paper')
             result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
-                                 cap=self._check_cap(), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
+                                 cap=self._call_cap(False), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
                                  reason=False)
             value = result['value']
             with self._mutex:
@@ -3118,7 +3120,12 @@ class PaperReviewRunner(ReviewBase):
         return parts
 
     def _read_cap(self):
-        return self._model_cap('review_read', self._analysis_cap())
+        return self._call_cap(False, self._model_cap('review_read', self._analysis_cap()))
+
+    def _call_cap(self, think, ceiling=None):
+        """The output cap of a call: the role's ceiling when it reasons first, else at most DIRECT_CAP."""
+        ceiling = self._check_cap() if ceiling is None else ceiling
+        return ceiling if think else min(ceiling, DIRECT_CAP)
 
     def _reading_usable(self, key):
         """Only a usable completed answer counts as reading; accept older summary-only entries."""
