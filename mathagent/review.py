@@ -2447,10 +2447,13 @@ class PaperReviewRunner(ReviewBase):
                     jobs.append((3, 'sweep:' + name, self._sweep_job(name)))  # long calls: started early
         if whole or scope_done:
             for uid in s['plan_units']:
-                for item in self._audit_plan(uid, scope_done):
+                # With the whole paper in every call the plan does not wait for the overview: the main results the
+                # map flags get their passes at once (the overview's additions extend the plan when they arrive).
+                for item in self._audit_plan(uid, scope_done or whole):
                     if s['checks'].get(item['key'], {}).get('usable'):
                         continue
-                    priority = (2 if item['pass_index'] == 0 else 5) if uid in chain else 6
+                    # The thinking passes are the longest calls: they start first.
+                    priority = (1 if self._deep(item['pass_index']) else 2 if item['pass_index'] == 0 else 5) if uid in chain else 6
                     jobs.append((priority, item['key'], self._audit_job(uid, item)))
         jobs += self._adjudication_jobs(chain)
         if whole and effort['typos']:
@@ -2890,7 +2893,7 @@ class PaperReviewRunner(ReviewBase):
                     adjudication = s['adjudications'][key] = {'effect': cluster['effect'], 'unit': cluster['unit']}
             step = self._next_step(adjudication)
             if step:
-                priority = 4 if cluster['on_chain'] else 8
+                priority = 5 if cluster['on_chain'] else 8
                 jobs.append((priority, f'{step}:{key}', self._opinion_job(step, cluster)))
         return jobs
 
@@ -2961,7 +2964,8 @@ class PaperReviewRunner(ReviewBase):
                            f'{defense["argument"]}\n' + (f'Repair proposed by the defence: {defense["repair"]}\n' if defense['repair'] else ''))
             elif step == 'repair':
                 prompt += f'\nTHE PROPOSED REPAIR (it would make the effect {adjudication["repair_wanted"]["effect"]}):\n{adjudication["repair_wanted"]["repair"]}\n'
-            think = bool(self.effort.get('think'))
+            # The defence answers at once; the judge and the repair check, which decide severity, reason first.
+            think = bool(self.effort.get('think')) and step != 'defend'
             result = self._judge(role, prompt, cap=self._call_cap(think, self._confirm_cap()), schema=schema,
                                  key=f'{step}:{key}', reason=think)
             value = result['value']
