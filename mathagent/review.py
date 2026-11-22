@@ -123,6 +123,11 @@ READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per pa
 TYPO_BATCH = 40  # remarks checked against the paper per call
 
 
+_NO_CHANGE = re.compile(r'(?i)\bno (?:change|correction|repair|fix)(?:es)? (?:is |are )?(?:needed|required|necessary)\b'
+                        r'|\bnothing to (?:fix|change)\b')
+_CORRECT_AS_IS = re.compile(r'(?i)(?<!not )(?<!n\'t )\bcorrect as (?:written|stated)\b')
+
+
 def _few(labels, shown=4):
     """"Minor 1, Minor 2, Minor 3, Minor 4 and 11 more"."""
     return ', '.join(labels[:shown]) + (f' and {len(labels) - shown} more' if len(labels) > shown else '')
@@ -2769,6 +2774,9 @@ class PaperReviewRunner(ReviewBase):
                     'issues': [], 'verdict': 'unavailable', 'explanation': ''}
         allowed = set(n for a, b in (segment or unit['proofs']) for n in range(a, b + 1))
         issues = [self._parse_issue(item, unit['source'], allowed) for item in value.get('issues') or [] if isinstance(item, dict)]
+        # An issue whose own text concludes that nothing needs to change is not an objection (live: six of them).
+        issues = [i for i in issues if not (_NO_CHANGE.search(i['suggestion'] + ' ' + i['evidence'][-200:])
+                                            or (i['suggestion'].strip() and _CORRECT_AS_IS.search(i['suggestion'])))]
         verdict = value.get('verdict') if value.get('verdict') in ('no_issue_found', 'issues_found', 'uncertain') else 'uncertain'
         concrete = [i for i in issues if i['kind'] != 'uncertainty']
         if verdict == 'no_issue_found' and issues:
@@ -3051,15 +3059,21 @@ class PaperReviewRunner(ReviewBase):
             jobs.append((priority, f'typo-check:{batch[0]}', self._typo_check_job(batch)))
         return jobs
 
+    def _formula_remark(self, comment):
+        """A remark that changes mathematics (a formula, a constant, a sign), as opposed to the language."""
+        return comment.get('importance') == 'error' or bool(re.search(r'[$\\^_]', comment.get('suggestion') or ''))
+
     def _typo_check_job(self, batch):
         def run():
             items = [(i, self.state['presentation'][i]) for i in batch]
             rows = [f'R{n} (lines {c["start_line"]}-{c["end_line"]}, {c["kind"]}): "{c["quote"]}" — {c["comment"]}'
                     + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
             self.emit('notice', f'Checking {len(rows)} typo and presentation remarks against the paper')
+            # At High a batch with corrections to formulas reasons first: unchecked, four in ten were wrong.
+            deep = bool(self.effort.get('think')) and any(self._formula_remark(c) for _, c in items)
             result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
-                                 cap=self._call_cap(False), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
-                                 reason=False)
+                                 cap=self._call_cap(deep), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
+                                 reason=deep)
             value = result['value']
             with self._mutex:
                 verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
@@ -3386,7 +3400,7 @@ class PaperReviewRunner(ReviewBase):
                 for c in group:
                     host = c.get('host') or c['unit']
                     if host in chain:
-                        out.append(c['label'] if host == uid or not named else f'{c["label"]} (in {self._unit(host)["name"]}, which it uses)')
+                        out.append(c['label'] if host == uid or not named else f'relies on {self._unit(host)["name"]} ({c["label"]})')
                 return out
             hit, small, open_ = labels([c for c in major if c['status'] == 'confirmed'], True), labels(minor), labels(questions)
             alleged = labels([c for c in major if c['status'] != 'confirmed'], True)
@@ -3395,7 +3409,8 @@ class PaperReviewRunner(ReviewBase):
             if not unit['proofs']:
                 status = 'no proof found in the paper'
             elif hit:
-                status = 'affected by ' + ', '.join(hit)
+                own = [h for h in hit if not h.startswith('relies on')]
+                status = '; '.join((['an error in its proof: ' + ', '.join(own)] if own else []) + [h for h in hit if h.startswith('relies on')])
             elif alleged:
                 status = ', '.join(alleged) + (' alleged; second opinion pending' if self.state['phase'] != 'done' else ' alleged, not given a second opinion')
             elif len(done) < len(planned):
