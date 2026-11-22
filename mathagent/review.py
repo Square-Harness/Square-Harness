@@ -2264,6 +2264,13 @@ class PaperReviewRunner(ReviewBase):
                     pinned = next((s for s in self.state['sources'] if s['path'] == package['path']), None)
                     if pinned:
                         self._mark(pinned['id'], [[1, max(1, len(pinned['content'].splitlines()))]])
+            units = [u for u in self.state['map']['units'] if u.get('number')]
+            if units and self.state['map'].get('format') == 'tex':
+                # The model numbers theorems by counting environments and gets shared counters and appendices wrong.
+                text += ('\n\nTHE NUMBERED RESULTS, AS THE COMPILED PAPER NUMBERS THEM (from its theorem declarations; '
+                         'refer to results by these numbers):\n' + '\n'.join(
+                             f'{u["name"]}' + (f' [{u["label"]}]' if u.get('label') else '') + f': line {u["statement"][0]}'
+                             for u in units if u.get('statement')))
             if self.state['map']['bibliography']:
                 text += '\n\nBIBLIOGRAPHY (key: entry):\n' + self._bibliography_text(600)
             self._block_text = text
