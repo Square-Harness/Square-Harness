@@ -29,6 +29,22 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - Never push, force-push, rewrite published history, delete branches or open a
   pull request without explicit approval from the person you work for.
   Before proposing a commit, run `git fetch` and report new upstream commits.
+- The `Publish app container` workflow publishes stable GitHub Releases to
+  `ghcr.io/square-harness/square-harness` for `linux/amd64` and `linux/arm64`.
+  The release tag must match `mathagent/__init__.py`; it creates version,
+  major/minor and `latest` tags. The first published package must be changed to
+  public in GitHub Packages settings before anonymous users can pull it.
+- The `Publish development container` workflow publishes non-`main` branch
+  pushes and manual runs from non-`main` branches to the separate
+  `ghcr.io/square-harness/square-harness-dev` package, tagged `dev-<12-char-sha>`.
+  It does not publish `latest` or change stable release tags. For a source build,
+  layer `compose.dev.yaml` over `compose.yaml`; the local launchers pull the
+  published image selected by `SQUARE_HARNESS_IMAGE` instead. To try a completed
+  branch build, set `SQUARE_HARNESS_IMAGE=ghcr.io/square-harness/square-harness-dev:dev-<12-char-sha>`
+  before running the local launcher and use
+  `SQUARE_DATA_VOLUME=square-harness-dev-data` to keep test data separate. The
+  development package must be public for anonymous pulls, or Docker must be
+  authenticated with `read:packages`.
 - A stale local branch may be literally named `origin/main`. Compare with
   `refs/remotes/origin/main`.
 - Before any commit, scan the diff for private data and remove it: absolute
@@ -657,7 +673,7 @@ documented together when releasing these features.
 | | `gui/hub.py`, `gui/provider_settings.py` | Tasks, queue and threads; provider selection; per-account in-memory credentials; local private-file persistence; interruptible clients |
 | | `gui/server_credentials.py`, `gui/google_secret_manager.py` | Provider-neutral server credential-store interface and registry; Google Secret Manager adapter |
 | | `gui/account_limits.py`, `gui/inference.py` | Durable per-account rate/token reservations and account-scoped model-request admission |
-| | `Dockerfile`, `compose.yaml`, `compose.server.yaml`, `deployment/docker-entrypoint.sh`, `deployment/docker-launch.py`, `deployment/start-local.sh`, `deployment/start-local.ps1` | One full-app image; local and authenticated server modes; platform-specific local launchers, persistent data mounts, secret staging and loopback-published listener |
+| | `Dockerfile`, `compose.yaml`, `compose.dev.yaml`, `compose.server.yaml`, `deployment/docker-entrypoint.sh`, `deployment/docker-launch.py`, `deployment/start-local.sh`, `deployment/start-local.ps1` | One full-app image; stable and branch GHCR publishing; local source-build override; local and authenticated server modes; platform-specific pull-and-run launchers, persistent data mounts, secret staging and loopback-published listener |
 | | `gui/store.py`, `gui/watch.py`, `gui/effort.py` | Read-only job views, chats, settings, uploads, templates; watching `.mathagent/`; effort budgets |
 | Frontend | `frontend/src` | `store.ts` (state from one SSE stream), `api.ts` (types mirror `gui/store.py`), `router.ts`, `modes.ts`, `modeCalls.ts`, `effort.ts`, `views/`, `components/` |
 | | `frontend/public/sw.js` | Static-only PWA cache; API requests always go to the backend |

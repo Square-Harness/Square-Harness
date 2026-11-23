@@ -21,16 +21,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local
 
 The Bash launcher is for macOS/Linux (and Windows only when using WSL or Git
 Bash); the PowerShell launcher is for native Windows. Both check that Docker and
-the Compose plugin are available, build the image from the source checkout,
-start local mode, and open the private app link. The image is not currently
-published to a container registry, so the first start builds it and needs an
-internet connection to download its base image and dependencies.
+the Compose plugin are available, pull the published app image, start local
+mode, and open the private app link. The image will be available after the
+first stable GitHub Release publishes it. If the GHCR package has not been made
+public yet, Docker login may be required.
 
 The launchers do not install Docker. Docker installation is operating-system
 specific, may require administrator approval or a restart, and should be done
 through the official instructions: <https://docs.docker.com/get-docker/>. If
 Docker is installed but stopped, start Docker Desktop/Engine and run the
 launcher again.
+
+For developers who need to build from the current source checkout instead of
+pulling an image, use the development Compose override:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example \
+  -f compose.yaml -f compose.dev.yaml up --build -d
+```
 
 The local app listens only on `127.0.0.1:8765`. Its workspace and saved
 settings are kept in the named Docker volume `square-harness-local-data`; this
@@ -1034,11 +1042,19 @@ startup environment and storage. The app does not mount the Docker socket, so
 the isolated numerical sandbox remains unavailable inside this container.
 Never add a Docker-socket mount to the shared server deployment.
 
-Start local mode from the repository root:
+Start local mode from the repository root with the published image:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example up --build -d
+docker compose --env-file deployment/compose.local.env.example pull
+docker compose --env-file deployment/compose.local.env.example up -d
 docker compose --env-file deployment/compose.local.env.example ps
+```
+
+For a local source build instead, run:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example \
+  -f compose.yaml -f compose.dev.yaml up --build -d
 ```
 
 Open `http://127.0.0.1:8765` and use the `Open:` URL from the app logs, which
@@ -1072,7 +1088,9 @@ Edit `.local/compose.server.env`, then start:
 
 ```sh
 docker compose --env-file .local/compose.server.env \
-  -f compose.yaml -f compose.server.yaml up --build -d
+  -f compose.yaml -f compose.server.yaml pull
+docker compose --env-file .local/compose.server.env \
+  -f compose.yaml -f compose.server.yaml up -d
 ```
 
 Set the gateway's `shared_backend.port` to the published host port

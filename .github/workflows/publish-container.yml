@@ -1,0 +1,82 @@
+name: Publish app container
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'Square-Harness/Square-Harness' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify release tag matches app version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          tag_match = re.fullmatch(r"v?(\d+\.\d+\.\d+)", tag)
+          source = Path("mathagent/__init__.py").read_text(encoding="utf-8")
+          version_match = re.search(r"^__version__ = ['\"]([^'\"]+)['\"]", source, re.MULTILINE)
+          if not tag_match or not version_match:
+              sys.exit("Release tag must be a stable semantic version such as v1.2.3.")
+          if tag_match.group(1) != version_match.group(1):
+              sys.exit(
+                  f"Release tag {tag!r} does not match app version "
+                  f"{version_match.group(1)!r}."
+              )
+          print(f"Publishing Square Harness {version_match.group(1)}")
+          PY
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/square-harness/square-harness
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }}
+            type=raw,value=latest
+
+      - name: Build and publish multi-platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max

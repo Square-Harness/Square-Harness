@@ -39,11 +39,12 @@ the model itself is not included in the image.
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local.ps1
    ```
 
-The launcher checks Docker and Compose, builds the app image from the downloaded
-source on first run, starts it in local mode, and opens the private app link in
-your browser. It does **not** install Docker automatically: Docker installation
-requires operating-system-specific steps and your approval. The image is not
-currently published as a prebuilt download. Python and Node.js are not needed.
+The launcher checks Docker and Compose, pulls the published app image, starts
+it in local mode, and opens the private app link in your browser. It does
+**not** install Docker automatically: Docker installation requires
+operating-system-specific steps and your approval. Python and Node.js are not
+needed. Image downloads will be available after the first stable GitHub Release
+publishes the package.
 The PowerShell command's execution-policy bypass applies only to that
 PowerShell process; it does not change your system policy.
 

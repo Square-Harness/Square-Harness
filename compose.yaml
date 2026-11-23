@@ -3,10 +3,7 @@
 
 services:
   square-harness:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: square-harness:local
+    image: ${SQUARE_HARNESS_IMAGE:-ghcr.io/square-harness/square-harness:latest}
     environment:
       SQUARE_HARNESS_MODE: ${SQUARE_HARNESS_MODE:-local}
       SQUARE_HARNESS_CONTAINER: "1"

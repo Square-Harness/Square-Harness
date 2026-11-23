@@ -32,7 +32,13 @@ try {
     $env:SQUARE_HARNESS_MODE = 'local'
     Push-Location $repoRoot
     try {
-        & docker compose --env-file $envFile up --build -d
+        & docker compose --env-file $envFile pull
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error 'Could not download the Square Harness image. Check your internet connection and confirm that the selected GHCR image is available to you.'
+            exit $LASTEXITCODE
+        }
+
+        & docker compose --env-file $envFile up -d
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'Docker could not start Square Harness. Check Docker Desktop, available disk space and port 8765.'
             exit $LASTEXITCODE

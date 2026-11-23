@@ -32,7 +32,11 @@ fi
 [[ -f "$env_file" ]] || fail 'The local Compose configuration is missing from this download.'
 cd "$repo_root"
 
-if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" up --build -d; then
+if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" pull; then
+  fail 'Could not download the Square Harness image. Check your internet connection and confirm that the selected GHCR image is available to you.'
+fi
+
+if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" up -d; then
   fail 'Docker could not start Square Harness. Check Docker Desktop/Engine, available disk space and port 8765.'
 fi
 

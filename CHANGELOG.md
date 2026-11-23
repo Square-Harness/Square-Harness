@@ -16,9 +16,16 @@
   Compose modes. Add an installable PWA shell that caches static assets only;
   agent work still requires the hosted backend.
 - Add Bash (macOS/Linux) and PowerShell (Windows) local launchers that check
-  Docker/Compose, build the app image from source, start local mode and open the
-  private app link. Update the README with Docker-first startup and provider
-  setup instructions.
+  Docker/Compose, pull the app image, start local mode and open the private app
+  link. Update the README with Docker-first startup and provider setup
+  instructions.
+- Add a release workflow to publish version-checked, multi-platform app images
+  to GitHub Container Registry, including version, major/minor and `latest`
+  tags, SBOM and provenance attestations.
+- Make local/server Compose use the published GHCR image by default, retain a
+  source-build Compose override for development, update local launchers to pull
+  before starting, and publish non-main test builds to a separate development
+  GHCR package.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same
