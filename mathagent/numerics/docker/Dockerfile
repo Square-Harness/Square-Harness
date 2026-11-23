@@ -6,10 +6,11 @@
 #
 # Build (current architecture):
 #   python -m mathagent.numerics build
-# or equivalently:
-#   docker build -t square-harness/python-numerics:2 mathagent/numerics/docker
-# Multi-architecture build (linux/amd64 + linux/arm64):
-#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:2 --push mathagent/numerics/docker
+# The harness accepts only an image labelled with the digest of this build context
+# (org.squareharness.sandbox.content, computed by numerics.executor.content_digest);
+# the build command adds it. A manual or multi-architecture build must pass it too:
+#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:2 \
+#     --label org.squareharness.sandbox.content=<digest> --push mathagent/numerics/docker
 #
 # The base image is pinned by its multi-architecture index digest and every wheel by
 # its hash, so a rebuild installs the same files. Nothing is installed at run time:

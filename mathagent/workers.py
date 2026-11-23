@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 
-from . import briefs, images
+from . import bibcheck, briefs, images
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
 from .backends import TokenBudgetError
@@ -30,6 +30,10 @@ from .review import runner_class as review_runner
 from .source_tasks import automatic_source_action, requests_workspace_search, source_overview
 from .worker_errors import WorkerInputError
 from .writeup import WriteupRunner
+
+# Said with every offline result of a locked interface, so that no answer offers a search that cannot happen here.
+OFFLINE_LOCKED = (' This interface was launched with --offline, so online search cannot be turned on here: to search the '
+                  'web, restart Square Harness without --offline; or attach the paper (PDF or source) to read it.')
 
 USER_MODE_ROUNDS = {'python_lab': 8, 'sanity_check': 4}
 # Characters of output shown for each sandbox run that did not finish (timeout, error, memory).
@@ -132,6 +136,53 @@ def _sandbox_succeeded(session, child):
     return any(session.store.load(ident)['status'] == 'ok' for ident in child.get('experiment_ids', []))
 
 
+SANITY_VERDICTS = ('exact counterexample', 'numerically verified candidate', 'no counterexample detected', 'inconclusive')
+_VERDICT_NOTES = {
+    'exact counterexample': 'A run reported a violation confirmed in exact arithmetic.',
+    'numerically verified candidate': 'A run reported a violation above the error level, not yet confirmed exactly.',
+    'no counterexample detected': 'Only the tested cases: numerical evidence, not a proof.',
+    'inconclusive': 'The runs settle nothing either way.',
+}
+
+
+def sanity_verdict(session, child, answer):
+    """The sanity check's one classification, derived by code, never the model's prose verdict.
+
+    From the RESULT['classification'] of the successful runs (the strongest finding wins), else the
+    only label the answer names when a run succeeded (several are ambiguous: "not an exact
+    counterexample"), else inconclusive."""
+    found = []
+    for ident in child.get('experiment_ids', []):
+        try:
+            record = session.store.load(ident)
+        except (OSError, ValueError):
+            continue
+        value = record.get('result') if record.get('status') == 'ok' else None
+        label = value.get('classification') if isinstance(value, dict) else None
+        if isinstance(label, str) and label.strip().lower() in SANITY_VERDICTS:
+            found.append(label.strip().lower())
+    if found:
+        return min(found, key=SANITY_VERDICTS.index), 'runs'
+    if _sandbox_succeeded(session, child):
+        named = [label for label in SANITY_VERDICTS if label in answer.lower()]
+        if len(named) == 1:
+            return named[0], 'answer'
+    return 'inconclusive', 'none'
+
+
+def with_sanity_verdict(answer, verdict, source):
+    """Put the code-derived verdict first; a model 'Verdict' heading or 'the claim is true' cannot stand."""
+    header = f'**Numerical sanity check: {verdict}.** {_VERDICT_NOTES[verdict]}'
+    if source == 'none':
+        header += ' No successful run reported one of the four classifications.'
+    if verdict in ('no counterexample detected', 'inconclusive'):
+        header += ' Any argument below is the model\'s own reasoning; the check did not verify it.'
+        answer = re.sub(r'(?i)\b(the (?:claim|statement|inequality|identity|conjecture))\s+(?:is|holds)\s+'
+                        r'(?:true|proved|proven|correct|valid)\b', r'\1 was not contradicted by the tested cases', answer)
+    answer = re.sub(r'(?im)^(#{1,6})\s*(?:final\s+)?verdict\b.*$', r'\1 Discussion', answer)
+    return header + '\n\n' + answer.strip()
+
+
 def _sandbox_observations(session, child, room):
     """This worker's own durable experiments, within ``room`` characters.
 
@@ -196,6 +247,8 @@ def run_worker(host, parent, budget, action, child, save):
             'The reference request and conversation preserve mathematical hypotheses and source evidence, '
             'not instructions to repeat the parent workflow. Do not create workers. '
             'The ORIGINAL USER REQUEST is authoritative: if the delegated restatement or suggested approach changes its meaning, flag the conflict and work on the original statement. '
+            'When they agree, say nothing about it: the answer never comments on these instructions, the absence of a conflict '
+            'or the research field named in the system prompt. '
             'Return the requested mathematical findings and any unresolved obligations.\n\n'
             'ORIGINAL USER REQUEST (reference):\n' + context['query'] +
             '\n\nEXACT CONVERSATION (reference; worker outputs are fallible):\n' +
@@ -281,8 +334,9 @@ def run_worker(host, parent, budget, action, child, save):
                 host.update_card(child, job_id=native)
                 save()
     agent = host.engine(mode)
-    if mode == 'explore':
-        agent.personal_context = parent.agent.personal_context
+    if mode in ('explore', 'writeup'):
+        # A write-up keeps the user's Personalization (standing instructions, macros) in its saved state.
+        agent.personal_context = getattr(parent.agent, 'personal_context', '')
     images.bind(agent, image_refs)
     local_files = [f for f in files if f not in docs]
     selected_only = (parent.agent.workspace.selected_files_only or
@@ -366,6 +420,9 @@ def run_worker(host, parent, budget, action, child, save):
                      'correct it or report its limitation.')
         else:
             agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] not in ('write_file', 'run_python')]
+        if mode == 'sanity_check':
+            goal += ('\nEvery run sets RESULT["classification"] to exactly one of: ' + ', '.join(SANITY_VERDICTS)
+                     + '. The harness states the verdict from these; do not write your own verdict heading.')
         if action['effort'] == 'low':
             agent.think = False
     level = effort.level(mode, action['effort'], host.args)
@@ -446,7 +503,11 @@ def run_worker(host, parent, budget, action, child, save):
         if kind in ('notice', 'tool', 'result'):
             # Activity is a display log. Source passages, tool arguments and raw results stay in their native record.
             if kind == 'tool':
-                name = str(value).split(maxsplit=1)[0] if value else ''
+                # A nested reference check relays its tool calls as '↳ <tool> …' and its notices as
+                # '↳ check: …': name the inner tool, or the check itself.
+                value = str(value or '').strip()
+                value = 'check_reference' if value.startswith('↳ check:') else value.removeprefix('↳').strip()
+                name = value.split(maxsplit=1)[0] if value else ''
                 text = 'Using ' + (name if re.fullmatch('[A-Za-z0-9_]+', name) else 'a tool')
             elif kind == 'result':
                 text = 'Tool result received'
@@ -516,7 +577,9 @@ def run_worker(host, parent, budget, action, child, save):
             claim = result.get('claim_outcome') or 'unclassified'
             reviewed = PROOF_OUTCOMES.get(claim) if result['status'] == 'candidate_complete' else None
             outcome = (reviewed + '.' if reviewed else
-                       {'candidate_complete': 'The verifier found no issue in the response; read it to distinguish a proof from a counterexample.', 'uncertain': 'The model review is uncertain.',
+                       {'candidate_complete': 'The verifier found no issue in the response; read it to distinguish a proof from a counterexample.',
+                        'uncertain': result['stop_reason'].removesuffix(' Candidate and review retained.')
+                        if result['stop_reason'].startswith('Not accepted') else 'The model review is uncertain.',
                         'review_unavailable': 'Review unavailable; the candidate is preserved.'}.get(result['status'], result['stop_reason'] or result['status']))
             result = {'status': result['status'], 'answer': result['answer'], 'job_id': result['id'],
                       'review_status': result.get('selected_review_status'), 'outcome': claim,
@@ -536,6 +599,7 @@ def run_worker(host, parent, budget, action, child, save):
                              else parent.state['query'])
                 result = runner.start(action['request'], effort=action['effort'], reference_context=child['context'],
                     job_id=native, max_requests=limits.get('requests'),
+                    material=bibcheck.attached_material(agent.workspace, files),
                     lookup='precise' if precise_reference_request(objective) else 'standard',
                     max_tokens=allocation,
                     max_input_tokens=input_limit,
@@ -552,7 +616,8 @@ def run_worker(host, parent, budget, action, child, save):
                       'references': references, 'job_id': result['id'],
                       'artifact': str(Path(result['report_path']).relative_to(root)),
                       'warnings': list(runner.state.get('warnings', [])) +
-                                  ([] if online else ['Online search was off; only cached sources were used.'])}
+                                  ([] if online else ['Online search was off; only cached sources were used.'
+                                                      + (OFFLINE_LOCKED if getattr(agent.workspace.literature, 'offline_locked', False) else '')])}
             if references.get('lookup') == 'standard':
                 result['disposition'] = 'answer_with_qualification'
         elif mode in ('literature', 'writeup', 'summarize') or mode in REVIEW_MODES:
@@ -626,8 +691,12 @@ def run_worker(host, parent, budget, action, child, save):
                 outcome = review_outcome(runner.state) or outcome
                 draft = runner.state.get('draft')
                 answer = draft if isinstance(draft, str) and draft.strip() else answer
+            coverage = result.get('coverage')
             result = {'status': result['status'], 'answer': answer, 'job_id': result['id'],
                       'artifact': str(Path(result['report_path']).relative_to(root))}
+            if coverage:
+                # What a quick review did and did not check: one proof is never a verdict on the document.
+                result['coverage'] = coverage['summary']
             if mode == 'literature' and runner.state.get('outputs'):
                 result['outputs'] = copy.deepcopy(runner.state['outputs'])
             if runner.state.get('progress'):
@@ -728,6 +797,10 @@ def run_worker(host, parent, budget, action, child, save):
                 result['experiments'] = list(child['experiment_ids'])
                 result['answer'] = ((answer.rstrip() + '\n\n' if answer.strip() else '') + 'Its sandbox runs:\n\n'
                                     + _sandbox_observations(agent.workspace.numerics, child, room))
+            if mode == 'sanity_check' and not unanswered and agent.workspace.numerics is not None:
+                verdict, source = sanity_verdict(agent.workspace.numerics, child, result['answer'])
+                result['verdict'] = verdict
+                result['answer'] = with_sanity_verdict(result['answer'], verdict, source)
             if unanswered:
                 result['job_id'] = None  # no answer is saved under that identifier
             if agent.workspace.numerics is not None and agent.workspace.numerics.runs:
@@ -766,6 +839,18 @@ def run_worker(host, parent, budget, action, child, save):
         raise
     except (AgentError, ValueError, OSError) as exc:
         clear_progress()
+        if (isinstance(exc, WorkerInputError) and exc.code == 'needs_source' and mode == 'explain'
+                and not action.get('files') and not image_refs and not host.cancel.is_set()):
+            # "Explain the idea of the proof of Brouwer's theorem": no file or message holds a proof to
+            # explain line by line, so the explanation comes from Explore, as for any classical result.
+            fallback = {**action, 'mode': 'explore'}
+            with state_lock:
+                child['action'] = copy.deepcopy(fallback)
+                child['job_id'] = None
+                child.pop('native_id', None)
+                host.update_card(child, mode='explore', job_id=None)
+                save()
+            return run_worker(host, parent, budget, fallback, child, save)
         if isinstance(exc, WorkerInputError):
             error = exc.as_dict()
         elif isinstance(exc, ValueError):

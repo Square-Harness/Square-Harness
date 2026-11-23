@@ -26,7 +26,7 @@ from .ledger import _atomic_write, _bytes, _directory, _publish_job, _read, _reg
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
-from .call_policy import allocate_call, CallContextError
+from .call_policy import allocate_call, CallContextError, interrupted_charge, streamed_characters
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
 from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
@@ -139,6 +139,9 @@ def _working_reference_prompt(value, source_files=()):
                                       'use the pinned source passages for this task.]')
                 message['stored_reference_context_sha256'] = digest
     return _reference_prompt(context)
+
+
+MAX_ADD_TOKENS = 20_000_000  # one explicit extra output allowance on resume
 
 
 def remaining_limit(settings, key, used=0):
@@ -370,7 +373,8 @@ class ResearchRunner:
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
 
-    def resume(self, job_id, *, additional_seconds=0):
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
+        """Continue a saved job. ``additional_*`` is an explicit extra allowance, recorded in the job and its report."""
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
         if self.state['kind'] not in self.KINDS:
@@ -382,12 +386,27 @@ class ResearchRunner:
         self._validate_transport_resume()
         if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
             raise ValueError('Additional working time must be between 0 and 86400 seconds')
-        if additional_seconds:
+        if type(additional_tokens) is not int or not 0 <= additional_tokens <= MAX_ADD_TOKENS:
+            raise ValueError(f'Additional output tokens must be an integer from 0 to {MAX_ADD_TOKENS}')
+        if additional_tokens and self.state['settings'].get('max_tokens') is None:
+            raise ValueError('This job has no cumulative output-token ceiling, so additional tokens do not apply')
+        if additional_seconds and self.state['settings'].get('max_seconds') is None:
+            raise ValueError('This job has no time limit, so additional seconds do not apply')
+        if additional_seconds or additional_tokens:
             with self._lock():
                 self.state = _read_state(self.directory, job_id)
                 self._restore_literature()
-                self.state['settings']['max_seconds'] += additional_seconds
-                self.state.setdefault('time_extensions', []).append({'seconds': additional_seconds, 'time': _now()})
+                settings = self.state['settings']
+                before = {'tokens': settings.get('max_tokens'), 'seconds': settings.get('max_seconds')}
+                if additional_seconds:
+                    settings['max_seconds'] += additional_seconds
+                    self.state.setdefault('time_extensions', []).append({'seconds': additional_seconds, 'time': _now()})
+                if additional_tokens:
+                    settings['max_tokens'] += additional_tokens
+                self.state.setdefault('allowance_additions', []).append(
+                    {'time': _now(), **({'tokens': additional_tokens} if additional_tokens else {}),
+                     **({'seconds': additional_seconds} if additional_seconds else {}),
+                     'before': before, 'status_before': self.state['status']})
                 if self.state['status'] == 'budget_exhausted':
                     self.state['status'] = 'paused'
                 self._save()
@@ -667,11 +686,47 @@ class ResearchRunner:
         self.state['status'] = 'reviewed' if complete else 'partial'
         self.state['stop_reason'] = 'Research workflow finished; output remains a model draft.'
 
+    def _journal_characters(self, call):
+        """Characters streamed into a call's journal, or None when it cannot be read within its bounds."""
+        try:
+            path = self.directory / 'artifacts' / call['stream']
+            _regular(path)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, encoding='utf-8') as stream:
+                if os.fstat(stream.fileno()).st_size > MAX_STREAM_BYTES:
+                    return None
+                return streamed_characters(stream)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _settle_estimate(self, call, *, earlier=False):
+        """Charge a call cut off with no usage report an estimate from its journal instead of its whole cap.
+
+        A provider failure (``generation_failed``) keeps its reservation; a measured call keeps its usage.
+        ``earlier``: a charge an earlier version left at the whole reservation, re-settled and recorded."""
+        if 'charged_tokens' in call or type((call.get('stats') or {}).get('eval_count')) is int:
+            return False
+        characters = self._journal_characters(call)
+        reserved = call.get('reserved_tokens')
+        if characters is None or type(reserved) is not int:
+            return False
+        estimate = interrupted_charge(reserved, characters)
+        if earlier and estimate < reserved:
+            self.state.setdefault('charge_resettlements', []).append({
+                'call': call.get('stream'), 'from_tokens': reserved, 'to_tokens': estimate,
+                'streamed_characters': characters, 'time': _now()})
+        self.state['tokens_charged'] += estimate - reserved
+        call.update(charged_tokens=estimate, charge_basis='estimate', streamed_characters=characters)
+        return estimate != reserved
+
     def _recover(self):
         interrupted = [c for c in self.state['calls'] if c['status'] in {'running', 'interrupted'}]
+        for call in [c for c in self.state['calls'] if c['status'] == 'abandoned']:
+            self._settle_estimate(call, earlier=True)  # abandoned by an earlier version at its whole reservation
         for call in interrupted:
+            # Unknown usage is charged the journal's estimate. A half-emitted tool call is never replayed.
+            self._settle_estimate(call, earlier=call['status'] == 'interrupted')
             call['status'] = 'abandoned'
-            # Reservations remain charged. A half-emitted tool call is never replayed.
             pieces = []
             path = self.directory / 'artifacts' / call['stream']
             _regular(path)
@@ -1069,6 +1124,10 @@ class ResearchRunner:
             prompt_count = exc.stats.get('prompt_eval_count')
             if type(prompt_count) is int and prompt_count >= 0:
                 self.state['input_tokens_charged'] += prompt_count - call['reserved_input_tokens']
+        elif not isinstance(exc, DeepInfraGenerationError):
+            # Stopped here (pause, shutdown, deadline) with no usage report: the journal holds everything
+            # streamed, so charge its estimate instead of the whole reservation.
+            self._settle_estimate(call)
 
     def _timed_events(self, stream):
         """A transport guard at our deadline is a budget stop; an earlier outage still propagates."""
@@ -1094,14 +1153,17 @@ class ResearchRunner:
                     if value.get('source_url', '').startswith(('https://', 'http://')):
                         sources[sid]['url'] = value['source_url']
                     start, end = value.get('start_line'), value.get('end_line')
-                    if type(start) is int and type(end) is int and 1 <= start <= end and not value.get('truncated'):
+                    # A read that stopped early still returned its lines in full ('lines_complete'); only a clipped
+                    # line or a shortened passage is partial.
+                    complete = not value.get('truncated') or (value.get('lines_complete') is True and not value.get('passage_truncated'))
+                    if type(start) is int and type(end) is int and 1 <= start <= end and complete:
                         ranges.setdefault(sid, []).append((start, end))
                     for match in value.get('matches', []):
                         number = match.get('line')
                         end_line = match.get('end_line', number)
                         if (type(number) is int and number > 0 and type(end_line) is int
                                 and number <= end_line <= number + 79
-                                and not match.get('partial_line') and not value.get('truncated')):
+                                and not match.get('partial_line')):  # 'truncated' here means fewer matches
                             ranges.setdefault(sid, []).append((number, end_line))
                 for key, item in value.items():
                     if key in {'url', 'source_url', 'requested_url', 'pdf_url', 'landing_url', 'html_url', 'open_access_url'} and isinstance(item, str) and item.startswith(('https://', 'http://')):
@@ -1186,7 +1248,7 @@ class ResearchRunner:
             out.append(f'- [{sid}] {label}; read ranges: {ranges.get(sid, []) or "metadata only"}.')
         out += ['', '## Usage and saved evidence', '',
                 usage_footer(s), '',
-                'state.json preserves the original scope, manuscript and skill snapshots, counters, exact tool results and working notes. artifacts/ preserves request payloads, streamed output and source evidence. Input usage is estimated before dispatch and corrected when the model provides actual usage. Interrupted calls retain their reservations.', '']
+                'state.json preserves the original scope, manuscript and skill snapshots, counters, exact tool results and working notes. artifacts/ preserves request payloads, streamed output and source evidence. Input usage is estimated before dispatch and corrected when the model provides actual usage. An interrupted call with no usage report is charged an estimate from its streamed output; one cut off by a provider failure retains its reservation.', '']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
     def _result(self):

@@ -4,7 +4,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type FolderListing, type ReadSettings } from '../api'
 import { workspaceBusy } from '../concurrency'
-import { refreshStatus, useApp } from '../store'
+import { markOwnFolderSwitch, refreshStatus, useApp } from '../store'
 import { ErrorNote, Loading, Modal, Toggle } from './common'
 import { ChevronIcon, FileIcon, FolderIcon } from './Icons'
 
@@ -29,6 +29,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const open = async (target: string) => {
     setError('')
     try {
+      markOwnFolderSwitch()
       await api.openFolder(target)
       await refreshStatus()
       onClose()
@@ -49,6 +50,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const rootName = (listing?.root || app.status?.root || '').split('/').filter(Boolean).pop() || 'root'
   const crumbs = path ? path.split('/') : []
   const isCurrent = listing && listing.path === (app.status?.workspace_path || '')
+  const recent = listing ? (listing.recent.includes('') ? listing.recent : [...listing.recent, '']) : []
   return (
     <Modal title="Open a folder" icon={<FolderIcon />} onClose={onClose} wide>
       <nav className="crumbs" aria-label="Folder path">
@@ -56,7 +58,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
         {crumbs.map((part, index) => (
           <span key={index}>
             <span className="crumb-sep">/</span>
-            <button type="button" className="crumb" onClick={() => setPath(crumbs.slice(0, index + 1).join('/'))}>{part}</button>
+            <button type="button" className="crumb" onClick={() => setPath(crumbs.slice(0, index + 1).join('/'))}>{listing?.project && listing.path === path && index === crumbs.length - 1 ? listing.project.name : part}</button>
           </span>
         ))}
       </nav>
@@ -66,17 +68,21 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
         <>
           <div className="folder-here">
             <span className="muted">{counts(listing.files)} in this folder</span>
-            <button type="button" className="btn btn-primary" disabled={!!isCurrent || busy} onClick={() => open(listing.path)}>
-              {isCurrent ? 'This is the open folder' : 'Open this folder'}
-            </button>
+            {listing.holds_projects ? <span className="muted small">The file folders of your projects</span>
+              : listing.project ? <span className="muted small">Files of the project <strong>{listing.project.name}</strong>{listing.project.deleted ? ' (deleted)' : ''}</span>
+              : <button type="button" className="btn btn-primary" disabled={!!isCurrent || busy} onClick={() => open(listing.path)}>
+                {isCurrent ? 'This is the open folder' : 'Open this folder'}
+              </button>}
           </div>
+          {listing.project && <p className="muted small">A project keeps its files here. {listing.project.deleted ? 'The project was deleted; its files were kept.' : 'Open the project from the conversation list to work with them; this folder cannot be opened as a workspace.'}</p>}
           {busy && <p className="busy-note">Pause all active work and cancel queued turns before opening another folder. Chats and jobs belong to the folder they started in.</p>}
           <ul className="folder-list">
             {listing.folders.map((folder) => (
               <li key={folder.path}>
-                <button type="button" className="folder-row" onClick={() => setPath(folder.path)}>
+                <button type="button" className="folder-row" onClick={() => setPath(folder.path)} title={folder.project ? folder.path : undefined}>
                   <FolderIcon size={17} />
                   <span className="folder-name">{folder.name}</span>
+                  {folder.project && <span className="pill">{folder.project.deleted ? 'Deleted project' : 'Project'}</span>}
                   {folder.jobs && <span className="pill">Saved work</span>}
                   <span className="folder-count">{counts(folder.files)}</span>
                   <ChevronIcon size={15} />
@@ -89,10 +95,10 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
             <input className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="New folder name" aria-label="New folder name" />
             <button type="submit" className="btn" disabled={!name.trim()}>Create folder here</button>
           </form>
-          {listing.recent.length > 0 && (
+          {recent.length > 0 && (
             <div className="recent">
               <p className="detail-label">Recently opened</p>
-              {listing.recent.map((item) => (
+              {recent.map((item) => (
                 <button key={item || '.'} type="button" className="link-btn recent-item" onClick={() => setPath(item)}>{item || rootName}</button>
               ))}
             </div>

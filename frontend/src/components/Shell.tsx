@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, type Account, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
-import { ago, count } from '../format'
+import { ago, count, findFolded } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, type Mode, type Route } from '../router'
@@ -16,7 +16,7 @@ import { PersonalizationSettings } from './Personalization'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SlidersIcon, StackIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
 import { AgentSquares } from './AgentGroup'
@@ -143,7 +143,7 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
             <a key={job.id} href={href('prove', job.id)} className={'side-item' + (route.id === job.id ? ' side-item-active' : '')}>
               <Square variant={look.variant} label={look.label} />
               <span className="side-body">
-                <span className="side-name"><Inline limit={110}>{job.title}</Inline></span>
+                <span className="side-name"><Inline mathProse limit={110}>{job.title}</Inline></span>
                 <span className="side-meta">
                   {job.version === 2
                     ? <span>Attempt {job.rounds.used} of {job.rounds.limit}</span>
@@ -186,22 +186,93 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
   )
 }
 
+/** Text with the part a search matched marked; plain text only (titles with mathematics stay typeset). */
+function Highlighted({ text, query }: { text: string; query: string }) {
+  const found = findFolded(text, query)
+  if (!found) return <>{text}</>
+  return <>{text.slice(0, found[0])}<mark className="search-mark">{text.slice(found[0], found[1])}</mark>{text.slice(found[1])}</>
+}
+
+/** Search the saved conversations by title and messages; the server answers with an excerpt per match. */
+function useChatSearch(query: string, revision: unknown) {
+  const [result, setResult] = useState<{ query: string; chats: ChatListItem[]; truncated: boolean } | null>(null)
+  const [error, setError] = useState('')
+  const latest = useRef(0)
+  const wanted = query.trim()
+  useEffect(() => {
+    if (!wanted) { setResult(null); setError(''); return }
+    const ticket = ++latest.current
+    const timer = window.setTimeout(() => {
+      api.chats(wanted).then((value) => {
+        if (ticket === latest.current) { setResult({ query: wanted, chats: value.chats, truncated: !!value.truncated }); setError('') }
+      }, (reason: Error) => { if (ticket === latest.current) setError(reason.message) })
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [wanted, revision])
+  return { result: wanted ? result : null, searching: !!wanted && result?.query !== wanted && !error, error: wanted ? error : '' }
+}
+
+function ChatSearch({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const input = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    // Ctrl+K or Cmd+K focuses the search, as in most applications.
+    const key = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k'
+          && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        event.preventDefault()
+        input.current?.focus()
+        input.current?.select()
+      }
+    }
+    document.addEventListener('keydown', key)
+    return () => document.removeEventListener('keydown', key)
+  }, [])
+  const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
+  return (
+    <div className="side-search" role="search">
+      <SearchIcon size={15} />
+      <input ref={input} type="search" className="side-search-input" value={value} maxLength={200}
+        placeholder="Search conversations" aria-label="Search conversations by title or message"
+        aria-keyshortcuts={mac ? 'Meta+K' : 'Control+K'} title={`Search titles and messages (${mac ? '⌘K' : 'Ctrl+K'})`}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => { if (event.key === 'Escape' && value) { event.preventDefault(); event.stopPropagation(); onChange('') } }} />
+      {value ? <button type="button" className="icon-btn side-search-clear" aria-label="Clear the search" title="Clear the search"
+        onClick={() => { onChange(''); input.current?.focus() }}><CloseIcon size={14} /></button>
+        : <kbd className="side-search-key" aria-hidden="true">{mac ? '⌘K' : 'Ctrl K'}</kbd>}
+    </div>
+  )
+}
+
 function ChatSideList({ route, app }: { route: Route; app: AppState }) {
   const [selected, setSelected] = useState<ChatListItem | null>(null)
   const [actions, setActions] = useState<ChatListItem | null>(null)
+  const [query, setQuery] = useState('')
   const opener = useRef<HTMLButtonElement | null>(null)
+  const search = useChatSearch(query, app.chats?.map((chat) => chat.id + chat.updated_at).join(' '))
   useEffect(() => {
     if (selected && app.chats && !app.chats.some((chat) => chat.id === selected.id)) setSelected(null)
   }, [app.chats, selected])
   // Every conversation lives here, including critiques and explorations from earlier versions.
   if (!app.chats) return <p className="side-empty muted">Loading…</p>
   const project = app.projects?.find((item) => item.id === app.projectFilter)
-  const chats = app.chats.filter((chat) => !project || chat.project_id === project.id)
+  const searching = !!query.trim()
+  // Search results keep the live list's rows (status, deletions) and add the server's excerpt.
+  const live = new Map(app.chats.map((chat) => [chat.id, chat]))
+  const source = searching ? (search.result?.chats || []).flatMap((hit) => live.has(hit.id) ? [{ ...live.get(hit.id)!, match: hit.match }] : []) : app.chats
+  const chats = source.filter((chat) => !project || chat.project_id === project.id)
   const projectName = (id?: string | null) => (!project && id && app.projects?.find((item) => item.id === id)?.name) || ''
+  const plainTitle = (title: string) => !/[$\\]/.test(title)
   return (
     <>
-      <div className="side-label"><span>{project ? 'In this project' : 'Conversations'}</span></div>
-      {!chats.length && <p className="side-empty muted">{project ? 'No conversations in this project yet. Start one with New conversation.' : MODES.free.empty}</p>}
+      <ChatSearch value={query} onChange={setQuery} />
+      <div className="side-label"><span>{searching ? (project ? 'Matches in this project' : 'Matching conversations') : project ? 'In this project' : 'Conversations'}</span></div>
+      {searching && <ErrorNote>{search.error}</ErrorNote>}
+      {searching && search.searching && !search.result && <p className="side-empty muted" role="status">Searching…</p>}
+      {searching && search.result && !chats.length && <p className="side-empty muted" role="status">
+        No conversation{project ? ' in this project' : ''} mentions “{query.trim()}”.{project ? ' Go back to All conversations to search everywhere.' : ' Search looks in titles and messages.'}
+      </p>}
+      {searching && search.result?.truncated && <p className="side-empty muted small">Only the most recent conversations were searched. Use more specific words to search further.</p>}
+      {!searching && !chats.length && <p className="side-empty muted">{project ? 'No conversations in this project yet. Start one with New conversation.' : MODES.free.empty}</p>}
       {chats.map((chat) => {
         const work = chatWork(app.snapshot, chat.id)
         const agents = chat.agent_statuses || []
@@ -214,12 +285,13 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
               {!agentActivity && work.active && <Square variant="running" size={12} label="Active conversation" />}
               {work.queued && <Square variant="ready" size={12} label="Queued conversation" />}
               <span className="side-body">
-                <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
+                <span className="side-name">{searching && plainTitle(chat.title) ? <Highlighted text={chat.title} query={query} /> : <Inline mathProse limit={110}>{chat.title}</Inline>}</span>
+                {searching && chat.match ? <span className="side-match"><Highlighted text={chat.match} query={query} /></span> : null}
                 <span className="side-meta">
                   {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
                   {work.queued && <span>Queued</span>}
                   {projectName(chat.project_id) && <span className="side-project" title={`Project: ${projectName(chat.project_id)}`}><FolderIcon size={12} /><span>{projectName(chat.project_id)}</span></span>}
-                  <span className="side-preview">{/^\s*(?:##\s*)?Investigation report\b/i.test(chat.preview || '') ? 'Investigation report' : chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
+                  {!(searching && chat.match) && <span className="side-preview">{/^\s*(?:##\s*)?Investigation report\b/i.test(chat.preview || '') ? 'Investigation report' : chat.preview ? <Inline mathProse limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>}
                   <span className="side-time">{ago(chat.updated_at)}</span>
                 </span>
               </span>
@@ -346,7 +418,7 @@ function PilotAllowance({ allowance, detailed = false }: { allowance: TesterAllo
   const outputUnit = 1000 * Number(allowance.output_per_million)
   if (!Number.isFinite(outputUnit) || outputUnit <= 0) return null
   const inputWeight = Number(allowance.input_per_million) / Number(allowance.output_per_million)
-  const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString(undefined, { maximumFractionDigits: 3 })
+  const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString('en-US', { maximumFractionDigits: 3 })
   const hint = `Across all conversations. Each input token counts as ${inputShare} of an output token; output includes thinking. This conservative pilot allowance uses Standard list prices; actual billing may be lower. The meter includes reservations.`
   const money = (nanos: number) => '$' + (nanos / 1e9).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
   return (
@@ -458,10 +530,13 @@ function WorkspacePanel({ about }: { about: boolean }) {
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
   const ollama = status.backend === 'ollama'
-  const ready = reachable && installed
-  const modelNote = !reachable ? (ollama ? 'Ollama is not reachable' : 'The model server is not reachable')
+  // The saved status says nothing while the harness itself cannot be reached.
+  const offline = app.connection === 'reconnecting'
+  const ready = reachable && installed && !offline
+  const modelNote = offline ? 'Harness not reachable' : !reachable ? (ollama ? 'Ollama is not reachable' : 'The model server is not reachable')
     : !installed ? (ollama ? 'Model is not installed' : 'Model is not served') : 'Model ready'
-  const modelHint = !reachable ? (ollama ? 'Start ollama serve, then reload.' : 'Start the model server, then reload.')
+  const modelHint = offline ? 'Check that square-harness --gui is still running; this page reconnects by itself.'
+    : !reachable ? (ollama ? 'Start ollama serve, then reload.' : 'Start the model server, then reload.')
     : ollama ? `Run ollama pull ${status.model}.` : `Serve ${status.model}, or restart with --model.`
   // A conversation that is only answering (no specialist yet) holds no place.
   const active = activeTasks(app.snapshot).filter((entry) => entry.task.slot !== false).length

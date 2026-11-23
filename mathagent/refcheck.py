@@ -25,6 +25,8 @@ from .literature import bibliography_entry, bibliography_keys, cited_keys, cites
 from .model_limits import is_ds4, substantive_output, workflow_budget
 from .research import ResearchRunner, remaining_limit, _working_reference_prompt
 from .reference_search import StandardReferenceSearch
+from .writeup import entry_identifiers
+from . import bibcheck
 
 LEVELS = ('read', 'cited', 'located', 'contradicted', 'not_found')
 RANK = {'read': 4, 'cited': 3, 'located': 2, 'contradicted': 1, 'not_found': 0, 'inconclusive': 0}
@@ -38,7 +40,7 @@ EFFORTS = {
     'medium': dict(candidates=3, verify_rounds=4, discover=True, seconds=480, requests=60, chars=120_000),
     'high': dict(candidates=3, verify_rounds=5, discover=True, seconds=720, requests=80, chars=160_000),
 }
-TOOLS = ('search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_paper')
+TOOLS = ('search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_paper', 'lookup_identifier')
 MAX_RESULTS = 5  # search results per call: a check needs a few good hits, not a survey
 
 
@@ -75,7 +77,9 @@ def precise_reference_request(text):
         r'|\b(?:which|what|quelle|verify|check|confirm)\b.{0,25}\bedition\b'
         r'|\b(?:check|verify|confirm|look up|search)\b.{0,40}\bprecisely\b'
         r'|\bnumbered\s+(?:theorem|lemma|proposition|corollary|result)'
-        r'|\bwhich\s+(?:theorem|lemma|proposition|corollary)\s+(?:of|in)\b'), text, re.I | re.S) is not None
+        r'|\bwhich\s+(?:theorem|lemma|proposition|corollary)\s+(?:of|in)\b'
+        r'|\bwhere\s+(?:exactly|precisely)\b|\bwhere\s+in\s+(?:th(?:at|e|is)\s+|their\s+|his\s+|her\s+)?(?:paper|book|article|work|text)\b'
+        r'|\b(?:is|was)\s+(?:it|this|that)\s+stated\s+where\b|\bou\s+exactement\b'), text, re.I | re.S) is not None
 
 
 def statement_request(text):
@@ -288,6 +292,41 @@ def _clean_candidate(value, source):
             'source': source, 'rounds': 0, 'notes': [], 'claimed': None, 'verdict': None}
 
 
+_PLACE = re.compile(r'\b(?:Theorem|Thm\.?|Lemma|Proposition|Prop\.?|Corollary|Cor\.?|Section|Chapter|Definition|Remark|Example)'
+                    r'\s+(?:\d+(?:\.\d+)*[a-z]?|[A-Z]\b)', re.I)
+_NAME_STOP = frozenset('is it its the a an of in on by and that this theorem lemma proposition corollary section chapter '
+                       'proc philos soc math ann j journal vol volume no pp page pages does did was were check verify '
+                       'confirm correct whether please survey review give find what which was has have show tell'.split())
+
+
+def question_identifiers(text):
+    """The DOIs and arXiv identifiers written in a question, in order of appearance (at most three)."""
+    text = str(text or '')
+    found = sorted(entry_identifiers(text), key=lambda i: (text.lower().find(i.split(':', 1)[1]), i))
+    return [i for i in found if i.startswith(('doi:', 'arxiv:'))][:3]
+
+
+def cited_work(text):
+    """A work the question cites by authors and quoted title ("T. E. Harris, 'A lower bound ...', 1960"), with the
+    place it names, as a candidate to check; None when the question cites none."""
+    text = str(text or '')
+    quoted = re.search(r"(?:^|[\s(,;:])[\'\"“‘«]([^\'\"”’»\n]{12,250})[\'\"”’»]", text)
+    if not quoted or len(quoted.group(1).split()) < 3:
+        return None
+    before = text[max(0, quoted.start() - 160):quoted.start()]
+    before = re.split(r'\b(?:of|in|by|from|that|par|de)\s+(?=[A-Z])|[.?!:]\s+(?=[A-Z][a-z])', before)[-1]
+    names = [w for w in re.findall(r"[A-ZÀ-Ý][^\W\d_]*(?:[-'’][^\W\d_]+)*", before)
+             if len(w) > 2 and w.lower() not in _NAME_STOP and not re.fullmatch(r'[A-Z]\.?', w)]
+    if not names:
+        return None
+    after = text[quoted.end():quoted.end() + 160]
+    year = re.search(r'(?<![\d.])(?:1[5-9]|20)\d\d(?![\d.])', after) or re.search(r'(?<![\d.])(?:1[5-9]|20)\d\d(?![\d.])', before)
+    places = _PLACE.findall(text)
+    return _clean_candidate({'authors': names[:4], 'title': quoted.group(1).strip(' ,.'), 'year': year.group() if year else '',
+                             'locator': places[0] if len(set(p.lower() for p in places)) == 1 else '',
+                             'why': 'the work the question attributes the claim to', 'source_type': 'unknown'}, 'question')
+
+
 def describe(candidate):
     who = ', '.join(candidate['authors']) or 'Unknown author'
     year = f' ({candidate["year"]})' if candidate.get('year') else ''
@@ -312,7 +351,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 value(kind, text)
         self._emit = quiet
 
-    def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None, **overrides):
+    def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None,
+              material='', **overrides):
+        # An attached reference list (.bib or text) whose entries are each checked against the registries.
+        self._bibliography_material = str(material or '')[:200_000]
         if lookup not in ('standard', 'precise'):
             raise ValueError('lookup must be standard or precise')
         human = reference_context.get('query') if isinstance(reference_context, dict) else None
@@ -355,7 +397,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         return []  # a check never pins workspace files: queries stay public topic words
 
     def _extra_state(self):
-        return {'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
+        return {**({'bibliography_material': self._bibliography_material} if getattr(self, '_bibliography_material', '') else {}),
+                'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
                 'discovered': False, 'answer': '', 'standard_author': '',
                 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
                                                         'lookup': self._lookup, 'asker': self._asker}}
@@ -372,6 +415,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             fixed += '\n' + label + '\n' + s['statement'] + '\nKeywords: ' + ', '.join(s['keywords']) + '\n'
         online = bool(self.literature and self.literature.online)
         fixed += f'Internet enabled: {online}.\n'
+        if getattr(self.literature, 'offline_locked', False):
+            fixed += ('This interface was launched with --offline: online search cannot be turned on here. Never offer '
+                      'an online search; the user can restart without --offline or attach the paper.\n')
         optional = []
         if role in ('verify', 'verdict'):
             c = s['candidates'][s['current']]
@@ -412,6 +458,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 or remaining_limit(settings, 'max_input_tokens', self.state['input_tokens_charged']) < 6000)
 
     def _step(self, phase):
+        if self.literature is not None:
+            self.literature.urgent = True  # a short interactive check goes before background reviews at the shared rate gate
         if self._standard_step(phase):
             return
         if phase == 'recall':
@@ -425,11 +473,96 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             self.state['draft'] = self.state['answer']
             self.state['phase'] = 'done'
         elif phase == 'plan':  # the research runner's first phase
-            self.state['phase'] = 'recall'
+            entries = bibcheck.parse_entries(self.state.get('bibliography_material') or self.state['goal'])
+            if entries:
+                self.state['bibliography_entries'] = entries
+            self.state['phase'] = 'bibliography' if entries else 'recall'
+        elif phase == 'bibliography':
+            # A reference list: every entry is checked against the registries, without a model call.
+            entries = self.state['bibliography_entries']
+            self.emit('notice', f'Checking {len(entries)} references against the registries')
+            self.state['bibliography_check'] = bibcheck.check_entries(
+                self.literature, entries, stop=lambda: self._elapsed() >= self.state['settings']['max_seconds'] * .9)
+            self.state['phase'] = 'answer'
         else:
             raise ValueError('Unknown check phase: ' + phase)
 
+    def _human_words(self):
+        """The text whose identifiers, links and cited work are checked: the request this check was given, else the
+        user's own message when the request carries none of them. A message listing many references, split into
+        several checks, does not make each check look them all up."""
+        goal = self.state['goal']
+        human = (self.state.get('reference_context') or {}).get('query')
+        if question_identifiers(goal) or cited_work(goal) or re.search(r'https?://', goal) or not isinstance(human, str):
+            return goal
+        return human if len(question_identifiers(human)) <= 2 and len(re.findall(r'https?://', human)) <= 2 else goal
+
+    def _resolve_identifiers(self):
+        """A DOI or arXiv identifier in the question is looked up before any topic search: one registry request
+        settles whether it exists, and its record becomes the first candidate to check."""
+        s = self.state
+        if s.get('identifier_checks') is not None or not self.literature:
+            return []
+        s['identifier_checks'], found = [], []
+        words = self._human_words()
+        places = _PLACE.findall(words)
+        for identifier in question_identifiers(words):
+            self.emit('tool', 'lookup_identifier ' + identifier)
+            result = str(self.literature.execute('lookup_identifier', {'identifier': identifier}))
+            evidence_id = f'E{len(s["evidence"]) + 1}'
+            s['evidence'].append({'id': evidence_id, 'tool': 'lookup_identifier', 'arguments': {'identifier': identifier},
+                                  'artifact': self._artifact('evidence-' + evidence_id, result), 'result': result,
+                                  'round': s['rounds_started'], 'candidate': 'identifier'})
+            try:
+                value = json.loads(result)
+            except ValueError:
+                value = {}
+            record = value.get('record') if isinstance(value.get('record'), dict) else {}
+            entry = {'identifier': identifier, 'found': value.get('found'), 'registry': value.get('registry', ''),
+                     'note': str(value.get('note') or value.get('error') or '')[:300],
+                     **{k: record[k] for k in ('title', 'authors', 'year', 'venue', 'journal_ref', 'comment', 'doi',
+                                               'latest_version', 'withdrawn', 'published', 'url') if record.get(k)}}
+            s['identifier_checks'].append(entry)
+            if value.get('found') and record.get('title') and record.get('authors') and len(question_identifiers(words)) <= 2:
+                year = record.get('year') or str(record.get('published') or '')[:4]
+                c = _clean_candidate({'authors': _surnames(record['authors']), 'title': record['title'], 'year': str(year or ''),
+                                      'locator': places[0] if len(set(p.lower() for p in places)) == 1 else '',
+                                      'why': f'{identifier} given in the question', 'source_type': 'article'}, 'identifier')
+                if c:
+                    c['identifier_evidence'] = evidence_id
+                    found.append(c)
+        # Other URLs in the question are opened as given: the page is evidence, and a refusal (robots rules, size,
+        # missing page) is reported as it is, never replaced by a topic search.
+        covered = re.compile(r'https?://(?:(?:www\.|export\.)?arxiv\.org/(?:abs|pdf|html)/|(?:dx\.)?doi\.org/)', re.I)
+        urls = [u.rstrip('.,;:)]>\'"') for u in re.findall(r'https?://[^\s<>"]+', words)]
+        for url in list(dict.fromkeys(u for u in urls if not covered.match(u)))[:3]:
+            self.emit('tool', 'open_paper ' + url)
+            result = str(self.literature.execute('open_paper', {'identifier_or_url': url}))
+            evidence_id = f'E{len(s["evidence"]) + 1}'
+            s['evidence'].append({'id': evidence_id, 'tool': 'open_paper', 'arguments': {'identifier_or_url': url},
+                                  'artifact': self._artifact('evidence-' + evidence_id, result), 'result': result,
+                                  'round': s['rounds_started'], 'candidate': 'identifier'})
+            try:
+                value = json.loads(result)
+            except ValueError:
+                value = {}
+            if value.get('error'):
+                s['identifier_checks'].append({'identifier': url, 'kind': 'url', 'found': None, 'note': str(value['error'])[:400]})
+            else:
+                s['identifier_checks'].append({'identifier': url, 'kind': 'url', 'found': True, 'registry': 'opened',
+                                               'note': f'opened as {value.get("document_id")}, {value.get("total_lines")} lines'
+                                                       + (f', title “{value["title"]}”' if value.get('title') else '')})
+        return found
+
     def _recall(self):
+        seeded = self._resolve_identifiers()
+        cited = cited_work(self._human_words())
+        if cited and not any(_words(cited['title']) and _words(cited['title']) <= _words(c['title']) for c in seeded):
+            seeded.append(cited)  # the work the claim is attributed to is always checked
+        if seeded:
+            keep = {(_fold(' '.join(c['authors'])), _fold(c['title'])) for c in seeded}
+            self.state['candidates'] = seeded + [c for c in self.state['candidates']
+                                                 if (_fold(' '.join(c['authors'])), _fold(c['title'])) not in keep]
         instruction = ('Before searching, recall from memory. Restate precisely the result the question asks about '
                        '(hypotheses, domain, boundary conditions, spaces). Then list up to three references where it is '
                        'stated, best first: the places an expert in the field would cite for exactly this result (a '
@@ -522,7 +655,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if c and candidate_key(c) not in seen:
                 self.state['candidates'].append(c)
                 seen.add(candidate_key(c))
-        self.state['candidates'] = self.state['candidates'][:self.state['check']['candidates']]
+        self.state['candidates'] = self.state['candidates'][:max(self.state['check']['candidates'], len(seeded))]
+        for i, c in enumerate(self.state['candidates']):
+            for e in self.state['evidence']:
+                if c.get('identifier_evidence') and e['id'] == c['identifier_evidence']:
+                    e['candidate'] = i
         if not self.state['candidates'] and not self.state.get('standard_author'):
             self.state['warnings'].append('The model recalled no reference to check.')
         for c in self.state['candidates']:
@@ -597,6 +734,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if calls:
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
+        if self.literature is not None and not self.literature.online and not any(
+                e.get('candidate') == index and 'Offline mode' not in e['result'] and not e['result'].startswith('{"error"')
+                for e in s['evidence']):
+            # Web research is off and the cache holds nothing on this work: model rounds could only repeat cache misses.
+            c['verdict'] = self._gate(index, {})
+            self.emit('notice', f'Guess {index + 1}: nothing cached and web research is off')
+            self._next()
+            return
         # Each guess gets a fair share of web requests, so the first cannot starve the others.
         share = max(6, settings['max_requests'] // (len(s['candidates']) + int(s['check']['discover'])))
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']
@@ -631,6 +776,24 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if not names:
             return []
         calls = []
+        work = self._review_work(c)
+        if work:
+            # A work of the review shown in this conversation: its saved record, and its full text, which the
+            # review cached when it read the paper (also usable with online search off).
+            record = {'identifier': ('arxiv:' + work['arxiv']) if work.get('arxiv') else 'doi:' + str(work.get('doi')),
+                      **{k: work[k] for k in ('title', 'authors', 'year', 'venue', 'doi', 'url') if work.get(k)},
+                      'source': 'bibliography of the literature review shown in this conversation (saved registry record)'}
+            result = json.dumps({'results': [record], 'review_job': work.get('review_job'), 'read_by_review': work.get('read')},
+                                ensure_ascii=False)
+            evidence_id = f'E{len(self.state["evidence"]) + 1}'
+            self.state['evidence'].append({'id': evidence_id, 'tool': 'review_record', 'arguments': {'title': work['title']},
+                                           'artifact': self._artifact('evidence-' + evidence_id, result), 'result': result,
+                                           'round': self.state['rounds_started'],
+                                           'candidate': next((i for i, x in enumerate(self.state['candidates']) if x is c),
+                                                             self.state['current'])})
+            if self.state['check'].get('lookup') != 'standard' and (work.get('arxiv') or work.get('doi')):
+                identifier = ('arxiv:' + work['arxiv']) if work.get('arxiv') else 'doi:' + work['doi']
+                calls.append({'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': identifier}}})
         words = re.findall(r'[^\W\d_]+', c['title'])[:8]
         query = f'au:{names[0]}' + (' ti:' + ' '.join(words) if words else '')
         calls.append({'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'zbmath', 'limit': 3}}})
@@ -643,12 +806,58 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 'author': names[0], 'locator': c['locator'] if _number(c['locator']) else '', 'topic': topic, 'title': c['title']}}})
         return calls
 
+    def _review_works(self):
+        """References of the literature reviews this conversation shows, from their saved registry records: a review
+        in the workspace whose bibliography holds a DOI or arXiv identifier that the conversation's text carries."""
+        if getattr(self, '_review_cache', None) is not None:
+            return self._review_cache
+        self._review_cache = []
+        context = self.state.get('reference_context')
+        if not context or not getattr(self.agent, 'workspace', None):
+            return self._review_cache
+        wanted = entry_identifiers(json.dumps(context, ensure_ascii=False))
+        folder = self.agent.workspace.root / '.mathagent' / 'research'
+        if not wanted or not folder.is_dir():
+            return self._review_cache
+        try:
+            jobs = sorted((p for p in folder.iterdir() if (p / 'state.json').is_file()),
+                          key=lambda p: (p / 'state.json').stat().st_mtime, reverse=True)[:30]
+        except OSError:
+            return self._review_cache
+        for job in jobs:
+            try:
+                if (job / 'state.json').stat().st_size > 64 * 2 ** 20:
+                    continue
+                state = json.loads((job / 'state.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if state.get('kind') != 'literature':
+                continue
+            for r in state.get('references') or []:
+                ids = ({'doi:' + str(r['doi']).lower()} if r.get('doi') else set()) | (
+                    {'arxiv:' + re.sub(r'v\d+$', '', str(r['arxiv']).lower())} if r.get('arxiv') else set())
+                if ids & wanted and isinstance(r.get('authors'), list) and r.get('title'):
+                    self._review_cache.append({**{k: r.get(k) for k in ('title', 'authors', 'year', 'venue', 'doi', 'arxiv', 'url', 'read')},
+                                               'review_job': state.get('id')})
+        return self._review_cache
+
+    def _review_work(self, c):
+        """The review reference that is this candidate, if any."""
+        names = {_fold(n) for n in _surnames(c['authors'])}
+        words = _words(c['title'])
+        for work in self._review_works():
+            theirs = _words(work['title'])
+            if names & {_fold(n) for n in _surnames(work['authors'])} and words and theirs and len(words & theirs) >= .6 * len(words):
+                return work
+        return None
+
     def _next(self):
         s = self.state
         enough = self._confirmed() >= (1 if s['check']['candidates'] <= 2 else 2)
         if s['current'] + 1 < len(s['candidates']) and not enough and not self._out_of_time(.7):
             s['current'] += 1
-        elif not self._confirmed() and s['check']['discover'] and not s['discovered'] and not self._out_of_time(.6):
+        elif (not self._confirmed() and s['check']['discover'] and not s['discovered'] and not self._out_of_time(.6)
+              and (self.literature is None or self.literature.online)):  # an open-paper search needs the web
             s['phase'] = 'discover'
         else:
             s['phase'] = 'answer'
@@ -933,7 +1142,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                         entry = next((e for e in (bibliography_entry(full or [], k) for k in used) if e), '')
         if level == 'located' and not record:
             failed = set(getattr(self.literature, 'down', ())) | set(self._standard_health())
-            if failed:
+            offline = any('Offline mode' in str(e.get('result') or '') for e in evidence)
+            if offline:
+                reasons.append('no record was found in the local cache, and web research was off: not conclusive')
+                level = 'inconclusive'
+            elif failed:
                 reasons.append('no record was found, but ' + ', '.join(sorted(failed)) + ' failed: not conclusive')
                 level = 'inconclusive'
             else:
@@ -1007,8 +1220,37 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         body = ',\n'.join(f'  {k} = {{{v}}}' for k, v in fields if v)
         return f'@{kind}{{{key},\n{body}\n}}'
 
+    def _identifier_lines(self):
+        """What the registries said about the identifiers given in the question."""
+        lines = []
+        for item in self.state.get('identifier_checks') or []:
+            label = item['identifier'].replace('arxiv:', 'arXiv:')
+            if item.get('kind') == 'url':
+                lines.append(f'- {label}: ' + (item['note'] if item.get('found') else f'**could not be opened** — {item["note"]}'))
+            elif item.get('found') is False:
+                lines.append(f'- `{label}`: **not found** — {item.get("note") or "the registry has no such identifier."}')
+            elif item.get('found'):
+                work = describe({'authors': item.get('authors') or [], 'title': item.get('title') or '',
+                                 'year': str(item.get('year') or item.get('published') or '')[:4]}) if item.get('title') else ''
+                extra = [f'journal reference: {item["journal_ref"]}' if item.get('journal_ref') else '',
+                         f'latest version v{item["latest_version"]}' if item.get('latest_version') else '',
+                         '**withdrawn** (per arXiv)' if item.get('withdrawn') else '',
+                         f'arXiv comment: “{item["comment"]}”' if item.get('comment') else '',
+                         item.get('note') or '']
+                lines.append(f'- `{label}` ({item.get("registry")}): ' + (work or 'exists')
+                             + ''.join('; ' + e for e in extra if e) + '.')
+            else:
+                lines.append(f'- `{label}`: could not be looked up ({item.get("note") or "no answer"}).')
+        return ['**Identifiers and links given in the question** (looked up as given):', *lines, ''] if lines else []
+
     def _compose(self):
+        head = self._identifier_lines()
+        return '\n'.join(head) + ('\n' if head else '') + self._compose_body()
+
+    def _compose_body(self):
         s = self.state
+        if s.get('bibliography_check') is not None:
+            return bibcheck.compose(s['bibliography_check'], online=bool(self.literature and self.literature.online))
         chosen = self.chosen()
         if s['check'].get('lookup') == 'standard':
             return self._compose_standard()
@@ -1064,6 +1306,19 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def result_for_agent(self):
         """Compact JSON for an agent that called check_reference."""
+        if self.state.get('bibliography_check') is not None:
+            entries = [{'entry': r['entry'][:160], 'verdict': r['verdict'], 'differences': r['differences'][:3],
+                        'record': (r.get('record') or {}).get('identifier'), 'notes': r['notes'][:2]}
+                       for r in self.state['bibliography_check']]
+            value = {'status': self.state['status'], 'check_id': self.state['id'], 'bibliography': entries,
+                     'stop_reason': self.state.get('stop_reason', ''),
+                     'note': 'Registry metadata only; the papers were not read. Report each entry with its verdict.'}
+            text = json.dumps(value, ensure_ascii=False)
+            while len(text) > 6000 and any(e['notes'] or len(e['entry']) > 60 for e in entries):
+                for e in entries:
+                    e['notes'], e['entry'] = [], e['entry'][:60]
+                text = json.dumps(value, ensure_ascii=False)
+            return text
         refs = []
         for c in self.chosen():
             v = c['verdict']
@@ -1084,7 +1339,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         others = [{'reference': describe(c).replace('*', ''), 'place': c['locator'],
                    'level': (c.get('verdict') or {}).get('level', 'not_checked'),
                    'reasons': (c.get('verdict') or {}).get('reasons', [])} for c in self.state['candidates'] if c not in self.chosen()]
+        identifiers = [{k: item.get(k) for k in ('identifier', 'found', 'registry', 'note', 'title', 'journal_ref',
+                                                  'latest_version', 'withdrawn') if item.get(k) not in (None, '')}
+                       for item in self.state.get('identifier_checks') or []]
         value = {'status': self.state['status'], 'check_id': self.state['id'], 'references': refs, 'not_confirmed': others,
+                 **({'identifiers_in_question': identifiers} if identifiers else {}),
                  'stop_reason': self.state.get('stop_reason', ''),
                  'note': 'Only read/cited references have a checked place. Any other place is unchecked memory: '
                          'give it as "by memory, I think it is in …", never as a checked place.'}
@@ -1113,6 +1372,20 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 'resumable': self.state['status'] in ('running', 'paused')}
 
     def _finish(self):
+        self._finish_status()
+        missing = [i['identifier'] for i in self.state.get('identifier_checks') or [] if i.get('found') is False]
+        if missing:
+            self.state['stop_reason'] += ' Not found in the registries: ' + ', '.join(missing) + '.'
+
+    def _finish_status(self):
+        results = self.state.get('bibliography_check')
+        if results is not None:
+            unchecked = sum(r['verdict'] in ('not_checked', 'inconclusive') for r in results)
+            self.state['status'] = 'partial' if unchecked else 'answered'
+            self.state['stop_reason'] = (f'Bibliography checked: {len(results) - unchecked} of {len(results)} entries.'
+                                         + (f' {unchecked} could not be checked (budget or source failure); ask again to check them.'
+                                            if unchecked else ''))
+            return
         if self.state['check'].get('lookup') == 'standard':
             chosen = self.chosen()
             gaps = bool(self.state.get('standard_unresolved')) or any(
@@ -1149,6 +1422,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         self.state['status'] = 'answered' if self._confirmed() else 'partial'
         self.state['stop_reason'] = ('Check finished.' if self._confirmed()
                                      else 'Check finished without a confirmed place; see the levels below.')
+
 
     def _report(self):
         s = self.state
@@ -1191,6 +1465,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
         parent = agent.workspace.literature
         literature = LiteratureTools(agent.workspace.root, online=bool(parent and parent.online),
                                      timeout=parent.timeout if parent else 15)
+        if parent is not None:
+            literature.cancelled = parent.cancelled
         if share_source_budget and parent is not None:
             # This synchronous nested lookup draws on the investigation child's
             # remaining retrieval budget. Persist each reservation before HTTP.

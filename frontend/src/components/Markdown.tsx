@@ -12,9 +12,12 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+// Copying a selection that contains typeset mathematics puts its LaTeX source, between $ or $$, in plain text.
+import 'katex/contrib/copy-tex'
 import { normalizeMath, remarkCitations, remarkPaperLinks, snippet, splitBlocks, type PaperLinks } from '../mathtext'
 import type { PluggableList } from 'unified'
 import { experimentImage } from '../artifacts'
+import { CopyButton } from './common'
 
 const KATEX = { throwOnError: false, strict: 'ignore', trust: false, maxExpand: 500, maxSize: 20 } as const
 const MathMacros = createContext<Record<string, string | object>>({})
@@ -42,6 +45,8 @@ export function MathMacrosProvider({ definitions, children }: { definitions?: Re
 
 const safeUrl = (url: string) => (/^(https?:|mailto:)/i.test(url) ? url : experimentImage(url))
 const inlineText = ({ children }: { children?: ReactNode }) => <>{children}</>
+type HastNode = { type: string; value?: string; children?: HastNode[] }
+const hastText = (node?: HastNode): string => node ? (node.value ?? (node.children || []).map(hastText).join('')) : ''
 
 type Props = {
   children: string
@@ -51,11 +56,13 @@ type Props = {
   inline?: boolean
   mathProse?: boolean
   papers?: PaperLinks
+  /** Text the person typed: mathematics KaTeX cannot read keeps the text colour instead of error red. */
+  quiet?: boolean
 }
 
-export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline, mathProse, papers }: Props) {
+export const Markdown = memo(function Markdown({ children, className, onCite, flagged, inline, mathProse, papers, quiet }: Props) {
   const macros = useContext(MathMacros)
-  const katex = useMemo(() => ({ ...KATEX, macros: { ...macros } }), [macros])
+  const katex = useMemo(() => ({ ...KATEX, macros: { ...macros }, ...(quiet ? { errorColor: 'currentColor' } : {}) }), [macros, quiet])
   const components = useMemo<Components>(() => ({
     a: ({ href, title, children: label }) => (
       <a href={href} title={title} target="_blank" rel="noopener noreferrer nofollow">{label}</a>
@@ -63,6 +70,13 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
     img: ({ src, alt }) => (typeof src === 'string' && experimentImage(src)
       ? <img className="experiment-inline" src={src} alt={alt || 'Sandbox figure'} loading="lazy" />
       : <span className="img-alt">(image{alt ? `: ${alt}` : ''} not loaded)</span>),
+    // A code block keeps its exact text one click away.
+    ...(inline ? {} : { pre: ({ node, children: code }) => (
+      <div className="md-code">
+        <pre>{code}</pre>
+        <CopyButton className="code-copy" label="Copy" title="Copy this code" text={() => hastText(node as HastNode | undefined)} />
+      </div>
+    ) }),
     // Compact previews keep heading text and inline math without heading size.
     ...(inline ? { p: inlineText, h1: inlineText, h2: inlineText, h3: inlineText,
       h4: inlineText, h5: inlineText, h6: inlineText } : {}),

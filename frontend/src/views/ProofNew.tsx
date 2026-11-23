@@ -74,9 +74,18 @@ export function ProofNew() {
   }
 
   const running = capacityFull(snapshot, status)
+  // The rules the server applies, said with the labels of this form.
+  const invalid = (value: number, low: number, high = Infinity) => !Number.isInteger(value) || value < low || value > high
+  const limitError = invalid(rounds, 1, 100) ? 'Attempts must be a whole number from 1 to 100.'
+    : tokens !== null && invalid(tokens, 512) ? 'The total output token limit must be at least 512 tokens, or blank for no limit.'
+    : invalid(minutes, 1) ? 'Time must be at least 1 minute.'
+    : invalid(solveTokens, 128, 1_000_000) ? 'The solve output ceiling must be from 128 to 1,000,000 tokens.'
+    : invalid(verifyTokens, 128, 1_000_000) ? 'The review output ceiling must be from 128 to 1,000,000 tokens.'
+    : invalid(ctx, 2048) ? 'Context must be at least 2,048 tokens.' : ''
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (uploading) return
+    if (limitError) { setError(limitError); return }
     setBusy(true)
     setError('')
     setQueuedNote('')
@@ -153,7 +162,8 @@ export function ProofNew() {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {defaults && <EffortSlider kind="proof" defaults={defaults} level={level} onLevel={chooseLevel} custom={custom} />}
+            {defaults && <EffortSlider kind="proof" defaults={defaults} level={level} onLevel={chooseLevel} custom={custom}
+              current={{ rounds, tokens, seconds: minutes * 60, solve_tokens: solveTokens, verify_tokens: verifyTokens }} />}
             <p className="field-hint">Effort sets the number of approaches and checks. Work is saved when paused. Optional limits stay with the job when you resume.</p>
             <Collapse summary="Advanced limits">
               <div className="field-grid">
@@ -162,12 +172,12 @@ export function ProofNew() {
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens}
                   hint="Optional. Includes thinking across all calls; leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
-                <NumberField label="Solve output ceiling" value={solveTokens} onChange={setSolveTokens} min={128} step={1024}
+                <NumberField label="Solve output ceiling" value={solveTokens} onChange={setSolveTokens} min={128} max={1_000_000} step={128}
                   hint="Tokens per solve, including thinking" />
-                <NumberField label="Review output ceiling" value={verifyTokens} onChange={setVerifyTokens} min={128} step={1024}
+                <NumberField label="Review output ceiling" value={verifyTokens} onChange={setVerifyTokens} min={128} max={1_000_000} step={128}
                   hint="Tokens per whole-proof review, including thinking" />
-                <NumberField label="Context" value={ctx} onChange={setCtx} min={2048} step={2048}
-                  hint="Must hold the problem, the pinned text and a full answer" />
+                <NumberField label="Context" value={ctx} onChange={setCtx} min={2048} step={1024}
+                  hint="At least 2,048 tokens. Must hold the problem, the pinned text and a full answer." />
               </div>
             </Collapse>
           </div>

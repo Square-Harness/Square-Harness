@@ -14,6 +14,7 @@ The security model matches the terminal interface:
 - network and Python permissions stay fixed at launch; proof jobs use
   pinned text and no tools, as in the terminal.
 """
+import errno
 import hmac
 import http.cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,13 +31,15 @@ import socket
 import stat
 import sys
 import threading
-from urllib.parse import parse_qs, urlencode, urlsplit
+import unicodedata
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 import webbrowser
 
 from .. import __version__
 from ..agent import AgentError
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
+from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
 from .. import images
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
@@ -89,12 +92,32 @@ class Unauthorized(Exception):
     """A login attempt used the wrong access token."""
 
 
+# How a limit is named in the forms, for messages about a request's fields.
+LABELS = {'ctx': 'Context', 'rounds': 'Attempts', 'tokens': 'Total output', 'solve_tokens': 'Solve ceiling',
+          'verify_tokens': 'Review ceiling', 'input_tokens': 'Total input', 'requests': 'Search requests',
+          'chars': 'Source characters', 'add_tokens': 'Extra output tokens', 'add_rounds': 'Extra attempts'}
+
+
 def _int(body, key, low=None, high=None):
     value = body.get(key)
     if value is None:
         return None
     if type(value) is not int or (low is not None and value < low) or (high is not None and value > high):
-        raise ValueError(f'{key} must be an integer' + (f' from {low} to {high}' if low is not None and high is not None else ''))
+        unit = ' tokens' if key == 'ctx' or key.endswith('tokens') else ''
+        rule = (f' from {low:,} to {high:,}{unit}' if low is not None and high is not None else
+                f' at least {low:,}{unit}' if low is not None else f' at most {high:,}{unit}' if high is not None else '')
+        raise ValueError(f'{LABELS.get(key, key)} must be ' + ('a whole number' + (',' + rule if rule else '')
+                                                             if type(value) is not int else rule.strip()))
+    return value
+
+
+def _added_seconds(body, key):
+    """An explicit extra working time on resume: 0 (none) up to one day."""
+    value = body.get(key)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 86400:
+        raise ValueError(f'{key} must be a number of seconds from 0 to 86400')
     return value
 
 
@@ -123,7 +146,8 @@ def _files(body, key='source_files'):
 
 def _text(body, key, limit):
     value = body.get(key)
-    if not isinstance(value, str) or not value.strip():
+    # Text made only of control characters and spaces is as empty as whitespace: refuse it before any model call.
+    if not isinstance(value, str) or not ''.join(ch for ch in value if unicodedata.category(ch) != 'Cc').strip():
         raise ValueError(f'Provide {key}')
     if len(value) > limit:
         raise ValueError(f'{key} is limited to {limit} characters')
@@ -153,6 +177,22 @@ def project_read(h, body, id):
         raise store.NotFound('Unknown project') from None
 
 
+@route('DELETE', '/api/projects/' + UUID)
+def project_delete(h, body, id):
+    try:
+        return h.server.hub.delete_project(id)
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
+
+
+@route('GET', '/api/projects/' + UUID + '/files')
+def project_files(h, body, id):
+    try:
+        return projects.list_files(h.server.hub.root, id)
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
+
+
 @route('POST', '/api/projects/' + UUID)
 def project_update(h, body, id):
     try:
@@ -174,13 +214,13 @@ def feedback_config(h, body):
 @route('POST', '/api/feedback/preview')
 def feedback_preview(h, body):
     from . import feedback
-    return feedback.preview(h.server.hub.root, body.get('chat_id'))
+    return feedback.preview(h.server.hub.root, body.get('chat_id'), (h.server.token,))
 
 
 @route('POST', '/api/feedback/export')
 def feedback_export(h, body):
     from . import feedback
-    data = feedback.archive(h.server.hub.root, body.get('chat_id'))
+    data = feedback.archive(h.server.hub.root, body.get('chat_id'), (h.server.token,))
     h.send_bytes(200, data, 'application/zip', [('Content-Disposition', 'attachment; filename="conversation-diagnostics.zip"'),
                                               ('Cache-Control', 'private, no-store')])
     return Streamed
@@ -198,7 +238,7 @@ def feedback_submit(h, body):
     email = h.headers.get('X-SH-User-Email', '')
     if email and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) and len(email) <= 254:
         metadata['reporter_email'] = email
-    return feedback.save(hub.root, body, metadata)
+    return feedback.save(hub.root, body, metadata, (h.server.token,))
 
 
 @route('GET', '/api/feedback/' + UUID + '/archive')
@@ -208,6 +248,13 @@ def feedback_archive(h, body, id):
     h.send_bytes(200, data, 'application/zip', [('Content-Disposition', f'attachment; filename="feedback-{id}.zip"'),
                                               ('Cache-Control', 'private, no-store')])
     return Streamed
+
+
+@route('GET', '/api/account')
+def account(h, body):
+    """No account locally. The hosted gateway answers this path itself with the signed-in email."""
+    return {}
+
 
 @route('GET', '/api/status')
 def status(h, body):
@@ -444,7 +491,19 @@ def proof(h, body, id):
 
 @route('POST', '/api/proofs/' + UUID + '/resume')
 def proof_resume(h, body, id):
-    return {'task': h.server.hub.resume_proof(id, queue=bool(_flag(body, 'queue'))).summary(), 'id': id}
+    unknown = set(body) - {'queue', 'add_tokens', 'add_seconds', 'add_rounds'}
+    if unknown:
+        raise ValueError('Unknown resume options: ' + ', '.join(sorted(unknown)))
+    task = h.server.hub.resume_proof(id, queue=bool(_flag(body, 'queue')),
+                                     add_tokens=_int(body, 'add_tokens', 0, MAX_ADD_TOKENS) or 0,
+                                     add_seconds=_added_seconds(body, 'add_seconds'),
+                                     add_rounds=_int(body, 'add_rounds', 0, MAX_ADD_ROUNDS) or 0)
+    return {'task': task.summary(), 'id': id}
+
+
+@route('DELETE', '/api/proofs/' + UUID)
+def proof_delete(h, body, id):
+    return h.server.hub.delete_proof(id)
 
 
 @route('GET', '/api/proofs/' + UUID + '/report')
@@ -498,7 +557,14 @@ def research(h, body, id):
 
 @route('POST', '/api/research/' + UUID + '/resume')
 def research_resume(h, body, id):
-    return {'task': h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue')), additional_seconds=_seconds(body, 'additional_seconds') or 0).summary(), 'id': id}
+    if body.get('add_rounds') is not None:
+        raise ValueError('add_rounds applies to proofs; a research job takes add_tokens and add_seconds')
+    if body.get('add_seconds') is not None and body.get('additional_seconds') is not None:
+        raise ValueError('Give add_seconds or additional_seconds, not both')
+    seconds = _added_seconds(body, 'add_seconds') or _seconds(body, 'additional_seconds') or 0
+    task = h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue')), additional_seconds=seconds,
+                                        additional_tokens=_int(body, 'add_tokens', 0, MAX_ADD_TOKENS) or 0)
+    return {'task': task.summary(), 'id': id}
 
 
 @route('GET', '/api/research/' + UUID + '/review-evidence')
@@ -524,12 +590,16 @@ def research_stream(h, body, id, name):
 @route('GET', '/api/chats')
 def chats(h, body):
     hub = h.server.hub
-    rows = store.list_chats(hub.root, hub.base)
+    query = (h.query.get('q') or [''])[0].strip()
+    if len(query) > 200:
+        raise ValueError('Search for at most 200 characters')
+    search = {} if query else None
+    rows = store.list_chats(hub.root, hub.base, query=query or None, search=search)
     live = {t.target for t in hub.active_tasks() if t.kind == 'chat'}
     for row in rows:
         if row['id'] not in live:
             row['agent_statuses'] = []
-    return {'chats': rows}
+    return {'chats': rows, **({'truncated': True} if search and search.get('truncated') else {})}
 
 
 @route('POST', '/api/chats')
@@ -564,7 +634,9 @@ def chat(h, body, id):
     result = _chat_view(saved, hub.root)
     result['math_macros'] = store.chat_macros(hub.root, saved, hub.base)
     snapshot = hub.snapshot()
-    if any(task['target'] == id and task['state'] == 'queued' for task in snapshot['queue']):
+    result['queued_followup'] = next(({'task': task['id'], 'content': task['title']} for task in snapshot['queue']
+                                      if task.get('followup') and task['target'] == id), None)
+    if any(task['target'] == id and task['state'] == 'queued' and not task.get('followup') for task in snapshot['queue']):
         # A queued turn has not saved its state yet: the previous turn's status would show (B8).
         result['assistant_status'], result['assistant_resumable'], result['assistant_progress'] = 'queued', False, None
     elif result['assistant_status'] == 'running':
@@ -579,6 +651,9 @@ def chat(h, body, id):
             if result['investigation'] and (saved.get('assistant_state') or {}).get('investigation'):
                 from ..investigation import TERMINAL
                 result['investigation']['can_stop'] = result['investigation']['phase'] not in TERMINAL
+                for step in result['investigation']['tasks']:
+                    if step['status'] == 'running':  # its worker died with the process (a graceful stop says so itself)
+                        step['status'] = 'interrupted'
             tokens = result['assistant_budget']['tokens']
             tokens['uncertain'] += tokens['reserved']
             tokens['reserved'] = 0
@@ -601,7 +676,9 @@ def chat_title(h, body, id):
 @route('POST', '/api/chats/' + UUID + '/project')
 def chat_project(h, body, id):
     hub = h.server.hub
-    return _chat_view(hub.set_chat_project(id, body.get('project_id')), hub.root)
+    if 'project_id' not in body:
+        raise ValueError('Give project_id: a project ID, or null to remove the conversation from its project')
+    return _chat_view(hub.set_chat_project(id, body['project_id']), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/settings')
@@ -612,7 +689,11 @@ def chat_settings(h, body, id):
         raise ValueError('Give think or online as true or false')
     if online:
         hub.online(True)  # refuses when launched with --offline
-    return _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online), hub.root)
+    view = _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online), hub.root)
+    if online is False:
+        # Running work of this conversation stops web access at its next request, not only later turns.
+        view['online_stopped_jobs'] = hub.stop_online(id)
+    return view
 
 
 @route('POST', '/api/chats/' + UUID + '/messages')
@@ -624,8 +705,10 @@ def chat_message(h, body, id):
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
     content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
-    h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode, required_effort=(body.get('mode_call') or {}).get('effort'))
-    return {'ok': True}
+    task = h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode,
+                              required_effort=(body.get('mode_call') or {}).get('effort'), queue=bool(_flag(body, 'queue')))
+    # A follow-up queued behind the running turn has state 'queued'; cancel it with /api/queue/<task>/cancel.
+    return {'ok': True, 'task': task.summary()}
 
 
 @route('POST', '/api/chats/' + UUID + '/investigation/stop')
@@ -691,6 +774,13 @@ def workspace_open(h, body):
     path = body.get('path')
     if not isinstance(path, str):
         raise ValueError('Give the folder path relative to the interface root')
+    target = store.resolve_folder(h.server.hub.base, path)
+    if projects.holds_projects(target):
+        raise ValueError('This folder holds the files of your projects. Open the project from the conversation list instead.')
+    project = projects.folder_label(target)
+    if project:
+        raise ValueError(f'This folder holds the files of the project “{project["name"]}”. '
+                         'Open the project from the conversation list instead; opening it as a folder would start an empty workspace inside it.')
     h.server.switch(path)
     return {'workspace': str(h.server.hub.root)}
 
@@ -724,11 +814,16 @@ def upload(h, body):
     name = (h.query.get('name') or [''])[0]
     root = h.server.hub.root
     project_id = (h.query.get('project_id') or [''])[0]
-    folder = projects.read_project(root, project_id)['folder'] if project_id else ''
+    try:
+        folder = projects.read_project(root, project_id)['folder'] if project_id else ''
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
     saved = store.save_upload(root / folder if folder else root, name, body)
     if folder:
         saved = folder + '/' + saved
     result = {'path': saved}
+    if encoding := store.upload_encoding(body):
+        result['note'] = f'Read as {encoding} text (the file starts with a byte-order mark); it is kept unchanged.'
     if images.is_image(saved):
         try:
             result['image'] = images.snapshot(root, [saved])[0]
@@ -745,15 +840,26 @@ def templates(h, body):
     return {'templates': store.list_templates(h.server.hub.base)}
 
 
+_WRITEUP_KEYS = {'goal', 'source_files', 'files', 'template_files', 'template', 'save_template', 'notes', 'output',
+                 'rounds', 'tokens', 'input_tokens', 'seconds', 'queue'}
+
+
 @route('POST', '/api/writeup')
 def writeup_start(h, body):
+    unknown = sorted(set(body) - _WRITEUP_KEYS)
+    if unknown:
+        raise ValueError('Unknown field' + ('s' if len(unknown) > 1 else '') + ' for a write-up: ' + ', '.join(unknown)
+                         + '. Use source_files for the notes, template_files for the template.')
+    if body.get('files') is not None and body.get('source_files') is not None:
+        raise ValueError('Give the notes once: source_files (files is the same field)')
     template = body.get('template')
     save_as = body.get('save_template')
     notes = body.get('notes') or ''
     if not isinstance(notes, str) or not isinstance(body.get('output') or '', str):
         raise ValueError('notes and output must be text')
     task = h.server.hub.start_writeup(
-        _text(body, 'goal', 20000), source_files=_files(body), template_files=_files(body, 'template_files'),
+        _text(body, 'goal', 20000), source_files=_files(body, 'files' if body.get('files') is not None else 'source_files'),
+        template_files=_files(body, 'template_files'),
         template=template if isinstance(template, str) and template else None,
         save_template=save_as if isinstance(save_as, str) and save_as.strip() else None,
         notes=notes, output=body.get('output') or '',
@@ -827,6 +933,25 @@ def style_template(h, body):
     return {'style': store.set_style_template(h.server.hub.base, h.server.hub.root, name.strip(), _files(body, 'template_files'))}
 
 
+# After /api/styles/choice and /api/styles/template: the first matching route wins.
+@route('POST', r'/api/styles/(?P<name>[^/]{1,200})')
+def style_edit(h, body, name):
+    name = unquote(name)
+    if set(body) - {'rename', 'items'} or len(body) != 1:
+        raise ValueError('Send either {"rename": "new name"} or {"items": {...}}')
+    if 'rename' in body:
+        if not isinstance(body['rename'], str) or not body['rename'].strip():
+            raise ValueError('Give the new name of the style')
+        return {'style': store.edit_style(h.server.hub.base, name, rename=body['rename'])}
+    return {'style': store.edit_style(h.server.hub.base, name, items=body['items'])}
+
+
+@route('DELETE', r'/api/styles/(?P<name>[^/]{1,200})')
+def style_delete(h, body, name):
+    store.delete_style(h.server.hub.base, unquote(name))
+    return {'ok': True}
+
+
 @route('POST', '/api/style')
 def style_start(h, body):
     name, goal = body.get('name'), body.get('goal') or ''
@@ -892,6 +1017,24 @@ def research_review(h, body, id):
 @route('GET', '/api/research/' + UUID + '/bib')
 def research_bib(h, body, id):
     return _review_file(h, id, 'bib', 'application/x-bibtex; charset=utf-8')
+
+
+@route('GET', '/api/research/' + UUID + r'/download\.md')
+def research_download_md(h, body, id):
+    return _review_download(h, id, 'md', 'text/markdown; charset=utf-8')
+
+
+@route('GET', '/api/research/' + UUID + r'/download\.bib')
+def research_download_bib(h, body, id):
+    return _review_download(h, id, 'bib', 'application/x-bibtex; charset=utf-8')
+
+
+def _review_download(h, id, output, content_type):
+    """A literature review rendered for use outside the app: standalone Markdown or the BibTeX of its cited works."""
+    name, data = store.research_review_download(h.server.hub.root, id, output)
+    h.send_bytes(200, data, content_type, [('Content-Disposition', f'attachment; filename="{name}"'),
+                                           ('Cache-Control', 'no-store')])
+    return Streamed
 
 
 def _review_file(h, id, output, content_type):
@@ -1051,6 +1194,12 @@ class Handler(BaseHTTPRequestHandler):
         value = json.loads(data.decode('utf-8'))
         if not isinstance(value, dict):
             raise ValueError('Request body must be a JSON object')
+        try:
+            # JSON escapes can encode a lone surrogate, which no saved UTF-8 file can hold.
+            json.dumps(value, ensure_ascii=False).encode('utf-8')
+        except UnicodeEncodeError:
+            raise ValueError('The request contains an invalid character (an unpaired UTF-16 surrogate). '
+                             'Remove it and try again.') from None
         return value
 
     def _raw_body(self):
@@ -1096,13 +1245,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.error(409, str(exc))
         except (projects.StaleProject, personalization.StalePersonalization) as exc:
             return self.error(409, str(exc))
+        except FileExistsError as exc:
+            return self.error(409, _os_message(exc))
         except store.NotFound as exc:
             return self.error(404, str(exc))
         except Unauthorized as exc:
             return self.error(401, str(exc))
         except (BrokenPipeError, ConnectionResetError):
             raise
-        except (ValueError, AgentError, OSError) as exc:
+        except OSError as exc:
+            return self.error(400, _os_message(exc))
+        except (ValueError, AgentError) as exc:
             return self.error(400, str(exc))
         except Exception as exc:  # report, never crash the handler thread silently
             print(f'Interface error on {method} {path}: {type(exc).__name__}: {exc}', file=sys.stderr)
@@ -1194,6 +1347,19 @@ class Server(ThreadingHTTPServer):
             self.watcher = Watcher(target, self.hub.bus, old.interval)
             self.watcher.start()
         self.hub.bus.publish('workspace', path=target.relative_to(self.hub.base).as_posix())
+
+
+def _os_message(exc):
+    """An OS error without server paths or temporary names; harness-raised messages are kept."""
+    if exc.errno is None and exc.filename is None:
+        return str(exc)
+    return {errno.EEXIST: 'A file or folder with that name already exists',
+            errno.ENOENT: 'No such file or folder',
+            errno.ENAMETOOLONG: 'That name is too long',
+            errno.EACCES: 'Permission denied by the file system',
+            errno.EPERM: 'Permission denied by the file system',
+            errno.ENOSPC: 'The disk is full',
+            errno.EROFS: 'The folder is read-only'}.get(exc.errno, f'File system error ({exc.strerror or "unknown"})')
 
 
 # -- launch ------------------------------------------------------------------
@@ -1318,7 +1484,8 @@ def serve(args):
     lines.append('╰─ Ctrl+C stops the interface; running work pauses at its saved checkpoint')
     print('\n'.join(lines), flush=True)
     if args.allow_python:
-        print('Python enabled: each snippet requires approval in the interface and runs with your account permissions.')
+        print('Python enabled: each snippet requires approval in the interface and runs with your account permissions.',
+              flush=True)
     if not args.no_browser:
         threading.Timer(0.4, webbrowser.open, [local + query]).start()
     previous_handlers = {}

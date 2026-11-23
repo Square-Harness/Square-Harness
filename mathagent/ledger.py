@@ -416,7 +416,8 @@ class ProofStore:
         """Hold one safe journal descriptor; sync every half second and on exit.
 
         Reservations are durable before dispatch. A power loss may lose the last
-        half second of journal events; their unknown usage remains reserved.
+        half second of journal events; the margin of an interrupted call's
+        estimated charge (call_policy.interrupted_charge) covers them.
         """
         self._writable()
         self._check_paths()

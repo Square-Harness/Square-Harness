@@ -21,8 +21,10 @@ export function duration(seconds: number): string {
   return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
 }
 
+// The interface is written in English: numbers follow it, not the browser's locale.
+export const NUMBER = new Intl.NumberFormat('en-US')
 export function count(value: number): string {
-  return new Intl.NumberFormat(undefined).format(Math.round(value))
+  return NUMBER.format(Math.round(value))
 }
 
 export function bytes(value: number): string {
@@ -39,3 +41,27 @@ export function firstLine(text: string, limit = 120): string {
   const line = text.replace(/\s+/g, ' ').trim()
   return line.length <= limit ? line : line.slice(0, limit - 1) + '…'
 }
+
+const fold = (text: string) => text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+
+/** Where a search query occurs in text, ignoring case and accents (as the server's search does). */
+export function findFolded(text: string, query: string): [number, number] | null {
+  const wanted = fold(query.trim())
+  if (!wanted) return null
+  let folded = ''
+  const starts: number[] = []
+  for (let index = 0; index < text.length;) {
+    const char = String.fromCodePoint(text.codePointAt(index)!)
+    const piece = fold(char)
+    for (let k = 0; k < piece.length; k++) starts.push(index)
+    folded += piece
+    index += char.length
+  }
+  const at = folded.indexOf(wanted)
+  if (at < 0) return null
+  const last = starts[at + wanted.length - 1]
+  return [starts[at], last + String.fromCodePoint(text.codePointAt(last)!).length]
+}
+
+/** A file as the person knows it: a project's own files without their internal projects/<id>/ folder. */
+export const displayPath = (path: string) => path.replace(/^projects\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\//, '')

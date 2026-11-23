@@ -138,13 +138,14 @@ function ResultsList({ outputs, choose }: { outputs: WorkOutput[]; choose: (id: 
   })}</ul>
 }
 
-type Preview = { text: string; proof?: ProofDetail; research?: ResearchDetail }
+type Preview = { text: string; proof?: ProofDetail; research?: ResearchDetail; run?: RunDetails }
 
 async function previewText(output: WorkOutput, chat: string): Promise<Preview> {
   switch (output.kind) {
     case 'conversation': return { text: output.text || '' }
     case 'experiment': {
-      return { text: (await api.chatExperiment(chat, output.job)).answer }
+      const { answer, ...run } = await api.chatExperiment(chat, output.job)
+      return { text: answer, run }
     }
     case 'answer': return { text: (await api.savedChatAnswer(chat, output.job)).answer }
     case 'check': return { text: (await api.chatCheck(chat, output.job)).answer }
@@ -202,16 +203,39 @@ function ProofReviews({ proof }: { proof: ProofDetail }) {
   })}</div>
 }
 
-function ExperimentPreview({ text }: { text: string }) {
-  let data
-  try { data = JSON.parse(text) } catch { return <pre className="work-output-source">{text}</pre> }
-  if (!data || typeof data !== 'object') return <pre className="work-output-source">{text}</pre>
+/** Why a sandbox run failed or stopped, returned beside its saved text when the record has it. */
+export type RunDetails = { status?: string; run_status?: string; error?: unknown; stop_reason?: string; limits?: unknown; stdout_tail?: string; seconds?: number }
+
+function ExperimentPreview({ text, run }: { text: string; run?: RunDetails }) {
+  let parsed
+  try { parsed = JSON.parse(text) } catch { parsed = null }
+  if ((!parsed || typeof parsed !== 'object') && !run?.error && !run?.stop_reason) return <pre className="work-output-source">{text}</pre>
+  // Fields of the run record fill in what the saved text does not carry.
+  const data = { ...(parsed && typeof parsed === 'object' ? parsed : {}),
+    ...Object.fromEntries(Object.entries(run || {}).filter(([key, value]) => value != null && value !== '' && key !== 'status')) }
   const output = typeof data.stdout === 'string' ? data.stdout.trimEnd() : ''
   const result = data.result == null ? '' : typeof data.result === 'string' ? data.result : JSON.stringify(data.result, null, 2)
+  // A failed or stopped run records why (fields written by the sandbox runner when available).
+  const str = (value: unknown) => typeof value === 'string' ? value.trim() : ''
+  const error = str(data.error) || (data.error && typeof data.error === 'object'
+    ? [str(data.error.type), str(data.error.message)].filter(Boolean).join(': ') : '')
+  const stop = ['', 'completed', 'complete', 'ok', 'done', 'finished', 'success'].includes(str(data.stop_reason).toLowerCase())
+    ? '' : str(data.stop_reason).replaceAll('_', ' ')
+  const traceback = str(data.traceback) || (data.error && typeof data.error === 'object' ? str(data.error.traceback) : '')
+  const tail = !output ? str(data.stdout_tail) : ''
+  const limits = data.limits && typeof data.limits === 'object' && !Array.isArray(data.limits)
+    ? Object.entries(data.limits as Record<string, unknown>).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)) : []
   return <div className="work-experiment">
+    {(error || stop) && <div className="error-note experiment-failure" role="note">
+      <p><strong>{stop ? `The run stopped: ${stop}.` : 'The run failed.'}</strong>{error ? ' ' + error : ''}</p>
+    </div>}
+    {traceback && <details className="work-fold" open><summary>Traceback</summary><pre className="work-output-source">{traceback}</pre></details>}
+    {tail && <><h4>Last output before it stopped</h4><pre className="work-output-source">{tail}</pre></>}
+    {limits.length > 0 && <details className="work-fold"><summary>Limits of this run</summary>
+      <dl className="experiment-limits">{limits.map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{String(value)}</dd></div>)}</dl></details>}
     {output ? <><h4>Observations</h4><pre className="work-output-source">{output}</pre></> :
       result ? <><h4>Recorded result</h4><pre className="work-output-source">{result}</pre></> :
-      <p className="muted">No observations were recorded.</p>}
+      tail || error || stop ? null : <p className="muted">No observations were recorded.</p>}
     {data.truncated && <p className="muted small">Only part of the original experiment is available.</p>}
     {typeof data.stderr === 'string' && data.stderr.trim() && <details className="work-fold"><summary>Messages from the experiment</summary>
       <pre className="work-output-source">{data.stderr}</pre></details>}
@@ -265,7 +289,8 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
       {issues.length > 0 && <ul>{issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
     </details>}
     <div className="work-tab-actions">
-      {data?.outputs?.review && <a className="btn btn-small" href={api.researchReviewDownloadUrl(data.id)} download>Download review</a>}
+      {data?.outputs?.review && <a className="btn btn-small" href={api.reviewMarkdownUrl(data.id)} download>Download review (.md)</a>}
+      {data?.outputs?.review && <a className="btn btn-small" href={api.reviewBibtexUrl(data.id)} download>BibTeX (.bib)</a>}
     </div>
   </article>
 }
@@ -275,7 +300,7 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   const isText = ['conversation', 'experiment', 'answer', 'check', 'proof', 'report', 'tex', 'body', 'bib'].includes(output.kind)
   const [value, setValue] = useState<Preview | null>(null)
   const [cite, setCite] = useState('')
-  const { proof, research, text } = value || {}
+  const { proof, research, text, run } = value || {}
   const flagged = useMemo(() => research ? flaggedCitations(research) : new Set<string>(), [research])
   const issues = useMemo(() => research ? [...new Set([...research.citation_issues, ...research.review_context_issues, ...research.warnings])] : [], [research])
   const errorLines = useMemo(() => new Set((output.kind === 'body' ? [] : research?.compile?.errors || []).flatMap(
@@ -311,7 +336,7 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
     {isText && !error && (text === undefined ? <p role="status">Loading output…</p> : !text ? <p>No text has been saved yet.</p> :
       proof && output.kind === 'report' ? <ProofReviews proof={proof} /> :
       proof ? <ProofResponse proof={proof} /> :
-      output.kind === 'experiment' ? <ExperimentPreview text={text} /> :
+      output.kind === 'experiment' ? <ExperimentPreview text={text} run={run} /> :
       output.kind === 'check' ? <Markdown>{checkReading(text)}</Markdown> :
       research && output.kind === 'report' ? <Report data={research} flagged={flagged}
         issues={issues} onCite={setCite} /> :

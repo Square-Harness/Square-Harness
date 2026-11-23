@@ -5,9 +5,11 @@
 
 stdin: ``{code, nonce, timeout, seed, parameters, limits}``. stdout (the protocol):
 ``<<<SQH-START nonce>>>`` before the code runs, then ``<<<SQH-RESULT nonce>>>``, one
-JSON line and ``<<<SQH-END nonce>>>``. The code's own stdout/stderr go to files on
-the size-limited tmpfs and come back as head+tail excerpts. This script is not the
-security boundary; the container is, and the host kills it on overrun.
+JSON line and ``<<<SQH-END nonce>>>``. The code runs in a forked child; its own
+stdout/stderr go to files on the size-limited tmpfs and come back as head+tail
+excerpts, also when the child is killed at the memory or CPU limit (status
+``memory``/``timeout``). This script is not the security boundary; the container
+is, and the host kills it on overrun.
 """
 import base64
 import io
@@ -232,42 +234,17 @@ def forbid_privilege_gain():
             raise OSError('no_new_privs is not in effect')
 
 
-def main():
-    forbid_privilege_gain()  # Fails closed: no result, so the host reports a sandbox error.
-    protocol = os.fdopen(os.dup(1), 'wb', buffering=0)  # Not inherited by subprocesses (O_CLOEXEC).
-    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
-    request = json.loads(raw[:MAX_INPUT].decode('utf-8'))
-    nonce = str(request['nonce'])
-    code = str(request['code'])
-    timeout = float(request['timeout'])
-    seed = request.get('seed')
-    limits = request.get('limits') or {}
+def run_experiment(request, code, timeout, seed, limits, streams):
+    """In the forked child: run the code, collect its files, return the result (never raises)."""
+    try:  # The child, not this driver, is the one the kernel picks at the memory limit.
+        with open('/proc/self/oom_score_adj', 'w') as adjust:
+            adjust.write('1000')
+    except OSError:
+        pass
     # Backstop if the host session dies: busy code that ignores the alarm still gets SIGXCPU.
     cpu = int(math.ceil(timeout * max(1.0, float(limits.get('cpus', 1))))) + 2
     resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 2))
     output_bytes = int(limits.get('output_bytes', 20000))
-
-    os.makedirs(WORK, mode=0o700, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, mode=0o700, exist_ok=True)
-    if os.path.isdir(MPL_TEMPLATE):
-        shutil.copytree(MPL_TEMPLATE, WORK + '/mpl', dirs_exist_ok=True)
-        os.environ['MPLCONFIGDIR'] = WORK + '/mpl'
-    streams = {}
-    for fd, label in ((1, 'stdout'), (2, 'stderr')):
-        path = f'{WORK}/{label}'
-        target = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.dup2(target, fd)
-        os.close(target)
-        streams[label] = path
-    null = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(null, 0)
-    os.close(null)
-    sys.stdin = open(0, 'r', closefd=False)
-    sys.stdout = io.TextIOWrapper(io.FileIO(1, 'w', closefd=False), encoding='utf-8',
-                                  errors='backslashreplace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(io.FileIO(2, 'w', closefd=False), encoding='utf-8',
-                                  errors='backslashreplace', line_buffering=True)
-
     namespace = {'__name__': '__main__', '__builtins__': __builtins__, 'OUTPUT_DIR': OUTPUT_DIR,
                  'SEED': seed, 'PARAMS': request.get('parameters') or {}}
     if seed is not None:
@@ -282,10 +259,9 @@ def main():
     track_saved_figures()
 
     status, error, warnings = 'ok', None, []
-    protocol.write(f'<<<SQH-START {nonce}>>>\n'.encode())
     started = time.perf_counter()
     signal.signal(signal.SIGALRM, _alarm)
-    signal.signal(signal.SIGXCPU, _alarm)  # PID 1 ignores default-action signals: handle it explicitly
+    signal.signal(signal.SIGXCPU, _alarm)
     signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
         try:
@@ -322,11 +298,107 @@ def main():
     for label, path in streams.items():
         result[label], result[label + '_truncated'] = read_capped(path, output_bytes)
     result['warnings'] = warnings[:20]
-    body = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-    protocol.write(f'<<<SQH-RESULT {nonce}>>>\n'.encode() + body.encode('utf-8')
-                   + f'\n<<<SQH-END {nonce}>>>\n'.encode())
+    return result
+
+
+def stopped_result(status_code, timeout, elapsed, limits, streams, killed_at_deadline):
+    """In the driver: the child died without reporting (memory or CPU kill). Keep what it printed."""
+    warnings = []
+    signum = os.WTERMSIG(status_code) if os.WIFSIGNALED(status_code) else None
+    if killed_at_deadline or signum == signal.SIGXCPU or (signum == signal.SIGKILL and elapsed >= timeout):
+        status, error = 'timeout', {'type': 'TimeoutError', 'traceback': '',
+                                    'message': f'Execution exceeded the {timeout:g} s limit and was killed'}
+    elif signum == signal.SIGKILL:
+        status, error = 'memory', {'type': 'MemoryError', 'traceback': '', 'message': 'Killed at the memory limit'}
+    else:
+        detail = f'signal {signum}' if signum else f'status {os.WEXITSTATUS(status_code)}'
+        status, error = 'error', {'type': 'ProcessExit', 'traceback': '',
+                                  'message': f'The interpreter exited ({detail}) before reporting'}
+    result = {'status': status, 'error': error, 'elapsed_seconds': round(elapsed, 4)}
+    try:  # Files it saved are still on the tmpfs; open figures died with it.
+        result['artifacts'] = collect(limits, warnings)
+    except Exception as exc:
+        warnings.append(f'Output collection failed: {type(exc).__name__}: {exc}'[:300])
+        result['artifacts'] = []
+    for label, path in streams.items():
+        result[label], result[label + '_truncated'] = read_capped(path, int(limits.get('output_bytes', 20000)))
+    result['warnings'] = warnings[:20]
+    return result
+
+
+def main():
+    forbid_privilege_gain()  # Fails closed: no result, so the host reports a sandbox error.
+    protocol = os.fdopen(os.dup(1), 'wb', buffering=0)  # Not inherited by subprocesses (O_CLOEXEC).
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    request = json.loads(raw[:MAX_INPUT].decode('utf-8'))
+    nonce = str(request['nonce'])
+    code = str(request['code'])
+    timeout = float(request['timeout'])
+    seed = request.get('seed')
+    limits = request.get('limits') or {}
+
+    os.makedirs(WORK, mode=0o700, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, mode=0o700, exist_ok=True)
+    if os.path.isdir(MPL_TEMPLATE):
+        shutil.copytree(MPL_TEMPLATE, WORK + '/mpl', dirs_exist_ok=True)
+        os.environ['MPLCONFIGDIR'] = WORK + '/mpl'
+    streams = {}
+    for fd, label in ((1, 'stdout'), (2, 'stderr')):
+        path = f'{WORK}/{label}'
+        target = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.dup2(target, fd)
+        os.close(target)
+        streams[label] = path
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    sys.stdin = open(0, 'r', closefd=False)
+    sys.stdout = io.TextIOWrapper(io.FileIO(1, 'w', closefd=False), encoding='utf-8',
+                                  errors='backslashreplace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(io.FileIO(2, 'w', closefd=False), encoding='utf-8',
+                                  errors='backslashreplace', line_buffering=True)
+
+    protocol.write(f'<<<SQH-START {nonce}>>>\n'.encode())
+    result_path = WORK + '/result.json'
+    started = time.monotonic()
+    # The code runs in a child: at the memory or CPU limit the kernel kills the child, and this
+    # driver (PID 1) still reports what it printed and saved before it stopped.
+    child = os.fork()
+    if child == 0:
+        protocol.close()
+        try:
+            result = run_experiment(request, code, timeout, seed, limits, streams)
+            body = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+            fd = os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(body.encode('utf-8'))
+        except BaseException:
+            os._exit(70)
+        os._exit(0)  # Skip user atexit handlers and non-daemon threads.
+    deadline = started + timeout + 1.5  # Before the host's own deadline (timeout + 3 s).
+    killed = False
+    while True:
+        pid, status_code = os.waitpid(child, os.WNOHANG)
+        if pid:
+            break
+        if not killed and time.monotonic() > deadline:
+            os.kill(child, signal.SIGKILL)  # Code that ignored the alarm (a long C call).
+            killed = True
+        time.sleep(0.01)
+    elapsed = time.monotonic() - started
+    body = None
+    if os.WIFEXITED(status_code) and os.WEXITSTATUS(status_code) == 0 and not killed:
+        try:
+            with open(result_path, 'rb') as stream:
+                body = stream.read()
+        except OSError:
+            body = None
+    if body is None:
+        body = json.dumps(stopped_result(status_code, timeout, elapsed, limits, streams, killed),
+                          ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+    protocol.write(f'<<<SQH-RESULT {nonce}>>>\n'.encode() + body + f'\n<<<SQH-END {nonce}>>>\n'.encode())
     protocol.flush()
-    os._exit(0)  # Skip user atexit handlers and non-daemon threads.
+    os._exit(0)
 
 
 if __name__ == '__main__':

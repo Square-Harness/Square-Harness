@@ -15,7 +15,6 @@ from mathagent.backends import MeasuredStreamCancellation
 from mathagent.deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
 from mathagent.literature import LiteratureTools
 from mathagent.litreview import ReviewRunner, _cutoff_supported
-from mathagent.proof import count_input
 from mathagent.tools import Workspace
 from tests.test_research import FakeClient, response
 
@@ -196,7 +195,8 @@ class LiteratureReviewTests(unittest.TestCase):
             self.assertEqual((rejected['charged_tokens'], rejected['charged_input_tokens']), (0, 0))
             self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (20, 100))
             self.assertEqual(budget.snapshot()['tokens'], 20)
-            self.assertEqual(budget.snapshot()['input_tokens'], count_input(transport, transport.requests[0])[0])
+            # The provider's prompt count replaces the admission estimate (as in the runner's own meter).
+            self.assertEqual(budget.snapshot()['input_tokens'], 100)
             self.assertTrue((runner.directory / 'review.md').is_file())
             resumed = runner.resume(paused['id'])
         self.assertEqual(resumed['id'], paused['id'])

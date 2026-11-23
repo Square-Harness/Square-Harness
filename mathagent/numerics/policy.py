@@ -130,13 +130,43 @@ def load_policies(path=None):
             LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs', 20))}
 
 
-def resolve(policy, requested, approve=None):
+# One request may at most double a default; after a run ran into a limit, at most four times that limit.
+STEP = 2
+STEP_AFTER_LIMIT = 4
+PREVIEW_CODE_LINES = 12
+
+
+def step_limit(policy, key, reached=None):
+    """The largest value one escalation request may ask for, within the ceiling."""
+    allowed = getattr(policy.defaults, key) * STEP
+    if (reached or {}).get(key):
+        allowed = max(allowed, reached[key] * STEP_AFTER_LIMIT)
+    allowed = min(allowed, getattr(policy.ceiling, key))
+    return int(allowed) if key == 'memory_mb' else allowed
+
+
+def _preview(policy, raised, purpose, code):
+    lines = code.strip().splitlines()
+    shown = '\n'.join('  ' + line[:160] for line in lines[:PREVIEW_CODE_LINES])
+    if len(lines) > PREVIEW_CODE_LINES:
+        shown += f'\n  … ({len(lines) - PREVIEW_CODE_LINES} more lines)'
+    return ('RUN PYTHON IN THE SANDBOX WITH MORE RESOURCES (python-lab)\n'
+            + '\n'.join(f'{k}: {v:g} (default {getattr(policy.defaults, k):g}, ceiling '
+                        f'{getattr(policy.ceiling, k):g})' for k, v in raised.items())
+            + f'\nPurpose: {" ".join(purpose.split())[:300] or "(none given)"}'
+            + (f'\nCode ({len(lines)} lines):\n{shown}' if lines else '')
+            + '\nNetwork stays disabled; the code still cannot see your files.')
+
+
+def resolve(policy, requested, approve=None, *, purpose='', code='', reached=None):
     """Limits for one run. ``requested`` comes from a model and is untrusted.
 
     Lower values are always accepted (bounded below by FLOOR). Higher values are
-    refused for a policy without escalation, refused above the ceiling, and
-    otherwise need ``approve(preview)`` to return True: a user decision taken
-    by the interface, not by the model.
+    refused for a policy without escalation, refused above the ceiling or above
+    the step allowed now (see step_limit; ``reached`` holds limits earlier runs ran
+    into), refused without a stated purpose, and otherwise need ``approve(preview)``
+    to return True: a user decision taken by the interface, not by the model. The
+    preview shows the purpose and the start of the code.
     """
     requested = {k: v for k, v in (requested or {}).items() if v is not None}
     if set(requested) - set(REQUESTABLE):
@@ -157,13 +187,16 @@ def resolve(policy, requested, approve=None):
             ceiling = getattr(policy.ceiling, key)
             if value > ceiling:
                 raise PolicyError(f'{key}={value:g} exceeds the configured ceiling {ceiling:g}')
+            step = step_limit(policy, key, reached)
+            if value > step:
+                raise PolicyError(f'Ask for at most {key}={step:g} now. A larger value can be requested after a '
+                                  'run reaches the current limit; first estimate the cost with a smaller case.')
             raised[key] = value
         changes[key] = value
     if raised:
-        preview = ('RUN PYTHON IN THE SANDBOX WITH MORE RESOURCES (python-lab)\n'
-                   + '\n'.join(f'{k}: {v:g} (default {getattr(policy.defaults, k):g}, ceiling '
-                               f'{getattr(policy.ceiling, k):g})' for k, v in raised.items())
-                   + '\nNetwork stays disabled; the code still cannot see your files.')
+        if not isinstance(purpose, str) or not purpose.strip():
+            raise PolicyError('Larger limits need a purpose: say in one sentence why this run needs them.')
+        preview = _preview(policy, raised, purpose, code if isinstance(code, str) else '')
         if approve is None or not approve(preview):
             raise PolicyError('The user did not approve the larger limits. Run within the defaults: '
                               + ', '.join(f'{k}={getattr(policy.defaults, k):g}' for k in raised))

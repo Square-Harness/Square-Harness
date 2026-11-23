@@ -138,8 +138,30 @@ Version 1.1.0. The source of truth for the machine-readable version is
   A completed pre-upgrade verifier call is validated against the legacy schema
   in its immutable request; new calls cannot fall back to the old contract.
 - **Proof recovery and exports.** Transport interruptions do not consume solver
-  passes or verifier protocol retries. Redispatch uses a new journal key and
-  retains the interrupted call's reservation; never increase a saved allowance.
+  passes or verifier protocol retries. Redispatch uses a new journal key. An
+  interrupted call with no provider usage (pause, shutdown, crash, our own deadline)
+  is settled at a conservative estimate, `call_policy.interrupted_charge`: every
+  streamed character (answer, reasoning, tool calls) counts as a token, plus
+  `INTERRUPTED_MARGIN`, capped at the reservation, with `charge_basis: 'estimate'`
+  on the call. A provider failure (`provider_error`, `DeepInfraGenerationError`) keeps
+  its reservation. Resume re-settles an earlier version's full-cap charge from the
+  journal (`unsettled_interrupts`, recorded in `charge_resettlements` and the report);
+  an unreadable journal keeps the reservation. The research runners
+  (`ResearchRunner._settle_estimate`, used by review, write-up, style and literature
+  review) and the Assistant's `BudgetClient` apply the same rule. After a killed
+  process, the in-flight call's active time up to its journal's last write is
+  charged (`ProofRunner._crashed_call_seconds`). Never increase a saved allowance
+  silently: `resume(add_tokens=, add_seconds=, add_rounds=)` (research:
+  `additional_tokens`, `additional_seconds`) is an explicit user action, bounded
+  (`MAX_ADD_*`), refused for a proof that finished with a result, and recorded in
+  `allowance_additions` and the report. A passing review is accepted as a proof or
+  refutation only if `proof.not_a_proof` finds no non-attempt (target missing, open,
+  out of reach) and no reliance on an unexecuted program's output; otherwise the
+  candidate is `uncertain` with `controller_override` on the review (the model's
+  response is kept as written). These are demotion-only text checks: they never
+  promote a review. A job with no statement (`missing_statement`) is refused
+  before its first solve. When every solve stops at its output cap before writing
+  text, the stop is `budget_exhausted` with an output-limit reason.
   A continuation packs notes only after reserving useful solver output space.
   The export's selected candidate carries its own review status. An uncertain
   repair can replace a candidate with a concrete objection; retain both immutable
@@ -153,8 +175,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
     cards and completed child results stay readable. An unfinished legacy
     child returns an explicit retirement result without running the old skill.
   - Saved budgets and caps are kept on resume. Never grant a new allowance
-    silently: extra time is explicit (`--resume-add-seconds`, the interface's
-    "Resume (+N min)").
+    silently: extra time, tokens or attempts are explicit (`--resume-add-seconds`,
+    `--resume-add-tokens`, `--resume-add-rounds`, the resume routes' `add_*` fields,
+    the interface's "Resume (+N min)") and recorded in `allowance_additions`.
 - **Effort profiles.** The legacy tables in `mathagent/gui/effort.py` and
   `frontend/src/effort.ts` must stay identical. DS4 limits come from
   `model_limits.py` through API status, so forms and Assistant workers use the
@@ -196,8 +219,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   base and AMS packages. A portable vocabulary covers common notation when the
   distribution tree is unavailable. Custom commands are preserved in the source.
 - **Write-ups.** The user's notation outranks everything: `\newcommand`s in the
-  request, then the template's, then the saved style's, then the model's
-  (`writeup._request_preamble`). A saved style's macro brings the macros its
+  request, then the template's, then the user's Personalization macros
+  (`_personal_preamble`), then the saved style's, then the model's
+  (`writeup._request_preamble`). Personalization is captured at admission into
+  `state['personal']` (`personal_preferences`); its instructions go to the
+  outline and to `_priorities()` as data, clipped, after the request. A saved style's macro brings the macros its
   definition uses and the packages it needs, unless the preamble already loads
   them or TeX lacks them (`writeup._style_preamble`). Beyond notation, the order
   is the request, then the active style, then the guideline sheets
@@ -241,7 +267,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   unresolved. Parse Markdown DOI links without consuming their link syntax.
   Compilation success means a PDF was built; completion requires
   `readiness == 'ready'`, which the controller derives in the `check` phase
-  (`_check`, `_gates`) from the compile state, the final log (unresolved
+  (`_check`, `_gates`) from the compile state, a body with text (`has_text`, G4;
+  a job without material still makes one writing call from the request), the final log (unresolved
   citations/references, duplicate labels, overfull lines, class and float
   warnings: G8) and the deterministic
   `texcheck` findings; no model verdict is used, and the field is not called
@@ -290,8 +317,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   permission. Writes and replacements refuse archive targets. Research pins
   individual source members with logical `archive::member` names, not disk
   paths; never resolve those names as local bibliography/include paths.
-  An archive is not an assembled manuscript: unresolved compilation order,
-  macros and cross-file numbering remain explicit.
+  Reviews assemble an archive's manuscript as text (`arxiv_source.main_document`
+  and `assemble_tex`, called from `review.ReviewBase._assemble_archives`): the
+  member with `\documentclass` and `\begin{document}` is the main file, and
+  `\input`/`\include`/`\subfile`/`\import` naming another member are replaced
+  by that member's text, resolved lexically among the pinned members only (never
+  on disk), with depth, count, cycle and 4 MB bounds and a ten-second ceiling.
+  The assembled source keeps the main member's logical name, records
+  `assembled_from` (member and text hashes) and a `line_map` of runs
+  `[assembled_line, member, member_line, count]`; report locations name the
+  member and its line. Unresolved inclusions and macros remain explicit
+  warnings; without a main file the members stay separate.
   Remote source requests use exact trusted arXiv `/src/` or `/e-print/` URLs,
   a separate `arxiv-source:` cache identity and version checks. Restrict every
   content redirect to arXiv origins and retain robots rules. The export host's
@@ -322,7 +358,28 @@ Version 1.1.0. The source of truth for the machine-readable version is
   usable cached queries remain eligible. Metadata caches expire after seven
   days; ordinary pages and unversioned papers after one day. Rate gates are
   shared across jobs in one process and respect robots crawl-delay; independent
-  server processes do not share a rate limiter.
+  server processes do not share a rate limiter. At a shared gate a check
+  (`LiteratureTools.urgent`) is let through before waiting review requests; the
+  pacing between requests is unchanged. An arXiv HTTP 429 waits at least 15 s
+  (or its Retry-After, up to 60 s) and holds every job of the process back at
+  the gate before the provider can be marked down. Plain-HTTP arXiv, doi.org
+  and zbMATH links are upgraded to HTTPS (`upgrade_url`); no other host is.
+  `lookup_identifier` reads one DOI (Crossref, else the doi.org handle API, whose
+  404 means the DOI does not exist) or arXiv ID (the export API, with comment,
+  journal reference and latest version). A check looks up the identifiers of the
+  user's words before recall, opens other links in them as given, and seeds the
+  work a quoted citation names as a candidate. A reference list or attached
+  `.bib` takes `bibcheck` (registry metadata only, no model call, entries the
+  budget does not reach are listed as not checked). A check reuses the saved
+  records and cached full texts of a literature review in the workspace whose
+  bibliography holds an identifier of the conversation (`_review_works`); a
+  conversation's own text never creates a record. Offline, a work with nothing
+  cached is `inconclusive`, and no model round or open-paper search is spent on
+  it. A DOI page that never names the work's registered title is refused, not
+  cached (`_landing_check`). A read that stopped at its character cap keeps its
+  complete lines as read provenance (`lines_complete`); a clipped line or a
+  shortened passage does not. Turning a conversation's online search off stops
+  web requests of its running jobs (`Hub.stop_online`).
   Source-only follow-ups return the worker's qualified answer directly, preserving
   its metadata and limits instead of inviting unverified bibliographic additions.
 - **Literature reviews.** `litreview.ReviewRunner` checkpoints the
@@ -333,6 +390,13 @@ Version 1.1.0. The source of truth for the machine-readable version is
   characterization or a claim in a delegation brief requires independent evidence.
   Only retrieved records enter citations. Markdown and BibTeX are rendered from
   the same numbered selection and served by the review and bib research endpoints.
+  `review_export` renders the downloads (`download.md`, `download.bib`) from the
+  same state without changing `review.md`/`references.bib`, whose keys saved
+  write-ups use. When the question names an eponymous object that no pool record
+  mentions while at least two sources answered (`_unfound_subject`), the plan and
+  draft are told so and assembly titles the review "No work defining or studying
+  … was found"; without checked prose the title is the request, never the
+  model's planned title. Offline cache misses are not provider failures.
   The Assistant displays the review verbatim in the conversation.
   New jobs use the High workflow profile across the Assistant, direct GUI and
   CLI entry points. Use the same profile for discovery, screening and reading
@@ -342,8 +406,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   deliver partial results after the deadline. Missing checks, marked cuts and
   unresolved source findings are recorded in the job. The discovery shares begin
   when scoping finishes. Every call has a finite output allowance, the size the
-  controller gave its answer, on a hosted model too (`_wave_cap`). A failed
-  call keeps its reservation. A `verify` call that finds an anchored sentence unfaithful
+  controller gave its answer, on a hosted model too (`_wave_cap`). A call cut
+  off by a provider failure keeps its reservation; one cut off by a pause or a
+  crash is charged its journal estimate (see Proof recovery). A `verify` call that finds an anchored sentence unfaithful
   only disputes it (`check_work[i]['disputed']`): a second `verify` call that
   sees the objection decides, and a sentence whose re-check never answered stays
   unverified. A `follows` sentence that anchored sentences depend on counts as
@@ -388,15 +453,25 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Mozilla-derived bundles (`EXTRA_CA_FILES`, and `certifi` when importable);
   hostname checks stay on.
 - **Compile retries.** Missing-command retries require a new inferred definition
-  and share one compile deadline. Cancellation stops the compiler process group.
+  and share one compile deadline. `texcheck.file_line_errors` gives a
+  `file:line: Emergency stop.` the preceding `! LaTeX Error` message; a missing
+  package or class, or an error on a template line of the preamble
+  (`_preamble_problem`), skips the body repair and is said in plain words
+  (`texcheck.plain_error`). Folder delivery creates each output with
+  `writeup.create_new` (link of a complete file; never replaces a name). Cancellation stops the compiler process group.
   latexmk runs with `-norc`: a user's latexmkrc must not move `document.log`,
   which the repair call and the reference checks read.
 - **Write-up review.** Modelled on Proof: candidates and reviews are kept
   (`state['candidates']`, `state['reviews']`, keyed by the body's digest), the
   controller derives readiness from issue severities and never uses a model
-  verdict or category, drops issues whose quote is not in the body, and treats
+  verdict or category, drops issues whose quote is not in the body (except a
+  finding with no passage that is a blocker, or a major `F-requirement` or
+  `F-missing`: `_whole_issue` keeps it against that body digest only), and treats
   a fix that changes a formula as the author's. Revisions pass
-  `_revision_guard` or are discarded. Findings live in `state['ledger']` across
+  `_revision_guard` or are discarded: only `may_change_mathematics` findings
+  (fidelity, `formula_ok`) change a theorem-like statement's mathematics, and a
+  wording finding never deletes a formula; a statement changed by a fix is kept
+  in `statement_changes` and told in the reply and the report. Findings live in `state['ledger']` across
   rounds with a status (open, fixed, refuted, disputed, gone); the writer
   answers each with an edit or a rebuttal and the role `judge` rules on both.
   Each round has one focus (`_focus`). Flow findings (reader, `skeleton-*`,
@@ -509,7 +584,21 @@ Version 1.1.0. The source of truth for the machine-readable version is
     place;
   - cgroup memory, CPU and process limits, a wall-clock deadline and a CPU-time
     backstop, and bounded streamed output;
-  - removal on every exit path, with orphans cleaned at the next start.
+  - removal on every exit path, with orphans cleaned at the next start;
+  - at most `--python-concurrency` (default 2) containers per server at once.
+
+  The runner (`numerics/docker/runner.py`, PID 1) forks the code into a child, so a
+  kill at the memory or CPU limit still returns what the code printed and saved
+  (status `memory`/`timeout`). The image carries `org.squareharness.sandbox.content`,
+  the digest of the build files (`executor.content_digest`); `probe` refuses an image
+  without the current digest, so a runner or lock change requires
+  `python -m mathagent.numerics build`. Containers are labelled with their server
+  process (`org.squareharness.sandbox.process`): `numerics clean` removes only stopped
+  containers, those of a dead server on this host, and those older than any run.
+  `NumericsSession` compiles the code on the host (Python ≥ 3.12) before any approval
+  or container, after undoing an all-literal-`\n` tool argument (`normalize_code`);
+  escalation needs a purpose, shows it and the start of the code, and is capped per
+  request (`policy.step_limit`).
 
   The image is pinned (base image by digest, wheels by hash in
   `numerics/docker/requirements.lock`, amd64 and arm64). Artifacts are served
@@ -559,6 +648,23 @@ navigation does not cancel other jobs. Keep upload destinations bound to the
 drop target captured before I/O; changing views must not attach those files to
 the next composer. Submission waits until the current target's uploads finish.
 
+`DELETE /api/projects/<id>` (`Hub.delete_project`) is refused with 409 while a
+conversation of the project is active, queued or routing. It renames
+`PROJECT.md` to `PROJECT-deleted.md` (renaming it back restores the project),
+moves the project's conversations to no project and keeps every file where
+saved transcripts cite it. `GET /api/projects/<id>/files` lists the folder
+(hidden names and the notebook excluded, at most 500 entries).
+`projects.folder_label` names project folders for `store.list_folders`;
+`POST /api/workspace` refuses a project folder and the `projects/` folder that
+holds them, which would otherwise start a nested workspace.
+
+`GET /api/chats?q=` (`store.list_chats(query=…)`) filters conversations by
+title, user and Assistant messages, reviews and route requests, case- and
+accent-insensitively (`store.search_fold`), and adds `match`, an excerpt ('' for
+a title match). Folded transcripts are cached with the file's stat; a request
+stops folding new transcripts after `SEARCH_BUDGET` characters and reports
+`truncated`.
+
 Capture the selected project notebook at turn submission, including queued
 turns, and persist it in the Assistant checkpoint and child context. Resume
 must use that saved snapshot rather than rereading the current notebook.
@@ -576,6 +682,12 @@ ends, and the wait is excluded from its time allowance (`BudgetClient.waiting`).
 Pause and queue cancellation withdraw a waiting request and pause the turn with
 its saved work; per-conversation refusal is unchanged. Queue entries carry
 `position` and `queued_at`, and each task summary says whether it holds a slot.
+`POST /api/chats/<id>/route` with `queue: true` on a busy conversation holds one
+follow-up per conversation (`Hub.followups`, summary `followup: true`, listed after
+the slot queue; the chat view's `queued_followup`). `Hub._advance` starts it when
+the conversation's last task ends by itself (done, error, or a pause the user did
+not request), through `_assistant_turn(task=...)` so the queued task keeps its ID.
+A turn the user paused keeps it waiting; `/api/queue/<task>/cancel` removes it.
 
 Conversation titles run after successful work, one at a time, at the lowest
 priority: the title waits (without registering as an inference owner) until
@@ -593,7 +705,9 @@ updates use the existing chat lock and cannot overwrite a manual rename or
 transcript. The DeepInfra adapter
 validates a strict internal bounded-title payload before reducing its hosted
 input reservation; ordinary calls retain their previous full-context reserve.
-An interrupted title must not hold a full-context tester allowance.
+The transport-only `_start_seconds` that `DeepInfra.stream` adds is not part of
+the bounded title or routing shape. An interrupted title must not hold a
+full-context tester allowance. A failed title is printed to stderr.
 
 `images.py` freezes explicitly attached PNG/JPEG/static WebP bytes in the private
 workspace's content-addressed `.mathagent/images` cache. JSON histories and job
@@ -950,7 +1064,29 @@ adapter runs the child job. The child is saved before it runs, and its result
 is saved before the model sees it. Independent children run concurrently
 (`--assistant-concurrency`, on OpenAI-compatible servers only: at most five
 for DS4 and four for the original profiles). All share one
-`AssistantBudget`. Children cannot delegate.
+`AssistantBudget`. Children cannot delegate. `BudgetClient` charges the
+admission estimate before a call and replaces it with the provider's
+`prompt_eval_count` when the call reports it (`_settle_input`), as research and
+review do. When a new turn replaces `assistant_state`, `store._archive_turn_record`
+appends the finished turn's routing decision and usage to `chat['turn_records']`;
+the chat view's `usage_total` sums them with the current turn.
+
+The Assistant's instructions are sections of one policy (`orchestrator.POLICY_*`).
+`Orchestrator._policy(tools)` sends the core and only the sections of the tools
+and worker modes the call offers, or that the turn already used. Add a rule to the
+section of the tool or mode it governs; a rule every answer needs goes in
+`POLICY_CORE`. On a DS4 turn routed `direct`, `ModeOrchestrator` offers `delegate`
+with mode `prove` only and refuses other modes.
+
+The Assistant has `write_file` only when the current user message's own words ask
+to save a file (`orchestrator.write_requested`; quotations and code are not the
+user's words). `Orchestrator._write_file` uses `Workspace.write_file` and its
+per-call approval, refuses to replace an existing file the message does not name,
+excludes the approval wait from the turn's time and saves the result on the
+pending call so a resume never writes twice.
+
+An `explain` worker without files that finds no source (`needs_source`) is rerun
+at once as `explore` on the same child (`workers.run_worker`).
 
 A worker's result reaches the Assistant whole. A routed Python Lab result keeps
 the worker's interpretation in `answer` and what its runs printed in
@@ -1135,7 +1271,19 @@ sources carry it as `pages`. Explain (`ExplainRunner._pick_unit`) takes, in orde
 the request names (`manuscript.resolve`); a page, section or appendix it names, or the whole
 text when it is short (at most `WHOLE_TEXT_LINES` nonblank lines) and the request says "this
 page", "these notes" and the like; the usual unit choice; and otherwise one `locate` call,
-which sees the numbered text with `[page N]` markers. A named result without an attached
+which sees the numbered text with `[page N]` markers. A section a TeX manuscript does not
+have is refused without a model call, with the real sections and results
+(`review._contents`). Quick review (`ReviewBase._pick_unit`) never picks one proof for a
+request about the whole document (`ALL_UNITS_REQUEST`, `WHOLE_DOCUMENT_REQUEST`, or a `pick`
+answer naming none) when the source has several: it fails `one_result_only`, listing the
+proofs and suggesting a detailed review. A finished quick review records `coverage` (the
+proof checked, the proofs not checked); the worker result carries its summary and the
+Assistant's synthesis gets a `CONTROLLER COVERAGE` note, so one checked proof is never
+reported as a verdict on the document. Review and detailed review ask which manuscript
+(`ambiguous_source`) when several are pinned and none is named; an assembled archive counts
+once. Referee reports quote manuscript lines addressed to a reviewer or an AI
+(`review.reviewer_instructions`, conservative patterns, plus remarks of the checks) in a
+note to the editor; the text is data and is never followed. A named result without an attached
 proof gets its proof lines from `locate` when the request asks about the proof. A passage is
 a unit with `passage: True`, no statement and its lines in `proofs`, so the walkthrough, the
 fill and the accuracy check cover every line; `PASSAGE_POLICY` and its fill and check
@@ -1171,7 +1319,16 @@ The Writing Styles form pins each eligible upload as soon as the upload succeeds
 It asks for the articles and a name only: it shows no effort level and starts
 every style with the High limits (`effortLimits('style', defaults, 'high')`),
 which **More options** can change. The saved styles are listed on the same page
-as one choice (`SavedStyles`), which writes `style-choice.json`. The job page
+as one choice (`SavedStyles`), which writes `style-choice.json`. A saved style
+is corrected in the app: `POST /api/styles/<name>` with `{"rename": ...}`
+(`style.rename_profile`, which follows the choice) or `{"items": {...}}`
+(`style.edit_profile`: one domain's fields replaced and bounded; departures and
+macros can only be removed), and `DELETE /api/styles/<name>`
+(`style.delete_profile`; the choice falls back to automatic). These routes are
+registered after `/api/styles/choice` and `/template`, which they would
+otherwise shadow. The guide's text is rendered with the style's macros
+(`MathMacrosProvider`). Learnt items are cut by `style.clip`, at a sentence or
+clause end outside mathematics and LaTeX groups. The job page
 (`StyleView`) words the running step from the saved state (`stepText`), folds
 the model's stream and the usage meters, and counts the dropped-quotation
 warnings instead of listing them: its `DROPPED` pattern and `defaultGoal` copy
@@ -1408,7 +1565,7 @@ The optional JWT dependency belongs to this deployment layer, not SH's core.
 
 `GET /api/account` exposes only the validated email and a logout URL derived
 from the configured hostname. It applies the same identity checks as workspace
-requests. Local 404 responses disable the account menu. Hosted documents reload
+requests. The local backend answers `{}` (no email), which disables the account menu. Hosted documents reload
 after a restored browser-cache entry or an identity change, and lose their old
 content before browser caching; signing out does not mutate server history.
 
@@ -1547,7 +1704,12 @@ generation. The bounded, nonthinking structured decision selects a direct answer
 Proof, an investigation or ordinary specialist routing. Existing explicit mode
 and automatic source/reference selections take precedence. `ModeOrchestrator`
 saves the decision and usage, then runs the short preparation and durable Proof
-handoff when required. A malformed routing decision is an operational failure;
+handoff when required. A proof request with no statement anywhere
+(`mode_calls.statement_missing`: no file, image, project or earlier message, no
+formula and no content word) asks for it instead (`statement_missing`), routed or
+selected with `@prove`. A routed medium or high Proof that the router flags
+`open_problem` is not started: the reply explains, and `Hub._open_problem_card`
+adds a proposed Proof card with its cost that the user can start. A malformed routing decision is an operational failure;
 it must never fall back to an unreviewed direct proof. Resume reuses the saved
 decision and child.
 The raw benchmark path bypasses this conversational routing. Other model

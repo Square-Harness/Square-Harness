@@ -4,15 +4,19 @@
 // Pure text preparation for typeset mathematics (no React; testable with node).
 
 const CODE = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/g
-const MATH = /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g
 const DISPLAY_ENV = /(^|\n)([ \t]*)(\\begin\{(equation|align|gather|multline|flalign|alignat)(\*?)\}[\s\S]*?\\end\{\4\5\})/g
 const THEOREM = 'theorem|lemma|proposition|corollary|definition|remark|example|claim|conjecture|assumption|hypothesis'
+// Cross-references become placeholders while equations are numbered, then resolve:
+// \uE000 in prose, \uE002 inside mathematics, both closed by \uE001.
+const PROSE_REF = '\uE000', MATH_REF = '\uE002', REF_END = '\uE001'
 
 const capitalize = (word: string) => word.charAt(0).toUpperCase() + word.slice(1)
+const references = (text: string, open: string) =>
+  text.replace(/\\(eq)?ref\{([^{}\n]*)\}/g, (_m, eq: string | undefined, label: string) => `${open}${eq ? 'eq' : 'ref'}:${label}${REF_END}`)
 
 /** Text-mode LaTeX that models often emit in prose, outside math. */
 function prose(text: string): string {
-  return text
+  return references(text
     .replace(/\\textbf\{([^{}\n]*)\}/g, '**$1**')
     .replace(/\\(?:emph|textit)\{([^{}\n]*)\}/g, '*$1*')
     .replace(new RegExp(`\\\\begin\\{(${THEOREM})\\}(?:\\[([^\\]\\n]*)\\])?`, 'g'),
@@ -20,25 +24,128 @@ function prose(text: string): string {
     .replace(new RegExp(`\\\\end\\{(${THEOREM})\\}`, 'g'), '')
     .replace(/\\begin\{proof\}(?:\[([^\]\n]*)\])?/g, (_m, title?: string) => `*${title || 'Proof'}.* `)
     .replace(/\\end\{proof\}/g, ' ∎')
-    .replace(/\\label\{[^{}\n]*\}/g, '')
-    .replace(/\\(?:eq)?ref\{([^{}\n]*)\}/g, '($1)')
+    .replace(/\\label\{[^{}\n]*\}/g, ''), PROSE_REF)
 }
 
-// Some saved planner fields mix prose with undelimited notation such as λ_{n+1}.
+// Some saved planner fields mix prose with undelimited notation such as λ_{n+1} or C_{p^2}.
 // Recognize individual indexed symbols and operators only. Keep identifiers,
 // destinations, literal code and existing mathematical spans as supplied.
-const SCRIPTED_SYMBOL = /(?<![\p{L}\p{N}_/\\])((?:inf|sup|lim|max|min|[a-zA-Zα-ωΑ-Ω])(?:[_^](?:\{[a-zA-Z0-9α-ωΑ-Ω+−=<>≤≥ -]{1,35}\}|[a-zA-Z0-9α-ωΑ-Ω])){1,2})(?![\p{L}\p{N}_/]|\.[a-zA-Z])/gu
+const SCRIPT_CHARS = 'a-zA-Z0-9α-ωΑ-Ω+−=<>≤≥ ,-'
+const SCRIPTED_SYMBOL = new RegExp(`(?<![\\p{L}\\p{N}_/\\\\])((?:inf|sup|lim|max|min|[a-zA-Zα-ωΑ-Ω∫∑∏])(?:[_^](?:\\{(?:[${SCRIPT_CHARS}]|[_^](?:[a-zA-Z0-9]|\\{[${SCRIPT_CHARS}]{1,20}\\})){1,35}\\}|[a-zA-Z0-9α-ωΑ-Ω])){1,2})(?![\\p{L}\\p{N}_/]|\\.[a-zA-Z])`, 'gu')
+const OPERATORS: Record<string, string> = { '∫': '\\int', '∑': '\\sum', '∏': '\\prod' }
 function typesetSymbols(text: string): string {
   return text.split(/(https?:\/\/\S+|\]\([^\n)]*\))/g).map((part, index) => index % 2 ? part :
     part.replace(SCRIPTED_SYMBOL, (_, token: string) => {
-      const tex = token.replace(/^(inf|sup|lim|max|min)/, '\\$1')
+      const tex = token.replace(/^(inf|sup|lim|max|min)/, '\\$1').replace(/^[∫∑∏]/, (symbol) => OPERATORS[symbol] + ' ')
         .replaceAll('−', '-').replaceAll('≥', '\\ge ').replaceAll('≤', '\\le ')
       return '$' + tex + '$'
     })).join('')
 }
 
-function normalizeText(text: string, mathProse: boolean): string {
-  const prepareProse = (part: string) => prose(mathProse ? typesetSymbols(part) : part)
+// -- equation numbers ----------------------------------------------------------------
+
+type Numbering = { count: number; labels: Map<string, string> }
+const LABEL = /\\label\{([^{}\n]*)\}/g
+const TAG = /\\tag\*?\{([^{}\n]*)\}/
+// KaTeX numbers rows with a page-wide CSS counter and has no multline or flalign:
+// number each message's equations here, in starred environments with explicit tags.
+const STARRED: Record<string, string> = { equation: 'equation*', align: 'align*', gather: 'gather*', alignat: 'alignat*', multline: 'gather*', flalign: 'align*' }
+const NUMBERED_ENV = /\\begin\{(equation|align|gather|multline|flalign|alignat)(\*?)\}(\{\d+\})?([\s\S]*?)\\end\{\1\2\}/g
+
+/** Split an environment body at its top-level row breaks (\\), not inside braces or inner environments. */
+function rows(body: string): string[] {
+  const out: string[] = []
+  let depth = 0, start = 0
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]
+    if (c === '\\') {
+      if (body.startsWith('\\begin{', i)) depth++
+      else if (body.startsWith('\\end{', i)) depth--
+      else if (body[i + 1] === '\\' && depth === 0) { out.push(body.slice(start, i)); start = i + 2 }
+      i++
+    } else if (c === '{') depth++
+    else if (c === '}') depth--
+  }
+  out.push(body.slice(start))
+  return out
+}
+
+/** One numbered unit (a row, or a whole equation): its own tag, the next number, or none. */
+function tagUnit(unit: string, numbered: boolean, state: Numbering): string {
+  const labels = [...unit.matchAll(LABEL)].map((match) => match[1])
+  let text = unit.replace(LABEL, '')
+  const explicit = text.match(TAG)
+  const off = /\\(?:nonumber|notag)\b/.test(text)
+  text = text.replace(/\\(?:nonumber|notag)\b/g, '')
+  let tag: string | null = explicit ? explicit[1] : null
+  if (!explicit && numbered && !off && text.trim()) {
+    tag = String(++state.count)
+    text = text.replace(/\s*$/, (space) => ` \\tag{${tag}}${space}`)
+  }
+  if (tag !== null) for (const label of labels) state.labels.set(label, tag)
+  return text
+}
+
+function numberDisplay(body: string, state: Numbering): string {
+  let found = false
+  body = body.replace(NUMBERED_ENV, (_m, env: string, star: string, columns: string | undefined, inner: string) => {
+    found = true
+    const numbered = !star
+    const perRow = env !== 'equation' && env !== 'multline'
+    const content = perRow ? rows(inner).map((row) => tagUnit(row, numbered, state)).join('\\\\')
+      : env === 'multline' ? (() => { const parts = rows(inner); const last = parts.length - 1
+        return parts.map((row, index) => tagUnit(row, numbered && index === last, state)).join('\\\\') })()
+      : tagUnit(inner, numbered, state)
+    return `\\begin{${STARRED[env]}}${columns || ''}${content}\\end{${STARRED[env]}}`
+  })
+  // A labelled display outside any numbered environment is numbered so that \eqref can point to it.
+  return !found && /\\label\{/.test(body) ? tagUnit(body, true, state) : body.replace(LABEL, '')
+}
+
+/** Inline mathematics cannot carry \tag or \label: move a tag after the formula as text. */
+function inlineMath(body: string, display: boolean): string {
+  const tag = body.match(TAG)
+  const tex = body.replace(LABEL, '').replace(new RegExp(TAG.source, 'g'), '').trim()
+  return `$${display ? '\\displaystyle ' : ''}${references(tex, MATH_REF)}$${tag ? ` (${tag[1]})` : ''}`
+}
+
+// -- dollar delimiters ------------------------------------------------------------------
+
+type Span = { index: number; end: number; body: string; display: boolean }
+
+/** Mathematics delimited by $…$ or $$…$$. A single $ is only a delimiter when it pairs on the
+    same line and does not read as an amount ("$5 and $10"): the closing $ is not followed by a
+    digit, and a body that ends with a space also starts with one ("$ x $"). */
+function mathSpans(text: string): Span[] {
+  const spans: Span[] = []
+  let i = 0
+  while (i < text.length) {
+    const at = text.indexOf('$', i)
+    if (at < 0) break
+    if (at > 0 && text[at - 1] === '\\') { i = at + 1; continue }
+    if (text[at + 1] === '$') {
+      const end = text.indexOf('$$', at + 2)
+      if (end > at + 2 && text.slice(at + 2, end).trim()) {
+        spans.push({ index: at, end: end + 2, body: text.slice(at + 2, end), display: true })
+        i = end + 2
+      } else i = at + 2
+      continue
+    }
+    const close = text.indexOf('$', at + 1)
+    const body = close < 0 ? '' : text.slice(at + 1, close)
+    const amount = close >= 0 && (/\d/.test(text[close + 1] || '') || (/\s$/.test(body) && !/^\s/.test(body)))
+    if (close < 0 || !body.trim() || body.includes('\n') || amount || text[close - 1] === '\\') { i = at + 1; continue }
+    spans.push({ index: at, end: close + 1, body, display: false })
+    i = close + 1
+  }
+  return spans
+}
+
+/** A $ that delimits nothing is a literal dollar sign; escape it so Markdown math leaves it alone. */
+const literalDollars = (text: string) => text.replace(/(?<!\\)\$/g, '\\$')
+
+function normalizeText(text: string, mathProse: boolean, state: Numbering): string {
+  const prepareProse = (part: string) => prose(mathProse ? typesetSymbols(literalDollars(part)) : literalDollars(part))
   text = text
     .replace(/\\\[([\s\S]+?)\\\]/g, (_m, body: string) => `$$${body}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_m, body: string) => `$${body.trim()}$`)
@@ -49,32 +156,42 @@ function normalizeText(text: string, mathProse: boolean): string {
   })
   let out = ''
   let last = 0
-  for (const match of text.matchAll(MATH)) {
-    const at = match.index ?? 0
-    out += prepareProse(text.slice(last, at))
-    if (match[1] !== undefined) {
-      const lineStart = text.lastIndexOf('\n', at - 1) + 1
-      const lineEnd = text.indexOf('\n', at + match[0].length)
-      const before = text.slice(lineStart, at)
-      const after = text.slice(at + match[0].length, lineEnd === -1 ? text.length : lineEnd)
-      const body = match[1].trim()
+  for (const span of mathSpans(text)) {
+    out += prepareProse(text.slice(last, span.index))
+    if (span.display) {
+      const lineStart = text.lastIndexOf('\n', span.index - 1) + 1
+      const lineEnd = text.indexOf('\n', span.end)
+      const before = text.slice(lineStart, span.index)
+      const after = text.slice(span.end, lineEnd === -1 ? text.length : lineEnd)
+      const body = span.body.trim()
       if (!before.trim() && !after.trim()) {
         // Alone on its line(s): a display block, keeping list indentation.
-        out += `$$\n${before}${body.split('\n').map((line) => line.trim()).join('\n' + before)}\n${before}$$`
+        const numbered = references(numberDisplay(body, state), MATH_REF)
+        out += `$$\n${before}${numbered.split('\n').map((line) => line.trim()).join('\n' + before)}\n${before}$$`
       } else {
         // Inside a sentence: keep the paragraph intact, typeset in display style.
-        out += `$\\displaystyle ${body.replace(/\s*\n\s*/g, ' ')}$`
+        out += inlineMath(body.replace(/\s*\n\s*/g, ' '), true)
       }
     } else {
-      out += match[0]
+      out += inlineMath(span.body, false)
     }
-    last = at + match[0].length
+    last = span.end
   }
   return out + prepareProse(text.slice(last))
 }
 
+function resolveReferences(text: string, labels: Map<string, string>): string {
+  return text.replace(/([\uE000\uE002])(eq|ref):([^\uE001]*)\uE001/g, (_m, open: string, kind: string, label: string) => {
+    const number = labels.get(label)
+    const shown = number === undefined ? (kind === 'eq' ? `(${label})` : label) : kind === 'eq' ? `(${number})` : number
+    return open === MATH_REF ? `\\text{${shown.replace(/[{}\\]/g, '')}}` : shown
+  })
+}
+
 export function normalizeMath(source: string, mathProse = false): string {
-  return source.split(CODE).map((part, index) => (index % 2 ? part : normalizeText(part, mathProse))).join('')
+  const state: Numbering = { count: 0, labels: new Map() }
+  const parts = source.split(CODE).map((part, index) => (index % 2 ? part : normalizeText(part, mathProse, state)))
+  return parts.map((part, index) => (index % 2 ? part : resolveReferences(part, state.labels))).join('')
 }
 
 // -- citations such as [M1:L3-L6] or [doc-0123abcd:L12-L28] -----------------------

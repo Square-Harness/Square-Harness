@@ -154,7 +154,7 @@ class ExperimentStore:
         directory = base / 'index' / 'experiments'
         _directory(directory.parent, create=True)
         _directory(directory, create=True)
-        _atomic_write(directory / (record['id'] + '.json'), _encode(kept(record)))
+        _atomic_write(directory / (record['id'] + '.json'), _encode(retained(record)))
 
     def _prune(self, keep):
         folders = sorted(p for p in self.directory.iterdir()
@@ -178,8 +178,8 @@ class ExperimentStore:
                 _directory(copy.parent.parent, create=True)
                 _directory(copy.parent, create=True)
                 try:
-                    intact = _read(copy, 65536).encode() == compact
-                except (OSError, ValueError):
+                    intact = _encode(kept(json.loads(_read(copy, 65536)))) == compact
+                except (OSError, ValueError, TypeError, AttributeError):
                     intact = False
                 if not intact:
                     self._retain(original)
@@ -223,6 +223,44 @@ def kept(record):
             out[key] = {'truncated': True, 'sha256': hashlib.sha256(raw).hexdigest(),
                         'preview': raw[:2000].decode('utf-8', 'ignore')}
         out['truncated'] = True
+    return out
+
+
+_STOP_REASONS = {'error': 'The code raised an error.', 'timeout': 'Stopped at the time limit.',
+                 'memory': 'Killed at the memory limit.', 'output_limit': 'Stopped: it printed more than the sandbox returns.',
+                 'cancelled': 'Cancelled.', 'sandbox_error': 'The sandbox could not run it.'}
+DETAIL_FIELDS = ('error', 'stop_reason', 'limits', 'stdout_tail', 'seconds', 'run_status')
+
+
+def details(record):
+    """How a run ended, for the Outputs view: its error, why it stopped, its limits, the end of what it
+    printed and how long it ran. Not part of the evidence digest (see kept)."""
+    status = record.get('status')
+    error = record.get('error') if isinstance(record.get('error'), dict) else None
+    limits = record.get('limits') if isinstance(record.get('limits'), dict) else None
+    stdout = record.get('stdout') if isinstance(record.get('stdout'), str) else ''
+    seconds = record.get('elapsed_seconds')
+    message = record.get('message') if isinstance(record.get('message'), str) else ''
+    return {'run_status': status if isinstance(status, str) else None,
+            'error': {k: str(error.get(k) or '')[:cap] for k, cap in (('type', 200), ('message', 1000), ('traceback', 3000))}
+            if error else None,
+            'stop_reason': None if status == 'ok' else (message[:500] or _STOP_REASONS.get(status, status)),
+            'limits': {k: limits.get(k) for k in ('timeout_seconds', 'memory_mb', 'cpus')} if limits else None,
+            'stdout_tail': stdout[-2000:] if stdout else '',
+            'seconds': seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None}
+
+
+def retained(record):
+    """The kept copy under .mathagent/index: kept() plus the run's details, within 64 KiB.
+
+    kept(retained(r)) == kept(r), so the evidence digest does not depend on the details."""
+    out = kept(record)
+    extra = details(record)
+    for _ in range(3):
+        if len(_encode({**out, **extra})) <= 65536:
+            return {**out, **extra}
+        extra = {**extra, 'stdout_tail': extra['stdout_tail'][-500:],
+                 'error': extra['error'] and {**extra['error'], 'traceback': extra['error']['traceback'][-500:]}}
     return out
 
 

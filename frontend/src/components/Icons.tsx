@@ -39,6 +39,8 @@ export const AutoIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r
 export const FileIcon = (p: IconProps) => <Icon {...p}><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" /></Icon>
 export const PinIcon = (p: IconProps) => <Icon {...p}><path d="M9 4h6l-1 6 3 3H7l3-3z" /><path d="M12 13v7" /></Icon>
 export const CheckIcon = (p: IconProps) => <Icon {...p}><path d="M5 12.5l4.5 4.5L19 7" /></Icon>
+/** Two overlapping sheets: copy to the clipboard. */
+export const CopyIcon = (p: IconProps) => <Icon {...p}><rect x="8" y="8" width="12" height="12" rx="1.5" /><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" /></Icon>
 export const PhoneIcon = (p: IconProps) => <Icon {...p}><rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M11 18.5h2" /></Icon>
 // An Erlenmeyer flask with a liquid line and a bubble: the Python Lab's mark.
 export const FlaskIcon = (p: IconProps) => <Icon {...p}><path d="M8.5 3h7" /><path d="M10 3v6.2L4.6 18.4A1.7 1.7 0 0 0 6.1 21h11.8a1.7 1.7 0 0 0 1.5-2.6L14 9.2V3" /><path d="M7.3 14.5h9.4" /><circle cx="11.2" cy="17.7" r="0.9" /></Icon>

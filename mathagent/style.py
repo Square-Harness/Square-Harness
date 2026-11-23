@@ -433,12 +433,57 @@ def _unique(items, key):
     return out
 
 
+def clip(text, length, mark=True):
+    """`text` cut to at most `length` characters at the last sentence end, else clause end, else space that lies
+    outside mathematics and outside a LaTeX group or command: never inside $...$, \\(...\\), braces or a command
+    name. A cut that is not a sentence end ends with '…' when `mark` (not for a verbatim example, which must stay a
+    passage of the source)."""
+    if len(text) <= length:
+        return text
+    room = length - (1 if mark else 0)
+    sentence = clause = space = 0
+    depth, math, i = 0, '', 0
+    while i < len(text) and i < room:
+        char = text[i]
+        if char == '\\' and i + 1 < len(text):
+            pair = text[i:i + 2]
+            if pair in ('\\(', '\\[') and not math:
+                math = ')' if pair == '\\(' else ']'
+            elif math and pair == '\\' + math:
+                math = ''
+            i += 2
+            while i < len(text) and text[i].isalpha():
+                i += 1  # a command name is never cut
+            continue
+        if char == '$' and math in ('', '$'):
+            math = '' if math else '$'
+        elif char == '{':
+            depth += 1
+        elif char == '}':
+            depth = max(0, depth - 1)
+        elif not math and not depth and i + 1 <= room:
+            following = text[i + 1:i + 2]
+            if char in '.!?' and following in (' ', '') and not re.search(r'\b(?:e\.g|i\.e|cf|resp|etc|p|pp|Thm|Lem|Prop|Eq)$', text[:i]):
+                sentence = i + 1
+            elif char in ';:,)' and following == ' ':
+                clause = i + 1
+            elif char == ' ':
+                space = i
+        i += 1
+    if sentence >= length * 0.4:
+        return text[:sentence]
+    cut = clause if clause >= length * 0.4 else space or clause or sentence
+    if not cut:
+        return ''  # one unbroken formula or command: nothing that can be cut cleanly
+    return text[:cut].rstrip(' ,;:') + ('…' if mark else '')
+
+
 def _text(value, length):
-    return _flat(str(value or ''))[:length]
+    return clip(_flat(str(value or '')), length)
 
 
 def _items(values, count):
-    return [_flat(str(v))[:LIMITS['item']] for v in values or [] if isinstance(v, str) and v.strip()][:count]
+    return [clip(_flat(str(v)), LIMITS['item']) for v in values or [] if isinstance(v, str) and v.strip()][:count]
 
 
 def _records_of(values, fields, count):
@@ -446,7 +491,8 @@ def _records_of(values, fields, count):
     out = []
     for value in values or []:
         if isinstance(value, dict) and all(isinstance(value.get(name), str) for name, _, _ in fields):
-            item = {name: _flat(value[name].strip(trim))[:length] for name, length, trim in fields}
+            item = {name: clip(_flat(value[name].strip(trim)), length, mark=name not in ('example', 'term'))
+                    for name, length, trim in fields}
             if all(item.values()):
                 out.append(item)
     return out[:count]
@@ -579,6 +625,101 @@ def set_template(root, name, files):
     profile['updated_at'] = _now()
     save_profile(root, profile)
     return public_profile(profile)
+
+
+_TEXT_FIELDS = {'audience': LIMITS['audience'], 'aim': LIMITS['aim'], 'description': 300}
+_LIST_FIELDS = {'structure': LIMITS['structure'], 'phrases': LIMITS['phrases'],
+                **{key: LIMITS['question'] for key, _, _ in QUESTIONS}}
+
+
+def _edited_text(value, field, limit):
+    if not isinstance(value, str) or '\x00' in value:
+        raise ValueError(f'{field} must be text')
+    text = _flat(value)
+    if len(text) > limit:
+        raise ValueError(f'{field} is limited to {limit} characters')
+    return text
+
+
+def edit_profile(root, name, items):
+    """The author's corrections of a saved style: `items` replaces the fields it names in one domain (`domain`, which
+    may be left out when the style has one): audience, aim, description (text); structure, phrases and each question's
+    list (lists of text); names ([{term, note}]) and typesetting ([{habit, example}]). `departures` and `macros` list
+    the rule ids and macro names to keep: an author removes what does not sound like them, and adds nothing the
+    articles did not show there. Returns the saved style as the interface lists it."""
+    if not isinstance(items, dict) or not items:
+        raise ValueError('Give the parts of the style to change')
+    known = {'domain', 'names', 'typesetting', 'departures', 'macros', *_TEXT_FIELDS, *_LIST_FIELDS}
+    unknown = sorted(set(items) - known)
+    if unknown:
+        raise ValueError('A style has no part named ' + ', '.join(unknown))
+    profile = load_profile(root, name)
+    domain = _domain(profile, items.get('domain'))
+    if domain is None:
+        raise ValueError('Name the kind of paper (domain) to change: ' + ', '.join(d['name'] for d in profile['domains']))
+    for field, limit in _TEXT_FIELDS.items():
+        if field in items:
+            domain[field] = _edited_text(items[field], field, limit)
+    for field, count in _LIST_FIELDS.items():
+        if field in items:
+            values = items[field]
+            if not isinstance(values, list) or len(values) > count:
+                raise ValueError(f'{field} is a list of at most {count} items')
+            domain[field] = [text for text in (_edited_text(v, field, LIMITS['item']) for v in values) if text]
+    for field, fields, count in (('names', NAME_FIELDS, LIMITS['names']), ('typesetting', TYPESETTING_FIELDS, LIMITS['typesetting'])):
+        if field in items:
+            values = items[field]
+            if not isinstance(values, list) or len(values) > count or not all(isinstance(v, dict) for v in values):
+                raise ValueError(f'{field} is a list of at most {count} entries')
+            edited = []
+            for value in values:
+                entry = {key: _edited_text(value.get(key, ''), f'{field} {key}', length) for key, length, _ in fields}
+                if all(entry.values()):
+                    edited.append(entry)
+            domain[field] = edited
+    if 'departures' in items:
+        keep = items['departures']
+        if not isinstance(keep, list) or not all(isinstance(v, str) for v in keep):
+            raise ValueError('departures lists the rules to keep')
+        domain['departures'] = [d for d in domain.get('departures') or [] if d.get('rule') in keep]
+    if 'macros' in items:
+        keep = items['macros']
+        if not isinstance(keep, list) or not all(isinstance(v, str) for v in keep):
+            raise ValueError('macros lists the macro names to keep')
+        profile['macros'] = [m for m in profile['macros'] if m['name'] in keep]
+    profile['updated_at'] = _now()
+    profile['edited'] = True
+    save_profile(root, profile)
+    return public_profile(profile)
+
+
+def rename_profile(root, name, new):
+    """Give a saved style another name; the style write-ups follow is renamed with it."""
+    new = new.strip() if isinstance(new, str) else new
+    target = style_path(root, new)  # refuses a bad name
+    profile = load_profile(root, name)
+    if new == profile['name']:
+        return public_profile(profile)
+    if target.exists() or target.is_symlink():
+        raise ValueError(f'A style named "{new}" is already saved: choose another name, or delete that one first')
+    old = style_path(root, name)
+    profile.update(name=new, updated_at=_now())
+    save_profile(root, profile)
+    old.unlink(missing_ok=True)
+    choice = load_choice(root)
+    if choice.get('style') == name:
+        _atomic_write(choice_path(root), json.dumps({**choice, 'style': new}, ensure_ascii=False).encode('utf-8'))
+    return public_profile(profile)
+
+
+def delete_profile(root, name):
+    """Delete a saved style. Write-ups already made keep the copy they used; when it was the style write-ups follow,
+    they choose automatically again."""
+    path = style_path(root, name)
+    load_profile(root, name)  # an unknown or damaged name fails here
+    path.unlink()
+    if load_choice(root).get('style') == name:
+        _atomic_write(choice_path(root), json.dumps({'mode': 'auto'}).encode('utf-8'))
 
 
 def public_profile(profile):

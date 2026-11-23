@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 9
+POLICY_VERSION = 10
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -38,6 +38,7 @@ SCHEMA = {
                 'after_results': {'type': 'boolean'}},
             'required': ['mode', 'request'], 'additionalProperties': False}},
         'reason': {'type': 'string', 'minLength': 1, 'maxLength': 400},
+        'open_problem': {'type': 'boolean'},
     },
     'required': ['route', 'effort', 'tasks', 'reason'],
     'additionalProperties': False,
@@ -123,6 +124,15 @@ arguments, operator or PDE estimates, asymptotic rates, and multistep arguments
 belong in Proof mode. A familiar theorem or a statement you think you can solve
 is not automatically elementary. When the requested deliverable is one
 nontrivial proof, use prove even if the proof looks difficult.
+When the statement to prove is a famous open problem or a major unsolved
+conjecture (for example the Riemann hypothesis or the twin prime conjecture),
+still use route=prove and add "open_problem": true; the application then asks
+the user before starting a long Proof. Omit open_problem otherwise.
+
+A request to save text given in the conversation (the user's words or an
+earlier answer) unchanged to a named file is not a document request: use
+route=direct; the assistant writes the file after the user approves it. Use
+writeup only when a document has to be composed.
 
 Use route=direct for ordinary questions and only VERY elementary proofs: one
 short algebraic identity, arithmetic, or an immediate consequence of a
@@ -526,6 +536,7 @@ preserve the unfinished routing step instead of falling back to a long answer.
         raise AgentError('Proof routing returned an invalid decision; no direct proof was authorized')
     if decision['route'] == 'suggested' and suggested_mode not in JOB_MODES:
         raise AgentError('The router selected an unavailable suggested specialist')
-    return {'route': decision['route'], **_validated_tasks(decision, query, files, reading), 'effort': decision['effort'], 'reason': decision['reason'].strip()[:400], 'stats': stats, 'allocation': allocation,
+    flags = {'open_problem': True} if decision['route'] == 'prove' and decision.get('open_problem') is True else {}
+    return {'route': decision['route'], **_validated_tasks(decision, query, files, reading), 'effort': decision['effort'], 'reason': decision['reason'].strip()[:400], **flags, 'stats': stats, 'allocation': allocation,
             'model': model, 'policy_version': POLICY_VERSION,
             'prompt_sha256': hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}

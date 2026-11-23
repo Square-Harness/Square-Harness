@@ -5,6 +5,7 @@ import { useCallback, useMemo, useState, type ReactElement } from 'react'
 import { api, LIST_PIPELINE, REVIEW_PIPELINE, type Evidence, type ResearchDetail, type ReviewCoverage } from '../api'
 import { Collapse, ErrorNote, Loading, Meter, SourceLines, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
+import { ResumeMore } from '../components/JobActions'
 import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago, count, firstLine } from '../format'
@@ -147,6 +148,8 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : additionalSeconds ? `${busy ? 'Queue resume' : 'Resume'} (+${extensionLabel} min)` : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {!ours && !data.running && (resumable || data.status === 'budget_exhausted') && data.kind !== 'style' &&
+          <ResumeMore kind="research" id={data.id} disabled={queued} tokenStep={100_000} usage={{ tokens: data.budget.tokens, seconds: data.budget.seconds }} />}
         {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
         {data.running && !ours && !route.from && ownTask?.kind !== 'chat' && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
@@ -181,8 +184,8 @@ export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail
             : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
           {(data.outputs?.review || data.outputs?.bib) && (
             <div className="outputs">
-              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(data.id)} download>{data.status === 'complete' ? 'Download review (.md)' : 'Download partial review (.md)'}</a>}
-              {data.outputs.bib && <a className={'btn btn-small' + (data.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(data.id)} download>References (.bib)</a>}
+              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(data.id)} download>{data.status === 'complete' ? 'Download review (.md)' : 'Download partial review (.md)'}</a>}
+              {data.outputs.bib && <a className={'btn btn-small' + (data.outputs.review ? '' : ' btn-primary')} href={data.outputs.review ? api.reviewBibtexUrl(data.id) : api.researchBibDownloadUrl(data.id)} download>BibTeX (.bib)</a>}
             </div>
           )}
           {data.coverage && <p className="caveat">{coverageText(data.coverage)}</p>}
@@ -359,7 +362,7 @@ function ReviewEvidenceList({ data }: { data: ResearchDetail }) {
   return (
     <div className="evidence">
       {evidence.data.items.map((item) => {
-        const kind = item.passages.length ? 'Paper passage' + (item.passages.length === 1 ? '' : 's') : item.abstract ? 'Abstract' : 'Bibliographic record'
+        const kind = item.passages.length ? 'Paper passage' + (item.passages.length === 1 ? '' : 's') : item.abstract ? 'Abstract' : item.review ? 'zbMATH review' : 'Bibliographic record'
         const links = [
           item.doi && ['DOI', 'https://doi.org/' + encodeURIComponent(item.doi).replace(/%2F/gi, '/')],
           item.arxiv && ['arXiv', 'https://arxiv.org/abs/' + encodeURIComponent(item.arxiv).replace(/%2F/gi, '/')],
@@ -373,7 +376,8 @@ function ReviewEvidenceList({ data }: { data: ResearchDetail }) {
               <pre className="source">{passage.text}</pre>
             </div>)}
             {item.abstract && <div className="passage-quote"><span className="muted small">Abstract excerpt from the source record</span><pre className="source">{item.abstract}</pre></div>}
-            {!item.passages.length && !item.abstract && <p className="muted small">No source passage or abstract was saved.</p>}
+            {item.review && <div className="passage-quote"><span className="muted small">zbMATH review from the source record</span><pre className="source">{item.review}</pre></div>}
+            {!item.passages.length && !item.abstract && !item.review && <p className="muted small">Bibliographic record only: no source passage, abstract or review was saved.</p>}
             {links.length > 0 && <p className="small">{links.map(([label, url], i) => <span key={label}>{i > 0 && ' · '}<a href={url} target="_blank" rel="noreferrer">{label}</a></span>)}</p>}
           </Collapse>
         )

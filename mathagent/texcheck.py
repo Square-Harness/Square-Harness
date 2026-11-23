@@ -63,6 +63,49 @@ _OVERFULL = re.compile(r'Overfull \\hbox \(([\d.]+)pt too wide\) (?:(?:in paragr
                        r'|detected at line (\d+)|has occurred while \\output is active)')
 # -file-line-error also points into listed scripts and nested source files.
 LOG_FILE_ERROR = re.compile(r'^(?:\./)?((?![./])[^:\r\n]+\.[A-Za-z0-9]+):(\d+): (.+)$', re.M)
+_MISSING_FILE = re.compile(r"File [`'‘]([^'’\n]+)['’] not found")
+
+
+def file_line_errors(log):
+    """The (file, line, message) errors of a -file-line-error log. LaTeX's own errors in nonstop mode (a missing
+    package or class) are printed with "! LaTeX Error: ..." while the file:line form only says "Emergency stop.":
+    such a line takes the message of the "!" error before it, which names the cause."""
+    out = []
+    for match in LOG_FILE_ERROR.finditer(log):
+        name, line, message = match.groups()
+        if 'Fatal error occurred' in message:
+            continue
+        if re.match(r'\s*(?:Emergency stop|==> Fatal error)', message):
+            causes = [c.strip() for c in re.findall(r'^! (.+)$', log[:match.start()], re.M)
+                      if not re.match(r'\s*(?:Emergency stop|==> Fatal error)', c)]
+            if causes:
+                message = causes[-1]
+        out.append((name, line, message))
+    return out
+
+
+def missing_file(message):
+    """The file a LaTeX error says is not found (a package, a class), or ''."""
+    match = _MISSING_FILE.search(message or '')
+    return match.group(1) if match else ''
+
+
+def plain_error(message):
+    """A LaTeX error in plain words, for the author: what is missing and what to do; otherwise the message itself."""
+    name = missing_file(message)
+    suffix = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+    stem = name.rsplit('.', 1)[0]
+    if suffix == 'sty':
+        return (f'the package {stem} ({name}) is not installed here: install it in your TeX distribution, or remove '
+                f'its \\usepackage line from the template')
+    if suffix == 'cls':
+        return (f'the document class {stem} ({name}) is not installed here: install it, add the .cls file to the '
+                'template files, or choose another class')
+    if name:
+        return f'LaTeX cannot find the file {name}: add it to the files given with the template'
+    return (message or '').strip()
+
+
 _LOG_REFERENCE = re.compile(r"(Reference|Citation) [`'‘]([^'’\n]+)['’] on page \S+ undefined(?: on input line (\d+))?")
 _LOG_LABEL = re.compile(r"Label [`'‘]([^'’\n]+)['’] multiply defined")
 _LOG_GLYPH = re.compile(r'Missing character: There is no (\S+)')
@@ -185,10 +228,9 @@ def check(document, body_line, log='', material='', kind=None, points_total=None
             add('PROSE', 'positional', 'formula referred to by position (label it and use \\eqref)', m.group(0), m.start())
 
     # -- the compile log
-    for name, number, message in LOG_FILE_ERROR.findall(log):
-        if 'Fatal error occurred' not in message:
-            add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip(), '' if name == 'document.tex' else name,
-                line=int(number) if name == 'document.tex' else None)
+    for name, number, message in file_line_errors(log):
+        add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip(), '' if name == 'document.tex' else name,
+            line=int(number) if name == 'document.tex' else None)
     if not kept.get('latex-error'):
         for message in re.findall(r'^! (.+)$', log, re.M):
             add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip())

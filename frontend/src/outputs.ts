@@ -141,8 +141,8 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
       if (primary) add('report', 'Write-up report')
     } else if (page) {
       add('report', mode === 'literature' ? 'Literature review' : 'Review report',
-        undefined, formats?.review ? api.researchReviewDownloadUrl(job) : undefined)
-      if (formats?.bib) add('bib', 'Bibliography', undefined, api.researchBibDownloadUrl(job))
+        undefined, formats?.review ? api.reviewMarkdownUrl(job) : undefined)
+      if (formats?.bib) add('bib', 'Bibliography (BibTeX)', undefined, formats?.review ? api.reviewBibtexUrl(job) : api.researchBibDownloadUrl(job))
     }
   }
   // Worker-internal checks and experiments may have a native record but no chat card or figure.

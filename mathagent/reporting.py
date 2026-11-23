@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """Reported output and capacity held by workers, shared by the GUI and saved reports."""
+import unicodedata
 
 
 def reported_output(call):
@@ -33,6 +34,18 @@ def output_summary(state):
         parts.append(f'Active calls reserve another {tokens["reserved"]} output tokens.')
     parts.append(f'The cumulative output limit is {tokens["limit"]} tokens.' if tokens['limit'] is not None
                  else 'There is no cumulative output limit.')
+    estimated = [c for c in state.get('calls', []) if c.get('charge_basis') == 'estimate']
+    if estimated:
+        parts.append(f'{len(estimated)} interrupted call(s) with no usage report are charged an estimate from their '
+                     f'streamed output plus a margin ({sum(c.get("charged_tokens", 0) for c in estimated)} tokens in all).')
+    resettled = state.get('charge_resettlements') or []
+    if resettled:
+        parts.append(f'On resume, {len(resettled)} earlier interrupted call(s) were re-charged from their saved journals: '
+                     f'{sum(r["from_tokens"] for r in resettled)} tokens held became {sum(r["to_tokens"] for r in resettled)}.')
+    names = {'tokens': 'output tokens', 'seconds': 'seconds', 'rounds': 'attempts'}
+    for addition in state.get('allowance_additions') or []:
+        parts.append(f'Extra allowance added on resume at your request ({addition.get("time", "")}): '
+                     + ', '.join(f'+{addition[k]:g} {names[k]}' for k in names if addition.get(k)) + '.')
     return ' '.join(parts)
 
 
@@ -50,5 +63,6 @@ def usage_footer(state):
             + '; elapsed seconds: ' + amount(state.get('seconds_used', 0), settings.get('max_seconds'), seconds=True) + '.')
 
 def one_line(text, limit=80):
-    text = ' '.join(str(text).split())
+    # Control characters (NUL included) become spaces: a title or preview is a single printable line.
+    text = ' '.join(''.join(' ' if unicodedata.category(ch) == 'Cc' else ch for ch in str(text)).split())
     return text if len(text) <= limit else text[:limit - 1] + '…'

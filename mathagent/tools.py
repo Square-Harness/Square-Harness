@@ -434,7 +434,7 @@ class Workspace:
             return 'Python execution disabled; restart with --allow-python to enable approval prompts.'
         if not isinstance(code, str) or len(code) > 20000:
             raise ValueError('Provide Python source, at most 20000 characters')
-        if not self.approve('RUN PYTHON (not sandboxed; has your account permissions)\n' + code):
+        if not self.approve('RUN PYTHON (not sandboxed; has your account permissions and the server\'s environment)\n' + code):
             return 'User denied Python execution.'
         # A timeout and output-file limit are guardrails, NOT a security sandbox.
         wrapper = '''import resource
@@ -457,8 +457,10 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                     pass
                 p.wait()
             out.seek(0)
-            output = out.read(MAX_RESULT).decode('utf-8', errors='replace')
-        return f'Exit {p.returncode}; timeout={timed_out}\n{output}\n[output capped at 6000 bytes]'
+            data = out.read(MAX_RESULT + 1)
+            output = data[:MAX_RESULT].decode('utf-8', errors='replace')
+        return f'Exit {p.returncode}; timeout={timed_out}\n{output}' + (
+            f'\n[output cut at {MAX_RESULT} bytes]' if len(data) > MAX_RESULT else '')
 
     def check_reference(self, statement, guesses=None):
         if not isinstance(statement, str) or not statement.strip() or len(statement) > 2000:

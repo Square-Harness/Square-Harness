@@ -12,11 +12,14 @@ and removes the container on every exit path.
 """
 import base64
 from dataclasses import dataclass, field
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import platform
 import re
+import socket
 import shutil
 import struct
 import subprocess
@@ -30,6 +33,14 @@ IMAGE = 'square-harness/python-numerics:2'
 IMAGE_LABEL = 'org.squareharness.sandbox'
 IMAGE_VERSION = '2'
 CONTAINER_LABEL = 'org.squareharness.sandbox.run'
+# The build context's digest, set by `python -m mathagent.numerics build`: an image built from an
+# older Dockerfile, runner or lock file is refused even under the same tag and version.
+CONTENT_LABEL = 'org.squareharness.sandbox.content'
+# Which server process started a container, so `clean` never removes another server's live run.
+PROCESS_LABEL = 'org.squareharness.sandbox.process'
+DOCKER_DIR = Path(__file__).resolve().parent / 'docker'
+BUILD_FILES = ('Dockerfile', 'LICENSE.md', 'NOTICE', 'requirements.in', 'requirements.lock', 'runner.py')
+DEFAULT_CONCURRENCY = 2
 MAX_CODE_BYTES = 200_000
 MAX_PARAMETER_BYTES = 8_000
 STARTUP_SECONDS = 60
@@ -101,6 +112,19 @@ class ExperimentResult:
         return value
 
 
+def content_digest(directory=DOCKER_DIR):
+    """SHA-256 of the image build context (line endings normalized, so a Windows checkout agrees)."""
+    digest = hashlib.sha256()
+    for name in BUILD_FILES:
+        digest.update(name.encode() + b'\0' + (Path(directory) / name).read_bytes().replace(b'\r\n', b'\n') + b'\0')
+    return digest.hexdigest()
+
+
+def process_id():
+    """This server process on this machine (the label value of its containers)."""
+    return f'{socket.gethostname()}:{os.getpid()}'
+
+
 def docker_environment():
     env = {k: v for k, v in os.environ.items() if k in DOCKER_ENV or k.startswith('DOCKER_')}
     env.setdefault('PATH', os.defpath)
@@ -138,18 +162,34 @@ def _reader(stream, limit, sink, overflow, marker=None, seen=None):
         pass
 
 
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # It exists but belongs to someone else.
+    return True
+
+
 class DockerExecutor:
     """The shared Docker backend; one instance per process, safe across threads."""
 
-    def __init__(self, image=IMAGE, startup_seconds=STARTUP_SECONDS):
+    def __init__(self, image=IMAGE, startup_seconds=STARTUP_SECONDS, concurrency=DEFAULT_CONCURRENCY):
         if not isinstance(image, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}', image):
             raise ValueError('Invalid sandbox image reference')
+        if type(concurrency) is not int or not 1 <= concurrency <= 8:
+            raise ValueError('Sandbox concurrency must be an integer from 1 to 8')
         self.image = image
         self.startup_seconds = startup_seconds
         self.owner = uuid.uuid4().hex[:12]
         self.runtime_nnp = True  # Docker's no-new-privileges option; see _calibrate.
         self._image_info = None
         self._lock = threading.Lock()
+        # Each run may use gigabytes; more containers at once than this wait their turn, so
+        # parallel workers do not exhaust the Docker VM's memory (whose OOM killer picks any run).
+        self.concurrency = concurrency
+        self._slots = threading.BoundedSemaphore(concurrency)
 
     def _cli(self):
         path = shutil.which(os.environ.get('SQUARE_DOCKER') or 'docker')
@@ -191,8 +231,13 @@ class DockerExecutor:
         if labels.get(IMAGE_LABEL) != 'python-numerics' or labels.get(IMAGE_LABEL + '.version') != IMAGE_VERSION:
             raise SandboxUnavailable(f'{self.image} is not a version-{IMAGE_VERSION} sandbox image. '
                                      'Rebuild it with: python -m mathagent.numerics build')
+        if labels.get(CONTENT_LABEL) != content_digest():
+            raise SandboxUnavailable(f'{self.image} was built from another version of the sandbox files '
+                                     '(Dockerfile, runner or package lock). Rebuild it with: '
+                                     'python -m mathagent.numerics build')
         self.reap_stale()
         info = {'image': self.image, 'id': image_id, 'architecture': arch, 'os': osname, 'version': IMAGE_VERSION,
+                'content': labels.get(CONTENT_LABEL), 'concurrency': self.concurrency,
                 'docker': version.stdout.decode(errors='replace').strip(),
                 'no_new_privileges': 'docker+process' if self._calibrate() else 'process'}
         with self._lock:
@@ -222,7 +267,7 @@ class DockerExecutor:
         threads = str(max(1, int(limits.cpus + 0.999)))
         nnp = self.runtime_nnp if runtime_nnp is None else runtime_nnp
         return [self._cli(), 'run', '--rm', '-i', '--name', name, '--pull', 'never',
-                '--label', f'{CONTAINER_LABEL}={self.owner}',
+                '--label', f'{CONTAINER_LABEL}={self.owner}', '--label', f'{PROCESS_LABEL}={process_id()}',
                 '--network', 'none', '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
                 *(['--security-opt', 'no-new-privileges:true'] if nnp else []),
                 '--memory', f'{limits.memory_mb}m', '--memory-swap', f'{limits.memory_mb}m',
@@ -258,10 +303,37 @@ class DockerExecutor:
                 self.remove(name)
 
     def leftovers(self, mine=True):
-        """Names of sandbox containers still present (this executor's own by default)."""
-        label = f'{CONTAINER_LABEL}={self.owner}' if mine else CONTAINER_LABEL
-        found = self._docker('ps', '--all', '--filter', f'label={label}', '--format', '{{.Names}}')
-        return found.stdout.decode(errors='replace').split()
+        """Names of sandbox containers that can be removed safely.
+
+        mine: this executor's own containers. Otherwise only stopped containers, containers whose
+        server process on this machine is gone, and containers older than any run can last; a live
+        run of another server (this machine or one sharing the Docker engine) is never listed."""
+        if mine:
+            found = self._docker('ps', '--all', '--filter', f'label={CONTAINER_LABEL}={self.owner}', '--format', '{{.Names}}')
+            return found.stdout.decode(errors='replace').split()
+        from .policy import HARD_LIMITS
+        limit = HARD_LIMITS.timeout_seconds + self.startup_seconds + 120
+        found = self._docker('ps', '--all', '--filter', f'label={CONTAINER_LABEL}', '--format',
+                             '{{.Names}}\t{{.State}}\t{{.CreatedAt}}\t{{.Label "' + PROCESS_LABEL + '"}}')
+        now, host, names = datetime.now(timezone.utc), socket.gethostname(), []
+        for line in found.stdout.decode(errors='replace').splitlines():
+            name, state, created, process = (line.split('\t') + ['', '', ''])[:4]
+            try:
+                age = (now - datetime.strptime(created[:25], '%Y-%m-%d %H:%M:%S %z')).total_seconds()
+            except ValueError:
+                age = 0
+            owner_host, _, pid = process.rpartition(':')
+            gone = owner_host == host and pid.isdigit() and not _alive(int(pid))
+            if name.startswith('sqh-py-') and (state not in ('running', 'paused', 'restarting') or gone or age > limit):
+                names.append(name)
+        return names
+
+    def _wait_for_slot(self, cancel):
+        """Queue behind the runs already in progress in this process; False when cancelled."""
+        while not self._slots.acquire(timeout=0.1):
+            if cancel is not None and cancel.is_set():
+                return False
+        return True
 
     def run(self, code, limits, *, seed=None, parameters=None, cancel=None):
         """Execute ``code`` under ``limits``; user errors come back in the result, never as exceptions."""
@@ -277,7 +349,12 @@ class DockerExecutor:
         try:
             with numerical_slot(cancel):
                 self.probe()
-                return self._execute(code, limits, seed=seed, parameters=parameters, cancel=cancel)
+                if not self._wait_for_slot(cancel):
+                    raise AdmissionCancelled
+                try:
+                    return self._execute(code, limits, seed=seed, parameters=parameters, cancel=cancel)
+                finally:
+                    self._slots.release()
         except AdmissionCancelled:
             return ExperimentResult('cancelled', message='Cancelled while waiting for a numerical worker.')
         except AdmissionUnavailable as exc:
@@ -396,11 +473,16 @@ class DockerExecutor:
                                            'message': f'The interpreter exited with status {returncode} before reporting'})
         try:
             data = json.loads(out[start + len(head):stop].decode('utf-8'))
-            if not isinstance(data, dict) or data.get('status') not in ('ok', 'error', 'timeout'):
+            if not isinstance(data, dict) or data.get('status') not in ('ok', 'error', 'timeout', 'memory'):
                 raise ValueError('unexpected result shape')
         except ValueError as exc:
             return ExperimentResult('sandbox_error', exit_code=returncode, message=f'Unreadable sandbox result: {exc}')
         result = ExperimentResult(data['status'], exit_code=returncode, elapsed_seconds=float(data.get('elapsed_seconds') or 0))
+        if data['status'] == 'memory':  # The runner survived its code's kill and kept the output.
+            result.exit_code = 137
+            result.message = f'Killed at the {limits.memory_mb} MB memory limit; what it printed before is kept.'
+        elif data['status'] == 'timeout' and (data.get('error') or {}).get('message', '').endswith('was killed'):
+            result.message = 'Killed at the time limit; what it printed before is kept.'
         for key in ('stdout', 'stderr'):
             text = data.get(key) if isinstance(data.get(key), str) else ''
             setattr(result, key, text[:limits.output_bytes + 200])

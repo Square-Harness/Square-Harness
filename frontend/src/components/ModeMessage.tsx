@@ -99,7 +99,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
             {fixedEffort ? null : hasEffort ? <>
               <p className="selected-mode-label">Effort</p>
               <div role="radiogroup" aria-label="Effort for this message" className="effort-menu">
-                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Up to Medium for tasks with adjustable effort' : 'The harness picks the effort for this mode' },
+                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Up to Medium for tasks with adjustable effort' : 'The harness picks the effort for this skill' },
                   ...EFFORTS.filter((item) => call.mode !== 'investigate' || item.id !== 'high')].map((item) => (
                   <button key={item.id ?? 'auto'} type="button" role="radio" aria-checked={item.id === effort}
                     className={'effort-menu-item' + (item.id === effort ? ' effort-menu-current' : '')}
@@ -109,20 +109,20 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
                 ))}
               </div>
               {call.mode === 'investigate' && <p className="selected-mode-about">Literature reviews use High effort within the investigation’s budget.</p>}
-            </> : <p className="selected-mode-label">No effort setting for this mode.</p>}
+            </> : <p className="selected-mode-label">No effort setting for this skill.</p>}
           </div>
           <div className="selected-mode" role="status" tabIndex={0} onClick={() => setPinned((on) => !on)}
             onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setPinned((on) => !on) } else if (event.key === 'Escape') setPinned(false) }}
             aria-haspopup="true" aria-expanded={pinned}>
             <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
             <strong>@{call.mode}</strong><span>{hasEffort ? (level ? `${level.label} effort` : 'Auto effort') : 'Selected for this message'}</span>
-            <button type="button" className="chip-remove" aria-label="Clear selected mode" onClick={(event) => { event.stopPropagation(); declined.current = call; onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
+            <button type="button" className="chip-remove" aria-label="Clear selected skill" onClick={(event) => { event.stopPropagation(); declined.current = call; onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
           </div>
         </div>
       })()}
       {open && <div className="mode-picker">
-        <div className="mode-picker-title">Modes <span>↑ ↓ to browse · Enter or Tab to select · Esc to dismiss</span></div>
-        <div id={listId} role="listbox" aria-label="Choose a mode">
+        <div className="mode-picker-title">Skills <span>↑ ↓ to browse · Enter or Tab to select · Esc to dismiss</span></div>
+        <div id={listId} role="listbox" aria-label="Choose a skill">
           {options.map((item, index) => <div key={item.mode} id={`${listId}-${index}`} role="option"
             aria-selected={index === active} className={'mode-option' + (index === active ? ' mode-option-active' : '')}
             onMouseEnter={() => setActive(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => select(index)}>
@@ -142,7 +142,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
       }} onSelect={(event) => refresh(value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}
         onBlur={() => { queryRef.current = null; setQuery(null) }} onKeyDown={keys}
         rows={Math.min(8, Math.max(2, value.split('\n').length))}
-        placeholder="Describe what you want to do; type @ to select a mode…" aria-label="Message"
+        placeholder="Describe what you want to do; type @ to select a skill…" aria-label="Message"
         role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${active}` : undefined} />
     </div>

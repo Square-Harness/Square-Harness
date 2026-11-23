@@ -7,7 +7,8 @@
   doctor             Check Docker, the image and a test run
   list / show ID     Inspect the saved experiments of a workspace
   rerun ID           Re-execute a saved experiment with its code, seed, parameters and limits
-  clean              Remove leftover sandbox containers
+  clean              Remove leftover sandbox containers (stopped, or left by a server that is gone;
+                     never a live run of another server)
 """
 import argparse
 from dataclasses import fields
@@ -17,10 +18,8 @@ import subprocess
 import sys
 
 from .artifacts import ExperimentStore
-from .executor import IMAGE, DockerExecutor, SandboxUnavailable, docker_environment
+from .executor import CONTENT_LABEL, DOCKER_DIR, IMAGE, DockerExecutor, SandboxUnavailable, content_digest, docker_environment
 from .policy import SANITY_DEFAULTS, Limits
-
-DOCKER_DIR = Path(__file__).resolve().parent / 'docker'
 
 
 def main(argv=None):
@@ -41,7 +40,7 @@ def main(argv=None):
     executor = DockerExecutor(args.image)
     try:
         if args.command == 'build':
-            command = [executor._cli(), 'build', '--tag', args.image,
+            command = [executor._cli(), 'build', '--tag', args.image, '--label', f'{CONTENT_LABEL}={content_digest()}',
                        *(['--platform', args.platform] if args.platform else []), str(DOCKER_DIR)]
             print('$ ' + ' '.join(command), flush=True)
             return subprocess.call(command, env=docker_environment())

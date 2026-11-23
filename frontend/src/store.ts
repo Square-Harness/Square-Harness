@@ -25,6 +25,10 @@ export type AppState = {
   projectFilter: string
   listError?: string
   ticks: Record<string, number>
+  /** Bumped when the connection comes back: every open view reloads, including one that never loaded. */
+  resync: number
+  /** The folder another tab opened, shown once after this tab followed it. */
+  folderNotice?: string
 }
 
 type ServerEvent =
@@ -45,11 +49,14 @@ type ServerEvent =
   | { type: 'projects'; seq: number }
   | { type: 'personalization'; seq: number }
 
+const FOLDER_NOTICE = 'square-folder-notice'
+const OWN_SWITCH = 'square-own-folder-switch'
 const EMPTY: TaskSnapshot = { seq: 0, task: null, activity: [], live: null, approvals: [], queue: [], routing: [], tasks: [] }
 
 let state: AppState = {
   auth: 'checking', status: null, connection: 'connecting', snapshot: EMPTY,
-  proofs: null, research: null, chats: null, projects: null, projectFilter: 'all', ticks: {},
+  proofs: null, research: null, chats: null, projects: null, projectFilter: 'all', ticks: {}, resync: 0,
+  folderNotice: takeFolderNotice(),
 }
 const listeners = new Set<() => void>()
 
@@ -76,9 +83,9 @@ export function setProjectFilter(projectFilter: string) {
   set({ projectFilter })
 }
 
-/** Changes whenever the server reports a change to this job or chat. */
+/** Changes whenever the server reports a change to this job or chat, or the connection returns. */
 export function useTick(id: string | null | undefined): number {
-  return useSyncExternalStore(subscribe, () => id ? state.ticks[id] || 0 : 0)
+  return useSyncExternalStore(subscribe, () => (id ? state.ticks[id] || 0 : 0) + state.resync * 1_000_000)
 }
 
 function bump(id: string | null | undefined) {
@@ -143,6 +150,8 @@ export function refreshLists(delay = 0, scope: 'all' | 'chats' = 'all') {
 
 function forgetChat(id: string, seq?: number) {
   deletedChats.add(id)
+  // The open composer keeps its unsent message before the view leaves the deleted conversation.
+  window.dispatchEvent(new CustomEvent('square-chat-deleted', { detail: id }))
   set((s) => {
     const ticks = { ...s.ticks }
     delete ticks[id]
@@ -166,7 +175,28 @@ export async function deleteConversation(id: string) {
 }
 
 // Folder changes invalidate every loaded chat, job, pending HTTP request and live stream.
-function leaveWorkspace() {
+// A tab that did not open the folder itself says so after reloading.
+function takeFolderNotice(): string | undefined {
+  try {
+    const notice = sessionStorage.getItem(FOLDER_NOTICE) || undefined
+    sessionStorage.removeItem(FOLDER_NOTICE)
+    return notice
+  } catch { return undefined }
+}
+/** Called by the tab that opens another folder, so that only the other tabs show a notice. */
+export function markOwnFolderSwitch() {
+  try { sessionStorage.setItem(OWN_SWITCH, '1') } catch { /* private mode */ }
+}
+export function dismissFolderNotice() { set({ folderNotice: undefined }) }
+let leaving = false
+function leaveWorkspace(path?: string) {
+  // The folder event and a status check can both arrive before the reload: act once.
+  if (leaving) return
+  leaving = true
+  try {
+    if (sessionStorage.getItem(OWN_SWITCH)) sessionStorage.removeItem(OWN_SWITCH)
+    else sessionStorage.setItem(FOLDER_NOTICE, path || 'another folder')
+  } catch { /* private mode: reload without a notice */ }
   const notebook = window.location.hash.split('?')[0].split('/').slice(0, 2).join('/') || '#/free'
   window.history.replaceState(null, '', notebook)
   window.location.reload()
@@ -179,7 +209,7 @@ export async function refreshStatus() {
     const status = await api.status()
     if (generation !== statusGeneration) return
     if (state.status && state.status.workspace !== status.workspace) {
-      leaveWorkspace()
+      leaveWorkspace(status.workspace)
       return
     }
     set({ status })
@@ -303,7 +333,7 @@ function handle(event: ServerEvent) {
       bump(event.chat)
       break
     case 'workspace':
-      leaveWorkspace()
+      leaveWorkspace(event.path)
       break
     case 'files':
       bump('files')
@@ -324,7 +354,12 @@ function connect() {
   source?.close()
   window.clearTimeout(retry)
   source = new EventSource('/api/events')
-  source.onopen = () => set({ connection: 'open' })
+  source.onopen = () => {
+    // A view whose request failed while the harness was away loads again.
+    const returning = state.connection === 'reconnecting'
+    set({ connection: 'open' })
+    if (returning) refreshAll()
+  }
   source.onmessage = (message) => {
     try {
       handle(JSON.parse(message.data))
@@ -354,7 +389,7 @@ export function refreshAll() {
   refreshStatus()
   refreshLists()
   refreshSnapshot()
-  set((s) => ({ ticks: Object.fromEntries(Object.entries(s.ticks).map(([k, v]) => [k, v + 1])) }))
+  set((s) => ({ resync: s.resync + 1 }))
 }
 
 let unauthorizedListener: (() => void) | null = null
@@ -367,7 +402,7 @@ export async function start() {
   try {
     const status = await api.status()
     if (state.status && state.status.workspace !== status.workspace) {
-      leaveWorkspace()
+      leaveWorkspace(status.workspace)
       return
     }
     set({ status, auth: 'ok' })

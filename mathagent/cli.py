@@ -183,14 +183,16 @@ def parser():
     p.add_argument('--assistant-input-tokens', type=int, help='Optional hard shared input-token ceiling (default: no cumulative ceiling)')
     p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort and model profile)')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
-    p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification (default: no cumulative ceiling)')
-    p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
+    p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification '
+                   '(default: no cumulative ceiling; DeepInfra DS4 profile: proof-rounds x (solve + 2 x verify) tokens)')
+    p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof '
+                   '(default: 1800; DeepInfra DS4 profile: 3 x proof-rounds x --proof-call-seconds)')
     p.add_argument('--proof-call-seconds', type=float, default=10800,
                    help='DS4 per-call working-time allowance; new Proof totals allow three calls per solver pass (default: 10800)')
     p.add_argument('--proof-solve-tokens', type=int, default=32768,
-                   help='Output ceiling for each full solve or revision, including thinking')
+                   help=f'Output ceiling for each full solve or revision, including thinking (default: 32768; DeepInfra DS4 profile: {MODEL_OUTPUT_TOKENS})')
     p.add_argument('--proof-verify-tokens', type=int, default=16384,
-                   help='Output ceiling for each whole-proof review, including thinking')
+                   help=f'Output ceiling for each whole-proof review, including thinking (default: 16384; DeepInfra DS4 profile: {MODEL_OUTPUT_TOKENS})')
     p.add_argument('--proof-repair-tokens', type=int, default=None,
                    help='Output ceiling for each repair/later attempt, including thinking (default: solve tokens)')
     p.add_argument('--proof-min-solve-tokens', type=int, default=None,
@@ -210,7 +212,9 @@ def parser():
     p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise). Literature Review always uses High.')
     p.add_argument('--research-tokens', type=int, help='Cumulative generated-token ceiling per report (default: effort-based for DS4, unlimited for local profiles)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
-    p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')
+    p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /resume and /research-resume, recorded in the job')
+    p.add_argument('--resume-add-tokens', type=int, default=0, help='Explicit additional output tokens for /resume and /research-resume, recorded in the job (up to 20000000)')
+    p.add_argument('--resume-add-rounds', type=int, default=0, help='Explicit additional proof attempts for /resume, recorded in the job (up to 20)')
     p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
     p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: sized to survey breadth, otherwise 12)')
     p.add_argument('--research-chars', type=int, default=30000, help='Maximum response characters for model-invoked literature tools (survey synthesis uses the input-token budget)')
@@ -218,7 +222,7 @@ def parser():
     p.add_argument('--mode', choices=MODES, default='prove')
     p.add_argument('--no-think', action='store_true')
     p.add_argument('--show-thinking', action='store_true')
-    p.add_argument('--allow-python', action='store_true', help='Offer unsandboxed Python with per-call approval (Linux)')
+    p.add_argument('--allow-python', action='store_true', help='Offer unsandboxed Python with per-call approval')
     sandbox = p.add_argument_group('Python sandbox (Docker; see docs/guide.md)')
     sandbox.add_argument('--no-numerical-checks', action='store_true',
                          help='Do not offer automatic numerical sanity checks in chat (/python-lab and /sanity-check remain)')
@@ -227,6 +231,8 @@ def parser():
     sandbox.add_argument('--python-image', metavar='TAG', help='Sandbox image (default: square-harness/python-numerics:2)')
     sandbox.add_argument('--python-limits', type=Path, metavar='FILE',
                          help='JSON file with sanity-check and python-lab limits, bounded by built-in maxima')
+    sandbox.add_argument('--python-concurrency', type=int, default=2, metavar='N',
+                         help='Sandbox containers running at once (1–8, default %(default)s); further runs wait their turn')
     p.add_argument('--gui', action='store_true', help='Serve the visual interface in your browser instead of the terminal prompt')
     p.add_argument('--gui-host', default='127.0.0.1',
                    help='Interface address (default: %(default)s); 0.0.0.0 lets phones on your network connect with the access token')
@@ -304,6 +310,8 @@ def main():
         p.error('Use ctx >= 2048, 128 <= predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if args.specialist_output_tokens is not None and args.specialist_output_tokens < 128:
         p.error('Use specialist-output-tokens >= 128')
+    if not 0 <= args.resume_add_tokens <= 20_000_000 or not 0 <= args.resume_add_rounds <= 20:
+        p.error('Use resume-add-tokens from 0 to 20000000 and resume-add-rounds from 0 to 20')
     if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens is not None and args.proof_tokens < 512
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
@@ -319,6 +327,8 @@ def main():
         p.error('--proof-verify-temperature must be between 0 and 2')
     if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= 86400:
         p.error('Use resume-add-seconds between 0 and 86400')
+    args.gui_concurrency_explicit = any(value.split('=')[0] == '--gui-concurrency' for value in sys.argv[1:])
+    args.gui_model_concurrency_explicit = any(value.split('=')[0] == '--gui-model-concurrency' for value in sys.argv[1:])
     args.research_seconds_explicit = any(value.split('=')[0] == '--research-seconds' for value in sys.argv[1:])
     args.research_tokens_explicit = any(value.split('=')[0] == '--research-tokens' for value in sys.argv[1:])
     args.research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
@@ -337,6 +347,8 @@ def main():
             local_host = False
         if not local_host:
             p.error('Offline mode requires a localhost/loopback model --host; use --allow-remote-model explicitly, or --online for model and web research')
+    if not 1 <= args.python_concurrency <= 8:
+        p.error('Use python-concurrency from 1 to 8')
     if not args.online and args.allow_python:
         p.error('--allow-python requires --online: unrestricted Python can access the network')
     if args.gui:
@@ -630,7 +642,9 @@ def main():
                         runner = ReviewRunner(agent, ui.emit, concurrency=review_concurrency())
                     else:
                         runner = (WriteupRunner if writeup else ResearchRunner)(agent, ui.emit)
-                    result = runner.resume(job_id, additional_seconds=args.resume_add_seconds) if args.resume_add_seconds else runner.resume(job_id)
+                    extra = {k: v for k, v in (('additional_seconds', args.resume_add_seconds),
+                                               ('additional_tokens', args.resume_add_tokens)) if v}
+                    result = runner.resume(job_id, **extra)
                     research_running = False
                     model_checked = False
                     research_result(result, export=not writeup)
@@ -672,7 +686,9 @@ def main():
                     # validate an unrelated CLI default model before resuming.
                     resume_agent = copy.copy(agent)
                     resume_agent.client = copy.copy(agent.client)
-                    result = ProofRunner(resume_agent, ui.emit).resume(last_proof_id)
+                    result = ProofRunner(resume_agent, ui.emit).resume(
+                        last_proof_id, add_tokens=args.resume_add_tokens, add_seconds=args.resume_add_seconds,
+                        add_rounds=args.resume_add_rounds)
                     proof_running = False
                     model_checked = False
                     proof_result(result)

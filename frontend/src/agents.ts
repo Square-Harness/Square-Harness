@@ -39,7 +39,10 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
     const status = agent.status
     const operational = status === 'failed' || status === 'stopped'
     let look = { label: agentLabels[status], variant: agentSquares[status] }
-    if (operational && agent.error?.code) {
+    // A worker stopped by pausing the Assistant waits for Resume: paused, not failed.
+    const pausedHere = status === 'stopped' && chat.assistant_status === 'paused' && chat.assistant_resumable !== false
+    if (pausedHere && agent.error?.code !== 'worker_budget_exhausted') look = { label: 'Paused', variant: 'paused' }
+    else if (operational && agent.error?.code) {
       if (agent.error.code === 'worker_budget_exhausted') look = { label: 'Work limit reached', variant: 'spent' }
     } else if (status === 'finished') {
       if (proof) {
@@ -55,6 +58,7 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
       (agent.progress && agent.progress.total > 1 ? workProgressText(agent.progress, status, status === 'running') : PHASES[phaseId])
     const latest = agent.timeline?.map(activityCaption).filter(Boolean).at(-1)
     const step = status === 'waiting' ? 'Waiting to start'
+      : pausedHere && look.variant === 'paused' ? 'Paused with the Assistant; Resume continues it'
       : operational ? (agent.error?.code === 'worker_budget_exhausted' ? '' : taskNotice(agent.error?.message || agent.outcome || '', chat.investigation?.tasks || []))
       : status === 'running' ? phase || latest || 'Starting work' : workNotice(agent.outcome || '')
     const cardOutput = agent.card_index != null && (item?.outputs || oldAnswers.has(agent.card_index))

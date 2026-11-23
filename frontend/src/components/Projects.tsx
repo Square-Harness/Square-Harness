@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useState } from 'react'
-import { api, ApiError, type Project } from '../api'
-import { refreshLists, setProjectFilter, useApp } from '../store'
+import { api, ApiError, type Project, type ProjectFile } from '../api'
+import { chatDeleteBlocked } from '../chatDeletion'
+import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { go } from '../router'
 import { ErrorNote, Modal } from './common'
 import { Markdown } from './Markdown'
-import { BackIcon, FolderIcon, MoreIcon, NotesIcon, PlusIcon } from './Icons'
-import { plural } from '../format'
+import { BackIcon, FileIcon, FolderIcon, MoreIcon, NotesIcon, PlusIcon, TrashIcon } from './Icons'
+import { bytes, plural } from '../format'
 
 const SHOWN = 6
 
@@ -38,6 +39,7 @@ export function ProjectNav() {
           <span>{plural(count(current.id), 'conversation')}{current.notes.trim() ? '' : ' · no notes yet'}</span>
         </div>
         <button type="button" className="btn btn-small btn-block" onClick={() => setEditing(current)}><NotesIcon size={15} /> Project notes</button>
+        <ProjectFiles project={current} />
       </div>
       {editor}
     </section>
@@ -81,6 +83,58 @@ export function ProjectSelector({ value, onChange, disabled = false }: { value: 
   </div>
 }
 
+/** The files saved in the project's folder, each one click from the next message. */
+function ProjectFiles({ project }: { project: Project }) {
+  const [open, setOpen] = useState(false)
+  const [files, setFiles] = useState<ProjectFile[] | null>(null)
+  const [truncated, setTruncated] = useState(false)
+  const [error, setError] = useState('')
+  const changed = useTick('files')
+  useEffect(() => { setFiles(null) }, [project.id, changed])
+  useEffect(() => {
+    if (!open || files) return
+    api.projectFiles(project.id).then((result) => { setFiles(result.files); setTruncated(!!result.truncated); setError('') },
+      (reason: Error) => setError(reason.message))
+  }, [open, files, project.id])
+  const attach = (path: string) => window.dispatchEvent(new CustomEvent('square-attach-paths', { detail: [path] }))
+  return <details className="project-files" onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
+    <summary><FileIcon size={14} /> Files{files ? <span className="project-count">{files.length}{truncated ? '+' : ''}</span> : null}</summary>
+    <ErrorNote>{error}</ErrorNote>
+    {open && !files && !error && <p className="muted small">Reading the project folder…</p>}
+    {files && !files.length && <p className="muted small">No files yet. Drop files on a conversation of this project to add them.</p>}
+    {files && files.length > 0 && <ul className="project-file-list">{files.map((file) => <li key={file.path}>
+      <span className="project-file-name" title={file.path}>{file.name}</span>
+      <span className="muted small">{bytes(file.size)}</span>
+      <button type="button" className="btn btn-quiet btn-small" title="Attach to the next message" aria-label={`Attach ${file.name} to the next message`} onClick={() => attach(file.path)}>Attach</button>
+    </li>)}</ul>}
+    {truncated && <p className="muted small">Only the first files are listed.</p>}
+  </details>
+}
+
+/** Deleting keeps everything the person made: conversations move to no project, files stay in the folder. */
+function DeleteProject({ project, onCancel, onDeleted }: { project: Project; onCancel: () => void; onDeleted: () => void }) {
+  const app = useApp()
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState('')
+  const chats = app.chats?.filter((chat) => chat.project_id === project.id) || []
+  const busy = chats.some((chat) => chatDeleteBlocked(app.snapshot, chat.id))
+  async function remove() {
+    setDeleting(true); setError('')
+    try { await api.deleteProject(project.id); setProjectFilter('all'); refreshLists(); onDeleted() }
+    catch (reason) { setError((reason as Error).message); setDeleting(false) }
+  }
+  return <Modal title="Delete this project?" icon={<TrashIcon />} tone="danger" onClose={deleting ? undefined : onCancel}>
+    <p><strong>{project.name}</strong> leaves the list of projects, with its notes.</p>
+    <p>{chats.length === 1 ? 'Its conversation moves to No project and keeps its messages.' : chats.length ? `Its ${plural(chats.length, 'conversation')} move to No project and keep their messages.` : 'It has no conversations.'} The files in its folder stay where they are.</p>
+    {busy && <p className="muted">A conversation in this project is still running or queued. Pause it or wait for it to finish first.</p>}
+    <ErrorNote>{error}</ErrorNote>
+    <div className="modal-actions">
+      <button type="button" className="btn" disabled={deleting} onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn btn-delete" disabled={deleting || busy} onClick={() => void remove()}><TrashIcon size={16} /> {deleting ? 'Deleting…' : 'Delete project'}</button>
+    </div>
+  </Modal>
+}
+
 type Draft = { name: string; notes: string }
 const draftOf = (project: Project | null): Draft => ({ name: project?.name || '', notes: project?.notes || '' })
 
@@ -93,6 +147,7 @@ function ProjectEditor({ project, onClose, onSaved }: { project: Project | null;
   const [stale, setStale] = useState(false)
   const [saving, setSaving] = useState(false)
   const [discard, setDiscard] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
   const original = draftOf(baseline)
   const dirty = draft.name !== original.name || draft.notes !== original.notes
@@ -131,10 +186,10 @@ function ProjectEditor({ project, onClose, onSaved }: { project: Project | null;
   return <Modal title={baseline ? 'Project notes' : 'New project'} icon={baseline ? <NotesIcon /> : <FolderIcon />} onClose={saving ? undefined : close} wide>
     <form className="project-editor" onSubmit={(event) => { event.preventDefault(); void save() }}>
       <label className="field"><span className="field-label">Project name</span>
-        <input className="text-input" autoComplete="off" maxLength={100} value={draft.name} placeholder="For example, Heat equation observability" onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        <input className="text-input" autoComplete="off" autoFocus={!baseline} maxLength={100} value={draft.name} placeholder="For example, Heat equation observability" onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
       </label>
       <div className="project-notes-columns">
-        <label className="project-notes-pane"><span className="project-notes-label"><span className="field-label">Notes</span><span className="muted small">{draft.notes.length.toLocaleString()} / 8,000 characters{dirty ? ' · unsaved' : ''}</span></span><textarea className="project-notes" aria-label="Project notes" rows={18} maxLength={8000} value={draft.notes}
+        <label className="project-notes-pane"><span className="project-notes-label"><span className="field-label">Notes</span><span className="muted small">{draft.notes.length.toLocaleString('en-US')} / 8,000 characters{dirty ? ' · unsaved' : ''}</span></span><textarea className="project-notes" aria-label="Project notes" rows={18} maxLength={8000} value={draft.notes}
           placeholder={'# Goal\nWhat are you trying to prove or understand?\n\n## Definitions and notation\n\n## Established facts\n\n## Open steps and possible approaches\nLabel assumptions and conjectures clearly.\n\n## References and files'}
           onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
         <div className="project-notes-pane"><span className="project-notes-label"><span className="field-label">Preview</span></span><div className="project-notes-preview" aria-label="Project notes preview">{draft.notes ? <Markdown>{draft.notes}</Markdown> : <p className="muted">Your project notes will appear here as you write.</p>}</div></div>
@@ -149,9 +204,11 @@ function ProjectEditor({ project, onClose, onSaved }: { project: Project | null;
         <button type="button" className="btn" onClick={() => setDiscard(false)}>Keep editing</button>
         <button type="button" className="btn btn-delete" onClick={onClose}>Discard changes</button>
       </div></div> : <div className="modal-actions">
+        {baseline && <button type="button" className="btn btn-quiet btn-delete action-start" disabled={saving} onClick={() => setDeleting(true)}><TrashIcon size={15} /> Delete project…</button>}
         <button type="button" className="btn" disabled={saving} onClick={close}>Cancel</button>
         <button type="submit" className="btn btn-primary" disabled={saving || !draft.name.trim() || stale}>{saving ? 'Saving…' : 'Save project'}</button>
       </div>}
     </form>
+    {deleting && baseline && <DeleteProject project={baseline} onCancel={() => setDeleting(false)} onDeleted={onClose} />}
   </Modal>
 }

@@ -326,6 +326,21 @@
 .interim.prose { font-size: 16px; color: var(--text-2); }
 .notice { margin: 6px 0; font-size: 13px; color: var(--text-3); }
 .notice-discarded { color: var(--red); }
+.notice-history { font-style: italic; }
+/* Under an answer: quiet actions, shown in full on hover or focus. */
+.message-actions { display: flex; gap: 6px; margin-top: 6px; opacity: 0.55; transition: opacity 0.15s; }
+.message-model:hover .message-actions, .message-actions:focus-within { opacity: 1; }
+@media (hover: none) { .message-actions { opacity: 1; } }
+.copy-btn { gap: 5px; min-height: 26px; padding: 0 8px; font-size: 12.5px; color: var(--text-3); }
+.copy-btn:hover { color: var(--ink); }
+.md-code { position: relative; }
+.md-code > .code-copy { position: absolute; top: 6px; right: 6px; background: var(--sheet); border: 1px solid var(--line); opacity: 0; }
+.md-code:hover > .code-copy, .code-copy:focus-visible { opacity: 1; }
+@media (hover: none) { .md-code > .code-copy { opacity: 1; } }
+/* The skill the person picked with @, kept on their message as in the composer. */
+.message-call { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 4px; padding: 2px 8px 2px 3px; border: 1px solid var(--line); border-radius: 6px; font: 12.5px/1.4 var(--font-ui); color: var(--text-2); }
+.message-call .route-cover { width: 20px; height: 20px; }
+.composer-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; max-width: calc(var(--measure) + 40px); margin: 0 0 8px; }
 .review-note { margin: 10px 0; padding: 6px 0 6px 14px; border-left: 2px solid var(--red); }
 .review-label { margin: 0 0 2px; font: 700 13px/1.4 var(--font-ui); color: var(--red); }
 .tool-step { margin: 4px 0; }
@@ -482,6 +497,8 @@
 
 .output-field { margin-bottom: 14px; max-width: 420px; }
 .queued-note { margin: 8px 0; padding: 8px 12px; font-size: 14px; background: var(--ink-soft); border-left: 2px solid var(--ink); border-radius: 0 6px 6px 0; }
+div.queued-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; max-width: calc(var(--measure) + 40px); }
+div.queued-note > span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .effort-suggested { font-weight: 400; color: var(--text-3); font-size: 12.5px; }
 .effort-summary-compact { margin-top: 6px; }
 
@@ -496,3 +513,10 @@
 .route-details > summary { font-size: 12.5px; }
 .route-details .route-summary { font-size: 14px; color: var(--text-2); }
 .route-clarify .route-card { border-color: var(--ink-soft-strong); }
+
+/* A failed sandbox run: the reason first, then its traceback and limits. */
+.experiment-failure p { margin: 0; }
+.experiment-limits { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 6px 0; font-size: 13px; }
+.experiment-limits > div { display: contents; }
+.experiment-limits dt { color: var(--text-3); }
+.experiment-limits dd { margin: 0; font-variant-numeric: tabular-nums; }
