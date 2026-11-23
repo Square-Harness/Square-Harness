@@ -469,7 +469,7 @@ function WorkspacePanel({ about }: { about: boolean }) {
       <div className="model-card" title={`${status.model} at ${status.host}: ${modelNote}`}>
         <span className={'model-dot' + (ready ? ' model-ok' : ' model-bad')} aria-hidden="true" />
         <span className="model-text">
-          <span className="model-name">{status.model.split('/').pop()}</span>
+          <span className="model-name">{!reachable && status.model_default ? 'No model connected' : status.model.split('/').pop()}</span>
           <span className={'model-state' + (ready ? '' : ' model-state-bad')}>{modelNote}</span>
         </span>
         <ThemeButton />

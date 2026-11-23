@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The sidebar shows "No model connected" instead of a model name when the
+  interface was started without `--model` or `--api-profile` and no model
+  server answers: the name was only the built-in default (`qwen3.8:27b`).
+  A model the user configured is still named, with its status below.
 - The start page no longer shows the skills as buttons: they suggested calling a
   skill directly, and a skill called on a task beyond its specific goal can fail
   (a `@writeup` of a whole 79-page paper stopped on a false missing
