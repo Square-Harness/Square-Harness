@@ -178,6 +178,9 @@ class ScriptedTypos(Scripted, TypoCheckRunner):
 
 TYPO = {'start_line': 20, 'end_line': 20, 'quote': BASE_CASE, 'check': 'Read.', 'is_problem': True, 'kind': 'clarity',
         'importance': 'suggestion', 'comment': 'Say why the base case holds.', 'suggestion': 'Since $a_1 = 1$.'}
+# The same remark as the typo check's lanes see it: a formula remark (tests/test_typocheck.py tests the lanes).
+REMARK = {'line': 20, 'quote': BASE_CASE, 'problem': 'Say why the base case holds.', 'correction': 'Since $a_1 = 1$.',
+          'evidence_line': 0, 'evidence_quote': ''}
 
 
 class ModesTests(ReviewCase):
@@ -195,8 +198,9 @@ class ModesTests(ReviewCase):
         self.assertEqual((think[main + '#0'], think[main + '#1']), (False, True))
 
     def test_typo_check_reads_and_checks_its_remarks_only(self):
-        runner = self.runner({'read': {'summary': 'The paper.', 'comments': [TYPO]},
-                              'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}]}}, ScriptedTypos)
+        runner = self.runner({'read': {'summary': 'The paper.', 'comments': [TYPO], 'remarks': [REMARK], 'lines': []},
+                              'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}],
+                                             'check': 'Read.', 'verdict': 'correction'}}, ScriptedTypos)
         result = runner.start('Check the typos.', source_files=['paper.tex'], max_rounds=5)
         self.assertEqual({call['role'] for call in runner.asked}, {'read', 'typo-check'})
         self.assertEqual((runner.state['level'], runner.state['pipeline'], runner.state['settings']['max_rounds']),
@@ -225,8 +229,8 @@ class ModesTests(ReviewCase):
         return runner, runner.resume(job_id)
 
     def test_saved_low_review_resumes_as_a_typo_check(self):
-        script = {'read': {'summary': 'The paper.', 'comments': [TYPO]},
-                  'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}]}}
+        script = {'read': {'summary': 'The paper.', 'comments': [TYPO], 'remarks': [REMARK], 'lines': []},
+                  'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}], 'check': 'Read.', 'verdict': 'correction'}}
         for cls in (None, PaperReviewRunner):  # by its saved state, and as the saved child of a chat's review card
             job_id, state = self.saved(ScriptedTypos, {}, level='low')
             self.assertEqual(variant_for_state(state), 'typos')

@@ -39,6 +39,7 @@ from .reporting import usage_footer
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
+from .typocheck import TypoLanes
 
 # 'review' is the referee report on a whole paper (every proof checked, one depth, no effort to choose); 'typos' is
 # the typo check, the paper read for typos and presentation only.
@@ -4213,7 +4214,7 @@ class PaperReviewRunner(ReviewBase):
                       'The original report is unchanged; no new full review or proof verification is claimed.']
 
 
-class TypoCheckRunner(PaperReviewRunner):
+class TypoCheckRunner(TypoLanes, PaperReviewRunner):
     """The typo check: the paper proofread part by part (each call with the whole paper in view when it fits), and
     every remark checked against the paper. No proof is checked and no recommendation is given."""
     VARIANT = 'typos'
