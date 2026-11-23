@@ -314,8 +314,8 @@ saved in your folder. You can pause work and resume it later with the budget it
 had left, and you can always see exactly what the model saw and wrote.
 
 **Bounded work.** Every job has a budget of attempts, working time and retrieval
-requests. You pick an effort level, Low, Medium or High, instead of tuning token
-counts. Nothing runs without limit by accident.
+requests. Most skills offer Low, Medium and High effort. Literature review
+always uses High.
 
 **Text is data, never instructions.** Manuscripts, papers, web pages and model
 answers cannot change what the harness is allowed to do:
@@ -376,8 +376,9 @@ one with a message.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
   `@literature`, `@quick_review`, `@referee`, `@detailed_review`, `@explain`,
   `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
-  Hover over the chip above the text box to read what the skill does and to
-  choose its effort. **Auto** means Medium, or High for a detailed review.
+  Hover over the chip above the text box to read what the skill does. For
+  skills with a choice of effort, **Auto** means Medium, or High for a
+  detailed review. Literature review always uses High.
   This is for users who know the skills: each one is built for a specific goal,
   while the Assistant divides a large task into jobs the skills can handle.
   A skill forced onto a larger task can fail in unexpected ways (for example,
@@ -648,8 +649,9 @@ Older messages show a neutral source label because they did not record how
 the file was selected.
 
 Up to six tasks can draw on Explore, Check, Literature,
-Proof and Quick review. At most two are Proof tasks. A task can use up to Medium
-effort. Independent tasks can run together when the model server supports it.
+Proof and Quick review. At most two are Proof tasks. Literature review uses
+High effort. The other tasks can use up to Medium effort. Independent tasks
+can run together when the model server supports it.
 Proof waits for the preceding steps listed in its plan. When the plan calls
 for a special case, the controller selects a precise statement from the evidence
 or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
@@ -822,7 +824,18 @@ Every sentence of a section is checked against the available evidence. A first p
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
-Low, Medium and High allow up to 55, 110 and 165 public source requests. Local-model profiles normally allow 6, 12 and 20 minutes respectively. Hosted DS4 uses the workflow time allowances described above. All three efforts check the written sections. Higher effort broadens discovery and allows more source passages: Low, Medium and High screen up to 100, 250 and 500 candidates and plan the reading of 3, 9 and 14 papers; the works the plan relies on can add up to three more, and papers already in the workspace cache are reused. Most of a review's time is spent waiting for sources, because arXiv asks for a pause between two requests; the job report lists the time of each step. Explicit time and request limits apply.
+Every new Literature review uses High workflow effort, whether you ask the
+Assistant, select `@literature`, use the standalone form or run
+`/literature` in the terminal. The review can make up to 165 public source
+requests, screen up to 500 candidates and plan full-text reading for up to
+14 papers. The outline can add up to three papers it relies on. The review
+reuses papers already cached in the workspace. A focused question may need
+fewer sources. Local-model profiles normally allow 20 minutes.
+Hosted DS4 uses the workflow time allowance described above. Explicit resource
+limits and the remaining budget of a conversation can stop a review earlier.
+Resuming a saved review keeps its original search breadth and remaining budget.
+The job report shows the time spent at each step, including waits between
+requests to arXiv.
 
 ### When the model provider is busy
 

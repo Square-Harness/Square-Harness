@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -57,7 +57,8 @@ after_results. Words such as then, afterwards, using it, with that reference,
 puis or ensuite mark such an order. Shared subject matter alone does not imply a
 dependency. A reference plus a simulation, or a numerical experiment plus an
 independent mathematical explanation, are two deliverables that start together.
-Use check for a targeted verified reference, literature for a survey,
+Every literature review runs at high effort. For a batch with a literature review, select the effort of its other tasks
+independently of the review. Use check for a targeted verified reference, literature for a survey,
 python_lab for a specifically requested execution or numerical simulation, explore
 for a mathematical explanation without a source or of a whole document, explain for one
 named result, page, section or appendix of an attached file, and prove for a nontrivial proof.

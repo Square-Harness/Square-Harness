@@ -46,7 +46,8 @@ function proofCeilings(defaults: Defaults, tokens: number | null, preset?: { sol
   return { tokens, solve_tokens: fitted, verify_tokens: review }
 }
 
-export function effortLimits(kind: EffortKind, defaults: Defaults, level: EffortLevel): Limits {
+export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLevel: EffortLevel): Limits {
+  const level = kind === 'literature' ? 'high' : requestedLevel
   const preset = defaults.effort_presets?.[level]
   const effort = preset || EFFORTS.find((item) => item.id === level) || EFFORTS[1]
   const seconds = effort.minutes * 60

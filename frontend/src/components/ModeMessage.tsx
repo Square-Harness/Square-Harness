@@ -89,16 +89,17 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
     <div className="mode-message">
       {validCall(value, call) && (() => {
         const info = MODE_CALLS.find((item) => item.mode === call.mode)
-        const level = EFFORTS.find((item) => item.id === effort)
+        const fixedEffort = call.mode === 'literature'
+        const level = EFFORTS.find((item) => item.id === (fixedEffort ? 'high' : effort))
         const choose = (next: EffortLevel | null) => { onEffort(next); input.current?.focus() }
         return <div className={'selected-mode-wrap' + (pinned ? ' selected-mode-open' : '')} ref={chip}>
           <div className="selected-mode-menu" role="group" aria-label={`@${call.mode} options`}>
             <p className="selected-mode-title"><strong>@{call.mode}</strong>{info && info.label !== call.mode && <span> · {info.label}</span>}</p>
             {info && <p className="selected-mode-about">{info.summary}</p>}
-            {hasEffort ? <>
+            {fixedEffort ? null : hasEffort ? <>
               <p className="selected-mode-label">Effort</p>
               <div role="radiogroup" aria-label="Effort for this message" className="effort-menu">
-                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Tasks may use up to Medium effort' : 'The harness picks the effort for this mode' },
+                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Up to Medium for tasks with adjustable effort' : 'The harness picks the effort for this mode' },
                   ...EFFORTS.filter((item) => call.mode !== 'investigate' || item.id !== 'high')].map((item) => (
                   <button key={item.id ?? 'auto'} type="button" role="radio" aria-checked={item.id === effort}
                     className={'effort-menu-item' + (item.id === effort ? ' effort-menu-current' : '')}
@@ -107,6 +108,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
                   </button>
                 ))}
               </div>
+              {call.mode === 'investigate' && <p className="selected-mode-about">Literature reviews use High effort within the investigation’s budget.</p>}
             </> : <p className="selected-mode-label">No effort setting for this mode.</p>}
           </div>
           <div className="selected-mode" role="status" tabIndex={0} onClick={() => setPinned((on) => !on)}

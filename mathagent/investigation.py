@@ -28,6 +28,7 @@ from .deepinfra import generation_attempts
 from .ledger import _atomic_write, _directory, _read
 from .investigation_writing import ProgressiveAnswer, WRITING_INPUT, WRITING_OUTPUT, WRITING_SECONDS, exact_review
 from .orchestrator import Orchestrator, WorkerInterrupted
+from .router import worker_effort
 from .source_tasks import _instruction_text, excludes_external_sources
 from .tools import schema
 
@@ -56,7 +57,8 @@ calculation or an internal consistency check. When external sources are excluded
 When the request includes prior work, schedule a nonoptional Check for a focused lookup or Literature for a survey,
 alongside independent mathematics. Distinguish external prior work from findings in the conversation, project or
 an attached paper. Explore can reason about the mathematics but its recollection does not check the literature.
-Literature surveys sources, quick_review requires a file.
+Literature surveys sources and always uses high effort. Other tasks stay within the investigation's effort level.
+Quick Review requires a file.
 Every prove task MUST include "claim":"target" for the exact target, or "claim":"variant" for a special case.
 For a variant Proof, list the evidence tasks in after AND supply candidate = {statement, relation, reason}:
 a precise, mathematically relevant restricted conjecture to attempt if the evidence does not suggest a better one.
@@ -87,7 +89,8 @@ def _object(properties, required=()):
 CASE_FIELDS = {'statement': _string(3000), 'relation': _string(250), 'reason': _string(400)}
 TASK_SCHEMA = _object({
     'id': _string(2, pattern='^t[1-8]$'), 'mode': dict(type='string', enum=list(MODES)),
-    'effort': dict(type='string', enum=list(EFFORTS)), 'objective': _string(400),
+    'effort': dict(type='string', enum=[*EFFORTS, 'high'], description='High for literature; low or medium for other tasks.'),
+    'objective': _string(400),
     'after': dict(type='array', items=_string(2), maxItems=MAX_TASKS),
     'claim': dict(type='string', enum=['target', 'variant'], description='Required for every prove task.'),
     'candidate': {**_object(CASE_FIELDS, CASE_FIELDS), 'description': 'A standalone fallback proposition for a variant Proof.'},
@@ -166,8 +169,10 @@ def validate_plan(plan, files=(), max_effort='medium', task_limit=MAX_TASKS):
             raise ValueError('Task IDs must be unique and use t1 through t8.')
         ids.add(name)
         mode, effort = task.get('mode'), task.get('effort')
-        if mode not in MODES or effort not in EFFORTS or (effort == 'medium' and max_effort == 'low'):
-            raise ValueError(f'{name} must use an allowed mode and effort up to {max_effort}.')
+        # Earlier saved literature plans may still carry low or medium effort.
+        allowed = (*EFFORTS, 'high') if mode == 'literature' else EFFORTS[:EFFORTS.index(max_effort) + 1]
+        if mode not in MODES or effort not in allowed:
+            raise ValueError(f'{name} must use an allowed mode and effort ({", ".join(allowed)}).')
         if not _bounded(task.get('objective'), 400):
             raise ValueError(f'{name} needs a precise objective in 1–400 characters.')
         deps = task.get('after')
@@ -561,9 +566,11 @@ class Investigation(Orchestrator):
         remaining = {k: None if ceiling[k] is None else max(0, int(ceiling[k] - budget[k])) for k in ceiling}
         prices = {}
         for mode in MODES:
+            levels = ('high',) if mode == 'literature' else EFFORTS[:EFFORTS.index(self.inv['max_effort']) + 1]
             prices[mode] = {e: {k: v for k, v in _worker_limits({'mode': mode, 'effort': e}, self.args).items()
-                                if k in remaining} for e in EFFORTS[:EFFORTS.index(self.inv['max_effort']) + 1]}
-        return (f"\nMaximum effort {self.inv['max_effort']}; at most {self._task_limit()} tasks, two Proof tasks. "
+                                if k in remaining} for e in levels}
+        return (f"\nLiterature effort high, maximum effort for other tasks {self.inv['max_effort']}; "
+                f"at most {self._task_limit()} tasks, two Proof tasks. "
                 f"Remaining launch caps (null means unlimited): {json.dumps(remaining)}. "
                 f"Per-task reservations: {json.dumps(prices)}. "
                 f"Each possible decision reserves {CONTROL_INPUT} input and {CONTROL_OUTPUT} output tokens; "
@@ -575,7 +582,8 @@ class Investigation(Orchestrator):
 
     def _propose(self, plan):
         validate_plan(plan, self.state['files'], self.inv['max_effort'], self._task_limit())
-        tasks = plan['tasks']
+        # Freeze the actual effort before reserving the plan's budget. Saved plans keep their original allowances.
+        tasks = [{**task, 'effort': worker_effort(task['mode'], task['effort'])} for task in plan['tasks']]
         query = self.state['query']
         if (excludes_external_sources(query) and not re.search(r'\b(?:cached|cache|en cache)\b', query, re.I)
                 and any(t['mode'] in ('check', 'literature') for t in tasks)):
@@ -607,7 +615,8 @@ class Investigation(Orchestrator):
             caps[key] += revisions * cost
         self.agent.client.adopt(**caps, commit=False)
         statement = plan['statement'].strip()
-        record = {**self.inv, 'plan': {**plan, 'statement': statement}, 'target': {'statement': statement, 'sha256': _digest(statement)},
+        record = {**self.inv, 'plan': {**plan, 'statement': statement, 'tasks': tasks},
+                  'target': {'statement': statement, 'sha256': _digest(statement)},
                   'ceiling': caps, 'allowances': allowances, 'writing_limit': revisions, 'phase': 'planned',
                   'tasks': {t['id']: {'mode': t['mode'], 'effort': t['effort'], 'status': 'pending'} for t in tasks}}
         record['approval_sha256'] = _approval_digest(record)

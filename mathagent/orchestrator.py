@@ -25,7 +25,7 @@ from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
-from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
+from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, worker_effort
 from .tools import schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4
@@ -60,7 +60,7 @@ search, independent proof review, exploration, a precise reference, a literature
 manuscript review or a write-up will help. The available modes are prove,
 explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
-least effort suitable for the objective: low, medium or high. For literature, use medium for an ordinary survey and high for broad or expressly in-depth coverage.
+least effort suitable for the objective: low, medium or high. Every literature review runs at high effort.
 High is the maximum effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, explore, referee
 and writeup workers the unchanged original user message and conversation, so
@@ -921,6 +921,8 @@ class Orchestrator:
                     raise AgentError('Malformed JSON main-agent tool arguments') from exc
             if not isinstance(arguments, dict):
                 raise AgentError('Main-agent tool arguments must be an object')
+            if function['name'] == 'delegate' and arguments.get('effort') in EFFORTS:
+                arguments = {**arguments, 'effort': worker_effort(arguments.get('mode'), arguments['effort'])}
             function['arguments'] = arguments
             call_id = call.get('id') or f'{self.state["id"]}_{self.state["main_calls"]}_{index}'
             if not isinstance(call_id, str) or call_id in previous_ids:

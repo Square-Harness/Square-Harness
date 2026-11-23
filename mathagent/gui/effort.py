@@ -8,6 +8,7 @@ DS4 presets come from model_limits and are sent to the interface by the server.
 """
 from ..litreview import breadth
 from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget
+from ..router import worker_effort
 
 # Token estimates remain for older integrations. New jobs have no cumulative
 # token ceiling unless one was explicitly supplied at launch or in the form.
@@ -25,6 +26,7 @@ LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high
 
 def level(mode, name, args=None):
     """Legacy workload estimates; detailed reviews allow twice the working time, literature uses its own search and writing budget."""
+    name = worker_effort(mode, name)
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
     value = dict(table.get(name, legacy.get(name, table['medium'])))
@@ -66,6 +68,7 @@ def _proof_ceilings(args, tokens, effort=None):
 
 def limits(mode, level, args):
     """Budget keyword arguments for Hub.start_route; answers in the conversation have none."""
+    level = worker_effort(mode, level)
     ds4 = getattr(args, 'api_profile', None) == 'deepinfra'
     table = DS4_EFFORTS if ds4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if ds4 else LEGACY_EFFORTS

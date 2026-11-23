@@ -334,15 +334,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
   Only retrieved records enter citations. Markdown and BibTeX are rendered from
   the same numbered selection and served by the review and bib research endpoints.
   The Assistant displays the review verbatim in the conversation.
-  `LEVELS` sets the search, reading and section allowances. It supplies the CLI
-  and server's effort presets. Explicit job budgets take precedence. Time shares
+  New jobs use the High workflow profile across the Assistant, direct GUI and
+  CLI entry points. Use the same profile for discovery, screening and reading
+  when an explicit resource limit reduces the job budget. A saved v2 job
+  resumes with its recorded allowances and search breadth. Time shares
   reserve capacity for writing and checking, and deterministic assembly can
   deliver partial results after the deadline. Missing checks, marked cuts and
   unresolved source findings are recorded in the job. The discovery shares begin
   when scoping finishes. Every call has a finite output allowance, the size the
-  controller gave its answer, on a hosted model too (`_wave_cap`): a failed call
-  keeps its reservation, and a 384,000-token one would exhaust a Low review in
-  three failures. A `verify` call that finds an anchored sentence unfaithful
+  controller gave its answer, on a hosted model too (`_wave_cap`). A failed
+  call keeps its reservation. A `verify` call that finds an anchored sentence unfaithful
   only disputes it (`check_work[i]['disputed']`): a second `verify` call that
   sees the objection decides, and a sentence whose re-check never answered stays
   unverified. A `follows` sentence that anchored sentences depend on counts as

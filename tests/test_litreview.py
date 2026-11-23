@@ -185,7 +185,9 @@ class LiteratureReviewTests(unittest.TestCase):
             state['phase'] = 'done'
 
         with patch.object(runner, '_step', side_effect=step):
-            paused = runner.start('Review observation.', max_tokens=5000)
+            paused = runner.start('Review observation.', max_tokens=5000, max_rounds=1)
+            self.assertEqual(runner.state['settings']['max_rounds'], 5)
+            self.assertEqual(runner.state['settings']['max_requests'], 165)
             self.assertEqual(paused['status'], 'paused')
             self.assertEqual(paused['worker_error']['code'], 'provider_rate_limit')
             self.assertEqual([note['text'] for note in runner.state['notes']], ['first'])

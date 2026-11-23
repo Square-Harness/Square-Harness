@@ -12,7 +12,7 @@ from .backends import MeasuredStreamCancellation
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
-from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
+from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, worker_effort
 from .source_tasks import access_check_source, automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
@@ -429,8 +429,9 @@ class ModeOrchestrator(Orchestrator):
                 if startable:
                     instruction += (
                         '\nThese objectives of the current request needed an earlier result and have not started. '
-                        'The results above are now available. Delegate them now with the listed mode and files, at '
-                        f'effort {decision["effort"]}, and put in each request what it needs from those results. '
+                        'The results above are now available. Delegate them now with the listed mode and files. '
+                        f'Use high effort for literature and {decision["effort"]} for other tasks. '
+                        'Put in each request what it needs from those results. '
                         'Copy a python_lab request exactly. If the result an objective needs is missing or failed, '
                         'do not delegate it and say so in the answer.\n' + json.dumps(startable, ensure_ascii=False))
                 elif waiting:
@@ -569,8 +570,9 @@ class ModeOrchestrator(Orchestrator):
         if self.required_mode == 'referee' and getattr(self.agent, 'review_reference', None):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         if self.required_mode is not None:
+            chosen = self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium')
             action = {'mode': self.required_mode, 'request': query, 'files': list(files),
-                      'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'),
+                      'effort': worker_effort(self.required_mode, chosen),
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
         elif compile_job:
             action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'low',

@@ -75,6 +75,8 @@ export function updateCall(before: string, after: string, call: ModeCall | null)
 }
 
 export function callPayload(text: string, call: ModeCall | null, effort?: EffortLevel) {
+  if (!validCall(text, call)) return undefined
+  const level = call.mode === 'literature' ? 'high' : effort
   // DOM selections use UTF-16 offsets; the server indexes Unicode code points.
-  return validCall(text, call) ? { mode: call.mode, start: Array.from(text.slice(0, call.start)).length, ...(effort ? { effort } : {}) } : undefined
+  return { mode: call.mode, start: Array.from(text.slice(0, call.start)).length, ...(level ? { effort: level } : {}) }
 }

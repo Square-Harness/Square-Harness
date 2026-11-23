@@ -207,7 +207,7 @@ def parser():
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Literature/Quick review/Explain, 6 otherwise)')
+    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise). Literature Review always uses High.')
     p.add_argument('--research-tokens', type=int, help='Cumulative generated-token ceiling per report (default: effort-based for DS4, unlimited for local profiles)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /research-resume; saved token and request caps stay unchanged')
@@ -520,7 +520,7 @@ def main():
                 variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
             result = runner.start(query, kind=kind,
-                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('literature', 'quick_review', 'explain') else 3),
+                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('quick_review', 'explain') else 3),
                 max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
                 max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds if args.research_seconds_explicit or

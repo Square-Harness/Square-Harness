@@ -512,6 +512,7 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertFalse(status['online'])
         self.assertTrue(status['online_locked'])
         self.assertEqual(status['defaults']['budget_profile'], DS4_PROFILE)
+        self.assertEqual(set(status['defaults']['literature_presets']), {'high'})
         self.assertEqual(status['defaults']['effort_presets']['medium']['solve_tokens'], 4096)
         self.assertEqual(status['defaults']['effort_presets']['medium']['verify_tokens'], 2048)
         launch = ['--gui', '--api-profile', 'deepinfra']
@@ -525,8 +526,9 @@ class DeepInfraWorkflowTests(GuiCase):
                          'summarize', 'explore', 'check', 'style', 'python_lab'):
                 with self.subTest(mode=mode, effort=name):
                     worker = effort.level(mode, name, defaults)
-                    self.assertEqual(worker['tokens'], passes * 3 * 384_000)
-                    self.assertEqual(worker['minutes'], passes * 3 * 180)
+                    worker_passes = 5 if mode == 'literature' else passes
+                    self.assertEqual(worker['tokens'], worker_passes * 3 * 384_000)
+                    self.assertEqual(worker['minutes'], worker_passes * 3 * 180)
         started = self.ok('POST', '/api/proofs', {
             'goal': 'Prove that x = x for every real x.', 'rounds': 1,
             'tokens': 12000, 'seconds': 120})

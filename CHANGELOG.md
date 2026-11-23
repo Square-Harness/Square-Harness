@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New Literature reviews always use High workflow effort. Previously the
+  Assistant could give the same request a Low search budget. High allows up to
+  500 candidates to be screened and 14 papers in the initial full-text reading
+  plan. Explicit resource limits still apply, and saved reviews resume with
+  their original budgets.
 - Fixed Write-Up stopping before drafting a long attached article because its
   planner had missed the bibliography at the end. On DeepInfra the outline and
   skeleton now read the full source when it fits their calls and the job budget.

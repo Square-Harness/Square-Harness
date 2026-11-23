@@ -1263,8 +1263,6 @@ class Hub:
             raise ValueError('Research kind must be literature or referee')
         budgets = self._research_budgets(**limits)
         if kind == 'literature':
-            if limits.get('rounds') is None and not getattr(self.args, 'research_rounds_explicit', False):
-                budgets['max_rounds'] = 3
             if getattr(self.args, 'research_seconds_explicit', False):
                 budgets['max_seconds'] = min(self.args.research_seconds, budgets['max_seconds'])
             elif limits.get('seconds') is None:
@@ -2021,6 +2019,7 @@ class Hub:
         if item.get('mode') in ('writeup', 'summarize') and item.get('job_id') and item['job_id'] not in downloads:
             downloads.append(item['job_id'])
         store.update_item(root, chat_id, index, mode=mode, request=request, files=files, status='starting', error=None,
+                          **({'effort': 'high'} if mode == 'literature' else {}),
                           previous_downloads=downloads, job_id=None, outputs=None, outcome='')
         try:
             if mode == 'prove':

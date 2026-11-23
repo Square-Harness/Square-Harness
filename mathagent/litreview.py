@@ -42,6 +42,7 @@ from .writeup import record_bibliography
 
 PIPELINE = 'literature-review-v2'
 LEGACY_PIPELINE = 'reading-list-v1'
+HIGH_ROUNDS = 5
 PHASES = ('scope', 'search', 'screen', 'expand', 'rank', 'read', 'outline', 'write', 'check', 'assemble', 'done')
 WORK_KINDS = ('survey', 'foundational', 'result', 'technique', 'neighbouring', 'background', 'off_topic')
 RESULT_KINDS = ('theorem', 'proposition', 'corollary', 'conjecture', 'heuristic', 'open_question', 'claim')
@@ -936,21 +937,22 @@ class ReviewRunner(ResearchRunner):
                 value(kind, text)
         self._emit = quiet
 
-    def start(self, goal, *, kind='literature', source_files=(), **budgets):
+    def start(self, goal, *, kind='literature', source_files=(), max_rounds=HIGH_ROUNDS, **budgets):
         if kind != 'literature':
             raise ValueError('The literature-review pipeline writes literature reviews only')
-        budgets.setdefault('max_rounds', 3)
-        level = breadth(budgets['max_rounds'])
+        if type(max_rounds) is not int or not 1 <= max_rounds <= 100:
+            raise ValueError('Invalid research budget: max_rounds')
+        # Older callers send their selected breadth as a round count. Only resume uses the saved breadth.
+        level = breadth(HIGH_ROUNDS)
         if budgets.get('max_requests') is None:
             budgets['max_requests'] = level['requests']
         if budgets.get('max_seconds') is None:
-            effort = 'low' if budgets['max_rounds'] == 1 else 'medium' if budgets['max_rounds'] <= 3 else 'high'
-            budgets['max_seconds'] = workflow_budget(effort)['seconds'] if is_ds4(self.agent) else level['seconds']
+            budgets['max_seconds'] = workflow_budget('high')['seconds'] if is_ds4(self.agent) else level['seconds']
         # A delegated worker also shares the enclosing Assistant's deadline.
         deadline = getattr(self.agent.client, 'deadline', None)
         if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
             budgets['max_seconds'] = min(budgets['max_seconds'], max(.1, deadline - time.monotonic()))
-        return super().start(goal, kind='literature', source_files=source_files, **budgets)
+        return super().start(goal, kind='literature', source_files=source_files, max_rounds=HIGH_ROUNDS, **budgets)
 
     def resume(self, job_id, *, additional_seconds=0):
         saved = _read_state(_job_directory(self.agent.workspace.root, job_id, self.FOLDER), job_id)

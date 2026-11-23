@@ -5,7 +5,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, type ReviewVariant } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField, Toggle } from '../components/common'
-import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
+import { describeLimits, EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { Glyph } from '../components/Glyph'
@@ -89,7 +89,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
   const [online, setOnline] = useState(true)
-  const [level, setLevel] = useState<EffortLevel>(review ? VARIANT_EFFORT[savedVariant()] : 'medium')
+  const [level, setLevel] = useState<EffortLevel>(review ? VARIANT_EFFORT[savedVariant()] : 'high')
 
   const uploading = useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
@@ -138,7 +138,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const running = capacityFull(snapshot, status)
   const noun = copy.noun
   const fileNamed = /\.(tex|md|txt|pdf)\b/.test(goal)
-  const ready = !review ? !!goal.trim()
+  const ready = !review ? !!d && !!goal.trim()
     : manuscript ? files.length > 0 || fileNamed
       : files.length ? !!(goal.trim() || target.trim()) : !!goal.trim()
   const submit = async (event: FormEvent) => {
@@ -228,7 +228,11 @@ export function ResearchNew({ kind }: { kind: Kind }) {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {d && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
+            {d && (review ? <EffortSlider kind="research" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />
+              : <div className="effort">
+                <span className="field-label">High effort</span>
+                <p className="field-hint effort-summary">{describeLimits('literature', { seconds: minutes * 60, requests, tokens })}.</p>
+              </div>)}
             {review && VARIANT_SCALE[variant] > 1 && <p className="field-hint">A detailed review allows twice this working time for proof checks.</p>}
             {!pasted && (
               <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
@@ -236,7 +240,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
-                <NumberField label={review ? 'Tries (sets passes and depth)' : 'Investigation rounds'} value={rounds} onChange={setRounds} min={1} max={100} />
+                {review && <NumberField label="Tries (sets passes and depth)" value={rounds} onChange={setRounds} min={1} max={100} />}
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />

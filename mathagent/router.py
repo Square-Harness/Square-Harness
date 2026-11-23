@@ -52,8 +52,7 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
 - literature: a written mathematical survey answering the user's question, with its central results,
   hypotheses, competing examples and sources. Preserve the topic and scope the user requested.
-  Treat any proposed theorem or status as a question to investigate. Select low for a brief focused
-  review, medium for an ordinary survey and high for broad or explicitly in-depth coverage.
+  Treat any proposed theorem or status as a question to investigate. Every literature review runs at high effort.
 - referee: a referee review of a whole manuscript file the user names or attaches: an overview of the paper and
   its typos and presentation problems, without checking the proofs.
 - detailed_review: the same review plus a check of the proofs (costs more); only when the user asks for a
@@ -89,6 +88,10 @@ FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a resul
                      'write a literature review or a review of a manuscript, or write up notes in LaTeX?')
 
 
+def worker_effort(mode, effort):
+    """The effort used when creating a worker or a suggestion to start one."""
+    return 'high' if mode == 'literature' else effort
+
 
 def clarify(message, files=(), question='', reason=''):
     """A suggestion that asks one question instead of starting anything."""
@@ -103,7 +106,7 @@ def _task(value, message, files):
         'mode': value['mode'],
         'request': repair_latex(request.strip() or message)[:8000],
         'files': list(dict.fromkeys([*files, *proposed]))[:20],
-        'effort': value.get('effort') if value.get('effort') in EFFORTS else 'medium',
+        'effort': worker_effort(value['mode'], value.get('effort') if value.get('effort') in EFFORTS else 'medium'),
         'reason': repair_latex(str(value.get('reason') or ''))[:400],
         'question': '',
     }

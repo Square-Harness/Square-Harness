@@ -226,7 +226,7 @@ def status(h, body):
                         'api_profile': api_profile,
                         'budget_profile': PROFILE if api_profile == 'deepinfra' else 'default',
                         'effort_presets': effort_presets(args) if api_profile == 'deepinfra' else None,
-                        'literature_presets': {name: effort.limits('literature', name, args) for name in effort.EFFORTS},
+                        'literature_presets': {'high': effort.limits('literature', 'high', args)},
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
                         'proof_call_seconds': getattr(args, 'proof_call_seconds', None),
