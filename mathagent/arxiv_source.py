@@ -5,6 +5,8 @@
 
 Archive members are untrusted data. Only their regular text-source contents
 are decoded; no pathname is created and no TeX include or command is run.
+`assemble_tex` builds a manuscript by text substitution among already decoded
+members (an include names a member, resolved lexically, never a disk path).
 """
 import hashlib
 import io
@@ -308,3 +310,158 @@ def extract_source(body, *, deadline=None, cancelled=lambda: False):
     _check(deadline, cancelled)
     return {'text': text, 'files': files, 'warnings': warnings, 'format': format_name,
             'sha256': _digest(body), 'text_sha256': _digest(text)}
+
+
+_INCLUDE = re.compile(r'\\(input|include|subfile|import|subimport|subinputfrom|subincludefrom|inputfrom|includefrom)'
+                      r'(?![A-Za-z@])(?:\s*\{([^{}]*)\}(?:\s*\{([^{}]*)\})?|(?<=input)\s+([^\s{}\\%]+))')
+_TWO_ARGUMENTS = ('import', 'subimport', 'inputfrom', 'includefrom', 'subinputfrom', 'subincludefrom')
+_DOCUMENTCLASS = re.compile(r'\\document(?:class|style)\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}')
+_INCLUDABLE = TEX_SUFFIXES | {'.bbl', '.sty', '.cls', '.def'}
+MAX_INCLUDE_DEPTH = 12
+MAX_INCLUSIONS = 512
+
+
+def _uncommented(line):
+    match = re.search(r'(?<!\\)%', line)
+    return line[:match.start()] if match else line
+
+
+def main_document(members):
+    """The member that compiles the paper: a TeX file with \\documentclass and \\begin{document}, not a
+    `subfiles`/`standalone` child; ties go to the file no other member includes, then to a usual name.
+    Returns (path, other candidates) or (None, [])."""
+    candidates = []
+    for path, text in members.items():
+        if PurePosixPath(path).suffix.lower() not in TEX_SUFFIXES:
+            continue
+        clean = '\n'.join(_uncommented(line) for line in text.split('\n'))
+        match = _DOCUMENTCLASS.search(clean)
+        if not match or '\\begin{document}' not in clean or match.group(2).strip() in ('subfiles', 'standalone'):
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None, []
+    included = set()
+    for text in members.values():
+        for match in _INCLUDE.finditer('\n'.join(_uncommented(line) for line in text.split('\n'))):
+            name = (match.group(3) or match.group(2) or match.group(4) or '').strip()
+            included.add(PurePosixPath(name).stem)
+    usual = ('main', 'ms', 'paper', 'article', 'manuscript')
+    candidates.sort(key=lambda p: (PurePosixPath(p).stem in included, PurePosixPath(p).stem.lower() not in usual,
+                                   p.count('/'), -len(members[p])))
+    return candidates[0], candidates[1:]
+
+
+def _member_name(directory, name, members):
+    """The archive member an include names, resolved lexically among the members only (never on disk)."""
+    name = name.strip().strip('"')
+    if not name or '\\' in name or ':' in name or name.startswith('/') or '\0' in name:
+        return None
+    parts = []
+    for part in (directory + '/' + name if directory else name).split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+    path = '/'.join(parts)
+    suffix = PurePosixPath(path).suffix.lower()
+    for candidate in ((path,) if suffix in _INCLUDABLE else (path + '.tex', path)):
+        if candidate in members and PurePosixPath(candidate).suffix.lower() in _INCLUDABLE:
+            return candidate
+    return None
+
+
+def assemble_tex(members, main, *, deadline=None, cancelled=lambda: False):
+    """Inline \\input, \\include, \\subfile and \\import of archive members into the main file, in memory.
+
+    `members` maps logical member paths to their decoded text. Nothing is read from disk, extracted,
+    compiled or executed: an include is a text substitution among the given members only. A subfile
+    contributes its document body. Returns the assembled text, a line map of runs
+    ``[assembled_start, member, member_start, count]`` (one-based) that points every assembled line
+    back to its member and line, the members used, and the includes that could not be resolved.
+    """
+    deadline = min(deadline, time.monotonic() + 10) if deadline is not None else time.monotonic() + 10
+    out, origin, used, missing = [], [], [main], []
+    size = [0, 0]  # bytes, inclusions
+
+    def emit(text, member, number):
+        size[0] += len(text.encode('utf-8')) + 1
+        if size[0] > MAX_SOURCE_TEXT_BYTES:
+            raise SourceArchiveError('The assembled TeX document exceeds the 4 MB source-text limit')
+        out.append(text)
+        origin.append((member, number))
+
+    def expand(member, stack, base):
+        _check(deadline, cancelled)
+        lines = members[member].split('\n')
+        start, end = 0, len(lines)
+        if stack:  # a subfile (or a stray complete document): only its body is part of the paper
+            begin = next((i for i, line in enumerate(lines) if '\\begin{document}' in _uncommented(line)), None)
+            if begin is not None:
+                start = begin + 1
+                end = next((i for i in range(start, len(lines)) if '\\end{document}' in _uncommented(lines[i])), len(lines))
+        directory = str(PurePosixPath(member).parent)
+        directory = '' if directory == '.' else directory
+        for index in range(start, end):
+            line(lines[index], member, index + 1, stack + [member], base, directory)
+
+    def line(text, member, number, stack, base, directory):
+        clean = _uncommented(text)
+        match = _INCLUDE.search(clean)
+        if not match:
+            emit(text, member, number)
+            return
+        command = match.group(1)
+        two = command in _TWO_ARGUMENTS
+        # A one-argument include ends at its own brace, never at a following group.
+        end = match.end() if two or match.group(2) is None else match.end(2) + 1
+        if two:
+            folder, name = (match.group(2) or ''), (match.group(3) or '')
+            relative = command.startswith('sub')
+            target_base = ((directory + '/' if relative and directory else '') + folder.strip()).strip('/')
+            searches = [target_base]
+        else:
+            name = match.group(2) if match.group(2) is not None else match.group(4) or ''
+            target_base = base
+            searches = [base, directory] if command != 'subfile' else [directory, base]
+        target = next((t for t in (_member_name(d, name, members) for d in dict.fromkeys(searches)) if t), None)
+        if target is None or target in stack or len(stack) > MAX_INCLUDE_DEPTH or size[1] >= MAX_INCLUSIONS:
+            reason = ('not in the archive' if target is None else 'a circular inclusion' if target in stack
+                      else 'beyond the inclusion limits')
+            note = f'\\{command}{{{name.strip()}}} in {member} (line {number}): {reason}'
+            if note not in missing:
+                missing.append(note)
+            emit(text, member, number)
+            return
+        size[1] += 1
+        before, after = text[:match.start()], text[end:]
+        if before.strip():
+            emit(before, member, number)
+        if target not in used:
+            used.append(target)
+        expand(target, stack, target_base if two else base)
+        if _uncommented(after).strip():
+            line(after, member, number, stack, base, directory)
+
+    base = str(PurePosixPath(main).parent)
+    expand(main, [], '' if base == '.' else base)
+    runs = []
+    for index, (member, number) in enumerate(origin, 1):
+        last = runs[-1] if runs else None
+        if last and last[1] == member and last[2] + last[3] == number and last[0] + last[3] == index:
+            last[3] += 1
+        else:
+            runs.append([index, member, number, 1])
+    return {'text': '\n'.join(out), 'line_map': runs, 'members': used, 'missing': missing}
+
+
+def member_line(line_map, line):
+    """(member, line) of an assembled line, or None outside the map."""
+    for start, member, member_start, count in line_map:
+        if start <= line < start + count:
+            return member, member_start + line - start
+    return None

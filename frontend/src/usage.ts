@@ -5,9 +5,9 @@ import type { Budget } from './api'
 import { count } from './format.ts'
 
 /** An absent cumulative cap is a counter, not an empty progress bar. */
-export function meterDisplay(budget: Budget, unit = '', decimals = 0) {
-  const show = (value: number) => (decimals
-    ? new Intl.NumberFormat(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals }).format(value)
+export function meterDisplay(budget: Budget, unit = '', decimals = 0, format?: (value: number) => string) {
+  const show = (value: number) => format ? format(value) : (decimals
+    ? new Intl.NumberFormat('en-US', { maximumFractionDigits: decimals, minimumFractionDigits: decimals }).format(value)
     : count(value)) + unit
   return {
     used: show(budget.used),

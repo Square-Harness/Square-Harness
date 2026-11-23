@@ -313,7 +313,11 @@ def scoped(entries, links, chats, scope, limit=None, findings=False):
         if findings and _carries_nothing(entry):
             continue
         owners = sorted(membership.get((entry['folder'], entry['job_id']), []))
-        locations = {chats[owner]: owner for owner in owners if owner in chats} or {'workspace': None}
+        locations = {}
+        for owner in owners:  # A deleted conversation (`deleted:<id>`) keeps the scope but has no chat to open.
+            if owner in chats and (locations.get(chats[owner]) is None or not owner.startswith('deleted:')):
+                locations[chats[owner]] = None if owner.startswith('deleted:') else owner
+        locations = locations or {'workspace': None}
         for key in locations:
             counts[key] = counts.get(key, 0) + 1
         if scope not in locations and scope != 'all':

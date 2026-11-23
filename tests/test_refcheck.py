@@ -157,7 +157,7 @@ class CheckTests(unittest.TestCase):
         self.assertFalse((self.root / '.mathagent' / 'research').exists())  # not listed as a literature report
         # The verifier never gets a tool to start another check, nor workspace file tools.
         names = {t['function']['name'] for r in self.client.requests for t in r.get('tools', [])}
-        self.assertEqual(names, {'search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'})
+        self.assertEqual(names, {'search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_paper', 'lookup_identifier'})
         # The controller looked up the record and the quotes before the model's first round.
         self.assertEqual([e['tool'] for e in runner.state['evidence'][:2]], ['search_papers', 'find_quotes'])
 

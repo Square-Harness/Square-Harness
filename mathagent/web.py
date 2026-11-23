@@ -16,7 +16,7 @@ import textwrap
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
-from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, decode_page, line_matches
+from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, decode_page, line_matches, upgrade_url
 from .worker_errors import WorkerInputError
 
 
@@ -56,7 +56,7 @@ def _safe_error(exc):
     code, retryable = 'web_unavailable', False
     if isinstance(exc, LiteratureError) and exc.code == 'source_unavailable':
         code, retryable = 'retrieval_failed', True
-    elif isinstance(exc, LiteratureError) and exc.code in ('unsupported_source_archive', 'source_access_denied'):
+    elif isinstance(exc, LiteratureError) and exc.code in ('unsupported_source_archive', 'source_access_denied', 'document_too_large'):
         code = exc.code
     elif isinstance(exc, LiteratureError) and exc.code in ('workflow_budget', 'request_budget'):
         code = 'web_budget_exhausted'
@@ -482,6 +482,7 @@ class WebTools:
                 'source_format', 'source_files', 'source_files_total', 'source_warnings') if key in metadata}
 
     def open_url(self, url):
+        url = upgrade_url(url)  # an http:// arXiv, DOI or zbMATH link is read over HTTPS
         self.literature._url(url)  # A specified URL never needs a search-provider credential.
         document = self.literature.open_paper(url)
         page_id = 'page-' + _digest(document['canonical_identifier'] + ':' + document['sha256']
@@ -595,7 +596,7 @@ class WebTools:
                 'links': [copy.deepcopy(link) for link in metadata['links']
                           if link['start_line'] <= end and link['end_line'] >= start_line],
                 'headings': [copy.deepcopy(h) for h in metadata['headings'] if start_line <= h['start_line'] <= end],
-                'truncated': end < requested_end, 'next_line': end + 1 if end < len(lines) else None,
+                'truncated': end < requested_end, 'lines_complete': True, 'next_line': end + 1 if end < len(lines) else None,
                 'evidence_kind': 'untrusted_cached_web_extraction'}
             if len(json.dumps(result, ensure_ascii=False).encode()) <= self._cap():
                 return result

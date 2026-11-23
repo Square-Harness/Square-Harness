@@ -11,9 +11,9 @@ export function JobNavigation({ route }: { route: Route }) {
   const origin = route.id && route.from && (!app.chats || app.chats.some((chat) => chat.id === route.from))
     ? route.from : null
   return (
-    <nav className="job-navigation" aria-label="Return to conversation mode">
+    <nav className="job-navigation" aria-label="Return to the conversations">
       <a className="btn btn-quiet back-link" href={href('free', origin)}>
-        <BackIcon size={18} /> {origin ? 'Back to conversation' : 'Back to conversation mode'}
+        <BackIcon size={18} /> {origin ? 'Back to conversation' : 'Back to conversations'}
       </a>
     </nav>
   )

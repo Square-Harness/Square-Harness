@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { beginUpload, dropTarget, useUploadsPending } from '../drop'
 import { useApp } from '../store'
+import { displayPath } from '../format'
 import { IMAGE_SUFFIXES, isImagePath } from './ImageAttachments'
 
 type Toast = { id: number; text: string; error?: boolean }
@@ -63,7 +64,8 @@ export function DropZone() {
             const result = await api.upload(file, target?.project_id)
             saved.push(result.path)
             const original = target?.project_id ? `projects/${target.project_id}/${file.name}` : file.name
-            toast(result.path === original ? `Added ${result.path}` : `Added ${file.name} as ${result.path} (a file with that name exists)`)
+            toast((result.path === original ? `Added ${displayPath(result.path)}` : `Added ${file.name} as ${displayPath(result.path)} (a file with that name exists)`)
+              + (result.note ? `. ${result.note}` : ''))
           } catch (reason) {
             toast(`${file.name}: ${(reason as Error).message}`, true)
           }
@@ -76,7 +78,14 @@ export function DropZone() {
       if (!hasFiles(event)) return
       if (feedbackOpen(event)) return
       event.preventDefault(); depth.current = 0; setOver(false)
-      void upload(Array.from(event.dataTransfer?.files || []))
+      // A dropped folder arrives as an unreadable file entry: say so instead of failing on it.
+      const items = Array.from(event.dataTransfer?.items || [])
+      const folders = new Set(items.flatMap((item) => {
+        const entry = item.kind === 'file' ? item.webkitGetAsEntry?.() : null
+        return entry?.isDirectory ? [entry.name] : []
+      }))
+      for (const name of folders) toast(`${name}: folders cannot be dropped. Drop the files inside it, or a .tar.gz archive of its TeX sources.`, true)
+      void upload(Array.from(event.dataTransfer?.files || []).filter((file) => !folders.has(file.name)))
     }
     const paste = (event: ClipboardEvent) => {
       if (event.defaultPrevented || !dropTarget() || (event.target instanceof Element && event.target.closest('[role="dialog"]'))) return

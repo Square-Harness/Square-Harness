@@ -88,6 +88,16 @@ WHOLE_REQUEST = re.compile(r'\b(?:this|these|the whole|cette|ces|tout(?:e)?\s+(?
                            r'|^\s*(?:please\s+)?(?:explain|explique\w*)(?:\s+(?:this|it|that|ceci|cela|ça|ca))?\s*[.!?]?\s*$', re.I)
 PROOF_REQUEST = re.compile(r'\b(?:proof|proves?|proved|strategy|argument|preuve|démonstration|demonstration|'
                            r'stratégie|strategie|démontr\w*|prouv\w*)\b', re.I)
+# A quick review checks one proof. These requests are about every proof of a document, never one of them.
+ALL_UNITS_REQUEST = re.compile(r"\b(?:all|every|each|whole|entire|tou(?:te)?s\s+les|chaque)\b"
+                               r"(?:\s+(?:the|of|its|their|my|these|those|des|ses|mes))*\s+"
+                               r"(?:proofs|results|lemmas|theorems|propositions|statements|claims|arguments|proof|"
+                               r"preuves|démonstrations|résultats|lemmes|théorèmes|preuve|démonstration)\b", re.I)
+WHOLE_DOCUMENT_REQUEST = re.compile(r"\b(?:whole|entire|complete|full|tout(?:e)?\s+(?:la|le|ce|cette))\s+"
+                                    r"(?:note|notes|paper|file|document|manuscript|article|text|draft|preprint)\b|"
+                                    r"\b(?:is|are|check|verify|review|proofread|read|go\s+through|look\s+at)\s+(?:over\s+)?"
+                                    r"(?:this|the|my|these|that|attached)\s+(?:note|notes|paper|file|document|manuscript|"
+                                    r"article|preprint|draft|text)\b(?!['’]s)", re.I)
 WHOLE_TEXT_LINES = 200  # a text this short ("this page", "these notes") is explained whole
 KIND_LABEL = {'invalid_inference': 'Invalid inference', 'missing_justification': 'Missing justification',
               'uncertainty': 'Uncertain step'}
@@ -196,6 +206,52 @@ def _lines_text(a, b):
     return f'line {a}' if a == b else f'lines {a}–{b}'
 
 
+def _contents(mapping):
+    """What a manuscript contains, for a message that asks the user to name a part of it."""
+    sections = [(f'Appendix {x["number"]}' if x.get('appendix') and str(x['number']).isalpha() else str(x['number']))
+                + (f' ({x["title"]})' if x.get('title') and x['title'] != x['number'] else '') for x in mapping['sections'][:15]]
+    results = [u['name'] for u in mapping['units'][:15]]
+    parts = ([('sections ' if len(sections) > 1 else 'section ') + ', '.join(sections)] if sections else []) + \
+            ([', '.join(results) + (f' and {len(mapping["units"]) - 15} more' if len(mapping['units']) > 15 else '')] if results else [])
+    return '; '.join(parts) or 'no recognised sections or statements'
+
+
+# Text in a manuscript addressed to its reviewer or to an AI (a prompt injection). Conservative: a strong phrase,
+# or an address to a reviewer/model together with an instruction about the review's outcome.
+_INJECTION_STRONG = re.compile(
+    r'\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:of\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|earlier|'
+    r'preceding|other|system)\s+(?:instructions?|prompts?|directions|guidelines|rules)\b|\b(?:reveal|print|show|repeat)\s+'
+    r'(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|instructions)\b|\bdo\s+not\s+(?:mention|highlight|report|point\s+out)\s+'
+    r'(?:any\s+)?(?:weakness|negative|flaw|error|issue|problem)s?\b|\bgive\s+(?:this\s+paper\s+|it\s+)?an?\s+'
+    r'(?:positive|favou?rable|glowing)\s+review\b', re.I)
+_INJECTION_ADDRESS = re.compile(r'(?i:\b(?:reviewers?|referees?|language\s+models?|chatbots?)\b)|'
+                                r'\b(?:AI|LLMs?|ChatGPT|GPT-?\d*|Claude|Gemini)\b')
+_INJECTION_ORDER = re.compile(r'\b(?:rate|score|recommend|accept|praise|approve)\w*\b.{0,60}\b(?:excellent|accept\w*|'
+                              r'positive(?:ly)?|favou?rabl[ey]|without\s+(?:any\s+)?(?:issues?|changes?|revisions?)|'
+                              r'no\s+(?:issues?|weakness\w*|errors?))\b', re.I)
+_INJECTION_NOTED = re.compile(r'(?i)\b(?:prompt[- ]injection|embedded\s+instructions?|instructions?\s+(?:addressed|directed|aimed)\s+'
+                              r'(?:at|to)\s+(?:the\s+)?(?:reviewer|referee|AI|model|language model)|addressed\s+to\s+(?:the\s+)?'
+                              r'(?:reviewer|referee|AI)s?\b[^.]{0,40}\binstruct)')
+
+
+def reviewer_instructions(content, tex=False):
+    """Lines of a manuscript that instruct its reviewer or an AI, as [{'line', 'text', 'comment'}] (data, never obeyed)."""
+    lines = content.splitlines()
+    found = []
+    for number, line in enumerate(lines, 1):
+        window = ' '.join(lines[max(0, number - 2):number + 1])
+        strong = _INJECTION_STRONG.search(line)
+        ordered = _INJECTION_ORDER.search(line) and _INJECTION_ADDRESS.search(window)
+        if not (strong or ordered):
+            continue
+        visible = manuscript._strip_comment(line) if tex else line
+        comment = not (_INJECTION_STRONG.search(visible) or _INJECTION_ORDER.search(visible))
+        found.append({'line': number, 'text': _clip(' '.join(line.split()), 240), 'comment': comment})
+        if len(found) >= 6:
+            break
+    return found
+
+
 def _clip(text, limit):
     """Text shortened to whole sentences (never cut inside a formula), marked [...] when shortened."""
     text = str(text or '').strip()
@@ -299,7 +355,7 @@ class ReviewBase(ResearchRunner):
         self._lines_cache = {}
         self._phase_limit = None
 
-    def resume(self, job_id, *, additional_seconds=0):
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
         self._restore_literature()
@@ -324,7 +380,7 @@ class ReviewBase(ResearchRunner):
             self.state.update(status='paused', phase=phase, active_checkpoint_wall=None)
             self._save()
         self._reopen_rechecks()
-        return super().resume(job_id, additional_seconds=additional_seconds)
+        return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
 
     def _reopen_rechecks(self):
         """A job saved by an older version may group alleged issues differently: its re-checks are kept under
@@ -742,16 +798,19 @@ class ReviewBase(ResearchRunner):
     def _map(self):
         if self.state.get('conversation_sources'):
             self._select_conversation_source()
-        elif len(self.state['sources']) > 1:
-            self._select_pinned_source()
+        else:
+            self._assemble_archives()
+            if len(self.state['sources']) > 1:
+                self._select_pinned_source()
         source = self.state['sources'][0]
-        if source.get('source_archive'):
+        if source.get('source_archive') and source.get('line_map') is None:
             self.state['source_incomplete'] = True
-            self._warn('Archive members were not assembled into a TeX document; this review concerns the selected member and cannot confirm cross-file numbering or omitted dependencies.')
+            self._warn('Archive members were not assembled into a TeX document (no file with \\documentclass was found); '
+                       'this review concerns the selected member and cannot confirm cross-file numbering or omitted dependencies.')
         mapping = manuscript.build(source['content'], source['path'])
         if source['path'].lower().endswith(('.tex', '.ltx', '.latex')):
             inputs = re.findall(r'\\(?:input|include|subfile)\s*\{([^}]+)\}', source['content'])
-            if inputs:
+            if inputs and source.get('line_map') is None:  # an assembled archive reports its unresolved includes itself
                 mapping['warnings'].append('External TeX inputs were not expanded: ' + ', '.join(dict.fromkeys(inputs)) + '. Their proofs are outside this review.')
                 self.state['source_incomplete'] = True
             bibliography_sources = [s for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() in ('.bib', '.bbl')]
@@ -781,11 +840,74 @@ class ReviewBase(ResearchRunner):
                 mapping['warnings'].append('No bibliography entries were loaded; external BibTeX/biblatex references cannot be checked.')
         mapping.pop('labels', None)
         self.state['map'] = mapping
+        self.state['injections'] = reviewer_instructions(source['content'], source['path'].lower().endswith(('.tex', '.ltx', '.latex')))
         self.state['whole'] = self._whole_fits()
         for warning in mapping['warnings'][:6]:
             self._warn('Manuscript map: ' + warning)
         self.emit('notice', f'Mapped {source["path"]}: {len(mapping["units"])} statements, '
                             f'{len(manuscript.checkable(mapping))} with proofs')
+
+    def _assemble_archives(self):
+        """Assemble each pinned TeX archive into its main document: \\input, \\include, \\subfile and \\import of
+        archive members are inlined as text, in memory (arxiv_source.assemble_tex). The assembled source replaces
+        the members it contains and keeps a line map back to them; nothing is read from disk or executed."""
+        from .arxiv_source import SourceArchiveError, assemble_tex, main_document
+        sources = self.state['sources']
+        for archive in dict.fromkeys(s['source_archive'] for s in sources if s.get('source_archive')):
+            group = [s for s in sources if s.get('source_archive') == archive]
+            if any(s.get('line_map') is not None for s in group):
+                continue  # assembled before this job was paused
+            members = {s['path'].rpartition('::')[2]: s['content'] for s in group}
+            main, _ = main_document(members)
+            if main is None:
+                continue
+            try:
+                assembled = assemble_tex(members, main)
+            except SourceArchiveError as exc:
+                self._warn(f'{archive}: the TeX files could not be assembled ({exc}); only {main} is reviewed as the manuscript.')
+                continue
+            by_member = {s['path'].rpartition('::')[2]: s for s in group}
+            text = assembled['text']
+            entry = dict(by_member[main], content=text, sha256=hashlib.sha256(text.encode()).hexdigest(),
+                         line_map=assembled['line_map'],
+                         assembled_from=[{'path': m, 'member_sha256': by_member[m].get('member_sha256'),
+                                          'sha256': by_member[m]['sha256']} for m in assembled['members']])
+            inlined = {id(by_member[m]) for m in assembled['members']}
+            sources[:] = [entry if s is by_member[main] else s for s in sources if s is by_member[main] or id(s) not in inlined]
+            self._lines_cache.pop(entry['id'], None)
+            stale = [w for w in self.state['warnings'] if w.startswith(archive + ': ') and 'not expanded' in w]
+            self.state['warnings'] = [w for w in self.state['warnings'] if w not in stale]
+            files = ', '.join(assembled['members'])
+            self._warn(f'{archive}: the manuscript {main} was assembled from {len(assembled["members"])} archive file(s) '
+                       f'({files}) by inlining \\input/\\include as text; nothing was compiled or executed, and macro '
+                       'definitions were not expanded. Locations name the archive file and its line.')
+            if assembled['missing']:
+                self.state['source_incomplete'] = True
+                self._warn(f'{archive}: these inclusions could not be resolved, so their content is outside this review: '
+                           + '; '.join(assembled['missing'][:8]) + ('; …' if len(assembled['missing']) > 8 else '') + '.')
+
+    def _member_place(self, source_id, a, b):
+        """'sections/results.tex, lines 12–15' for lines of an assembled archive; None otherwise."""
+        from .arxiv_source import member_line
+        line_map = self._source(source_id).get('line_map')
+        if not line_map:
+            return None
+        first, last = member_line(line_map, a), member_line(line_map, b)
+        if not first or not last:
+            return None
+        if first[0] == last[0] and first[1] <= last[1]:
+            return f'{first[0]}, {_lines_text(first[1], last[1])}'
+        return f'{first[0]} line {first[1]} to {last[0]} line {last[1]}'
+
+    def _assembly_note(self, source_id):
+        """How the numbered lines of an assembled archive map to its files (for appendices)."""
+        line_map = self._source(source_id).get('line_map')
+        if not line_map:
+            return []
+        runs = [_lines_text(start, start + count - 1) + f' = {member} ' + _lines_text(first, first + count - 1)
+                for start, member, first, count in line_map[:40]]
+        return ['', 'Line numbers of the assembled manuscript (the numbered excerpts, L…) map to the archive files as '
+                'follows: ' + '; '.join(runs) + ('; …' if len(line_map) > 40 else '') + '.']
 
     def _whole_fits(self):
         """Whether every check and the reading see the whole manuscript: a pinned file that fits a large context.
@@ -807,20 +929,47 @@ class ReviewBase(ResearchRunner):
 
     def _select_pinned_source(self):
         sources = self.state['sources']
-        manuscripts = [s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')]
+        suffixes = ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')
+        manuscripts = [s for s in sources if Path(s['path']).suffix.lower() in suffixes]
         selectable = manuscripts if self.VARIANT in MANUSCRIPT_VARIANTS and manuscripts else sources
         request = '\n'.join((self.state.get('goal', ''), self.state.get('target', ''),
                               (self.state.get('reference_context') or {}).get('query', '')))
         def named(path):
             return bool(re.search(r'(?<![\w./-])' + re.escape(path) + r'(?![\w/-]|\.[\w-])', request))
+
+        def documents(candidates):
+            """One candidate per document: an assembled archive counts once, as its assembled manuscript."""
+            out, archives = [], set()
+            for source in candidates:
+                archive = source.get('source_archive')
+                assembled = next((m for m in sources if archive and m.get('source_archive') == archive
+                                  and m.get('line_map') is not None), None)
+                if assembled is not None:
+                    if archive in archives:
+                        continue
+                    archives.add(archive)
+                    source = assembled
+                out.append(source)
+            return out
         matches = [source for source in selectable if named(source['path'])]
         if not matches:
             matches = [source for source in selectable if named(Path(source['path']).name)]
+        if not matches:
+            archives = documents([source for source in selectable if source.get('source_archive')
+                                  and (named(source['source_archive']) or named(Path(source['source_archive']).name))])
+            matches = archives if len(archives) == 1 else []
         if not matches and self.VARIANT in ('quick', 'explain'):
-            matches = [source for source in sources if manuscript.resolve(
-                manuscript.build(source['content'], source['path']), self.state.get('target') or request)]
+            matches = documents([source for source in sources if manuscript.resolve(
+                manuscript.build(source['content'], source['path']), self.state.get('target') or request)])
         if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
-            matches = [next((s for s in sources if Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')), sources[0])]
+            # Several manuscripts and none named: ask, never review whichever happens to come first.
+            matches = documents(manuscripts) or [sources[0]]
+            if len(matches) > 1:
+                names = [Path(source.get('source_archive') or source['path']).name if source.get('line_map') is not None
+                         else source['path'] for source in matches]
+                raise WorkerInputError('Which manuscript should I review: ' + ', '.join(names[:-1]) + ' or ' + names[-1] +
+                                       '? Name it in your message (the other pinned files can stay attached).',
+                                       code='ambiguous_source', scope='input', details={'sources': names})
         if len(matches) != 1:
             raise WorkerInputError('Which source should I use: ' + ', '.join(source['path'] for source in sources) + '?',
                 code='ambiguous_source', scope='input', details={'sources': [source['path'] for source in sources]})
@@ -858,35 +1007,66 @@ class ReviewBase(ResearchRunner):
         self.state['sources'] = [chosen] + [source for source in sources if source is not chosen]
 
     def _pick_unit(self):
-        """Quick and explain: the one result to work on, from the target, the request or the text itself."""
+        """Quick and explain: the one result to work on, from the target, the request or the text itself.
+
+        A quick review asked about a whole document with several proofs does not pick one of them: it says that it
+        checks one result and lists them, so a one-proof check never reads as a verdict on the document."""
         mapping, source = self.state['map'], self.state['sources'][0]
         target = self.state.get('target') or ''
+        goal = self.state['goal']
+        quick = self.VARIANT == 'quick'
+        every = quick and not target and bool(ALL_UNITS_REQUEST.search(goal))
         unit = manuscript.resolve(mapping, target) if target else None
-        if unit is None and not self._is_pasted():
-            unit = manuscript.resolve(mapping, self.state['goal'])
+        if unit is None and not self._is_pasted() and not every:
+            unit = manuscript.resolve(mapping, goal)
+        candidates = manuscript.checkable(mapping) if quick else mapping['units']
         if unit is None:
-            candidates = manuscript.checkable(mapping) if self.VARIANT == 'quick' else mapping['units']
             if len(candidates) == 1:
                 unit = candidates[0]
             elif self._is_pasted() and candidates:
                 unit = max(candidates, key=manuscript.proof_length)
-        if unit is None and not self._is_pasted() and mapping['units']:
+        if unit is None and not self._is_pasted() and mapping['units'] and (candidates or not quick):
+            whole = quick and len(candidates) > 1 and not self.state.get('conversation_sources')
+            # The user's own message counts too: a delegated objective may reword "is this note correct?".
+            asked = goal + '\n' + str((self.state.get('reference_context') or {}).get('query') or '')
+            if whole and (ALL_UNITS_REQUEST.search(asked) or WHOLE_DOCUMENT_REQUEST.search(asked)):
+                self._one_result_only(candidates, source)
             unit = self._ask_unit(mapping)
+            if unit is None and whole:
+                self._one_result_only(candidates, source)
         if unit is not None:
             chosen = {k: unit[k] for k in ('id', 'name', 'statement', 'proofs', 'refs', 'statement_refs', 'equations', 'title')}
         elif self._is_pasted() or self.state.get('conversation_sources'):
             chosen = self._split_pasted()
+        elif quick and not candidates:
+            self._nothing_to_check(mapping)
         else:
-            names = ', '.join(u['name'] for u in mapping['units'][:12])
-            raise WorkerInputError('Say which result to ' + ('check' if self.VARIANT == 'quick' else 'explain') +
-                                   f', for example "Lemma 3.2"; {source["path"]} contains: {names or "no recognised statements"}.',
+            raise WorkerInputError('Say which result to ' + ('check' if quick else 'explain') +
+                                   f', for example "Lemma 3.2"; {source["path"]} contains: {_contents(mapping)}.',
                                    code='target_not_found', details={'target': target})
         chosen['source'] = source['id']
-        if self.VARIANT == 'quick' and not chosen['proofs']:
-            raise WorkerInputError('No proof was found to check. Paste the statement and its proof, or use Prove to look for a proof.',
-                                   code='no_proof')
+        if quick and not chosen['proofs']:
+            self._nothing_to_check(mapping, None if unit is None else chosen['name'])
         self.state['unit'] = chosen
-        self.emit('notice', ('Checking ' if self.VARIANT == 'quick' else 'Explaining ') + chosen['name'])
+        self.emit('notice', ('Checking ' if quick else 'Explaining ') + chosen['name'])
+
+    def _nothing_to_check(self, mapping, name=None):
+        """Quick review without a proof: it says so and judges nothing (no verdict on a statement or formula)."""
+        stated = [u['name'] for u in mapping['units'] if not u['proofs']][:8] if name is None else [name]
+        raise WorkerInputError(
+            'Nothing to check: no proof was found' + (f' (the source states {", ".join(stated)} without proof)' if stated else '') +
+            '. Quick review checks proofs; it did not judge whether the statements or formulas themselves are true. '
+            'Paste the statement with its proof, use @sanity_check to try to falsify a formula numerically, '
+            'or @prove to look for a proof.', code='no_proof', details={'checked': False})
+
+    def _one_result_only(self, candidates, source):
+        names = [u['name'] for u in candidates]
+        listed = ', '.join(names[:15]) + (f' and {len(names) - 15} more' if len(names) > 15 else '')
+        raise WorkerInputError(
+            f'Quick review checks one proof at a time, and {source["path"]} contains {len(names)} proofs ({listed}). '
+            f'Nothing was checked. Say which result to check (for example "{names[0]}"), or use @detailed_review '
+            'to check the proofs of the whole document.',
+            code='one_result_only', details={'source': source['path'], 'proofs': names, 'suggested_mode': 'detailed_review'})
 
     def _is_pasted(self):
         return self.state['sources'][0]['id'] == 'P1'
@@ -895,7 +1075,8 @@ class ReviewBase(ResearchRunner):
         schema = {'type': 'object', 'additionalProperties': False, 'required': ['unit'],
                   'properties': {'unit': {'type': 'string', 'maxLength': 8}}}
         prompt = ('Which statement of the manuscript does this request concern? Answer with its id (such as U3), '
-                  'or an empty string if none.\n\nREQUEST:\n' + self.state['goal'] + '\n\nSTATEMENTS:\n' + manuscript.outline(mapping))
+                  'or an empty string if it names none, or concerns the whole manuscript or several statements.'
+                  '\n\nREQUEST:\n' + self.state['goal'] + '\n\nSTATEMENTS:\n' + manuscript.outline(mapping))
         result = self._ask('pick', prompt, cap=200, schema=schema, key='pick')
         uid = str((result['value'] or {}).get('unit') or '').strip()
         return manuscript.unit(mapping, uid)
@@ -1161,7 +1342,7 @@ class ReviewBase(ResearchRunner):
             kind = item.get('kind') if item.get('kind') in RANK else 'uncertainty'
             issue = {'start_line': _int(item.get('start_line')), 'end_line': _int(item.get('end_line')),
                      'quote': str(item.get('quote') or '')[:200], 'kind': kind,
-                     'evidence': str(item.get('evidence') or '')[:1500], 'suggestion': str(item.get('suggestion') or '')[:800]}
+                     'evidence': _clip(item.get('evidence'), 2500), 'suggestion': _clip(item.get('suggestion'), 1500)}
             if journal:
                 issue['severity'] = 'major' if item.get('severity') == 'major' else 'minor'
             if issue['end_line'] < issue['start_line']:
@@ -1174,7 +1355,7 @@ class ReviewBase(ResearchRunner):
             verdict = 'issues_found' if concrete else 'uncertain'
         elif verdict == 'issues_found' and not concrete:
             verdict = 'uncertain'
-        parsed = {'usable': True, 'verdict': verdict, 'explanation': str(value.get('explanation') or '')[:3000], 'issues': issues,
+        parsed = {'usable': True, 'verdict': verdict, 'explanation': _clip(value.get('explanation'), 3000), 'issues': issues,
                   'claimed': value.get('verdict') == 'issues_found' and not concrete}
         if journal:
             parsed['external'] = [{'key': str(e.get('key') or '')[:40], 'place': str(e.get('place') or '')[:80],
@@ -1276,7 +1457,7 @@ class ReviewBase(ResearchRunner):
             value = result['value'] or {}
             assessment = value.get('assessment') if value.get('assessment') in ('valid', 'rejected', 'undecided') else 'unavailable'
             entry = {'assessment': assessment, 'kind': value.get('kind') if value.get('kind') in RANK else cluster['kind'],
-                     'argument': str(value.get('argument') or '')[:2000], 'suggestion': str(value.get('suggestion') or '')[:800]}
+                     'argument': _clip(value.get('argument'), 3000), 'suggestion': _clip(value.get('suggestion'), 1500)}
             if value.get('severity') in ('major', 'minor'):
                 entry['severity'] = value['severity']
             with self._mutex:
@@ -1329,7 +1510,7 @@ class ReviewBase(ResearchRunner):
 
     def _where(self, source_id, a, b, unit=None):
         """A location a mathematician can follow: the part of the result, the lines, the page of a PDF."""
-        text = _lines_text(a, b)
+        text = self._member_place(source_id, a, b) or _lines_text(a, b)
         pages = self._source(source_id).get('pages') or []
         page = sum(1 for start in pages if start <= a)
         if page:
@@ -1487,6 +1668,12 @@ class QuickReviewRunner(ReviewBase):
             return False
         return self._checks_complete(unit['id'])
 
+    def _result(self):
+        result = super()._result()
+        if self.state.get('coverage'):
+            result['coverage'] = dict(self.state['coverage'])
+        return result
+
     def _render(self):
         s = self.state
         unit = s.get('unit')
@@ -1501,7 +1688,7 @@ class QuickReviewRunner(ReviewBase):
         coverage = self._check_coverage(unit['id'])
         lenses = ', '.join(coverage['completed_lenses'])
         count = coverage['full_passes']
-        where = ', '.join(_lines_text(a, b) for a, b in unit['proofs'])
+        where = ', '.join(self._member_place(sid, a, b) or _lines_text(a, b) for a, b in unit['proofs'])
         headline = {
             'no_issue_found': (f'∎ **No issue found** in the {coverage["parts"]} proof parts checked with {count} review strategies ({lenses}).'
                                if coverage['segmented'] else
@@ -1515,13 +1702,29 @@ class QuickReviewRunner(ReviewBase):
         if verdict == 'no_issue_found' and any(c['status'] == 'rejected' for c in clusters):
             headline = ('∎ **No issue stands**: the objections the passes raised were rejected by an independent '
                         're-check (see below; judge them yourself).')
+        shown = self._source(sid)
+        # An assembled archive is named by the archive; each location names its member file.
+        source = ('the pasted text' if sid == 'P1' else
+                  f'`{shown["source_archive"] if shown.get("line_map") else shown["path"]}`')
+        others = [u['name'] for u in manuscript.checkable(s.get('map') or {'units': []}) if u['id'] != unit['id']]
+        unchecked = (f'The {len(others)} other proof{"s" if len(others) != 1 else ""} in {source.strip("`")} '
+                     f'{"were" if len(others) != 1 else "was"} not checked: {", ".join(others[:20])}'
+                     f'{" and more" if len(others) > 20 else ""}.')
+        s['coverage'] = {'checked': [unit['name']], 'unchecked': others,
+                         'source': 'the pasted text' if sid == 'P1' else self._source(sid)['path'],
+                         'summary': (f'Only {unit["name"]} was checked. {unchecked} This verdict concerns {unit["name"]} '
+                                     'alone, not the whole document.') if others else
+                                    f'{unit["name"]} is the only proof found in the source.'}
+        if others:
+            headline += f' *This concerns {unit["name"]} only: {len(others)} other proof{"s" if len(others) != 1 else ""} in {source} {"were" if len(others) != 1 else "was"} not checked.*'
         self._headline = headline
-        source = 'the pasted text' if sid == 'P1' else f'`{self._source(sid)["path"]}`'
         passes = (f' with {count} completed review strateg{"y" if count == 1 else "ies"} ({lenses})' if coverage['segmented'] else
                   f' by {count} independent pass{"es" if count != 1 else ""} ({lenses})') if count else ''
         label = 'Proof checked' if coverage['complete'] else 'Proof selected'
         body += [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '',
                  f'{label}: {where} of {source}{passes}. The proof was not rewritten.']
+        if others:
+            body += ['', f'**Not checked:** {unchecked} Ask for each one, or use a detailed review for the whole document.']
         if coverage['segmented'] or not coverage['complete']:
             body += ['', f'Coverage: {coverage["usable_segments"]} of {coverage["segments"]} planned proof-part checks gave usable answers; '
                      f'{count} of {coverage["passes"]} review strategies completed all their parts.']
@@ -1569,7 +1772,7 @@ class QuickReviewRunner(ReviewBase):
         ranges = ([unit['statement']] if unit.get('statement') else []) + unit['proofs']
         for a, b in ranges:
             appendix += [f'L{n}: {lines[n - 1]}' for n in range(a, min(b, a + 400) + 1)]
-        appendix += ['```']
+        appendix += ['```'] + self._assembly_note(sid)
         failed = [s['checks'][key] for key in sorted(s['checks']) if not s['checks'][key].get('usable')]
         if failed:
             appendix += ['', f'{len(failed)} proof-part check(s) gave no usable answer: ' + '; '.join(c.get('error', '') for c in failed)]
@@ -1596,7 +1799,10 @@ class ExplainRunner(ReviewBase):
         if unit == 'locate':
             unit = self._locate(request)
             if unit is None:
-                raise WorkerInputError('Say which result, page or section to explain, for example "Lemma 3.2" or "page 4".',
+                source = self.state['sources'][0]
+                raise WorkerInputError(f'The requested part was not found in {source["path"]}, which contains: '
+                                       f'{_contents(self.state["map"])}. Say which result, page or section to explain, '
+                                       'for example "Lemma 3.2" or "page 4".',
                                        code='target_not_found', details={'target': self.state.get('target') or ''})
         if unit is None:
             try:
@@ -1643,6 +1849,12 @@ class ExplainRunner(ReviewBase):
             label = (section.group(1) or section.group(2)).upper()
             known = next((s for s in mapping['sections'] if str(s['number']).upper() == label), None)
             if known is None:
+                top = label.split('.')[0]
+                if mapping['format'] == 'tex' and not any(str(s['number']).upper() == top for s in mapping['sections']):
+                    # TeX sections are numbered reliably: an absent one is reported without a model call.
+                    raise WorkerInputError(f'{source["path"]} has no {"Appendix" if top.isalpha() else "Section"} {top}; '
+                                           f'it contains: {_contents(mapping)}. Say which part to explain.',
+                                           code='target_not_found', details={'target': label})
                 return 'locate'
             ends = [s['line'] - 1 for s in mapping['sections'] if s['line'] > known['line']]
             ends += [n - 1 for n in range(known['line'] + 1, len(lines) + 1)
@@ -2080,8 +2292,10 @@ class JournalRunner(ReviewBase):
             if not self.state['sources']:
                 raise WorkerInputError('Pin the manuscript to review.', code='invalid_worker_input')
             self._map()  # chooses the manuscript among the pinned files
-            others = [s['path'] for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() not in ('.bib', '.bbl')]
-            if others:  # a bibliography file is read into the references (see _map)
+            # A bibliography file is read into the references (see _map); an archive's style files hold macros.
+            others = [s['path'] for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() not in ('.bib', '.bbl')
+                      and not (s.get('source_archive') and Path(s['path']).suffix.lower() in ('.sty', '.cls', '.bst', '.def'))]
+            if others:
                 self._warn(f'Only {self.state["sources"][0]["path"]} is reviewed as the manuscript; '
                            f'{", ".join(others)} {"was" if len(others) == 1 else "were"} not read.')
             if not manuscript.checkable(self.state['map']):
@@ -2170,8 +2384,8 @@ class JournalRunner(ReviewBase):
         queries = [q for q in queries if q not in copied]
         if not value:
             self._warn('The scoping answer was not usable; the main results were chosen from the manuscript structure.')
-        scope = {'overview': str(value.get('overview') or '')[:3500], 'field': str(value.get('field') or '')[:200],
-                 'contribution': str(value.get('contribution') or '')[:1500],
+        scope = {'overview': _clip(value.get('overview'), 3500), 'field': str(value.get('field') or '')[:200],
+                 'contribution': _clip(value.get('contribution'), 1500),
                  'main': main, 'notation': notation, 'queries': queries,
                  'closest': [str(k)[:40] for k in value.get('closest') or []][:6]}
         with self._mutex:
@@ -2315,10 +2529,10 @@ class JournalRunner(ReviewBase):
                 continue
             row = {'start_line': _int(item.get('start_line')), 'end_line': _int(item.get('end_line')),
                    'quote': str(item.get('quote') or '')[:200], 'source': str(item.get('source') or '')[:200],
-                   'used': str(item.get('used') or '')[:800], 'known': str(item.get('known') or '')[:1200],
+                   'used': _clip(item.get('used'), 1200), 'known': _clip(item.get('known'), 1500),
                    'assessment': item.get('assessment') if item.get('assessment') in ('consistent', 'misapplied', 'misstated') else 'unknown',
                    'severity': 'major' if item.get('severity') == 'major' else 'minor',
-                   'explanation': str(item.get('explanation') or '')[:1500]}
+                   'explanation': _clip(item.get('explanation'), 2000)}
             row['end_line'] = max(row['end_line'], row['start_line'])
             if re.search(r"(?i)\b(?:this|the) (?:paper|manuscript)\b|manuscript's own|\bour\b", row['source']):
                 continue  # a result of the paper itself, not a cited one
@@ -2331,7 +2545,7 @@ class JournalRunner(ReviewBase):
                 if row['explanation']:
                     evidence += ' ' + row['explanation']
                 issue = {'start_line': row['start_line'], 'end_line': row['end_line'], 'quote': row['quote'],
-                         'kind': 'invalid_inference', 'severity': row['severity'], 'evidence': evidence[:2500],
+                         'kind': 'invalid_inference', 'severity': row['severity'], 'evidence': _clip(evidence, 4000),
                          'suggestion': '', 'source': row['source']}
                 issue['located'] = self._locate(issue, sid, set(range(1, total + 1)))
                 row['located'], row['issue_line'] = issue['located'], issue['start_line']
@@ -2440,6 +2654,7 @@ class JournalRunner(ReviewBase):
                         'Check that this place of this work states this result, with these hypotheses.')
             parent = self.literature
             literature = LiteratureTools(self.agent.workspace.root, online=True, timeout=getattr(parent, 'timeout', 15))
+            literature.cancelled = getattr(parent, 'cancelled', literature.cancelled)
             # Lookups run side by side: each sets the timeout of its own view of the shared client.
             inner = Agent(_OwnTimeout(self.agent.client), Workspace(self.agent.workspace.root, literature=literature, read_types=()),
                           self.agent.model, self.agent.ctx, self.agent.predict, False, 'check', seed=self.agent.seed)
@@ -2537,7 +2752,7 @@ class JournalRunner(ReviewBase):
         related = [{'n': _int(r.get('n')), 'relation': str(r.get('relation') or '')[:300]} for r in value.get('related') or []
                    if isinstance(r, dict) and 1 <= _int(r.get('n')) <= len(results)]
         with self._mutex:
-            self.state['novelty'] = {'assessment': str(value.get('assessment') or '')[:2000], 'related': related}
+            self.state['novelty'] = {'assessment': _clip(value.get('assessment'), 2500), 'related': related}
             self._save()
 
     # -- reading ------------------------------------------------------------------------------------
@@ -2861,7 +3076,7 @@ class JournalRunner(ReviewBase):
             # A label the controller did not give (the model renumbered) becomes a plain reference.
             return re.sub(r'\b(Major|Minor)(\s+comments?)?\s+(\d+)\b',
                           lambda m: m.group(0) if f'{m.group(1)} {m.group(3)}' in labels else f'a {m.group(1).lower()} comment', text)
-        self.state['write'] = {k: labelled(str(value.get(k) or '')[:4000]) for k in P.WRITE_SCHEMA['properties']}
+        self.state['write'] = {k: labelled(_clip(value.get(k), 6000)) for k in P.WRITE_SCHEMA['properties']}
         write = self.state['write']
         if write['recommendation'] not in P.RECOMMENDATIONS:
             write['recommendation'] = 'no_recommendation'
@@ -3005,7 +3220,34 @@ class JournalRunner(ReviewBase):
             body += ['', 'Provisional: ' + '; '.join(gaps) + '; see the scope below.']
         body += ['', write.get('reasons') or '']
         body += ['', '## Confidential comments to the editor', '', write.get('confidential') or '—']
+        body += self._injection_note(sid)
         return body, self._scope_appendix(verdicts, rejected, no_proof)
+
+    def _injection_note(self, sid):
+        """A note to the editor when the manuscript addresses its reviewer or an AI. The text was never followed."""
+        found = self.state.get('injections') or []
+        noted = []
+        if not found:
+            # What a model call remarked about such text (checks, re-checks, reading), when no pattern matched.
+            texts = [c.get('explanation', '') for c in self.state.get('checks', {}).values()]
+            texts += [c.get('argument', '') for c in self.state.get('confirms', {}).values()]
+            texts += [str(r.get('summary', '')) for r in (self.state.get('reading') or {}).values() if isinstance(r, dict)]
+            for text in texts:
+                for sentence in re.split(r'(?<=[.!?])\s+', str(text or '')):
+                    if _INJECTION_NOTED.search(sentence) and len(noted) < 2:
+                        noted.append(_clip(sentence, 300))
+        if not found and not noted:
+            return []
+        out = ['', '### Note to the editor: text addressed to reviewers', '']
+        if found:
+            out += ['The manuscript contains text that gives instructions to its reviewer or to an AI system. It was '
+                    'treated as part of the manuscript and not followed; this report is unaffected by it.', '']
+            out += [f'- {self._where(sid, f["line"], f["line"]).capitalize()}'
+                    + (' (in a TeX comment, not printed)' if f.get('comment') else '') + f': “{f["text"]}”' for f in found]
+        else:
+            out += ['A check remarked that the manuscript contains instructions addressed to its reviewer; they were '
+                    'not followed. What it said:', ''] + [f'- “{n}”' for n in noted]
+        return out
 
     def _scope_appendix(self, verdicts, rejected, no_proof):
         """What was and was not examined."""
@@ -3035,7 +3277,7 @@ class JournalRunner(ReviewBase):
             outcome = verdicts.get(uid, 'not checked').replace('_', ' ')
             if uid in verdicts and not coverage['complete']:
                 outcome += '; incomplete coverage'
-            spans = ', '.join(_lines_text(a, b) for a, b in u['proofs'])
+            spans = ', '.join(self._member_place(sid, a, b) or _lines_text(a, b) for a, b in u['proofs'])
             appendix.append(f'| {u["name"]}{" (main)" if uid in main else ""} | {spans} | {passes} | {outcome} |')
         if any(self._check_coverage(uid)['segmented'] for uid in s['plan_units']):
             appendix += ['', 'Segmented proofs were checked in parts. Strategy counts require every planned part to be usable; no whole-proof pass was performed.']
@@ -3091,7 +3333,7 @@ class JournalRunner(ReviewBase):
             if (s.get('novelty') or {}).get('assessment'):
                 appendix += ['', s['novelty']['assessment']]
             appendix += ['', 'Search hits do not establish or refute novelty.']
-        return appendix
+        return appendix + self._assembly_note(s['sources'][0]['id'])
 
 
 class SummaryReviewRunner(JournalRunner):

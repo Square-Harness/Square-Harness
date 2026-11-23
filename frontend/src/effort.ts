@@ -25,7 +25,7 @@ export type Limits = {
   solve_tokens?: number; verify_tokens?: number
 }
 
-const count = (value: number) => new Intl.NumberFormat(undefined).format(Math.round(value))
+const count = (value: number) => new Intl.NumberFormat('en-US').format(Math.round(value))
 
 export function isLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && (LEVELS as string[]).includes(value)

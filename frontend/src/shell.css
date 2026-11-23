@@ -58,6 +58,19 @@
 .side-kind { flex: none; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: 11px; font-weight: 700; color: var(--text-3); }
 .side-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 12px; }
 .side-empty { margin: 0; padding: 6px 8px 10px; font-size: 13.5px; line-height: 1.45; }
+.side-empty.small { font-size: 12.5px; }
+/* Search over titles and messages: a ruled line of the page, a square lens. */
+.side-search { position: relative; display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; padding: 0 4px 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--sheet); color: var(--text-3); }
+.side-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; color: var(--text-2); }
+.side-search > svg { flex: none; }
+.side-search-input { flex: 1; min-width: 0; height: 34px; padding: 0; border: 0; background: none; color: var(--text); font: 14px/1.3 var(--font-ui); outline: none; }
+.side-search-input::placeholder { color: var(--text-3); opacity: 0.85; }
+.side-search-input::-webkit-search-cancel-button { display: none; }
+.side-search-clear { width: 28px; height: 28px; flex: none; border-radius: 5px; color: var(--text-3); }
+.side-search-key { flex: none; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; font: 11px/1.4 var(--font-ui); color: var(--text-3); }
+@media (pointer: coarse) { .side-search-key { display: none; } .side-search-input { height: 40px; } }
+.side-match { font-size: 12.5px; line-height: 1.4; color: var(--text-2); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.search-mark { padding: 0 1px; border-radius: 2px; background: var(--ochre-soft); color: inherit; box-shadow: inset 0 -1.5px 0 var(--ochre); }
 
 /* A section of the list, named in small capitals. */
 .side-label { display: flex; align-items: center; justify-content: space-between; min-height: 30px; margin-top: 8px; padding: 0 2px 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-3); }
@@ -177,6 +190,13 @@
 .project-card-text strong { font: 700 16px/1.25 var(--font-text); overflow-wrap: anywhere; }
 .project-card-text span { font-size: 12px; color: var(--text-3); }
 .project-card .btn { grid-column: 1 / -1; }
+.project-files { grid-column: 1 / -1; font-size: 13px; }
+.project-files > summary { display: flex; align-items: center; gap: 6px; padding: 4px 2px; color: var(--text-2); cursor: pointer; }
+.project-files > summary .project-count { margin-left: auto; }
+.project-file-list { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.project-file-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 2px 0 2px 4px; border-top: 1px solid var(--line); }
+.project-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-file-list .btn { grid-column: auto; min-height: 26px; padding: 0 6px; }
 /* The composer's project control. */
 .project-selector { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 6px; min-width: 0; }
 .project-editor > p { margin: 12px 0 0; }
@@ -227,7 +247,13 @@
 .topbar-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font: 700 18px/1.2 var(--font-text); }
 .topbar-title .history-mark { width: 26px; height: 26px; font-size: 18px; }
 .topbar-title .brand-mark { width: 26px; height: 26px; }
-.connection { flex: none; padding: 7px 16px; font-size: 13px; background: var(--ochre-soft); border-bottom: 1px solid var(--line); }
+.connection { flex: none; padding: 7px 128px 7px 16px; font-size: 13px; background: var(--ochre-soft); border-bottom: 1px solid var(--line); }
+@media (max-width: 760px) { .connection { padding-right: 16px; } }
+.connection-notice { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--ink-soft); }
+.main:focus { outline: none; }
+/* The first stop for keyboard users: straight to the message box, past the conversation list. */
+.skip-link { position: fixed; top: 8px; left: 8px; z-index: 200; padding: 8px 12px; border: 1px solid var(--ink); border-radius: 7px; background: var(--sheet); color: var(--ink); font: inherit; font-size: 14px; transform: translateY(-160%); }
+.skip-link:focus { transform: none; outline: 2px solid var(--focus); outline-offset: 2px; }
 .scrim { position: fixed; inset: 0; z-index: 40; background: rgba(15, 20, 36, 0.4); }
 
 /* The spine a hidden panel leaves behind: click it to pull the panel back. */
@@ -496,6 +522,17 @@
 .style-done-file code { overflow-wrap: anywhere; }
 .style-template { margin: 4px 0 16px; padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 10px; }
 .style-template-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+/* Correcting a saved style: its actions, then each list as editable rows. */
+.style-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+.style-editor { display: grid; gap: 14px; max-width: 46rem; margin: 4px 0 16px; }
+.style-edit-list { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.style-edit-row { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.style-edit-row > .text-input { flex: 1 1 auto; }
+.style-edit-pair > .text-input:first-child { flex: 0 1 34%; }
+.style-edit-add { justify-self: start; }
+.style-edit-check { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
+.style-edit-check input { margin-top: 3px; }
+@media (max-width: 560px) { .style-edit-pair { flex-wrap: wrap; } .style-edit-pair > .text-input:first-child { flex-basis: 100%; } }
 
 /* The composer's chips: the open folder, the project, attachments. */
 .workspace-switch { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -555,7 +592,8 @@
 .drop-title { margin: 0 0 6px; font: 700 22px/1.25 var(--font-text); }
 .drop-hint { margin: 0 0 8px; color: var(--text-2); font-size: 14px; }
 .drop-types { margin: 0; font: 13px var(--font-mono); color: var(--text-3); }
-.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 130; display: grid; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
+/* Top right, under the Feedback button: never over the composer's Send button. */
+.toasts { position: fixed; right: 16px; top: calc(44px + env(safe-area-inset-top)); z-index: 130; display: grid; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
 .toast { margin: 0; padding: 10px 14px; background: var(--text); color: var(--paper); border-radius: 8px; box-shadow: var(--shadow-lg); font-size: 13.5px; }
 .toast-error { background: var(--red); color: #fff; }
 /* One select everywhere: the sheet's field with a drawn chevron. */

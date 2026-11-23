@@ -557,13 +557,16 @@ class DeepInfra(OpenAICompatible):
 
     def _quota_input_cap(self, payload, data):
         """Only validated nonthinking title/routing shapes use a smaller reserve."""
+        # `stream` adds the transport-only start deadline before the payload is validated; it changes
+        # nothing the provider receives, so it is not part of the bounded shape.
+        keys = set(payload) - {'_start_seconds'}
         if '_sh_bounded_routing' in payload:
             from .proof_routing import POLICY, SCHEMA, OUTPUT_TOKENS
             messages, options = payload.get('messages'), payload.get('options')
             valid = (payload['_sh_bounded_routing'] is True and payload.get('think') is False
                      and payload.get('stream') is True and not getattr(self, 'image_refs', None)
                      and payload.get('format') == SCHEMA
-                     and not set(payload) - {'model', 'messages', 'options', 'think', 'stream', 'format', '_sh_bounded_routing'}
+                     and not keys - {'model', 'messages', 'options', 'think', 'stream', 'format', '_sh_bounded_routing'}
                      and isinstance(options, dict) and not set(options) - {'num_ctx', 'num_predict', 'temperature'}
                      and type(data['max_tokens']) is int and 0 < data['max_tokens'] <= OUTPUT_TOKENS
                      and isinstance(messages, list) and len(messages) == 2)
@@ -585,7 +588,7 @@ class DeepInfra(OpenAICompatible):
         messages, options = payload.get('messages'), payload.get('options')
         valid = (payload['_sh_bounded_title'] is True and payload.get('think') is False
                  and payload.get('stream') is True
-                 and not set(payload) - {'model', 'messages', 'options', 'think', 'stream', '_sh_bounded_title'}
+                 and not keys - {'model', 'messages', 'options', 'think', 'stream', '_sh_bounded_title'}
                  and isinstance(options, dict) and not set(options) - {'num_ctx', 'num_predict', 'temperature'}
                  and type(data['max_tokens']) is int and 0 < data['max_tokens'] <= 64
                  and isinstance(messages, list) and len(messages) == 2)
@@ -620,7 +623,11 @@ class DeepInfra(OpenAICompatible):
             return self._quota_input_cap(payload, data)
         framing = 1024 + 128 * len(data['messages'])
         extras = {key: data[key] for key in ('tools', 'response_format') if key in data}
-        extra_allowance = 2 * self._bytes(extras) + 1024 * len(data.get('tools', []))
+        # Tool schemas are rendered once into the prompt: twice their JSON bytes, one fixed tool-calling
+        # preamble and a small per-tool header bound them (a flat 1024 per tool was the
+        # largest part of an Assistant estimate about ten times its billed prompt).
+        tools = data.get('tools', [])
+        extra_allowance = 2 * self._bytes(extras) + (1024 + 256 * len(tools) if tools else 0)
         refs = getattr(self, 'image_refs', [])
         image_allowance, image_method = 0, ''
         if refs:

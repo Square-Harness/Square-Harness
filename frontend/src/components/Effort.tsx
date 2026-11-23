@@ -4,16 +4,18 @@
 // Effort: one control instead of budget fields. The levels and their budgets are in effort.ts.
 import { useEffect, useRef, type CSSProperties, type KeyboardEvent } from 'react'
 import type { Defaults } from '../api'
-import { describeLimits, EFFORTS, effortLimits, type EffortKind, type EffortLevel } from '../effort'
+import { describeLimits, EFFORTS, effortLimits, type EffortKind, type EffortLevel, type Limits } from '../effort'
 
 export { describeLimits, EFFORTS, effortLimits, isLevel } from '../effort'
 export type { EffortKind, EffortLevel, Limits } from '../effort'
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value))
 
-export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, suggested }: {
+export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, suggested, current }: {
   kind: EffortKind; defaults: Defaults; level: EffortLevel; onLevel: (level: EffortLevel) => void
   custom?: boolean; compact?: boolean; suggested?: boolean
+  /** The limits the form will send, when Advanced limits changed the level's own. */
+  current?: Limits
 }) {
   const index = EFFORTS.findIndex((effort) => effort.id === level)
   const refs = useRef<(HTMLButtonElement | null)[]>([])
@@ -28,7 +30,7 @@ export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, 
     focusNext.current = true
     onLevel(EFFORTS[clamp(index + step, 0, EFFORTS.length - 1)].id)
   }
-  const limits = effortLimits(kind, defaults, level)
+  const limits = custom && current ? current : effortLimits(kind, defaults, level)
   return (
     <div className={'effort' + (compact ? ' effort-compact' : '')}>
       <div className="effort-head">
@@ -51,7 +53,7 @@ export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, 
         ))}
       </div>
       <p className={'field-hint effort-summary' + (compact ? ' effort-summary-compact' : '')}>
-        {describeLimits(kind, limits)}{custom ? '; changed in Advanced limits below' : ''}.
+        {describeLimits(kind, limits)}{custom ? (current ? ', as set in Advanced limits below' : '; changed in Advanced limits below') : ''}.
       </p>
     </div>
   )

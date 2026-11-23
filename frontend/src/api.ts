@@ -118,13 +118,20 @@ export type Status = {
 
 export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
 
+export type FolderProject = { id: string; name: string; deleted?: boolean }
 export type FolderListing = {
   root: string
   path: string
   current: string
   recent: string[]
   files: { tex: number; pdf: number; py: number }
-  folders: { name: string; path: string; files: { tex: number; pdf: number; py: number }; jobs: boolean }[]
+  folders: { name: string; path: string; files: { tex: number; pdf: number; py: number }; jobs: boolean
+    /** A project's own file folder: shown by its name, never opened as a workspace. */
+    project?: FolderProject | null }[]
+  /** Set when the listed folder itself is a project's file folder. */
+  project?: FolderProject | null
+  /** The listed folder is a workspace's projects/ folder. */
+  holds_projects?: boolean
 }
 
 export type Template = { name: string; files: string[] }
@@ -154,6 +161,12 @@ export type StyleDescription = {
 }
 export type StyleDeparture = { rule: string; habit: string; example?: string; examples?: string[]; sheet?: string; rule_text?: string; articles?: number; of?: number }
 export type DomainStyle = StyleDescription & { name: string; description: string; articles: string[] }
+/** Corrections of one domain of a saved style (POST /api/styles/<name> with items): each field given replaces it;
+ * departures and macros list what to keep. */
+export type StyleEdit = Partial<Pick<StyleDescription, 'audience' | 'aim' | 'structure' | 'definitions' | 'motivation' | 'proof_motivation'
+  | 'proof_organisation' | 'omissions' | 'contribution' | 'tone' | 'names' | 'typesetting' | 'phrases'>> & {
+  domain?: string; description?: string; departures?: string[]; macros?: string[]
+}
 export type StyleProfile = {
   format: 'square-style'
   version: 1 | 2
@@ -172,6 +185,8 @@ export type StyleProfile = {
 export type TaskState = 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'done' | 'error' | 'cancelled'
 
 export type TaskSummary = {
+  /** A message queued to run after its conversation's current turn. */
+  followup?: boolean
   waiting_model_calls?: number
   position?: number
   queued_at?: number | null
@@ -354,6 +369,9 @@ export type ProofDetail = {
   running: boolean
   live: Live
   artifacts: { name: string; size: number }[]
+  /** The saved work can continue with an explicit extra allowance (unfinished, or stopped on a budget). */
+  can_add_allowance?: boolean
+  allowance_additions?: { time: string; tokens?: number; seconds?: number; rounds?: number }[]
 }
 
 export type Evidence = {
@@ -427,6 +445,7 @@ export type ReviewEvidence = Pick<ReviewReference, 'n' | 'title' | 'doi' | 'arxi
   k: number | null
   s2?: string | null
   abstract: string
+  review?: string
   passages: { lines: string; locator: string; text: string }[]
 }
 
@@ -519,6 +538,8 @@ export type ChatListItem = {
   messages: number
   preview: string
   math_macros?: Record<string, string>
+  /** With a search (`GET /api/chats?q=`): a short excerpt around the first match. */
+  match?: string
 }
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
@@ -600,6 +621,10 @@ export type Chat = {
   assistant_resumable?: boolean
   assistant_budget?: AssistantBudget
   assistant_progress?: WorkProgress | null
+  /** A message waiting to run after the current turn (`POST /route` with `queue: true`). */
+  queued_followup?: { task: string; content: string } | null
+  /** Usage over every turn of the conversation, provider-reported where available. */
+  usage_total?: { input_tokens: number; output_tokens: number; seconds: number } | null
 }
 
 export type StreamChunk = {
@@ -623,6 +648,9 @@ export type Artifact = {
 }
 
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' }
+export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
+/** An explicit extra allowance for resuming a job: recorded in its state and report. */
+export type AllowanceAdditions = { add_tokens?: number; add_seconds?: number; add_rounds?: number }
 
 export class ApiError extends Error {
   status: number
@@ -725,7 +753,8 @@ export const api = {
   proofArtifact: (id: string, name: string) => get<Artifact>(`/api/proofs/${id}/artifacts/${name}`),
   proofStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/proofs/${id}/stream/${name}?from=${from}`),
   startProof: (body: Record<string, unknown>) => post<StartResult>('/api/proofs', body),
-  resumeProof: (id: string, queue = false) => post<StartResult>(`/api/proofs/${id}/resume`, { queue }),
+  resumeProof: (id: string, queue = false, additions: AllowanceAdditions = {}) => post<StartResult>(`/api/proofs/${id}/resume`, { queue, ...additions }),
+  deleteProof: (id: string) => request<{ ok: boolean }>('DELETE', `/api/proofs/${id}`),
 
   researches: () => get<{ jobs: ResearchListItem[] }>('/api/research'),
   research: (id: string) => get<ResearchDetail>(`/api/research/${id}`),
@@ -734,7 +763,7 @@ export const api = {
   researchArtifact: (id: string, name: string) => get<Artifact>(`/api/research/${id}/artifacts/${name}`),
   researchStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/research/${id}/stream/${name}?from=${from}`),
   startResearch: (body: Record<string, unknown>) => post<StartResult>('/api/research', body),
-  resumeResearch: (id: string, queue = false, additionalSeconds = 0) => post<StartResult>(`/api/research/${id}/resume`, { queue, ...(additionalSeconds > 0 ? { additional_seconds: additionalSeconds } : {}) }),
+  resumeResearch: (id: string, queue = false, additionalSeconds = 0, additions: AllowanceAdditions = {}) => post<StartResult>(`/api/research/${id}/resume`, { queue, ...(additionalSeconds > 0 ? { additional_seconds: additionalSeconds } : {}), ...additions }),
 
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
@@ -756,7 +785,7 @@ export const api = {
       if (response.status === 401) authListeners.forEach((listener) => listener())
       throw new ApiError(response.status, data.error || response.statusText)
     }
-    return data as { path: string; size?: number; image?: ImageRef }
+    return data as { path: string; size?: number; image?: ImageRef; note?: string }
   },
   templates: () => get<{ templates: Template[] }>('/api/templates'),
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
@@ -764,6 +793,9 @@ export const api = {
   setStyleChoice: (choice: StyleChoice) => post<{ choice: StyleChoice }>('/api/styles/choice', choice),
   startStyle: (body: Record<string, unknown>) => post<StartResult>('/api/style', body),
   setStyleTemplate: (name: string, files: string[]) => post<{ style: StyleProfile }>('/api/styles/template', { name, template_files: files }),
+  renameStyle: (name: string, rename: string) => post<{ style: StyleProfile }>(`/api/styles/${encodeURIComponent(name)}`, { rename }),
+  editStyle: (name: string, items: StyleEdit) => post<{ style: StyleProfile }>(`/api/styles/${encodeURIComponent(name)}`, { items }),
+  deleteStyle: (name: string) => request<{ ok: true }>('DELETE', `/api/styles/${encodeURIComponent(name)}`),
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
   researchPdfDownloadUrl: (id: string) => `/api/research/${id}/pdf?download=1`,
   researchTexUrl: (id: string) => `/api/research/${id}/tex`,
@@ -772,10 +804,14 @@ export const api = {
   writeupNeeds: (id: string, action: 'waive' | 'stop') => post<{ task: TaskSummary | null; id: string }>(`/api/research/${id}/needs`, { action }),
   researchReviewDownloadUrl: (id: string) => `/api/research/${id}/review?download=1`,
   researchBibDownloadUrl: (id: string) => `/api/research/${id}/bib?download=1`,
+  // Clean standalone files for use outside the app: Markdown with a numbered reference list, BibTeX of the cited works.
+  reviewMarkdownUrl: (id: string) => `/api/research/${id}/download.md`,
+  reviewBibtexUrl: (id: string) => `/api/research/${id}/download.bib`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
-  route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
+  route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number; effort?: EffortLevel }, queue = false) =>
+    post<{ ok: boolean; task?: TaskSummary }>(`/api/chats/${id}/route`, { content, files, mode_call, ...(queue ? { queue: true } : {}) }),
   index: (scope: { chat?: string; project?: string }) => indexPage('/api/index?' + new URLSearchParams(scope).toString()),
-  chatExperiment: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/experiments/${job}`),
+  chatExperiment: (chat: string, job: string) => get<{ answer: string; status: string; run_status?: string; error?: unknown; stop_reason?: string; limits?: unknown; stdout_tail?: string; seconds?: number }>(`/api/chats/${chat}/experiments/${job}`),
   chatCheck: (chat: string, job: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/checks/${job}`),
   savedChatAnswer: (chat: string, answer: string) => get<{ answer: string; status: string }>(`/api/chats/${chat}/answers/${answer}`),
   stopInvestigation: (id: string, expectedId?: string) => post<{ status: string; answer: string }>(
@@ -785,11 +821,13 @@ export const api = {
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),
   cancelRoute: (id: string, index: number) => post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/cancel`),
   dismissRoute: (id: string, index: number) => post<{ item: TranscriptItem }>(`/api/chats/${id}/routes/${index}/dismiss`),
-  chats: () => get<{ chats: ChatListItem[] }>('/api/chats'),
+  chats: (query = '') => get<{ chats: ChatListItem[]; truncated?: boolean }>('/api/chats' + (query ? '?q=' + encodeURIComponent(query) : '')),
   projects: () => get<{ projects: Project[] }>('/api/projects'),
   project: (id: string) => get<{ project: Project }>(`/api/projects/${id}`),
   createProject: (name: string, notes = '') => post<{ project: Project }>('/api/projects', { name, notes }),
   saveProject: (id: string, value: { name?: string; notes?: string; revision: string }) => post<{ project: Project }>(`/api/projects/${id}`, value),
+  projectFiles: (id: string) => get<{ files: ProjectFile[]; truncated?: boolean }>(`/api/projects/${id}/files`),
+  deleteProject: (id: string) => request<{ ok: boolean; moved: number }>('DELETE', `/api/projects/${id}`),
   chat: (id: string) => get<Chat>(`/api/chats/${id}`),
   chatTitle: (id: string, title: string) => post<Chat>(`/api/chats/${id}/title`, { title }),
   chatProject: (id: string, project_id: string | null) => post<Chat>(`/api/chats/${id}/project`, { project_id }),

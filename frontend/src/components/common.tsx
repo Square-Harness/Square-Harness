@@ -7,10 +7,10 @@ import { api, type Budget, type WorkProgress, type WorkspaceFile } from '../api'
 import { meterDisplay } from '../usage'
 import { workProgressText } from '../workProgress'
 import { taskById } from '../concurrency'
-import { bytes, count } from '../format'
+import { bytes, count, duration } from '../format'
 import { useApp, useTick } from '../store'
 import { useRoute } from '../router'
-import { CloseIcon, FileIcon, PinIcon } from './Icons'
+import { CheckIcon, CloseIcon, CopyIcon, FileIcon, PinIcon } from './Icons'
 import { isImagePath, PinnedImages } from './ImageAttachments'
 
 /** A changing revision queues a single trailing refresh. Changing the resource discards its old requests. */
@@ -44,9 +44,10 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[], revision?: s
   return { data, error, reload }
 }
 
-export function Meter({ label, used, limit, unit = '', decimals = 0, title }: { label: string; used: number; limit: number | null; unit?: string; decimals?: number; title?: string }) {
-  const display = meterDisplay({ used, limit }, unit, decimals)
-  const tone = display.ratio === null ? '' : display.ratio >= 1 ? ' meter-full' : display.ratio > 0.85 ? ' meter-high' : ''
+/** `calm`: reaching the limit is normal (one attempt of one used), so the bar never turns red. */
+export function Meter({ label, used, limit, unit = '', decimals = 0, title, format, calm = false }: { label: string; used: number; limit: number | null; unit?: string; decimals?: number; title?: string; format?: (value: number) => string; calm?: boolean }) {
+  const display = meterDisplay({ used, limit }, unit, decimals, format)
+  const tone = display.ratio === null || calm ? '' : display.ratio >= 1 ? ' meter-full' : display.ratio > 0.85 ? ' meter-high' : ''
   return (
     <div className={'meter' + tone} title={title}>
       <div className="meter-text">
@@ -68,7 +69,7 @@ export function UsageMeters({ budget }: { budget: { tokens: Budget; input_tokens
     {!!budget.tokens.uncertain && <p className="muted small">{count(budget.tokens.uncertain)} tokens held for calls with unknown usage.</p>}
     {budget.input_tokens && <Meter label="Cumulative input tokens" {...budget.input_tokens} title="Input summed across model calls; repeated text counts again. This is not the current context size." />}
     {budget.context && <Meter label="Current input context" {...budget.context} title="Input to the current model call, against its context capacity. Generated output also uses this capacity." />}
-    <Meter label="Working time, minutes" used={budget.seconds.used / 60} limit={budget.seconds.limit === null ? null : budget.seconds.limit / 60} decimals={1} />
+    <Meter label="Working time" used={budget.seconds.used} limit={budget.seconds.limit} format={duration} />
   </>
 }
 
@@ -164,7 +165,7 @@ export function OptionalNumberField({ label, value, onChange, step = 1000, hint 
   return <label className="field">
     <span className="field-label">{label}</span>
     <span className="field-input">
-      <input type="number" inputMode="numeric" value={value === null ? '' : value} min={1} step={step} placeholder="No limit"
+      <input type="number" inputMode="numeric" value={value === null ? '' : value} min={step} step={step} placeholder="No limit"
         onChange={(event) => onChange(event.target.value === '' ? null : event.target.valueAsNumber)} />
     </span>
     {hint && <span className="field-hint">{hint}</span>}
@@ -310,6 +311,43 @@ export function Modal({ title, onClose, children, wide, icon, tone = 'ink' }: {
 
 export function ErrorNote({ children }: { children: ReactNode }) {
   return children ? <p className="error-note" role="alert">{children}</p> : null
+}
+
+/** Copy text to the clipboard. The Clipboard API needs a secure page (localhost); a phone on
+    the local network reaches the interface over plain http, so fall back to a hidden selection. */
+export async function copyText(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return }
+  } catch { /* fall back below */ }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  const ok = document.execCommand('copy')
+  area.remove()
+  if (!ok) throw new Error('The browser refused to copy. Select the text and copy it by hand.')
+}
+
+/** A small button that copies its text and says so for a moment. */
+export function CopyButton({ text, label, title, className = '' }: { text: string | (() => string); label: string; title?: string; className?: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  useEffect(() => {
+    if (state === 'idle') return
+    const timer = window.setTimeout(() => setState('idle'), 1600)
+    return () => window.clearTimeout(timer)
+  }, [state])
+  return (
+    <button type="button" className={'btn btn-quiet btn-small copy-btn ' + className} title={state === 'failed' ? 'The browser refused to copy' : title || label}
+      aria-label={title || label}
+      onClick={() => { copyText(typeof text === 'function' ? text() : text).then(() => setState('copied'), () => setState('failed')) }}>
+      {state === 'copied' ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+      <span>{state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : label}</span>
+      <span className="agent-sr-only" role="status">{state === 'copied' ? 'Copied to the clipboard' : ''}</span>
+    </button>
+  )
 }
 
 export function Loading({ children = 'Loading…' }: { children?: ReactNode }) {

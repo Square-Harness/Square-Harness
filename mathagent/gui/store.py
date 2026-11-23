@@ -7,6 +7,7 @@ Job views never write engine state. Chat sessions are the interface's own
 records: the terminal keeps chat in memory, while a browser tab or phone needs
 the conversation to survive a reload.
 """
+import codecs
 import copy
 import errno
 import fcntl
@@ -20,6 +21,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 
 from ..reporting import one_line
@@ -30,8 +32,10 @@ from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import _job_directory, _read_state as _read_research
-from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, is_source_archive, source_suffix
-from ..style import list_profiles, load_choice, macro_definitions, public_profile, read_template, save_choice, scan, set_template
+from ..review_export import review_bibtex, review_markdown
+from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
+from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
+                     rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
 from . import agent_views, personalization, projects
@@ -253,6 +257,18 @@ def _candidate_text(store, candidate):
     return text if hashlib.sha256(text.encode()).hexdigest() == candidate.get('sha256') else None
 
 
+def _claim_outcome(state, selected):
+    """proved or refuted when the selected candidate passed its own whole-task review, as the runner reports it."""
+    from ..proof import _direction, _own_review
+    return (_direction(selected, _own_review(state, selected)) if selected else None) or 'unclassified'
+
+
+def _can_add_allowance(state):
+    """Whether "Resume with more budget" applies: an unfinished proof, or one that stopped on its allowance."""
+    from ..proof import TERMINAL, budget_stop
+    return state['status'] not in TERMINAL or budget_stop(state)
+
+
 def proof_request_text(state):
     """The task as the user reads it (a saved handoff Proof shows the user's request, not controller text)."""
     from ..proof import request_text
@@ -318,10 +334,30 @@ def proof_detail(root, proof_id, active=None):
     detail.update(candidates=s['candidates'], reviews=s['reviews'], pending=s['pending'],
                   selected_candidate=s['selected_candidate'], initial_candidate=s['initial_candidate'],
                   selected_review_status=selected.get('review_status', 'unreviewed') if selected else 'unreviewed',
-                  claim_outcome='unclassified',
+                  claim_outcome=_claim_outcome(s, selected),
+                  allowance_additions=s.get('allowance_additions', []),
+                  charge_resettlements=s.get('charge_resettlements', []),
+                  can_add_allowance=_can_add_allowance(s),
                   selection_history=s.get('selection_history', []),
                   answer=_candidate_text(store, selected) if selected else None)
     return detail
+
+
+def trash_proof(root, proof_id):
+    """Move a proof job into .mathagent/trash/proofs; moving the folder back into proofs/ restores it.
+
+    The job's run lock is held throughout, so no controller can be writing it."""
+    directory = _proof_directory(root, proof_id)
+    trash = Path(root) / '.mathagent' / 'trash'
+    _directory(trash, create=True)
+    _directory(trash / 'proofs', create=True)
+    target = trash / 'proofs' / f'{proof_id}-{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}'
+    if target.exists() or target.is_symlink():
+        target = target.with_name(target.name + '-' + uuid.uuid4().hex[:6])
+    with ProofStore.load(root, proof_id).lock():
+        os.rename(directory, target)
+    _sync_directory(directory.parent)
+    return target
 
 
 def proof_sources(root, proof_id):
@@ -527,11 +563,28 @@ def research_review_file(root, job_id, output):
     return _review_name(state) + path.suffix, data
 
 
+def research_review_download(root, job_id, output):
+    """A literature review as a clean standalone download: Markdown ('md') or the BibTeX of its cited works ('bib')."""
+    state = research_state(root, job_id)
+    if state['kind'] != 'literature' or not (state.get('outputs') or {}).get('review'):
+        raise NotFound('This literature review has no text to download yet')
+    if state.get('pipeline') != ReviewRunner.PIPELINE:
+        # An older reading list keeps its own files, which already have this shape.
+        name, data = research_review_file(root, job_id, 'review' if output == 'md' else 'bib')
+        return name.rsplit('.', 1)[0] + '.' + output, data
+    try:
+        text = review_markdown(state) if output == 'md' else review_bibtex(state)
+    except ValueError as exc:
+        raise NotFound(str(exc)) from None
+    return _review_name(state) + '.' + output, text.encode('utf-8')
+
+
 def _review_name(state):
     """A download name for a literature review: its title (else its topic, else its request), made safe."""
     scope = state.get('scope') if isinstance(state.get('scope'), dict) else {}
     title = next((value for value in (scope.get('title'), scope.get('topic')) if isinstance(value, str) and value.strip()),
                  state['goal'])
+    title = unicodedata.normalize('NFKD', re.sub(r'[\u2010-\u2015]', ' ', title)).encode('ascii', 'ignore').decode()  # Erdős becomes erdos
     title = re.sub(r'\\[a-zA-Z]+|[$^_{}]', ' ', title.lower())
     return re.sub(r'[^a-z0-9]+', '-', title).strip('-')[:60].rstrip('-') or 'literature-review'
 
@@ -622,7 +675,9 @@ def review_evidence(root, job_id):
             passages = _legacy_review_passages(root, r, document, verified)
         items.append({'k': k, 'n': n, 'title': r.get('title'), 'doi': r.get('doi'), 'arxiv': r.get('arxiv'),
                       'zbl': r.get('zbl'), 's2': r.get('s2'), 'passages': passages,
-                      'abstract': '' if passages else r.get('abstract') or ''})
+                      'abstract': '' if passages else r.get('abstract') or '',
+                      # A zbMATH review is the text a record-only claim was checked against.
+                      'review': '' if passages or r.get('abstract') else str(r.get('review') or '')[:4000]})
     return items
 
 
@@ -732,7 +787,7 @@ def set_chat_project(root, chat_id, project_id):
 
 @_locked_chat
 def set_chat_title(root, chat_id, title, *, manual=True):
-    if not isinstance(title, str) or not title.strip() or len(title) > 120:
+    if not isinstance(title, str) or not one_line(title, 120) or len(title) > 120:
         raise ValueError('Give the conversation a title of at most 120 characters')
     chat = load_chat(root, chat_id)
     if manual or chat.get('title_source') != 'manual':
@@ -900,7 +955,11 @@ def delete_chat(root, chat_id):
     except FileNotFoundError:
         raise NotFound('Unknown chat') from None
     _regular(path)
-    load_chat(root, chat_id)  # Validate the record's identity before deletion.
+    chat = load_chat(root, chat_id)  # Validate the record's identity before deletion.
+    try:
+        _keep_project_findings(root, chat)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # Deleting still works; the project's record then loses this chat's links.
     answers = private / 'answers'
     if answers.is_symlink():
         raise ValueError('Refusing symlink in answer storage')
@@ -929,22 +988,105 @@ def update_chat_settings(root, chat_id, *, think=None, online=None):
     return chat
 
 
-def list_chats(root, templates_root=None):
+# Conversation search reads every saved transcript once per change (cached with the file's
+# stat) and stops folding new transcripts after SEARCH_BUDGET characters in one request.
+SEARCH_ROLES = ('user', 'assistant', 'review')
+SEARCH_BUDGET = 40_000_000
+SEARCH_CHAT_CHARS = 4_000_000
+
+
+def search_fold(text):
+    """Case- and accent-insensitive form of text for search."""
+    return ''.join(c for c in unicodedata.normalize('NFKD', text) if not unicodedata.combining(c)).casefold()
+
+
+def _search_texts(chat):
+    texts, size = [], 0
+    for item in chat['transcript']:
+        if not isinstance(item, dict) or item.get('discarded'):
+            continue
+        role = item.get('role')
+        text = item.get('content') if role in SEARCH_ROLES else item.get('request') if role == 'route' else None
+        if isinstance(text, str) and text.strip():
+            texts.append(text)
+            size += len(text)
+            if size > SEARCH_CHAT_CHARS:
+                break
+    return texts
+
+
+def _excerpt(text, folded, query):
+    """About 160 characters of text around the first match of the folded query."""
+    at = folded.find(query)
+    start, end = at, at + len(query)
+    if len(folded) != len(text):
+        # Folding changed some lengths (ß, ligatures): map positions character by character near the match.
+        offset = max(0, min(at, len(text)) - 2000)
+        positions, pieces = [], []
+        for index, char in enumerate(text[offset:offset + 4000 + len(query)], offset):
+            piece = search_fold(char)
+            pieces.append(piece)
+            positions.extend([index] * len(piece))
+        found = ''.join(pieces).find(query)
+        start, end = (positions[found], positions[found + len(query) - 1] + 1) if found >= 0 else (offset, offset)
+    low, high = max(0, start - 70), min(len(text), end + 90)
+    excerpt = ('…' if low else '') + text[low:high] + ('…' if high < len(text) else '')
+    return ' '.join(excerpt.split())
+
+
+def _chat_match(path, chat, query, search):
+    """'' for a title match, an excerpt for a message match, None for no match."""
+    if query in search_fold(chat.get('title') or 'New conversation'):
+        return ''
+    def fold():
+        texts = _search_texts(chat)
+        search['folded'] = search.get('folded', 0) + sum(map(len, texts))
+        return [(text, search_fold(text)) for text in texts]
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    with _cache_lock:
+        cached = _cache.get((str(path), info.st_mtime_ns, info.st_size, 'search'))
+    if cached is None and search.get('folded', 0) > SEARCH_BUDGET:
+        search['truncated'] = True
+        return None
+    for text, folded in cached if cached is not None else _cached(path, fold, 'search'):
+        if query in folded:
+            return _excerpt(text, folded, query)
+    return None
+
+
+def list_chats(root, templates_root=None, *, query=None, search=None):
+    """Saved conversations, newest first. With a query, only those whose title or messages
+    contain it (case- and accent-insensitive), each with `match`, an excerpt ('' for the title)."""
     base = _chats(root)
     if base is None:
         return []
     chats = []
     preferences = personalization.load(templates_root or root)
+    folded_query = search_fold(query) if query else None
+    if search is None:
+        search = {}
     def load(path):
         chat = load_chat(root, path.name[:-5])
         chat['_display_macros'] = chat_macros(root, chat, templates_root, preferences=preferences)
         return chat
-    for path in base.iterdir():
+    def changed(path):
+        try:
+            return path.lstat().st_mtime_ns
+        except OSError:
+            return 0
+    # Newest first, so a search that runs out of budget has read the recent conversations.
+    for path in sorted(base.iterdir(), key=changed, reverse=True):
         if not path.name.endswith('.json') or not _ID.fullmatch(path.name[:-5]) or path.is_symlink():
             continue
         try:
             chat = _cached(path, lambda: load(path), preferences['revision'])
         except (OSError, ValueError, NotFound):
+            continue
+        match = _chat_match(path, chat, folded_query, search) if folded_query else None
+        if folded_query and match is None:
             continue
         last = next((item['content'] if item.get('role') != 'route' else
                      f"{ROUTE_NAMES.get(item.get('mode'), 'Suggestion')}: {item.get('request', '')}"
@@ -958,7 +1100,8 @@ def list_chats(root, templates_root=None):
                                          for lane in agent_views.agents(chat, current_only=True)]
                       if (chat.get('assistant_state') or {}).get('status') == 'running' else [],
                       'messages': sum(1 for item in chat['transcript'] if item.get('role') == 'user'),
-                      'preview': one_line(last, 140), 'math_macros': chat['_display_macros']})
+                      'preview': one_line(last, 140), 'math_macros': chat['_display_macros'],
+                      **({'match': match} if folded_query else {})})
     return sorted(chats, key=lambda chat: chat['updated_at'], reverse=True)
 
 
@@ -1118,11 +1261,45 @@ def _archive_experiments(chat, next_state):
             card['experiment_ids'] = list(dict.fromkeys([*(card.get('experiment_ids') or []), *runs]))
 
 
+def _turn_usage(budget):
+    """A turn's usage: reconciled input, provider-reported output and its time."""
+    return {'input_tokens': budget.get('input_tokens', 0), 'output_tokens': budget.get('measured_tokens', 0),
+            'seconds': round(budget.get('seconds', 0), 1)}
+
+
+def _archive_turn_record(chat, next_state):
+    """Keep each finished turn's routing decision and usage when the next turn replaces its checkpoint."""
+    previous = chat.get('assistant_state') or {}
+    if not previous.get('id') or previous['id'] == next_state.get('id'):
+        return
+    routing = previous.get('proof_routing') or {}
+    record = {'turn_id': previous['id'], 'status': previous.get('status'),
+              'usage': _turn_usage(assistant_accounting(None, previous, chat.get('transcript', ())))}
+    if routing.get('status') == 'complete':
+        record['routing'] = {key: copy.deepcopy(routing[key]) for key in
+                             ('route', 'effort', 'reason', 'question', 'stats', 'policy_version') if key in routing}
+        record['routing']['tasks'] = [task.get('mode') for task in [*routing.get('tasks', ()), *routing.get('later', ())]]
+    chat.setdefault('turn_records', []).append(record)
+
+
+def usage_total(chat, budget):
+    """Usage over every recorded turn of the conversation and the current one."""
+    total = {'input_tokens': 0, 'output_tokens': 0, 'seconds': 0}
+    for usage in [record.get('usage') or {} for record in chat.get('turn_records', [])] + [_turn_usage(budget)]:
+        for key in total:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[key] += value
+    total['seconds'] = round(total['seconds'], 1)
+    return total
+
+
 @_locked_chat
 def save_assistant(root, chat_id, state):
     """Checkpoint the parent and its child identities in the same atomic chat file."""
     chat = load_chat(root, chat_id)
     _archive_experiments(chat, state)
+    _archive_turn_record(chat, state)
     agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     _save_chat(root, chat)
@@ -1133,6 +1310,7 @@ def checkpoint_investigation(root, chat_id, state):
     """Commit the final report and checkpoint together, including after a crash or a repeated stop."""
     chat = load_chat(root, chat_id)
     _archive_experiments(chat, state)
+    _archive_turn_record(chat, state)
     agent_views.archive_turn(chat, state)
     chat['assistant_state'] = state
     inv = state['investigation']
@@ -1276,7 +1454,8 @@ def assistant_view(chat, root=None):
             'assistant_status': status,
             'assistant_resumable': status in ('paused', 'running'),
             'assistant_progress': progress,
-            'assistant_budget': {**budget_view(budget, status == 'running'), **context}}
+            'assistant_budget': {**budget_view(budget, status == 'running'), **context},
+            'usage_total': usage_total(chat, budget)}
 
 
 # -- workspace settings, folders, uploads and templates -------------------------------
@@ -1344,7 +1523,13 @@ def _counts(folder):
     return counts
 
 
+def _add_counts(total, more):
+    return {key: total[key] + more[key] for key in total}
+
+
 def list_folders(root, relative=''):
+    """Subfolders that can be opened. A project's file folder (projects/<id>) carries its
+    project name, and the projects folder counts the files of the projects inside it."""
     root = Path(root).resolve(strict=True)
     target = resolve_folder(root, relative)
     folders = []
@@ -1353,12 +1538,21 @@ def list_folders(root, relative=''):
                 or not entry.is_dir(follow_symlinks=False)):
             continue
         path = Path(entry.path)
-        folders.append({'name': entry.name, 'path': path.relative_to(root).as_posix(), 'files': _counts(path),
+        project = projects.folder_label(path)
+        counts = _counts(path)
+        if projects.holds_projects(path):
+            for child in sorted(path.iterdir())[:200]:
+                if projects.folder_label(child):
+                    counts = _add_counts(counts, _counts(child))
+        folders.append({'name': project['name'] if project else entry.name, 'path': path.relative_to(root).as_posix(),
+                        'files': counts, 'project': project,
                         'jobs': (path / '.mathagent' / 'proofs').is_dir() or (path / '.mathagent' / 'research').is_dir()})
         if len(folders) >= 500:
             break
+    folders.sort(key=lambda folder: folder['name'].casefold())
     rel = target.relative_to(root).as_posix()
-    return {'root': str(root), 'path': '' if rel == '.' else rel, 'files': _counts(target), 'folders': folders}
+    return {'root': str(root), 'path': '' if rel == '.' else rel, 'files': _counts(target), 'folders': folders,
+            'project': projects.folder_label(target), 'holds_projects': projects.holds_projects(target)}
 
 
 def create_folder(root, relative, name):
@@ -1366,8 +1560,17 @@ def create_folder(root, relative, name):
     if (not isinstance(name, str) or not name.strip() or len(name) > 100 or name.strip().startswith('.')
             or any(c in name for c in '/\\\0')):
         raise ValueError('Folder names cannot be empty, hidden, or contain slashes')
+    if any(ord(c) < 32 or 127 <= ord(c) < 160 for c in name):
+        raise ValueError('Folder names cannot contain line breaks or control characters')
+    if name.strip() in SKIP:
+        raise ValueError(f'Folders named "{name.strip()}" are hidden from the folder list; choose another name')
+    if len(name.strip().encode()) > 200:
+        raise ValueError('That folder name is too long')
     target = parent / name.strip()
-    target.mkdir()
+    try:
+        target.mkdir()
+    except FileExistsError:
+        raise FileExistsError('A folder or file with that name already exists') from None
     return target.relative_to(Path(root).resolve()).as_posix()
 
 
@@ -1380,9 +1583,48 @@ def remember_folder(root, relative):
     _atomic_write(base / 'gui-state.json', json.dumps(state, indent=1).encode())
 
 
+def saved_concurrency(root):
+    """Concurrency limits last set in the interface ({'chats': n, 'requests': n}, each 1–8)."""
+    state = _private_json(Path(root) / '.mathagent' / 'gui-state.json') or {}
+    saved = state.get('concurrency') if isinstance(state.get('concurrency'), dict) else {}
+    return {key: value for key, value in saved.items()
+            if key in ('chats', 'requests') and type(value) is int and 1 <= value <= 8}
+
+
+def save_concurrency(root, limits):
+    base = Path(root) / '.mathagent'
+    _directory(base, create=True)
+    state = _private_json(base / 'gui-state.json') or {}
+    state['concurrency'] = {**saved_concurrency(root), **limits}
+    _atomic_write(base / 'gui-state.json', json.dumps(state, indent=1).encode())
+
+
 def recent_folders(root):
     state = _private_json(Path(root) / '.mathagent' / 'gui-state.json') or {}
     return [r for r in state.get('recent', []) if isinstance(r, str)][:8]
+
+
+def _check_pdf(data):
+    """Refuse a .pdf upload that is plainly not a complete PDF, before it is saved: a PDF starts with %PDF- (within
+    its first kilobyte) and ends with %%EOF (a truncated download does not). Standard library only; nothing is
+    parsed here, and a PDF that passes but cannot be extracted gets its reason when a job reads it."""
+    if b'%PDF-' not in data[:1024]:
+        head = data[:4000].decode('utf-8', 'replace')
+        if re.search(r'\\(?:documentclass|begin\{|section\b|input\b)', head):
+            raise ValueError('That file is not a PDF: it looks like LaTeX source. Rename it to .tex and upload it again.')
+        raise ValueError('That file is not a PDF (it does not start with %PDF-).')
+    if b'%%EOF' not in data[-2048:]:
+        raise ValueError('This PDF is incomplete or damaged (it has no end-of-file marker). '
+                         'Download or export it again and upload the new file.')
+
+
+def upload_encoding(data):
+    """The encoding a byte-order mark declares for an uploaded text ('UTF-16 little-endian'...), or ''."""
+    if data.startswith(codecs.BOM_UTF16_LE):
+        return 'UTF-16 little-endian'
+    if data.startswith(codecs.BOM_UTF16_BE):
+        return 'UTF-16 big-endian'
+    return ''
 
 
 def save_upload(workspace, name, data):
@@ -1395,12 +1637,25 @@ def save_upload(workspace, name, data):
         raise ValueError('Drop text/LaTeX, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDF, Python or PNG/JPEG/WebP image files')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
+    if not data:
+        raise ValueError('That file is empty')
+    if suffix == '.pdf':
+        _check_pdf(data)
     if archive:
         from ..arxiv_source import extract_source
         extract_source(data, deadline=time.monotonic() + 10)  # Validate before publishing any workspace file.
     if not archive and suffix not in BINARY_UPLOADS and b'\x00' in data:
-        raise ValueError('That file is not text')
+        if not upload_encoding(data):
+            raise ValueError('That file is not text: it contains NUL bytes. Save it as UTF-8 text and drop it again')
+        try:
+            decode_text(data, base)  # UTF-16 with a byte-order mark: read as the workspace reader reads it
+        except ValueError:
+            raise ValueError('That file is not text: it starts as UTF-16 but does not decode. Save it as UTF-8 '
+                             'text and drop it again') from None
     stem, number = base[:-len(suffix)] if archive else Path(base).stem, 2
+    if len(base.encode()) > 200:  # File systems limit a name to 255 bytes; keep room for a "-N" suffix.
+        stem = stem.encode()[:200 - len(suffix.encode())].decode('utf-8', 'ignore').rstrip() or 'upload'
+        base = stem + suffix
     target = workspace / base
     fd, temporary = tempfile.mkstemp(prefix='.upload-', dir=workspace)
     try:
@@ -1449,6 +1704,15 @@ def list_templates(root):
     return found
 
 
+def check_template(name, paths):
+    """Refuse a template name or file list before anything is saved."""
+    _template_dir('.', name)
+    if not paths:
+        raise ValueError('Choose the template files to remember')
+    if any(Path(str(p)).suffix.lower() not in TEMPLATE_SUFFIXES for p in paths):
+        raise ValueError('Template files must be .sty, .cls, .tex or .bib')
+
+
 def save_template(root, workspace_obj, name, paths):
     """Copy template files from the workspace so they can be reused in any folder."""
     target = _template_dir(root, name)
@@ -1488,6 +1752,23 @@ def set_style_template(root, workspace, name, paths):
     """Give a saved style the LaTeX template made of these workspace files (none removes it)."""
     try:
         return set_template(root, name, read_template(Workspace(workspace), paths))
+    except FileNotFoundError:
+        raise NotFound('Unknown style') from None
+
+
+def edit_style(root, name, *, rename=None, items=None):
+    """Rename a saved style, or correct parts of its guide (style.edit_profile)."""
+    try:
+        if rename is not None:
+            return rename_profile(root, name, rename)
+        return edit_profile(root, name, items)
+    except FileNotFoundError:
+        raise NotFound('Unknown style') from None
+
+
+def delete_style(root, name):
+    try:
+        delete_profile(root, name)
     except FileNotFoundError:
         raise NotFound('Unknown style') from None
 
@@ -1773,7 +2054,19 @@ def saved_chat_experiment(root, chat_id, experiment_id):
     entry = next((e for e in collect(root) if e['folder'] == 'experiments' and e['job_id'] == experiment_id), None)
     if not entry:
         raise NotFound('The saved experiment is no longer available')
-    return {'answer': read_text(root, {'entries': [entry]}, entry['id']), 'status': entry['status']}
+    answer = read_text(root, {'entries': [entry]}, entry['id'])
+    from ..numerics.artifacts import DETAIL_FIELDS, ExperimentStore, details
+    try:  # The live record has the full run; a kept copy carries the same details (artifacts.retained).
+        shown = details(ExperimentStore(root).load(experiment_id))
+    except (OSError, ValueError, TypeError, AttributeError):
+        try:
+            base = Path(root) / '.mathagent' / 'index' / 'experiments'
+            _directory(base)
+            copy = json.loads(_read(base / (experiment_id + '.json'), 65536))
+            shown = {key: copy.get(key) for key in DETAIL_FIELDS}
+        except (OSError, ValueError, TypeError, AttributeError):
+            shown = {}
+    return {'answer': answer, 'status': entry['status'], **shown}
 
 
 def saved_chat_check(root, chat_id, job_id):
@@ -2002,9 +2295,47 @@ def _chat_evidence(chat):
     return jobs
 
 
+_KEPT = 'kept-project-findings.json'
+_kept_lock = threading.Lock()
+
+
+def _keep_project_findings(root, chat):
+    """Deleting a project conversation keeps its saved jobs in the project's research record.
+
+    The record's scope is derived from current chats, so the deleted chat's links to its saved
+    proofs, checks, reports and runs are kept under a `deleted:` owner. Its small answers are
+    deleted with it and are not kept."""
+    project = chat.get('project_id')
+    jobs = sorted([folder, job] for folder, job in _chat_evidence(chat) if folder != 'answers')
+    if not project or not jobs:
+        return
+    path = Path(root) / '.mathagent' / _KEPT
+    with _kept_lock:
+        kept = _private_json(path) or {}
+        kept[chat['id']] = {'project': project, 'jobs': jobs}
+        _atomic_write(path, json.dumps(kept, indent=1).encode())
+
+
+def _kept_findings(root):
+    kept = _private_json(Path(root) / '.mathagent' / _KEPT) or {}
+    for chat_id, record in kept.items():
+        if (not _ID.fullmatch(chat_id) or not isinstance(record, dict) or not isinstance(record.get('project'), str)
+                or not _ID.fullmatch(record['project']) or not (Path(root) / 'projects' / record['project']).is_dir()):
+            continue  # A deleted project's findings stay in the workspace record.
+        jobs = [tuple(job) for job in record.get('jobs') or [] if isinstance(job, list) and len(job) == 2
+                and all(isinstance(part, str) for part in job)]
+        yield 'deleted:' + chat_id, record['project'], jobs
+
+
 def evidence_links(root):
-    """Return chat-derived links alongside each chat's current project or private scope."""
+    """Return chat-derived links alongside each chat's current project or private scope.
+
+    A deleted project conversation's saved jobs stay linked to that project (owner `deleted:<id>`)."""
     links, chats = {}, {}
+    for owner, project, jobs in _kept_findings(root):
+        chats[owner] = 'project:' + project
+        for job in jobs:
+            links.setdefault(job, set()).add(owner)
     base = _chats(root)
     if base:
         for path in sorted(base.iterdir()):

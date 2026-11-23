@@ -4,6 +4,8 @@
 """Private, explicit-consent feedback snapshots. Never follows workspace references."""
 import base64
 import binascii
+import contextlib
+import contextvars
 import hashlib
 import io
 import json
@@ -34,6 +36,10 @@ _PATTERNS = (
     (re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'), '[REDACTED JWT]'),
     (re.compile(r'(?<![A-Fa-f0-9])[A-Fa-f0-9]{64}(?![A-Fa-f0-9])'), '[REDACTED TOKEN OR DIGEST]'),
     (re.compile(r'([?&#](?:token|key|api_key|access_token)=)[^\s&#"\']+', re.I), r'\1[REDACTED]'),
+    # Prefix-less provider keys and interface tokens: a long key-shaped string after a credential word.
+    (re.compile(r'''(\b(?:api[-_ ]?keys?|keys?|tokens?|secrets?|passwords?|credentials?|bearer|auth)\b[^\r\n]{0,40}?)'''
+                r'''(?<![A-Za-z0-9_-])(?![0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![A-Za-z0-9_-]))'''
+                r'''(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}''', re.I), r'\1[REDACTED KEY]'),
     (re.compile(r'''((?:["']?)(?:api[-_ ]?key|authorization|set-cookie|cookie|password|access[-_ ]?token|gui[-_ ]?token|webhook)(?:["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,;]+)''', re.I), r'\1[REDACTED]'),
 )
 
@@ -110,13 +116,47 @@ def _storage(root, create=False):
     return _directory(path, create=create, private=True)
 
 
+_HELD = contextvars.ContextVar('feedback_held_secrets', default=None)
+
+
+def _held_secrets(root=None, extra=()):
+    """Exact values of the credentials this server holds, whatever their syntax.
+
+    Prefix-less keys (DeepInfra) and the interface token match no pattern, and the recommended
+    launcher passes the provider key in a file, so the environment scan alone never sees it."""
+    values = {value for value in extra if isinstance(value, str)}
+    for name, secret in os.environ.items():
+        if _SECRET_KEYS.search(re.sub(r'[^a-z]', '', name.lower())):
+            values.add(secret)
+    from ..deepinfra import read_api_key
+    from . import feedback_slack
+    token = Path(root or os.devnull) / '.mathagent' / 'gui-token'
+    readers = (read_api_key, _webhook, lambda: (feedback_slack.settings() or ('',))[0],
+               lambda: _read(token, 4096).decode('ascii', 'replace') if root and token.exists() else '')
+    for read in readers:
+        try:
+            values.add(read() or '')
+        except Exception:  # A missing or invalid credential is simply not held.
+            pass
+    return tuple(sorted({value.strip() for value in values if len(value.strip()) >= 8}, key=len, reverse=True))
+
+
+@contextlib.contextmanager
+def _redacting(root, secrets=()):
+    marker = _HELD.set(_held_secrets(root, secrets))
+    try:
+        yield
+    finally:
+        _HELD.reset(marker)
+
+
 def _text(value):
+    # Exact values first: a pattern could otherwise cut a held secret and leave part of it.
+    held = _HELD.get()
+    for secret in _held_secrets() if held is None else held:
+        value = value.replace(secret, '[REDACTED]')
     for pattern, replacement in _PATTERNS:
         value = pattern.sub(replacement, value)
-    # In-memory credentials, if configured this way, need not match a known key syntax.
-    for name, secret in os.environ.items():
-        if _SECRET_KEYS.search(re.sub(r'[^a-z]', '', name.lower())) and len(secret) >= 8:
-            value = value.replace(secret, '[REDACTED]')
     return value
 
 
@@ -249,14 +289,16 @@ def _zip(files):
     return output.getvalue()
 
 
-def preview(root, chat_id):
-    files, omissions = _trace(root, chat_id)
-    return _manifest(files, omissions)
+def preview(root, chat_id, secrets=()):
+    with _redacting(root, secrets):
+        files, omissions = _trace(root, chat_id)
+        return _manifest(files, omissions)
 
 
-def archive(root, chat_id):
-    files, omissions = _trace(root, chat_id)
-    files['manifest.json'] = _json(_manifest(files, omissions))
+def archive(root, chat_id, secrets=()):
+    with _redacting(root, secrets):
+        files, omissions = _trace(root, chat_id)
+        files['manifest.json'] = _json(_manifest(files, omissions))
     return _zip(files)
 
 
@@ -367,7 +409,12 @@ def _notify(report):
     return True
 
 
-def save(root, body, metadata=None):
+def save(root, body, metadata=None, secrets=()):
+    with _redacting(root, secrets):
+        return _save(root, body, metadata)
+
+
+def _save(root, body, metadata):
     if not isinstance(body, dict) or set(body) - {'category', 'description', 'chat_id', 'include_trace', 'images'}:
         raise ValueError('Unknown feedback fields')
     category, description = body.get('category'), body.get('description')

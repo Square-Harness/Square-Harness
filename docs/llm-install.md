@@ -141,8 +141,8 @@ deployment-specific, not part of Cloudflare email-code authentication.
 The authenticated gateway endpoint `GET /api/account` returns only the verified
 email and the configured application's same-origin Access logout URL. It never
 returns a JWT, provider key or workspace token. The frontend uses this optional
-endpoint for its account menu; ordinary local backends return 404 and keep the
-local interface. A public presentation website and a protected app subdomain can
+endpoint for its account menu; ordinary local backends answer an empty object
+and keep the local interface. A public presentation website and a protected app subdomain can
 share a domain while only the app is routed through this gateway.
 
 For a capped Standard-service tester, configure `SH_DEEPINFRA_QUOTA_FILE` as an

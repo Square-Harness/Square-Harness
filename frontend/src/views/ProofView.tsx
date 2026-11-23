@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { api, type Call, type Candidate, type Pending, type ProofDetail, type Review } from '../api'
 import { Collapse, ErrorNote, Loading, Meter, SourceLines, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
+import { DeleteProof, ResumeMore } from '../components/JobActions'
 import { Inline, Markdown } from '../components/Markdown'
 import { candidateLook, proofLook, proofResumable, Square, type Variant } from '../components/Square'
 import { ago, bytes, count, duration, plural } from '../format'
@@ -23,6 +24,9 @@ const SELECTIONS: Record<string, string> = {
   whole_proof_review_found_no_issue: 'the whole-proof review found no blocking issue',
   uncertain_repair_replaces_candidate_with_known_issue: 'an uncertain repair replaces an answer with a concrete objection',
 }
+
+// Stopped on a limit: the saved work can continue once the person adds allowance.
+const EXTENDABLE = ['attempts_exhausted', 'budget_exhausted', 'review_unavailable']
 
 function outputCap(settings: ProofDetail['settings'], cap: number) {
   return Math.min(cap, settings.specialist_output_cap ?? cap)
@@ -102,6 +106,12 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
   const resumable = proofResumable(data.status, data.version)
   const settings = data.settings
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
+  // Saved work that stopped on a limit can continue with an explicit, recorded extra allowance.
+  const extendable = !ours && !data.running && !data.legacy && (data.can_add_allowance ?? (resumable || EXTENDABLE.includes(data.status)))
+  const step = outputCap(settings, settings.max_predict ?? 0) + outputCap(settings, settings.verify_tokens ?? 0)
+  const lastSolve = [...data.calls].reverse().find((call) => call.role === 'solver')
+  const ceiling = !data.running && lastSolve?.status === 'truncated' && !data.candidates.some((c) => c.transport_complete && c.attempt === lastSolve.round)
+    ? lastSolve.reserved_tokens : 0
   return (
     <header className="job-head">
       <div className="job-status">
@@ -110,7 +120,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
         {data.stop_reason && !data.running && <span className="job-stop">{data.stop_reason}</span>}
       </div>
       <div className={'job-goal' + (long && !expanded ? ' job-goal-clamped' : '')}>
-        <Markdown>{data.goal}</Markdown>
+        <Markdown mathProse>{data.goal}</Markdown>
       </div>
       {long && <button type="button" className="link-btn" onClick={() => setExpanded(!expanded)}>{expanded ? 'Show less' : 'Show the whole request'}</button>}
       <details className="job-settings-note">
@@ -133,6 +143,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
         </p>
       )}
       {data.recovery_notice && <p className="warning-note">{data.recovery_notice}</p>}
+      {ceiling && <p className="muted small">The last solve stopped at its {count(ceiling)}-token ceiling before finishing its answer. Resume with more budget to continue it from where it stopped.</p>}
       <div className="job-actions">
         {ours ? (
           <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}>
@@ -143,6 +154,9 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {extendable && <ResumeMore kind="proof" id={data.id} disabled={queued} tokenStep={step}
+          usage={{ tokens: data.budget.tokens, seconds: data.budget.seconds, rounds: data.budget.rounds }} />}
+        {!data.legacy && !data.running && !queued && <DeleteProof id={data.id} />}
         {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
         {data.running && !ours && !route.from && ownTask?.kind !== 'chat' && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
@@ -178,11 +192,14 @@ function Work({ data, ours, onArtifact }: { data: ProofDetail; ours: boolean; on
   )
 }
 
+// The model often closes its proof with its own end mark; the page then adds none.
+const ENDS_WITH_QED = /(?:∎|□|■|◻|\\(?:qed|qedhere|blacksquare|square|Box)|\\end\{proof\})[\s$.\\\])]*$/
+
 export function SelectedAnswer({ data, candidate }: { data: ProofDetail; candidate: Candidate }) {
   const clean = candidate.review_status === 'no_issue_found'
   const look = candidateLook(candidate)
   const review = [...data.reviews].reverse().find((item) => item.candidate === candidate.id && item.response)
-  const title = clean ? 'Answer the review accepted'
+  const title = clean ? 'Answer accepted by the review'
     : candidate.review_status === 'issues_found' ? 'Selected answer, with open objections'
     : candidate.review_status === 'uncertain' ? 'Selected answer, review uncertain'
     : candidate.review_status === 'review_unavailable' ? 'Selected answer, no usable review'
@@ -201,7 +218,7 @@ export function SelectedAnswer({ data, candidate }: { data: ProofDetail; candida
           {' '}Candidate {candidate.id}, from the {KINDS[candidate.kind] || candidate.kind} in attempt {candidate.attempt}.
         </p>
         <Markdown className="candidate-text">{data.answer || ''}</Markdown>
-        {clean && <p className="tombstone" aria-hidden="true">∎</p>}
+        {clean && !ENDS_WITH_QED.test(data.answer || '') && <p className="tombstone" aria-hidden="true">∎</p>}
         {clean && review?.response?.explanation && (
           <Collapse summary="Why the reviewer accepted it"><Markdown>{review.response.explanation}</Markdown></Collapse>
         )}
@@ -356,7 +373,7 @@ function Overview({ data, onAttempt }: { data: ProofDetail; onAttempt: (index: n
     <div className="ledger">
       <section className="aside-section">
         <h3 className="aside-title">Usage</h3>
-        <Meter label={data.legacy ? 'Rounds' : 'Attempts'} used={b.rounds.used} limit={b.rounds.limit} />
+        <Meter label={data.legacy ? 'Rounds' : 'Attempts'} used={b.rounds.used} limit={b.rounds.limit} calm={data.status !== 'attempts_exhausted'} />
         <UsageMeters budget={b} />
         {!data.legacy && settings.max_predict !== undefined && (
           <p className="muted small">

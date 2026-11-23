@@ -9,14 +9,16 @@ but cannot choose a skill, policy, image or container flag. ``python-lab`` is a
 user-requested skill, bound by a selected command or a validated routing decision.
 """
 import json
+import sys
 import threading
 import time
+import warnings
 
 from .. import __version__
 from .. import skill_catalog
 from ..tools import schema
 from .artifacts import ExperimentStore
-from .executor import IMAGE, DockerExecutor, SandboxUnavailable
+from .executor import DEFAULT_CONCURRENCY, IMAGE, DockerExecutor, SandboxUnavailable
 from .policy import LAB, SANITY, PolicyError, load_policies, resolve
 
 TOOL_NAMES = ('execute_python', 'read_experiment', 'read_skill_reference')
@@ -34,6 +36,34 @@ NOTES = {
                'simulate step by step instead of storing every path, accumulate statistics, or use float32.'),
     'files': ' The files are shown to the user with this run; describe them instead of pasting links.',
 }
+
+
+def normalize_code(code):
+    """Undo a common tool-argument encoding slip: the whole script sent with literal "\\n" escapes.
+
+    Only when the text has no real line break, does not compile as sent, and compiles once the
+    escapes become line breaks (a one-line script printing "a\\nb" is left alone)."""
+    if '\n' in code or '\\n' not in code or _syntax_error(code) is None:
+        return code
+    fixed = code.replace('\\r\\n', '\n').replace('\\n', '\n').replace('\\t', '\t')
+    return fixed if _syntax_error(fixed) is None else code
+
+
+def _syntax_error(code):
+    """The SyntaxError of ``code`` on this host, or None. Compiling never runs the code.
+
+    The sandbox runs Python 3.12: an older host cannot judge newer syntax and checks nothing."""
+    if sys.version_info < (3, 12):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # e.g. invalid escape sequences: the sandbox reports them
+            compile(code, '<experiment>', 'exec', dont_inherit=True)
+    except (SyntaxError, ValueError) as exc:
+        return exc
+    except (RecursionError, MemoryError):
+        return None  # Let the sandbox, with its own limits, decide.
+    return None
 
 
 def _excerpt(text, limit):
@@ -62,6 +92,7 @@ class NumericsSession:
         self.explicit, self.approve, self.cancel = explicit, approve, cancel
         self.invocation = 'routed' if routed else 'explicit' if explicit else 'automatic'
         self.runs = 0
+        self.reached = {}  # Limits a run of this session ran into: a reason to approve a larger one.
         self.on_run_change = None
         self.on_record = None  # Set by the interface to show each saved run in the conversation.
         self._lock = threading.Lock()
@@ -137,8 +168,17 @@ class NumericsSession:
         if not self.policy.escalation and (memory_mb is not None or cpus is not None):
             raise PolicyError('Automatic checks use fixed memory and CPU limits; heavier computations are for '
                               'the user\'s /python-lab.')
+        code = normalize_code(code)
+        if (error := _syntax_error(code)) is not None:
+            # Checked before any approval or container: a typo costs neither a run nor a sandbox start.
+            detail = {'type': type(error).__name__, 'message': str(getattr(error, 'msg', error))[:500]}
+            if isinstance(error, SyntaxError):
+                detail.update(line=error.lineno, text=(error.text or '').rstrip()[:300])
+            return {'status': 'syntax_error', 'error': detail, 'runs_left': max(self.policy.max_runs - self.runs, 0),
+                    'message': 'The code does not compile, so it was not run (no sandbox run was used). Fix it and '
+                               'send the complete script again, with real line breaks.'}
         limits = resolve(self.policy, {'timeout_seconds': timeout_seconds, 'memory_mb': memory_mb, 'cpus': cpus},
-                         self.approve)
+                         self.approve, purpose=purpose, code=code, reached=self.reached)
         with self._lock:
             if self.runs >= self.policy.max_runs:
                 return {'status': 'budget_exhausted', 'runs_left': 0,
@@ -162,6 +202,10 @@ class NumericsSession:
         record = self.store.save(code=code, result=result, limits=limits, policy=self.policy.name, image=image,
                                  seed=seed, parameters=parameters, purpose=purpose, invocation=self.invocation,
                                  harness_version=__version__)
+        hit = {'timeout': 'timeout_seconds', 'memory': 'memory_mb'}.get(result.status)
+        if hit:
+            with self._lock:
+                self.reached[hit] = max(self.reached.get(hit, 0), getattr(limits, hit))
         if self.on_record is not None:
             try:
                 self.on_record(record)
@@ -237,10 +281,11 @@ class NumericsSession:
 class PythonSandbox:
     """Process-wide sandbox configuration: one executor, the policies and availability."""
 
-    def __init__(self, *, enabled=True, automatic=True, image=IMAGE, limits_file=None, executor=None, policies=None):
+    def __init__(self, *, enabled=True, automatic=True, image=IMAGE, limits_file=None, executor=None, policies=None,
+                 concurrency=DEFAULT_CONCURRENCY):
         self.enabled, self.automatic = enabled, automatic
         self.policies = policies or load_policies(limits_file)
-        self.executor = executor or DockerExecutor(image)
+        self.executor = executor or DockerExecutor(image, concurrency=concurrency)
         self._failure = None
         self._lock = threading.Lock()
 
@@ -249,7 +294,8 @@ class PythonSandbox:
         return cls(enabled=not getattr(args, 'no_python_sandbox', False),
                    automatic=not getattr(args, 'no_numerical_checks', False),
                    image=getattr(args, 'python_image', None) or IMAGE,
-                   limits_file=getattr(args, 'python_limits', None))
+                   limits_file=getattr(args, 'python_limits', None),
+                   concurrency=getattr(args, 'python_concurrency', DEFAULT_CONCURRENCY))
 
     def unavailable(self):
         """None when the sandbox can run, else why (a failure is rechecked after 30 s)."""

@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
-import { api, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
+import { api, ApiError, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
-import { Collapse, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
+import { Collapse, CopyButton, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
@@ -19,19 +19,22 @@ import { proofLook, researchLook, Square, type Variant } from '../components/Squ
 import { useDropTarget } from '../drop'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { literalUnderscores } from '../mathtext'
-import { ago } from '../format'
+import { ago, count, displayPath, duration } from '../format'
 import { MODES } from '../modes'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
 import { go, href } from '../router'
-import { refreshLists, setProjectFilter, useApp, useTick } from '../store'
+import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
 
 type ChatMode = 'critic' | 'explore' | 'free'
+
+/** An unsent message kept when its conversation is deleted (here or in another tab). */
+let rescued: { draft: string; attachments: string[] } | null = null
 
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
@@ -107,7 +110,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   useEffect(() => { setLingering(null) }, [data])
   const live = current || lingering
   const routing = work.routing
-  const [draft, setDraft] = useState('')
+  const [kept] = useState(() => id ? null : rescued)
+  useEffect(() => { if (kept) rescued = null }, [kept])
+  const [draft, setDraft] = useState(kept?.draft || '')
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
   // null: no effort named, so the harness picks its default for the mode.
   const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
@@ -115,7 +120,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     if (next?.mode !== selectedCall?.mode) setSelectedEffort(null)
     setSelectedCall(next)
   }
-  const [attachments, setAttachments] = useState<string[]>([])
+  const [attachments, setAttachments] = useState<string[]>(kept?.attachments || [])
+  const [deletedNotice, setDeletedNotice] = useState(!!kept)
   const defaultProject = app.projects?.some((project) => project.id === app.projectFilter) ? app.projectFilter : null
   const [newProject, setNewProject] = useState<string | null>(defaultProject)
   const [projectOverride, setProjectOverride] = useState<string | null | undefined>(undefined)
@@ -125,8 +131,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const currentProject = id ? (projectOverride !== undefined ? projectOverride : savedProject) : newProject
   useEffect(() => { if (!id && !createdChat.current) setNewProject(defaultProject) }, [defaultProject, id])
   const [sendError, setSendError] = useState('')
+  // A refusal because this conversation is busy (another tab sent first) clears once its turn ends.
+  const [busyError, setBusyError] = useState(false)
   const [sending, setSending] = useState(false)
   const createdChat = useRef<string | null>(null)
+  useEffect(() => {
+    const deleted = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== id) return
+      rescued = { draft, attachments }
+      setProjectFilter(currentProject || 'all')
+    }
+    window.addEventListener('square-chat-deleted', deleted)
+    return () => window.removeEventListener('square-chat-deleted', deleted)
+  })
   useEffect(() => {
     const prepare = (event: Event) => {
       if (sending) { event.preventDefault(); setSendError('Wait for the message to be sent before changing projects.'); return }
@@ -145,6 +162,36 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLFormElement>(null)
   const pinned = useRef(true)
+
+  // The sidebar follows the open conversation: a project view that does not contain it returns to all conversations.
+  useEffect(() => {
+    if (!id || !data || data.id !== id) return
+    const filter = getState().projectFilter
+    if (filter !== 'all' && filter !== (data.project_id || 'all')) setProjectFilter(data.project_id || 'all')
+  }, [id, data?.id, data?.project_id])
+  // A new or newly opened conversation is ready for typing (not on touch screens, where it would open the keyboard).
+  useEffect(() => {
+    if (!window.matchMedia?.('(pointer: fine)').matches) return
+    const active = document.activeElement
+    if (active && active !== document.body && !active.closest('.sidebar, .composer')) return
+    composer.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true })
+  }, [id])
+  const sawBusy = useRef(false)
+  useEffect(() => {
+    if (!busyError) { sawBusy.current = false; return }
+    if (work.blocked) sawBusy.current = true
+    else if (sawBusy.current) { setSendError(''); setBusyError(false) }
+  }, [work.blocked, busyError])
+
+  // A project's file list attaches a file to the next message.
+  useEffect(() => {
+    const attach = (event: Event) => {
+      const paths = (event as CustomEvent<string[]>).detail
+      if (Array.isArray(paths)) setAttachments((items) => [...new Set([...items, ...paths])])
+    }
+    window.addEventListener('square-attach-paths', attach)
+    return () => window.removeEventListener('square-attach-paths', attach)
+  }, [])
 
   const uploading = useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]),
     currentProject)
@@ -166,6 +213,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const budgetDisplay = data?.assistant_budget ? assistantBudgetDisplay(data.assistant_budget) : null
   const paused = free && assistantResumable(data)
   const pausedInvestigation = paused && !!data?.investigation?.current
+  // While this conversation's own turn runs, a new Assistant message waits in the queue and starts after it.
+  const canQueue = free && !!id && (!!work.active || work.routing) && !work.queued
   const send = async (text?: string) => {
     let raw = text ?? draft
     let imageOnlyCall: ModeCall | null = null
@@ -182,13 +231,15 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
-    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || uploading || work.blocked || (hasImages && !app.status?.image_support)) return
+    const queue = canQueue
+    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || uploading || (work.blocked && !queue) || (hasImages && !app.status?.image_support)) return
     setSending(true)
     setSendError('')
+    setBusyError(false)
     try {
       let chatId = id || createdChat.current
       if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true, newProject)).id; createdChat.current = chatId }
-      if (free) await api.route(chatId, content, attachments, modeCall)
+      if (free) await api.route(chatId, content, attachments, modeCall, queue)
       else await api.send(chatId, content, attachments)
       setDraft('')
       setSelectedCall(null)
@@ -197,6 +248,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       if (!id) go(mode, chatId)
     } catch (reason) {
       setSendError((reason as Error).message)
+      setBusyError(reason instanceof ApiError && reason.status === 409)
     } finally {
       setSending(false)
     }
@@ -256,7 +308,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
-          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} waiting={data?.waiting_for_results} />}
+          {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} waiting={data?.waiting_for_results} paused={paused && !ours} />}
           {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
@@ -283,14 +335,18 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         </div>
       </div>
       <form className="composer" ref={composer} onSubmit={submit}>
+        {deletedNotice && !id && <p className="warning-note composer-notice" role="status">
+          The conversation you had open was deleted{draft.trim() || attachments.length ? '. Your unsent message is kept here, in a new conversation.' : '.'}
+          <button type="button" className="icon-btn" aria-label="Dismiss" onClick={() => setDeletedNotice(false)}><CloseIcon size={13} /></button>
+        </p>}
         <div className="composer-top">
           <WorkspaceSwitch />
           <ProjectSelector value={currentProject} onChange={(project) => { void changeProject(project) }} disabled={sending || resuming || projectSaving || work.blocked || (!!id && !data)} />
-          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || work.blocked} onClick={() => window.dispatchEvent(new Event('square-attach-files'))} aria-label={'Attach files' + (app.status?.image_support ? ' or images' : '')}><FileIcon size={14} /><span className="composer-long-label"> Attach files{app.status?.image_support ? ' or images' : ''}</span></button>
+          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || (work.blocked && !canQueue)} onClick={() => window.dispatchEvent(new Event('square-attach-files'))} aria-label={'Attach files' + (app.status?.image_support ? ' or images' : '')}><FileIcon size={14} /><span className="composer-long-label"> Attach files{app.status?.image_support ? ' or images' : ''}</span></button>
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
-            <span key={path} className="chip">
-              <FileIcon size={14} /><span>{path}</span>
-              <button type="button" className="chip-remove" aria-label={`Remove ${path}`}
+            <span key={path} className="chip" title={path}>
+              <FileIcon size={14} /><span>{displayPath(path)}</span>
+              <button type="button" className="chip-remove" aria-label={`Remove ${displayPath(path)}`}
                 onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
             </span>
           ))}
@@ -300,41 +356,58 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
             effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
-            onSend={() => { send() }} disabled={pausedInvestigation || blocked || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+            onSend={() => { send() }} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Continue the conversation…' : 'Ask about an approach, a reformulation or a connection…'}
             aria-label="Message" />}
+          {ours && canQueue && (draft.trim() || hasImages) && (
+            <button type="submit" className="btn btn-primary composer-send" disabled={sending || !!uploading || (hasImages && !app.status?.image_support)}
+              title="Send this message after the current turn finishes">
+              <SendIcon size={16} /> {sending ? 'Queueing…' : 'Queue'}
+            </button>
+          )}
           {ours ? (
-            <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
+            <button type="button" className={'btn composer-send' + (canQueue && (draft.trim() || hasImages) ? ' btn-quiet' : '')} disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
             </button>
           ) : paused && (pausedInvestigation || (!draft.trim() && !hasImages)) ? (
             <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending || !!uploading} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
-          ) : work.queued ? (
+          ) : work.queued && !work.active && !work.queued.followup ? (
             <button type="button" className="btn composer-send" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
               <CloseIcon size={16} /> Cancel queued turn
             </button>
           ) : (
-            <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label="Send">
-              <SendIcon size={16} /> {uploading ? 'Uploading…' : 'Send'}
+            <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
+              <SendIcon size={16} /> {uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}
             </button>
           )}
         </div>
         <div className="composer-bar">
           {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
-          {free && budgetDisplay && (
+          {free && (budgetDisplay || data?.usage_total) && (
             <details className="composer-usage"><summary>Usage details</summary>
-              <p title={budgetDisplay.title}>{[budgetDisplay.output, budgetDisplay.reserved, budgetDisplay.uncertain,
-                budgetDisplay.context, budgetDisplay.time].filter(Boolean).join(' · ')}</p>
+              {data?.usage_total && <p title="Summed over every turn of this conversation, as reported by the model provider where available.">
+                This conversation: {count(data.usage_total.input_tokens)} input · {count(data.usage_total.output_tokens)} output tokens · {duration(data.usage_total.seconds)} working time</p>}
+              {budgetDisplay && <p title={budgetDisplay.title}>{data?.usage_total ? 'Latest turn: ' : ''}{[budgetDisplay.output, budgetDisplay.reserved, budgetDisplay.uncertain,
+                budgetDisplay.context, budgetDisplay.time].filter(Boolean).join(' · ')}</p>}
             </details>
           )}
-          {free && <span className="composer-hint">@ selects a mode</span>}
+          {free && <span className="composer-hint">@ selects a skill</span>}
         </div>
         <ModelWaitNote taskId={task?.id} />
-        {work.queued && <p className="queued-note" role="status">{work.queued.position && work.queued.position > 1 ? `Waiting for a free place: ${work.queued.position - 1} ahead of this one.` : 'Next to start, as soon as a place frees up.'} You can cancel it above.</p>}
+        {work.queued && (work.active || work.routing || work.queued.followup ? (
+          <div className="queued-note" role="status">
+            <span><Square variant="ready" size={12} /> Queued: {(data?.queued_followup?.content || work.queued.title)
+              ? <Inline limit={90}>{data?.queued_followup?.content || work.queued.title}</Inline> : 'your next message'}.
+              {work.active || work.routing ? ' It starts when the current turn finishes.' : paused ? ' It starts after you resume the paused turn.' : ' It starts in a moment.'}</span>
+            <button type="button" className="btn btn-quiet btn-small" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
+              <CloseIcon size={14} /> Cancel
+            </button>
+          </div>
+        ) : <p className="queued-note" role="status">{work.queued.position && work.queued.position > 1 ? `Waiting for a free place: ${work.queued.position - 1} ahead of this one.` : 'Next to start, as soon as a place frees up.'} You can cancel it above.</p>)}
         {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
@@ -382,7 +455,7 @@ function group(items: TranscriptItem[]): Turn[] {
   return turns
 }
 
-function Transcript({ items, mode, chatId, lanes, plan, waiting }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation']; waiting?: Chat['waiting_for_results'] }) {
+function Transcript({ items, mode, chatId, lanes, plan, waiting, paused }: { items: TranscriptItem[]; mode: ChatMode; chatId: string; lanes: AgentLane[]; plan?: Chat['investigation']; waiting?: Chat['waiting_for_results']; paused: boolean }) {
   const turns = group(items)
   const groups = groupsOf(lanes)
   const byCard = new Map<number, AgentLane[]>()
@@ -420,9 +493,9 @@ function Transcript({ items, mode, chatId, lanes, plan, waiting }: { items: Tran
     <>
       {turns.map((turn, index) => (
         <div key={index} className="turn">
-          {turn.user && <UserMessage item={turn.user} />}
+          {turn.user && <UserMessage item={turn.user} call={turn.steps.find(({ item }) => item.role === 'route' && !!item.reason?.startsWith(EXPLICIT_CALL))?.item} />}
           {plan && index === planTurn && <ConversationPlan key={plan.id} plan={plan} finished={finalTurn >= 0} />}
-          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} />
+          <ModelSteps steps={turn.steps} mode={mode} chatId={chatId} groups={byCard} prompt={turn.user?.content} paused={paused && index === turns.length - 1} />
           {unstarted.get(index)?.map(batch => <AgentGroup key={batch[0].id} lanes={batch} prompt={turn.user?.content} chatId={chatId} />)}
           {index === turns.length - 1 && <WaitingForResults tasks={waiting} />}
           {plan && index === planTurn && finalTurn < 0 && <WorkingAnswer plan={plan} chatId={chatId} />}
@@ -432,23 +505,32 @@ function Transcript({ items, mode, chatId, lanes, plan, waiting }: { items: Tran
   )
 }
 
-function UserMessage({ item }: { item: TranscriptItem }) {
+// The route card the harness saves for a skill the person picked with @ (mode_calls.py).
+const EXPLICIT_CALL = 'User explicitly selected @'
+
+function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptItem }) {
   const files = (item.files || []).filter(path => !item.images?.length || !isImagePath(path))
   const attached = files.filter(path => item.attached_files?.includes(path))
   const available = files.filter(path => !item.attached_files?.includes(path))
+  const picked = call?.mode && call.mode !== 'clarify' ? call.mode : null
+  const cover = picked && picked !== 'critic' && picked !== 'free' ? KINDS[kindOf(picked)].cover : null
   return (
     <div className={'entry message message-user' + (item.discarded ? ' message-discarded' : '')}>
       <span className="in-margin speaker speaker-user">You</span>
       <div className="message-body">
-        <Markdown>{literalUnderscores(item.content)}</Markdown>
+        {picked && <p className="message-call" title="You selected this skill for the message">
+          {cover && <span className={`route-cover mode-${cover}`} aria-hidden="true"><Glyph mode={cover} /></span>}
+          <strong>@{picked}</strong>{call?.effort && effortKind(picked as RouteMode) ? <span> · {effortLabel(call.effort)} effort</span> : null}
+        </p>}
+        <Markdown quiet>{literalUnderscores(item.content)}</Markdown>
         {attached.length > 0 && (
           <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
-            <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>
+            <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>
           )}</div>
         )}
         {available.length > 0 && (
           <p className="message-sources"><span>{item.attached_files ? 'Available for this reply' : available.length === 1 ? 'Source' : 'Sources'}</span>
-            {' · '}{available.join(', ')}</p>
+            {' · '}{available.map(displayPath).join(', ')}</p>
         )}
         {!!item.images?.length && <ImageGallery images={item.images} />}
         {item.time && <span className="message-time">{ago(item.time)}</span>}
@@ -457,7 +539,10 @@ function UserMessage({ item }: { item: TranscriptItem }) {
   )
 }
 
-function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]>; prompt?: string }) {
+const PAUSE_NOTICE = 'Assistant paused.'
+const clock = (time: string) => { const date = new Date(time); return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) }
+
+function ModelSteps({ steps, mode, chatId, groups, prompt, paused }: { steps: Step[]; mode: ChatMode; chatId: string; groups: Map<number, AgentLane[]>; prompt?: string; paused: boolean }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
   // An Assistant conversation answers with one voice, whichever engine mode wrote it, except
@@ -500,6 +585,9 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
           ))}
           {item.content && (item.investigation_id ? <InvestigationReport content={item.content} chatId={chatId} synthesis={item.synthesis} covered={item.synthesis_steps} />
             : <Markdown className={final ? 'answer' : 'interim'}>{item.content}</Markdown>)}
+          {final && item.content && <div className="message-actions">
+            <CopyButton label="Copy" title="Copy this answer as Markdown, with its LaTeX source" text={item.content} />
+          </div>}
           {final && item.stats?.done_reason === 'length' && (
             <span className="message-time">The answer reached its length limit.</span>
           )}
@@ -518,6 +606,13 @@ function ModelSteps({ steps, mode, chatId, groups, prompt }: { steps: Step[]; mo
       // Older saved turns repeat a paused worker's card as a discarded message.
       if (item.discarded && steps.some(({ item: card }) => card.role === 'route' && card.orchestrated &&
           card.status === 'stopped' && card.error && item.content === 'Not added to the conversation: ' + card.error)) continue
+      if (item.content.startsWith(PAUSE_NOTICE)) {
+        // While paused, the paused note under the conversation says it once; afterwards this is history.
+        const later = steps.slice(i + 1).some(({ item: next }) => next.role === 'notice' && next.content.startsWith(PAUSE_NOTICE))
+        if (paused && !later) continue
+        blocks.push(<p key={index} className="notice notice-history">Paused{item.time && clock(item.time) ? ` at ${clock(item.time)}` : ''}.</p>)
+        continue
+      }
       blocks.push(<p key={index} className={'notice' + (item.discarded ? ' notice-discarded' : '')}>{item.content}</p>)
     } else if (item.role === 'tool') {
       blocks.push(<Collapse key={index} className="tool-step" summary={<span className="tool-line">{item.tool_name || 'tool'} result</span>}><pre className="plain">{item.content}</pre></Collapse>)
@@ -619,8 +714,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
             {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
             {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
-            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.researchReviewDownloadUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
-            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={api.researchBibDownloadUrl(item.job_id)} download>References (.bib)</a>}
+            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
+            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={item.outputs.review ? api.reviewBibtexUrl(item.job_id) : api.researchBibDownloadUrl(item.job_id)} download>BibTeX (.bib)</a>}
           </>}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
             ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
@@ -631,9 +726,9 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             </button>
           )}
           <Collapse className="route-details" summary={(kind === 'answer' || kind === 'check') && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
-            <div className="route-summary"><Inline limit={1200}>{item.request || ''}</Inline></div>
+            <div className="route-summary"><Inline mathProse limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
-              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
+              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>)}</div>
             )}
             {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
             {item.reason && <p className="muted small">Why: {item.reason}</p>}

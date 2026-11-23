@@ -556,6 +556,51 @@ def _surname(author):
     return (author.split(',')[0] if ',' in author else (author.split() or [''])[-1]).strip()
 
 
+# Nouns that an eponym names in a question: "the Boulard–Carillo conjecture", "Linnik's constant".
+_EPONYM_OBJECTS = frozenset('conjecture conjectures theorem theorems lemma problem problems hypothesis inequality inequalities '
+                            'constant constants principle criterion formula equation equations identity identities bound '
+                            'bounds estimate estimates property invariant invariants polynomial polynomials number numbers '
+                            'space spaces group groups algebra algebras operator operators transform program programme '
+                            'method condition correspondence duality flow measure process model graph graphs function '
+                            'functions series sequence sequences theory phenomenon paradox'.split())
+# Capitalised words that start a request or qualify an object without naming anyone.
+_NOT_NAMES = frozenset('the a an this that these those survey review give write explain describe summarize summarise list '
+                       'what which who is are was were does do did how why when where recent main strong weak '
+                       'generalized generalised extended fundamental central prime last great little big small local '
+                       'global four three two first second third new old modern classical please can could i we my our '
+                       'abc on of in for and to its their'.split())
+
+
+def _clip_words(text, limit):
+    text = ' '.join(str(text or '').split())
+    return text if len(text) <= limit else text[:limit - 1].rsplit(' ', 1)[0].rstrip(',;:') + '…'
+
+
+def _eponym(question):
+    """(phrase, names) of the first object the question names after people, e.g. ("Boulard–Carillo conjecture",
+    ["Boulard", "Carillo"]); None when it names none."""
+    text = str(question or '')
+    tokens = [(m[0], m.start(), m.end()) for m in re.finditer(r"[^\W\d_][\w'’.]*(?:[-–—][^\W\d_][\w'’.]*)*|[,;:?!()]", text)]
+    for i, (token, _, end) in enumerate(tokens):
+        if token.lower() not in _EPONYM_OBJECTS or i == 0:
+            continue
+        names, j, start = [], i - 1, None
+        while j >= 0:
+            word = re.sub(r"['’]s$", '', tokens[j][0])
+            parts = [part.rstrip('.') for part in re.split(r'[-–—]', word) if part]
+            if word.lower() == 'and' and names:
+                pass
+            elif not parts or not all(part[:1].isupper() for part in parts):
+                break
+            elif word.lower() not in _NOT_NAMES:
+                names = [part for part in parts if part.lower() not in _NOT_NAMES and len(part) >= 3] + names
+                start = tokens[j][1]
+            j -= 1
+        if names and start is not None:
+            return text[start:end], names
+    return None
+
+
 def _given_first(author):
     author = str(author).strip()
     return ' '.join(reversed([x.strip() for x in author.split(',', 1)])) if author.count(',') == 1 else author
@@ -952,17 +997,40 @@ class ReviewRunner(ResearchRunner):
         deadline = getattr(self.agent.client, 'deadline', None)
         if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
             budgets['max_seconds'] = min(budgets['max_seconds'], max(.1, deadline - time.monotonic()))
+        self._earlier = self._earlier_review(goal)
         return super().start(goal, kind='literature', source_files=source_files, max_rounds=HIGH_ROUNDS, **budgets)
 
-    def resume(self, job_id, *, additional_seconds=0):
+    def _earlier_review(self, goal):
+        """The most recent finished review of the same request in this workspace (its job ID), else None."""
+        wanted = ' '.join(_fold(goal).split())
+        folder = self.agent.workspace.root / '.mathagent' / self.FOLDER
+        try:
+            jobs = sorted((p for p in folder.iterdir() if (p / 'state.json').is_file()),
+                          key=lambda p: (p / 'state.json').stat().st_mtime, reverse=True)[:50]
+        except OSError:
+            return None
+        for job in jobs:
+            try:
+                if (job / 'state.json').stat().st_size > 64 * 2 ** 20:
+                    continue
+                state = json.loads((job / 'state.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if (state.get('kind') == 'literature' and state.get('phase') == 'done' and state.get('pipeline') == PIPELINE
+                    and ' '.join(_fold(state.get('goal') or '').split()) == wanted):
+                return state.get('id')
+        return None
+
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
         saved = _read_state(_job_directory(self.agent.workspace.root, job_id, self.FOLDER), job_id)
         if saved.get('pipeline') == LEGACY_PIPELINE:
             raise ValueError('This reading list was made by an earlier version of Square Harness. It stays readable, '
                              'but it cannot be resumed: start a new literature review instead.')
-        return super().resume(job_id, additional_seconds=additional_seconds)
+        return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
 
     def _extra_state(self):
-        return {'pipeline': PIPELINE, 'checked_export': True, 'scope': None, 'pool': [], 'sweep_log': [],
+        return {**({'earlier_review': self._earlier} if getattr(self, '_earlier', None) else {}),
+                'pipeline': PIPELINE, 'checked_export': True, 'scope': None, 'pool': [], 'sweep_log': [],
                 'screened': {}, 'screen_attempts': {}, 'screen_failed': {}, 'filtered': [], 'deferred': [], 'expanded': [],
                 'expand_round': 0, 'leads': {}, 'documents': {}, 'cards': {}, 'card_failed': {}, 'read_plan': {},
                 'read_planned': False, 'selected': [], 'importance': {}, 'dropped': [], 'outline': None,
@@ -1836,6 +1904,42 @@ class ReviewRunner(ResearchRunner):
         query = (self.state.get('reference_context') or {}).get('query')
         return query if isinstance(query, str) and query.strip() else self.state['goal']
 
+    def _unfound_subject(self):
+        """The named object of the question ('the Boulard–Carillo conjecture') when the searches answered and no
+        retrieved record mentions its names: then nothing establishes that it exists. None otherwise."""
+        s = self.state
+        answered = {row['source'] for row in s.get('sweep_log') or [] if not row.get('error')}
+        if len(answered) < 2:
+            return None  # offline, or the sources failed: absence of evidence says nothing here
+        subject = _eponym(self._review_question())
+        if not subject:
+            return None
+        phrase, names = subject
+        patterns = [re.compile(r'\b' + re.escape(_fold(name))) for name in names]
+        for record in s.get('pool') or []:
+            text = _fold(' '.join([str(record.get('title') or ''), str(record.get('abstract') or ''), str(record.get('review') or ''),
+                                   ' '.join(str(a) for a in record.get('authors') or [])]))
+            if all(p.search(text) for p in patterns):
+                return None
+        return phrase
+
+    def _subject_note(self):
+        """An instruction for the plan and the draft when the question's named object was never found."""
+        subject = self._unfound_subject()
+        if not subject:
+            return ''
+        return (f'\nIMPORTANT: no retrieved record mentions "{subject}". Nothing here establishes that it exists. '
+                f'Do not present it as an established object, and do not describe any work as a result, special case '
+                f'or partial result of it. Present the works only as literature on the nearby topic, and say in the '
+                f'opening that no work defining or studying "{subject}" was found.\n')
+
+    def _web_failures(self):
+        """(searches refused because web research was off, requests refused by a rate limit) in the search log."""
+        rows = [str(row.get('error') or '') for row in self.state.get('sweep_log') or []]
+        offline = sum(1 for e in rows if e.startswith('Offline mode'))
+        limited = sum(1 for e in rows if 'HTTP 429' in e or 'unavailable earlier in this session' in e)
+        return offline, limited
+
     def _public_queries(self, queries):
         """Reject long verbatim phrases from pinned or conversation text unless the human requested them.
 
@@ -1943,6 +2047,12 @@ class ReviewRunner(ResearchRunner):
     def _fits(seed, raw):
         words = _words(seed['title'])
         found = _words(raw.get('title'))
+        if '\ufffd' in str(raw.get('title') or ''):
+            # A registry title with lost characters ("Endlichkeitss\ufffdtze"): each lost character matches one letter.
+            tokens = re.findall(r'[\w\ufffd]+', _fold(raw['title']))
+            patterns = [re.compile(re.escape(t).replace('\ufffd', '[a-z]{1,2}')) for t in tokens if '\ufffd' in t]
+            found = {w for w in _words(' '.join(t for t in tokens if '\ufffd' not in t))} | {
+                w for w in words if any(p.fullmatch(w) for p in patterns)}
         parts = lambda title: re.findall(r'\d+|\b[ivx]+\b', _fold(title))
         names = [_fold(_surname(a)) for a in seed['authors'] if str(a).strip()]
         authors = _fold(' '.join(str(a) for a in raw.get('authors') or []))
@@ -2626,6 +2736,14 @@ class ReviewRunner(ResearchRunner):
                     found[str(n)] = m
                     break
                 if any(r.get(k) and other.get(k) and r[k] != other[k] for k in ('doi', 'arxiv')):
+                    # Two DOIs for one text (a blog post registered twice, a reposted record): the same full title,
+                    # the same authors and the same year are one work.
+                    same = (len(_full_title(r['title'])) >= 12 and _full_title(r['title']) == _full_title(other['title'])
+                            and r.get('year') == other.get('year') and r.get('authors')
+                            and [_fold(_surname(a)) for a in r['authors']] == [_fold(_surname(a)) for a in other.get('authors') or []])
+                    if same:
+                        found[str(n)] = m
+                        break
                     continue
                 close_years = not (r.get('year') and other.get('year')) or abs(r['year'] - other['year']) <= 1
                 if (close_years and mine & titles(other) and r.get('authors') and other.get('authors')
@@ -3029,7 +3147,7 @@ class ReviewRunner(ResearchRunner):
         works = '\n'.join(self._evidence_line(n) for n in s['selected'])
         prompt = (
             f'Plan a mathematical survey in the language and for the audience of the request.\n'
-            f'REQUEST: {self._review_question()}\nFocus: {scope["topic"]}\n\n'
+            f'REQUEST: {self._review_question()}\nFocus: {scope["topic"]}\n{self._subject_note()}\n'
             'The request and search scope specify the question. Neither is evidence for a mathematical assertion. '
             'Choose an economical narrative that answers it and that shows the reader the literature of the topic: '
             'who proved what. Explain in detail the decisive results, their predecessors and the strongest relevant '
@@ -3447,7 +3565,7 @@ class ReviewRunner(ResearchRunner):
                               + ' | '.join(section['table_columns']) + r'. In math cells use \lvert, \rvert and \Vert.')
         else:
             directions.append('Use prose, without a table.')
-        prompt = ('\n'.join(directions) + f'\n\nREQUEST:\n{self._review_question()}\n\nSECTION: {section["heading"]}\n'
+        prompt = ('\n'.join(directions) + f'\n\nREQUEST:\n{self._review_question()}\n{self._subject_note()}\nSECTION: {section["heading"]}\n'
                   + f'Other sections (avoid repeating them): {other_topics}\n\n'
                   + 'SOURCES FOR THIS SECTION:\n' + self._pack(works, budget=self._evidence_room(WRITE_EVIDENCE)))
         text = cut = ''
@@ -4792,7 +4910,22 @@ class ReviewRunner(ResearchRunner):
                 return 'the authors'
             return self._names(n) + ('' if n in cited else f' [{number(n)}]')
         title = TOKENS.sub(token, self._clean_section(title)).strip() or 'Literature review'
+        subject = self._unfound_subject()
+        if subject:
+            # The model's title takes the question's object as given; nothing retrieved establishes it.
+            title = f'No work defining or studying the {subject} was found'
+        elif not parts:
+            # Without checked prose the planned title would assert what no source supports.
+            title = 'Literature search: ' + _clip_words(self._review_question(), 120)
         out = [f'# {title}', '']
+        if subject:
+            names = {'zbmath': 'zbMATH Open', 'arxiv': 'arXiv', 'crossref': 'Crossref', 'semantic_scholar': 'Semantic Scholar',
+                     'opencitations': 'OpenCitations', 'publisher': 'publisher pages'}
+            asked = list(dict.fromkeys(names.get(row['source'], row['source']) for row in s['sweep_log'] if not row.get('error')))
+            out += [f'No work defining or studying the {subject} was found in the sources searched ({", ".join(asked)}): '
+                    f'none of the {len(s["pool"])} records retrieved mentions it. '
+                    + ('The works discussed below are on nearby topics. They are not results about the '
+                       f'{subject}, and nothing here confirms that it exists.' if s['pool'] else ''), '']
         for i, (heading, text) in enumerate(parts, 1):
             heading = TOKENS.sub(token, self._clean_section(heading)).strip() or 'Results'
             body = TOKENS.sub(token, self._checked_chronology(text)).strip()
@@ -4906,6 +5039,16 @@ class ReviewRunner(ResearchRunner):
             if not queries:
                 return 'The review ended before the first source search was completed.'
             if all(row.get('error') for row in queries):
+                offline, limited = self._web_failures()
+                if offline:
+                    locked = getattr(getattr(self.agent, 'workspace', None) and self.literature, 'offline_locked', False)
+                    return ('Web research was off for this review, and none of its searches were in the local cache, '
+                            'so no source was available. ' + ('This interface was launched with --offline: restart it '
+                            'without --offline to search the sources.' if locked else
+                            'Run the review with online search on to search the sources.'))
+                if limited:
+                    return ('The sources limited the request rate (HTTP 429) and returned no usable response. '
+                            'Resume the review later to search them again.')
                 return 'The source searches returned no usable response.'
             return 'No candidate work was found for this topic in the sources that answered.'
         if not self.state['selected']:
@@ -4916,7 +5059,9 @@ class ReviewRunner(ResearchRunner):
     def _about(self, cited):
         s = self.state
         coverage = self._coverage()
-        failing = [name for name, v in coverage['sources'].items() if v['asked'] and v['answered'] < v['asked'] / 2]
+        failing = [name for name, v in coverage['sources'].items()
+                   if v['asked'] - v.get('offline', 0) and v['answered'] < (v['asked'] - v.get('offline', 0)) / 2]
+        offline, limited = self._web_failures()
         names = {'zbmath': 'zbMATH Open', 'arxiv': 'arXiv', 'crossref': 'Crossref', 'semantic_scholar': 'Semantic Scholar',
                  'opencitations': 'OpenCitations'}
         providers = ', '.join(names.get(n, n) for n, v in coverage['sources'].items() if v['answered'])
@@ -4935,8 +5080,13 @@ class ReviewRunner(ResearchRunner):
                 text += ' Unchecked claims were withheld.'
         if any(check.get('withheld') for check in s['checks'].values()):
             text += ' Material with unresolved source-check findings was withheld.'
+        if offline:
+            text += (f' Web research was off: only searches and papers already in the local cache were used '
+                     f'({offline} requests were not cached).')
         if failing:
             text += ' Coverage gap: ' + ', '.join(names.get(n, n) for n in failing) + ' answered fewer than half of the requests.'
+        if limited and 'arxiv' in failing:
+            text += ' arXiv limited the request rate (HTTP 429), so some papers were read from their abstracts only.'
         if s['cuts']:
             text += ' The working time was short, so the review is shorter than planned (see the job page).'
         return text
@@ -4947,6 +5097,8 @@ class ReviewRunner(ResearchRunner):
             item = sources.setdefault(row['source'], {'asked': 0, 'answered': 0, 'errors': []})
             item['asked'] += 1
             if row['error']:
+                if str(row['error']).startswith('Offline mode'):
+                    item['offline'] = item.get('offline', 0) + 1  # web research off: not a failure of the source
                 if row['error'][:120] not in item['errors'] and len(item['errors']) < 5:
                     item['errors'].append(row['error'][:120])
             else:
@@ -4999,17 +5151,28 @@ class ReviewRunner(ResearchRunner):
             issues.append(f'{len(s["card_failed"])} full-text source cards could not be completed')
         if (s.get('core_recovery') or {}).get('stage') == 'failed':
             issues.append('the supplementary check of omitted primary results was incomplete')
+        offline, limited = self._web_failures()
+        if offline:
+            issues.append('web research was off, so only sources already in the local cache were used')
         for name, v in self._coverage()['sources'].items():
-            if name in ('zbmath', 'arxiv', 'crossref') and v['asked'] >= 3 and v['answered'] < v['asked'] / 2:
-                issues.append(f'most {name} requests failed')
+            asked = v['asked'] - v.get('offline', 0)
+            if name in ('zbmath', 'arxiv', 'crossref') and asked >= 3 and v['answered'] < asked / 2:
+                issues.append('arXiv limited the request rate (HTTP 429), so some papers were read from their abstracts '
+                              'only; resuming later can read them' if name == 'arxiv' and limited else f'most {name} requests failed')
+        subject = self._unfound_subject()
+        if subject:
+            issues.insert(0, f'no work defining or studying the {subject} was found')
         return issues
 
     def _recover(self):
-        """Interrupted calls keep their reservations and are not replayed; their partial text is not reused."""
+        """Interrupted calls are charged their journal's estimate and are not replayed; their partial text is not reused."""
         self._generation_failure_streak, self._provider_pause = 0, None
         self._stop.clear()
         interrupted = [c for c in self.state['calls'] if c['status'] in ('running', 'interrupted')]
+        for call in [c for c in self.state['calls'] if c['status'] == 'abandoned']:
+            self._settle_estimate(call, earlier=True)  # abandoned by an earlier version at its whole reservation
         for call in interrupted:
+            self._settle_estimate(call, earlier=call['status'] == 'interrupted')
             call['status'] = 'abandoned'
         if interrupted:
             self._warn('Interrupted model calls were abandoned; their work is done again on resume.')
@@ -5092,11 +5255,13 @@ def review_outcome(state):
     from .reporting import one_line
     if state.get('pipeline') != ReviewRunner.PIPELINE:
         return None
+    earlier = (f' An earlier review of the same request is job {state["earlier_review"]}.'
+               if isinstance(state.get('earlier_review'), str) else '')
     if state.get('status') == 'complete':
         count = len(state.get('bibliography') or [])
-        return f'Review written: {count} reference{"" if count == 1 else "s"}.'
+        return f'Review written: {count} reference{"" if count == 1 else "s"}.' + earlier
     if state.get('status') == 'partial':
-        return one_line(state.get('stop_reason') or 'Review written with gaps. See the saved report.', 300)
+        return one_line((state.get('stop_reason') or 'Review written with gaps. See the saved report.') + earlier, 360)
     if state.get('status') == 'paused' and state.get('phase') == 'screen':
         return (f'Screened {len(state["screened"])} of {len(state["pool"])} candidate records. '
                 'Resume continues from the saved screening results.')

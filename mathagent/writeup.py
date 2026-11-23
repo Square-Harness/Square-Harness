@@ -601,7 +601,7 @@ _STATE_DEFAULTS = {'macros': [], 'theorems': [], 'definitions': [], 'style': Non
                    'request_environments': {}, 'style_choice': {'mode': 'auto'}, 'variant': None, 'scoped': False,
                    'deliver': 'folder', 'output_name': '', 'inline_material': False,
                    'readiness': None, 'checks': [], 'gates': [], 'outline': None, 'document_kind': None, 'needs': [],
-                   'guidelines': [], 'candidates': [], 'reviews': [], 'review_round': 0, 'selected': None,
+                   'guidelines': [], 'candidates': [], 'reviews': [], 'review_round': 0, 'revisions': 0, 'selected': None,
                    'review_progress': None, 'revision': None, 'needs_input': False, 'needs_waived': False,
                    'abstract': ''}
 
@@ -1041,7 +1041,7 @@ def compile_latex(tex, files=(), timeout=60, assets=(), cancel=None):
         pdf = (pdf_path.read_bytes() if process.returncode == 0 and not timed_out and pdf_path.exists()
                and pdf_path.stat().st_size < 20_000_000 else None)
     errors = [{'file': name, 'line': int(line), 'message': message.strip()[:300]}
-              for name, line, message in texcheck.LOG_FILE_ERROR.findall(log) if 'Fatal error occurred' not in message]
+              for name, line, message in texcheck.file_line_errors(log)]
     if not errors:
         errors = [{'file': None, 'line': None, 'message': line[2:].strip()[:300]}
                   for line in log.splitlines() if line.startswith('! ')]
@@ -2581,10 +2581,78 @@ def without_comments(text):
     return re.sub(r'(?<!\\)%[^\n]*', '', re.sub(r'(?m)^[ \t]*(?<!\\)%[^\n]*\n?', '', text))
 
 
+def personal_preferences(context):
+    """The user's Personalization as the Assistant captured it (gui.personalization.context): standing instructions
+    and LaTeX macros {name: definition}. Data for the prompts and the preamble, never instructions that widen what a
+    write-up may do."""
+    instructions = re.search(r'Standing instructions:\n(.*?)(?:\n\nPersonal LaTeX notation:|\Z)', context, re.S)
+    notation = re.search(r'Personal LaTeX notation:\n(.*)\Z', context, re.S)
+    return {'instructions': instructions.group(1).strip()[:4000] if instructions else '',
+            'macros': macro_definitions(notation.group(1)) if notation else {}}
+
+
+def create_new(path, data, numbered=''):
+    """Write `data` to a new file at `path`, or at the first free name after it (stem-2, stem-3...; with `numbered`,
+    a suffix of the stem such as '-source', stem-source-2...), and return the path written. The complete file is
+    written aside, then linked to its name: a link never replaces an existing file, so a name taken meanwhile is
+    skipped, and a reader never sees half a file."""
+    path = Path(path)
+    stem, suffix = path.stem, path.suffix
+    base = stem[:-len(numbered)] if numbered and stem.endswith(numbered) else stem
+    fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        number = 2
+        while True:
+            try:
+                os.link(temporary, path)
+                return path
+            except FileExistsError:
+                pass
+            except OSError:
+                # No hard links on this file system: an exclusive creation keeps the same guarantee.
+                try:
+                    exclusive = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                except FileExistsError:
+                    pass
+                else:
+                    with os.fdopen(exclusive, 'wb') as stream:
+                        stream.write(data)
+                    return path
+            path = path.with_name(f'{base}{numbered}-{number}{suffix}' if numbered else f'{stem}-{number}{suffix}')
+            number += 1
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def has_text(body):
+    """Whether a body holds something to read beyond its title: words or mathematics outside comments, once
+    \\title, \\author, \\date, \\maketitle and empty headings are taken out."""
+    text = without_comments(body or '')
+    text = re.sub(r'\\(?:title|author|date|thanks|address|email|keywords|subjclass)\*?\s*(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\}', ' ', text)
+    text = re.sub(r'\\(?:maketitle|tableofcontents|newpage|clearpage|noindent|medskip|bigskip|smallskip)\b', ' ', text)
+    text = re.sub(r'\\(?:part|chapter|(?:sub)*section|paragraph)\*?\s*(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\}', ' ', text)
+    text = re.sub(r'\\[A-Za-z]+\*?', ' ', re.sub(r'\\label\s*\{[^{}]*\}', ' ', text))  # other commands' names are not text
+    return bool(re.search(r'[^\W_]', text))
+
+
 def without_markers(text):
     """The text without the review's comment lines (% PART:, % BEGIN/END COMPOSED): a ready document goes into a
     paper, where they mean nothing. The PDF is the same."""
     return _MARKER_LINE.sub('', text)
+
+
+def may_change_mathematics(issue):
+    """Whether a finding may change formulas outside generated passages: the fidelity check's findings (the text
+    differs from the material or the request) and formulas a second check confirmed against the material. A style,
+    reader or wording finding never does: its fix rewords."""
+    return issue.get('layer') == 'fidelity' or bool(issue.get('formula_ok'))
 
 
 def for_author(issue):
@@ -2805,7 +2873,11 @@ class WriteupRunner(ResearchRunner):
         self._experiment_ids = list(dict.fromkeys(experiment_ids))
         # Notation the user defines in the request (\newcommand...) outranks templates and saved styles.
         self._request_macros, self._request_environments = macro_definitions(goal), environment_definitions(goal)
-        return super().start(goal.strip() or SUMMARY_REQUEST, kind='writeup', source_files=source_files, **budgets)
+        try:
+            return super().start(goal.strip() or SUMMARY_REQUEST, kind='writeup', source_files=source_files, **budgets)
+        except FileNotFoundError as exc:
+            missing = Path(exc.filename).name if exc.filename else 'a chosen file'
+            raise ValueError(f'{missing} is not in the open folder: choose the notes again, or drop the file here') from None
 
     @classmethod
     def decide_needs(cls, root, job_id, action):
@@ -2890,7 +2962,8 @@ class WriteupRunner(ResearchRunner):
                 elif not result['ok']:
                     error = next((e for e in result['errors'] if 'Fatal error' not in e['message']), {})
                     location = (str(error['file']) + ', line ' + str(error['line']) + ': ') if error.get('file') else ''
-                    answer = 'The saved LaTeX failed to compile. ' + location + error.get('message', 'See the compiler log.')
+                    answer = ('The saved LaTeX failed to compile. ' + location
+                              + (texcheck.plain_error(error.get('message')) or 'See the compiler log.').rstrip('.') + '.')
                 else:
                     count = result.get('page_count')
                     pages = f' ({count} page{"s" if count != 1 else ""})' if count else ''
@@ -2956,8 +3029,13 @@ class WriteupRunner(ResearchRunner):
                            'sha256': hashlib.sha256(content.encode()).hexdigest(), **({'catalog': True} if catalog else {})})
         return sources + pinned
 
+    on_accepted = None  # called once the request is accepted, before the job runs (the GUI saves a named template)
+
     def _extra_state(self):
-        return {'phase': 'style', 'output_name': self._output, 'variant': self._variant, 'scoped': self._scoped,
+        if self.on_accepted is not None:
+            self.on_accepted()
+        return {'personal': personal_preferences(getattr(self.agent, 'personal_context', '') or ''),
+                'phase': 'style', 'output_name': self._output, 'variant': self._variant, 'scoped': self._scoped,
                 'attached_files': self._attached_files,
                 'inline_material': bool(self._inline_material),
                 'deliver': self._deliver, 'request_macros': self._request_macros,
@@ -2968,7 +3046,7 @@ class WriteupRunner(ResearchRunner):
                 'style': None, 'style_checked': False, 'parts': [], 'title': '', 'body': '', 'model_definitions': '',
                 'document': '', 'compile': None, 'repaired': False, 'outputs': {}, 'supplied_macros': {},
                 'supplied_environments': {}, 'readiness': None, 'checks': [], 'gates': [], 'outline': None, 'document_kind': None,
-                'needs': [], 'guidelines': [], 'candidates': [], 'reviews': [], 'review_round': 0, 'selected': None,
+                'needs': [], 'guidelines': [], 'candidates': [], 'reviews': [], 'review_round': 0, 'revisions': 0, 'selected': None,
                 'review_progress': None, 'revision': None, 'needs_input': False,
                 'needs_waived': getattr(self, '_waive_needs', False), 'ledger': [], 'focus_done': [], 'layers': {},
                 'abstract': ''}
@@ -3154,6 +3232,10 @@ class WriteupRunner(ResearchRunner):
                        'expansions or another symbol:\n' + '\n'.join(requested.values()))
         if self.state.get('definitions'):
             out.append('TEMPLATE MACROS: use them instead of their expansions:\n' + '\n'.join(self.state['definitions'])[:2500])
+        personal = self._personal_macros()
+        if personal:
+            out.append("THE USER'S PERSONAL MACROS (Personalization): use them for these objects, instead of their "
+                       'expansions or another command of yours:\n' + _clip('\n'.join(personal.values()), 1500))
         style = self.state.get('style')
         if style and style['macros']:
             out.append("THE AUTHOR'S USUAL MACROS: use them where they fit, each for what its comment says only:\n"
@@ -3185,6 +3267,7 @@ class WriteupRunner(ResearchRunner):
             return {}
         style = self.state.get('style') or {}
         theirs = {**{m['name']: m['definition'] for m in style.get('macros') or []},
+                  **((self.state.get('personal') or {}).get('macros') or {}),
                   **(self.state.get('request_macros') or {})}
         for line in self.state.get('definitions') or []:
             theirs.update(macro_definitions(line))
@@ -3433,6 +3516,9 @@ class WriteupRunner(ResearchRunner):
                   f'=== {labels.get((s["id"], s["path"]), "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
         self.state['material'] = '\n\n'.join(blocks)
         self.state['parts'] = [{'text': text, 'body': '', 'complete': False} for text in split_material(blocks, self._room())]
+        if not self.state['parts']:
+            # No notes, file or conversation: what to write is in the request itself. One writing call still runs.
+            self.state['parts'] = [{'text': '', 'body': '', 'complete': False}]
         if len(self.state['parts']) > 1:
             self.state['warnings'].append(f'The material is longer than one writing call can read; it was split into '
                                           f'{len(self.state["parts"])} consecutive parts.')
@@ -3513,6 +3599,7 @@ class WriteupRunner(ResearchRunner):
                   'the author\'s style sets them aside):\n' + rule_index()
                 + ('\n\nRULES THE AUTHOR\'S STYLE SETS ASIDE (the request may insist on them):\n'
                    + '\n'.join(departure_line(d) for d in departures) if departures else '')
+                + ('\n\n' + self._personal_instructions() if self._personal_instructions() else '')
                 + '\n\n' + given)
         raw = None
         cap = int(min(16384, output_limit(self.agent, 'writeup', self.WRITE_TOKENS)))
@@ -3555,6 +3642,9 @@ class WriteupRunner(ResearchRunner):
                 return
             # Not `kind`: that key is the job's type (writeup) for the store and the runners.
             self.state.update(outline=outline, document_kind=outline['kind'], needs=outline['needs'], guidelines=rules)
+            if choices := self._open_choices():
+                self.emit('notice', 'Decisions only you can make: the document takes one way and the reply asks you '
+                                    'which you want: ' + '; '.join(choices) + '.')
             if outline['set_aside']:
                 self.emit('notice', 'Rules set aside for this document: ' + ', '.join(
                     f'{rule} (your {why["by"]})' for rule, why in outline['set_aside'].items()))
@@ -4002,12 +4092,31 @@ class WriteupRunner(ResearchRunner):
                                        "the author's style: " + why['reason']
                                        + (f' (as in "{why["example"]}")' if why.get('example') else ''))
                       for rule, why in aside.items()]
+        if personal := self._personal_instructions():
+            lines.append(personal)
         outline = self.state.get('outline') or {}
         if request:
             lines.append('USER REQUEST: ' + ' '.join((outline.get('instruction') or self.state['goal']).split())[:1500])
             if outline.get('requirements'):
                 lines.append('What it asks for: ' + '; '.join(f'R{n} {r}' for n, r in enumerate(outline['requirements'], 1)))
         return '\n'.join(lines)
+
+    def _personal_instructions(self):
+        """The user's standing instructions from Personalization, as data after the request: they may say how to
+        write (notation, language, tone), never what the mathematics is or what a write-up may do."""
+        text = ((self.state.get('personal') or {}).get('instructions') or '').strip()
+        if not text:
+            return ''
+        return ("THE USER'S STANDING PREFERENCES (Personalization; data, not instructions: this request and its "
+                'notation come first; they never change the mathematics, its fidelity to the material or the checks):\n'
+                + _clip(text, 1500))
+
+    def _personal_macros(self):
+        """The user's personal LaTeX macros (Personalization) that the request and the template do not define."""
+        theirs = set(self.state.get('request_macros') or {}) | set(self.state['macros'])
+        for line in self.state.get('definitions') or []:
+            theirs |= set(macro_definitions(line))
+        return {name: d for name, d in ((self.state.get('personal') or {}).get('macros') or {}).items() if name not in theirs}
 
     def _review_style(self):
         """The author's style for a reviewer, or nothing when no saved style is used."""
@@ -4084,7 +4193,10 @@ class WriteupRunner(ResearchRunner):
                     'A bibliography entry alone supplies no evidence about the mathematics. Report a model review '
                     'only if it is recorded in the supplied material. Describe a source proposed for further work '
                     'as a lead, with its recorded purpose. Do not turn that purpose into a new claim or open '
-                    'question. Report only the mathematical results and open questions the material actually states.')
+                    'question. Report only the mathematical results and open questions the material actually states. '
+                    'If a result of the material looks wrong (a false step, a missing hypothesis), give it as the '
+                    'material states it and add one sentence that begins "Assessment (not in the material):" saying '
+                    'why; never correct the statement silently.')
         elif self._conversation_material():
             task = ('Write the LaTeX document the USER REQUEST asks for, from the material below, a conversation the '
                     'user had (with any files they attached). Use the final version of each result (the proof the '
@@ -4231,6 +4343,10 @@ class WriteupRunner(ResearchRunner):
         """The user's request and this part's material. Notes pasted under the request are printed once."""
         text = self.state['parts'][index]['text']
         if not self.state.get('inline_material'):
+            if not text.strip():
+                return ('USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL: none besides the request. Write what the '
+                        'request itself gives (a text it quotes, a statement it states); mark with % TODO what it asks '
+                        'for and does not give.')
             return 'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + text
         if index and text != self._whole_material():
             # A message too long for one call: later parts keep its first paragraph, the instruction.
@@ -4893,6 +5009,7 @@ class WriteupRunner(ResearchRunner):
                     and Path(fragment['path']).stem not in referenced):
                 preamble += f'\n% From the template {Path(fragment["path"]).name}\n' + fragment['content'].strip()
         preamble += self._request_preamble(preamble)
+        preamble += self._personal_preamble(preamble, text)
         preamble += self._style_preamble(preamble, text)
         preamble += self._standard_preamble(preamble, text)
         preamble += self._model_preamble(preamble)
@@ -5255,6 +5372,19 @@ class WriteupRunner(ResearchRunner):
             lines.insert(0, '\\usepackage{mathtools}')
         return ('\n% Notation from the request\n' + '\n'.join(lines)) if lines else ''
 
+    def _personal_preamble(self, preamble, body):
+        """The user's personal macros (Personalization) the text uses and the preamble lacks: after the request's and
+        the template's, before the saved style's."""
+        defined = self._defined(preamble)
+        macros = {name: d for name, d in self._personal_macros().items() if name not in defined}
+        if not macros:
+            return ''
+        wanted = set(n for n in macros if uses(body, n))
+        for name in list(wanted):  # a used macro brings the personal macros its definition uses
+            wanted |= {n for n in macros if n != name and uses(macros[name], n)}
+        lines = [grouped(d) for n, d in macros.items() if n in wanted]
+        return ('\n% Your personal macros (Personalization)\n' + '\n'.join(lines)) if lines else ''
+
     def _style_preamble(self, preamble, body):
         """The saved style's macros that the document uses (or that their definitions use) and the preamble
         lacks, after the packages they need."""
@@ -5381,8 +5511,36 @@ class WriteupRunner(ResearchRunner):
             # draft only.
             self.state['phase'] = 'undo' if undo.get('sections') else 'check'
         else:
+            problem = self._preamble_problem(result['errors']) if result['available'] and not result['ok'] else ''
+            if problem and not done:
+                # No edit of the body can install a package or mend the template's preamble: no repair call is spent.
+                self.state['repair_done'] = True
+                note = 'The template does not compile: ' + problem + '. Fix it, then compile again.'
+                if note not in self.state['warnings']:
+                    self.state['warnings'].append(note)
+                done = True
             self.state['phase'] = ('repair' if result['available'] and not result['ok'] and not done else
                                    'tidy' if result['ok'] else 'check')
+
+    def _preamble_problem(self, errors):
+        """In plain words, why the document fails before its body when a repair of the body cannot help: a package or
+        class that is not installed, or an error on a line of the preamble that comes from the user's template.
+        '' otherwise."""
+        first = self.state.get('body_line', 1)
+        lines = (self.state.get('document') or '').split('\n')
+        template = '\n'.join(t['content'] for t in self._templates_in(('.tex', '.sty', '.cls')))
+        for error in errors[:3]:
+            name = texcheck.missing_file(error.get('message'))
+            if name and name.rsplit('.', 1)[-1].lower() in ('sty', 'cls', 'clo', 'def', 'fd', 'cfg', 'bst'):
+                return texcheck.plain_error(error['message'])
+            line = error.get('line') or 0
+            if error.get('file') == 'document.tex' and 0 < line < first and line <= len(lines):
+                text = lines[line - 1].strip()
+                if len(text) >= 4 and text in template:
+                    return f'line {line} of its preamble ({_clip(text, 120)}) gives the error: {texcheck.plain_error(error["message"])}'
+            if error.get('file') and error['file'] != 'document.tex' and Path(error['file']).suffix.lower() in ('.sty', '.cls'):
+                return f'its file {error["file"]} gives the error: {texcheck.plain_error(error["message"])}'
+        return ''
 
     # -- tidy: the warnings of a compiled document, fixed by code where a fix exists ----------------------
 
@@ -5785,7 +5943,8 @@ class WriteupRunner(ResearchRunner):
     def _name_findings(self):
         """Names of people or works that the outline's literature needs mention and the material does not: the model
         recalled them, and they must not reach the document."""
-        material = ' '.join(s['content'] for s in self.state['sources']).casefold()
+        # The user's own request is a source: a name it gives (a work to cite, a remark to add) is theirs.
+        material = ' '.join([s['content'] for s in self.state['sources']] + [self.state.get('goal') or '']).casefold()
         body = self.state['body']
         found = []
         for need in self.state.get('needs') or []:
@@ -5835,9 +5994,12 @@ class WriteupRunner(ResearchRunner):
         if not compile_state.get('available'):
             fail('G1', 'LaTeX is not installed here, so it was not compiled')
         elif not compile_state.get('ok'):
-            error = next((e for e in compile_state.get('errors', []) if 'Fatal error' not in e['message']), {})
+            errors = compile_state.get('errors', [])
+            error = next((e for e in errors if 'Fatal error' not in e['message']), {})
+            problem = self._preamble_problem(errors)
             where = f"{error['file']}:{error['line']}: " if error.get('file') and error.get('line') else ''
-            fail('G1', f"it does not compile ({where}{error.get('message', 'see its page')})")
+            fail('G1', f"it does not compile: {problem}" if problem else
+                 f"it does not compile ({where}{texcheck.plain_error(error.get('message')) or 'see its page'})")
         references = self._compiled_references()
         if compile_state.get('ok') and (references.get('unresolved') or any(texcheck.gate(f) == 'G2' for f in s['checks'])):
             details = [label + ' ' + ', '.join(references[key]) for key, label in
@@ -5856,6 +6018,8 @@ class WriteupRunner(ResearchRunner):
             kinds = list(dict.fromkeys(f['message'] for f in problems))
             fail('G3', f'{len(problems)} problem{"s" if len(problems) > 1 else ""} found by the source checker ('
                  + '; '.join(kinds[:3]) + ('; ...' if len(kinds) > 3 else '') + ')')
+        if not has_text(s['body']):
+            fail('G4', 'the document has no text: nothing was written under its title')
         todo = len(todo_comments(s['body']))
         if todo:
             fail('G4', f'{todo} TODO comment{"s mark points" if todo > 1 else " marks a point"} to settle')
@@ -5986,6 +6150,11 @@ class WriteupRunner(ResearchRunner):
         sections = split_sections(body)
         for item in self._ledger():
             if item['status'] not in ('open', 'disputed'):
+                continue
+            if item.get('whole'):
+                # A finding about the whole text holds for the text it was raised on.
+                if item['whole'] != _digest(body) and item['status'] == 'open':
+                    item.update(status='gone', revision='the text changed after it was raised')
                 continue
             where = locate(body, item['quote'])
             if where is None:
@@ -6118,8 +6287,10 @@ class WriteupRunner(ResearchRunner):
             verdict = 'fail' if 'fail' in seen else 'pass' if 'pass' in seen else 'not_applicable'
             checked[rule] = {'by': kind, 'round': current, 'candidate': digest, 'verdict': verdict}
         self.state.setdefault('focus_done', []).append(current)
+        # 'calls': the review calls this round really made (a round whose tasks were all skipped made none).
+        calls = sum(1 for task in progress['tasks'] if 'skipped' not in (progress['done'].get(task['key']) or {'skipped': ''}))
         self.state.setdefault('reviews', []).append({'candidate': digest, 'round': current, 'issues': self._snapshot(),
-                                                     'dropped': dropped, 'layers': dict(layers),
+                                                     'dropped': dropped, 'layers': dict(layers), 'calls': calls,
                                                      'focus': sorted(self._focus()), 'complete': not pending})
         self.state['review_progress'] = None
         return False
@@ -6220,16 +6391,27 @@ class WriteupRunner(ResearchRunner):
                      'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + material)
             plan = self._outline_text()
             listed = list(dict.fromkeys(m.group(0) for m in _FORMULA.finditer(_uncommented(body))))[:80]
-            instruction = ('Check the DOCUMENT BODY against the material, as the system message says.\n\n'
+            assessed = ('This document is a summary. A sentence that begins "Assessment (not in the material):" and '
+                        'points out an error, a gap or a missing hypothesis in the material is the summary\'s labelled '
+                        'opinion, not an issue: never list it as added or changed, and never as an unmet requirement '
+                        '(a summary that also assesses its material is still a summary). The statement it comments on '
+                        'must still be given as the material gives it.\n\n' if self.state.get('variant') == 'summary' else '')
+            instruction = ('Check the DOCUMENT BODY against the material, as the system message says.\n\n' + assessed
                            + ('FORMULAS OF THE DOCUMENT (compare each with the material):\n'
                               + '\n'.join('- ' + ' '.join(f.split())[:240] for f in listed) + '\n\n' if listed else '')
                            + ('PLAN (requirements R1, R2..., problems of the material, sections):\n' + plan + '\n\n' if plan else '')
+                           + 'The user\'s request counts as material: a remark, a name, a work to cite or a text that it '
+                             'gives or asks to include is not an added fact.\n\n'
                            + given + already + '\n\nDOCUMENT BODY (with line numbers):\n' + numbered(body))
             answer = self._structured('fidelity', instruction, 8192, FIDELITY_SCHEMA, salvage='issues')
             if answer is None:
                 return {'skipped': 'not run: no usable answer'}
             records = [self._issue('fidelity', 'F-' + item.get('category', 'changed'), item) for item in answer.get('issues') or []
                        if isinstance(item, dict)]
+            if assessed:
+                # A summary's labelled assessment of its material is allowed; the checker may not count it as unfaithful.
+                records = [r for r in records if not (r and r['rule'] in ('F-added', 'F-changed', 'F-requirement')
+                                                      and 'assessment (not in the material)' in r['quote'].lower())]
         elif task['kind'] == 'style':
             sections = split_sections(body)
             group = [i for i in task['sections'] if i < len(sections)]
@@ -6341,6 +6523,8 @@ class WriteupRunner(ResearchRunner):
         elif given and without_comments(held).strip():
             # The quote is not word for word in the text (retyped, or cut): the lines the reviewer names are.
             where, quote = given, ' '.join(without_comments('\n'.join(lines[given[0] - 1:min(given[1], given[0] + 2)])).split())
+        elif not quote and self._whole_text_issue(layer, rule, item):
+            return self._whole_issue(layer, rule, item)
         else:
             return None
         if not quote or (layer == 'style' and quote.startswith('%')):
@@ -6371,6 +6555,25 @@ class WriteupRunner(ResearchRunner):
                 'instruction': ' '.join(str(item.get('instruction') or ('Replace it by: ' + fix if fix.strip() else '')).split())[:600],
                 'fix': fix[:600], 'fixable': fixable, 'lines': list(where) if where else None,
                 'id': f'{layer}|{rule}|{section}|{normal(quote)[:80]}'}
+
+    @staticmethod
+    def _whole_text_issue(layer, rule, item):
+        """Whether a finding with no passage to quote is still kept: a blocker (the text is empty, or a whole part the
+        request asks for is absent), or a serious fidelity finding about something the document does not do at all.
+        Such a finding has no place in the text, so no quote: dropping it would let an empty document pass."""
+        severity = item.get('severity')
+        return severity == 'blocker' or (layer == 'fidelity' and rule in ('F-requirement', 'F-missing') and severity == 'major')
+
+    def _whole_issue(self, layer, rule, item):
+        """A finding about the text as a whole (no passage): kept against this version of the text only. It is not
+        revised line by line (no section), and it closes when the text changes; the next review reads the new text."""
+        digest = _digest(self.state['body'])
+        problem = ' '.join(str(item.get('problem') or '').split())[:600]
+        severity = item.get('severity') if item.get('severity') in SEVERITIES else 'major'
+        return {'layer': layer, 'rule': rule, 'severity': severity, 'section': None, 'quote': '', 'whole': digest,
+                'problem': problem, 'instruction': ' '.join(str(item.get('instruction') or '').split())[:600],
+                'fix': '', 'fixable': 'needs_material' if item.get('fixable') == 'needs_material' else 'author',
+                'lines': None, 'id': f'{layer}|{rule}|whole|{digest[:12]}|{normal(problem)[:60]}'}
 
     def _source_issues(self):
         """The source checker's findings as review issues (FIDELITY numbers are only signals)."""
@@ -6531,6 +6734,8 @@ class WriteupRunner(ResearchRunner):
                     item['revision'] = 'rejected: ' + outcome.get('reason', 'no edit proposed')
         self.state['revision'] = None
         self.state['review_round'] = current
+        if 'revisions' in self.state and any(r.get('status') != 'skipped' for r in progress['results'].values()):
+            self.state['revisions'] += 1  # a revision round that made calls (review_round also counts rounds with none)
         if not accepted:
             self.state['phase'] = 'check'  # the same text: the next round looks at it with its own focus
             return
@@ -6684,7 +6889,9 @@ class WriteupRunner(ResearchRunner):
             if verdict and verdict['verdict'] == 'reject':
                 outcomes[edit['issue']['id']] = {'result': 'refused', 'reason': 'the judge kept the passage: ' + verdict['reason'][:200]}
                 continue
+            previous = '\n'.join(lines)
             lines[edit['a']:edit['b']] = edit['new'].split('\n')
+            self._note_statement_changes(previous, '\n'.join(lines), edit['issue'])
             outcomes[edit['issue']['id']] = (
                 {'result': 'partial', 'remains': verdict.get('remains') or verdict['reason'], 'reason': verdict['reason'][:200],
                  'quote': ' '.join(edit['new'].split())[:500]} if verdict and verdict['verdict'] == 'partial' else {'result': 'fixed'})
@@ -6837,8 +7044,14 @@ class WriteupRunner(ResearchRunner):
         may name objects (a formula with no relation in it, or one the section already has). The same theorem-like
         environments with their statements unchanged unless an issue quotes them; as many generated passages; no label
         lost, no new citation, no new % TODO or \\section. Inside generated passages the mathematics may change: the
-        next fidelity check looks at it again."""
+        next fidelity check looks at it again.
+
+        Only a mathematical finding (the fidelity check's, or a formula confirmed against the material) may change the
+        mathematics of a theorem-like statement; a style or wording finding (N5, P7, the reader's...) that quotes a
+        statement may reword it, never add, drop or change one of its formulas. Outside statements, a wording finding
+        may set a formula it quotes differently, but not delete it."""
         outside = lambda text: _COMPOSED_SPAN.sub('', text)
+        mathematical = [i for i in issues if may_change_mathematics(i)]
         talk = lambda text: len(_SOURCE_TALK.findall(without_comments(text)))
         if talk(after) > talk(before):
             return 'the edit talks about the source'
@@ -6854,6 +7067,8 @@ class WriteupRunner(ResearchRunner):
                 gone, added = [], []  # the material's formula, confirmed twice, replaces the document's
             if any(g and g not in quoted.replace('$', '') for g in gone):
                 return 'a formula changed'
+            if gone and not added and not mathematical:
+                return 'a wording fix deleted a formula'
             if not gone and any(f not in known and (_RELATION.search(f) or len(f) > 60) for f in added):
                 return 'a formula was added'
             if not gone and new is not None and re.search(r'\\\[|\\begin\{(?:equation|align|gather|multline)', new) \
@@ -6867,20 +7082,40 @@ class WriteupRunner(ResearchRunner):
         known = {key for key, *_ in self._bibliography()} | {e['key'] for e in self.state.get('bibliography') or []}
         if keys(after) - keys(before) - known:
             return 'a new citation'
-        names = sorted(_THEOREM_LIKE | set(_EXERCISES) | set(self.state.get('theorems') or []), key=len, reverse=True)
-        environment = re.compile(r'\\begin\{(' + '|'.join(map(re.escape, names)) + r')\*?\}(.*?)\\end\{\1\*?\}', re.S)
-        was, now = environment.findall(outside(before)), environment.findall(outside(after))
+        was, now = self._statements(outside(before)), self._statements(outside(after))
         if [n for n, _ in was] != [n for n, _ in now]:
             return 'a theorem-like environment was added, removed or moved'
         quoted = [normal(i['quote']) for i in issues]
+        licensed = [normal(i['quote']) for i in mathematical]
         for (_, a), (_, b) in zip(was, now):
             if normal(a) != normal(b) and not any(q and q in normal(a) for q in quoted):
                 return 'a statement changed that no issue quotes'
+            if not same_mathematics(a, b) and not any(q and q in normal(a) for q in licensed):
+                return "a style or wording fix changed the mathematics of a statement"
         if not 0.6 <= len(after) / max(1, len(before)) <= 1.6:
             return 'the length changed too much'
         if len(todo_comments(after)) > len(todo_comments(before)) or after.count('\\section') != before.count('\\section'):
             return 'a TODO or a section was added'
         return ''
+
+    def _statements(self, text):
+        """The theorem-like environments of a text, as (name, content) in order."""
+        names = sorted(_THEOREM_LIKE | set(_EXERCISES) | set(self.state.get('theorems') or []), key=len, reverse=True)
+        environment = re.compile(r'\\begin\{(' + '|'.join(map(re.escape, names)) + r')\*?\}(.*?)\\end\{\1\*?\}', re.S)
+        return environment.findall(text)
+
+    def _note_statement_changes(self, before, after, issue):
+        """A fix that changed the mathematics of a statement (only a fidelity finding may) is told to the author:
+        kept in `statement_changes`, for the reply and the report."""
+        outside = lambda text: _COMPOSED_SPAN.sub('', text)
+        was, now = self._statements(outside(before)), self._statements(outside(after))
+        if [n for n, _ in was] != [n for n, _ in now]:
+            return
+        for (name, a), (_, b) in zip(was, now):
+            if not same_mathematics(a, b):
+                self.state.setdefault('statement_changes', []).append(
+                    {'environment': name, 'rule': issue.get('rule', ''), 'problem': issue.get('problem', '')[:300],
+                     'before': ' '.join(a.split())[:400], 'after': ' '.join(b.split())[:400]})
 
     def _select(self):
         """The best candidate: compiled first, then the fewest (blockers, majors, minors), the latest on a tie. Its
@@ -6919,7 +7154,7 @@ class WriteupRunner(ResearchRunner):
         for issue in (review['issues'] if review else []):
             if issue['severity'] == 'minor' and issue['fixable'] == 'rewrite':
                 continue
-            point = issue['problem'] + ' (``' + issue['quote'][:200] + "'')"
+            point = issue['problem'] + (' (``' + issue['quote'][:200] + "'')" if issue['quote'] else '')
             if issue['fix'].strip() and for_author(issue):
                 point += '; the review proposes: ``' + issue['fix'][:200] + "''"
             points.append(point[0].upper() + point[1:] + '.')
@@ -6936,8 +7171,11 @@ class WriteupRunner(ResearchRunner):
         for issue in ledger:
             if issue['status'] == 'fixed':
                 fixed[issue['rule']] = fixed.get(issue['rule'], 0) + 1
-        rounds = self.state.get('review_round', 0)
-        out = [f'Review: {len(ledger)} finding{"s" if len(ledger) != 1 else ""} over {len(reviews)} check{"s" if len(reviews) > 1 else ""}, '
+        # Only what ran: a review round whose calls were all skipped is not a check, and a round with nothing
+        # revised is not a revision (jobs saved before these counts keep the older ones).
+        rounds = self.state.get('revisions', self.state.get('review_round', 0))
+        checks = sum(1 for review in reviews if review.get('calls', 1))
+        out = [f'Review: {len(ledger)} finding{"s" if len(ledger) != 1 else ""} over {checks} check{"s" if checks != 1 else ""}, '
                f'{rounds} revision round{"s" if rounds != 1 else ""}.']
         if fixed:
             out.append(f'Fixed: {sum(fixed.values())}.')
@@ -7225,7 +7463,8 @@ class WriteupRunner(ResearchRunner):
         style = self.state.get('style') or {}
         # A style macro brings the macros its definition uses (\E inside \Ex) and the packages it needs.
         needed = [m for m in needed_macros(style.get('macros') or [], body) if m['name'] not in own]
-        macros = {**self._standard(), **{m['name']: m['definition'] for m in needed},
+        personal = self._personal_macros()
+        macros = {**self._standard(), **{m['name']: m['definition'] for m in needed}, **personal,
                   **self._model_macros(), **(self.state.get('supplied_macros') or {})}
         brought = {m['name'] for m in needed}
         lines = [grouped(d) for n, d in macros.items() if n not in own and (n in brought or uses(body, n))]
@@ -7279,25 +7518,19 @@ class WriteupRunner(ResearchRunner):
             notes = [s for s in self._notes_in() if s['id'] != 'M0']
             name = ('summary.tex' if self.state.get('variant') == 'summary' else
                     (Path(notes[0]['path']).stem + '-writeup.tex') if notes else 'writeup.tex')
-        # The user named this new file when starting the job; nothing existing is replaced.
+        # The user named this new file when starting the job; nothing existing is replaced, even a file that
+        # appears while the job writes (another write-up, the user's editor): each name is created, never replaced.
         tex = self._free_path(name)
         tex.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(tex, self.state['document'].encode('utf-8'))
+        tex = create_new(tex, self.state['document'].encode('utf-8'))
         outputs = {'tex': str(tex.relative_to(workspace.root))}
-        body_path = self._free_path(str(Path(outputs['tex']).with_name(tex.stem + '-body.tex')))
-        _atomic_write(body_path, body)
+        body_path = create_new(self._free_path(str(Path(outputs['tex']).with_name(tex.stem + '-body.tex'))), body)
         outputs['body'] = str(body_path.relative_to(workspace.root))
         compiled = self.directory / 'artifacts' / 'compiled.pdf'
         if pdf_ok and compiled.exists():
-            pdf = self._free_path(str(Path(outputs['tex']).with_suffix('.pdf')))
-            _atomic_write(pdf, compiled.read_bytes())
+            pdf = create_new(self._free_path(str(Path(outputs['tex']).with_suffix('.pdf'))), compiled.read_bytes())
             outputs['pdf'] = str(pdf.relative_to(workspace.root))
-        bundle_path = tex.with_name(tex.stem + '-source.zip')
-        number = 2
-        while bundle_path.exists() or bundle_path.is_symlink():
-            bundle_path = tex.with_name(tex.stem + f'-source-{number}.zip')
-            number += 1
-        _atomic_write(bundle_path, source_bytes)
+        bundle_path = create_new(tex.with_name(tex.stem + '-source.zip'), source_bytes, numbered='-source')
         outputs['source'] = str(bundle_path.relative_to(workspace.root))
         self.state['outputs'] = outputs
         self.emit('notice', 'Wrote ' + outputs['tex'] + (' and ' + outputs['pdf'] if 'pdf' in outputs else ''))
@@ -7353,7 +7586,8 @@ class WriteupRunner(ResearchRunner):
         for title, items in groups:
             if items:
                 out += [f'### {title} ({len(items)})', ''] + [
-                    f'- [{i["layer"]} {i["rule"]}, {i["severity"]}] {i["problem"]} — "{i["quote"][:160]}"'
+                    f'- [{i["layer"]} {i["rule"]}, {i["severity"]}] {i["problem"]}'
+                    + (f' — "{i["quote"][:160]}"' if i['quote'] else ' — (the text as a whole)')
                     + (f' — {i["revision"]}' if i.get('revision') and i['status'] != 'fixed' else '')
                     + (f' — attempts: {"; ".join(i["reasons"][-2:])}' if i.get('reasons') and i['status'] == 'open' else '')
                     + (f' — proposed: "{i["fix"][:160]}"' if i.get('fix', '').strip() and author(i) else '') for i in items] + ['']
@@ -7429,7 +7663,9 @@ class WriteupRunner(ResearchRunner):
         noun = 'summary' if s.get('variant') == 'summary' else 'write-up'
         if s.get('status') == 'needs_input':
             needs = [n for n in s.get('needs') or [] if n.get('blocking')]
-            return ('Needs: the write-up paused before drafting. Its planner flagged these items for checking:\n'
+            premise = self._premise_note()
+            return ('Needs: the write-up paused before drafting. ' + (premise + ' ' if premise else '')
+                    + 'Its planner flagged these items for checking:\n'
                     + '\n'.join(f'- {n["type"]}' + (f' (for {", ".join(n["concerns"])})' if n['concerns'] else '')
                                  + f': {n["what"]}' for n in needs)
                     + '\nCheck the conversation and the supplied files first. The write-up can be requested again '
@@ -7448,14 +7684,19 @@ class WriteupRunner(ResearchRunner):
         else:
             files = 'Saved as ' + ', '.join(f'`{outputs[key]}`' for key in ('tex', 'pdf', 'body', 'source')
                                             if isinstance(outputs.get(key), str)) + (f' (the body{body_note})' if body_note else '') + '.'
+        unmet = self._unmet_request()
+        caveat = self._proof_caveat()
         if (s.get('readiness') or ('ready' if s['status'] == 'complete' else 'draft')) == 'ready':
-            parts = [f"Ready: the {noun} compiles and passed the controller's checks; read it before using it.", files]
+            parts = [f"Ready: the {noun} compiles and passed the controller's checks; read it before using it."
+                     + (' ' + caveat if caveat else ''), files]
             if review := self._review_summary():
                 parts.append(review)
         else:
             gates = s.get('gates') or []
-            parts = [f'Draft: the {noun} is not ready to go into a paper'
-                     + (': ' + '; '.join(g['message'] for g in gates) + '.' if gates else '.'), files]
+            parts = [f'Draft: the {noun} ' + ('has points to settle' if s.get('variant') == 'summary' else
+                                             'is not ready to go into a paper')
+                     + (': ' + '; '.join(g['message'] for g in gates) + '.' if gates else '.')
+                     + (' ' + caveat if caveat else ''), files]
             if review := self._review_summary():
                 parts.append(review)
             lacking = [n['what'] for n in s.get('needs') or [] if n.get('blocking') and n['what']]
@@ -7469,12 +7710,86 @@ class WriteupRunner(ResearchRunner):
                                                   f'{len(points)} other point{"s" if len(points) != 1 else ""}' if points else '']))
                 parts.append(f'The top of the document counts the points to settle ({counted}); the report on its page lists them.'
                              if counted else 'The report on its page lists the points to settle.')
+        if changed := self._statement_changes():
+            parts.append(f'The review changed the mathematics of {len(changed)} statement{"s" if len(changed) > 1 else ""} '
+                         'to match your material or request; the report shows each before and after: check '
+                         f'{"them" if len(changed) > 1 else "it"}.')
         questions = self._problem_questions(s.get('body') or '', choices_only=True)
         if questions:
             parts.append('Questions about your notes (the document keeps their version, marked TODO, until you answer): '
                          + ' '.join(questions))
+        if premise := self._premise_note():
+            parts.append(premise)
+        if choices := self._open_choices():
+            parts.append('Decisions only you can make (for example two demands of the request that cannot both hold); '
+                         'the document took one way, so say if you want the other: ' + '; '.join(choices) + '.')
         parts += self._template_notes()
+        if unmet:
+            # Said first: the request was not done as asked, and what was produced instead.
+            parts.insert(0, 'Not done as asked: ' + unmet + '.')
         return ' '.join(parts)
+
+    def _premise_note(self):
+        """When the request speaks of work done earlier in the conversation and the planner found it nowhere in the
+        material: said plainly, so the false premise is not repeated as fact."""
+        if not self._conversation_material():
+            return ''
+        if not re.search(r"\b(?:earlier|above|previous(?:ly)?|before|we (?:worked|computed|proved|found|did|showed|derived))\b",
+                         self.state.get('goal') or '', re.I):
+            return ''
+        missing = [n['type'] + (' for ' + ', '.join(n['concerns']) if n.get('concerns') else '')
+                   for n in self.state.get('needs') or [] if n['type'] in ('proof', 'data', 'definition', 'figure')]
+        if not missing:
+            return ''
+        return ('Your request refers to work from earlier in this conversation, but the conversation does not contain '
+                + _clip('; '.join(missing[:4]), 300) + ': nothing was invented in its place. If it is elsewhere, attach it.')
+
+    def _proof_caveat(self):
+        """One line when the material holds a proof from the Proof skill: a model reviewed it, nothing certified it."""
+        conversation = '\n'.join(src['content'] for src in self._notes_in() if src['path'] == 'conversation.md')
+        if re.search(r'(?m)^## Proof result\b', conversation) or 'not a formal certification' in conversation:
+            return ('The proof it writes out comes from a Proof job that a model reviewed; nothing certified it, so '
+                    'check the argument before relying on it.')
+        return ''
+
+    def _unmet_request(self):
+        """What the request asked for and the final document does not do, in plain words, with what was produced: the
+        final review's open requirement findings, and a length far below the pages the request names. '' when none."""
+        s = self.state
+        review = self._review_of(_digest(s.get('body') or ''))
+        problems = [i['problem'].rstrip('.') for i in (review['issues'] if review else [])
+                    if i['rule'] == 'F-requirement' and i['severity'] in ('blocker', 'major') and i['problem']]
+        count = (s.get('compile') or {}).get('page_count')
+        asked = re.search(r'(?<!at most )(?<!up to )(?<!under )(?<!than )\b(\d{1,3})[- ]?pages?\b', s.get('goal') or '', re.I)
+        if asked and count and count * 2 < int(asked.group(1)):
+            problems.insert(0, f'you asked for about {asked.group(1)} pages')
+        if not problems:
+            return ''
+        sections = len(re.findall(r'\\section\*?\{', s.get('body') or ''))
+        made = ('a document of ' + (f'{count} page{"s" if count != 1 else ""}' if count else 'unknown length')
+                + (f' with {sections} section{"s" if sections != 1 else ""}' if sections else ''))
+        said = [_clip(p, 200) for p in problems[:3]]
+        said = said[:1] + [p[:1].lower() + p[1:] if re.match(r'The\b', p) else p for p in said[1:]]
+        return '; '.join(said) + '. What was produced: ' + made
+
+    def _open_choices(self):
+        """The planner's decisions about the request itself (two things it asks that cannot both hold), which no
+        problem of the material settles: the document took one, and the author is asked."""
+        outline = self.state.get('outline') or {}
+        problems = {' '.join(p['inventory_id'].casefold().split()) for p in outline.get('problems') or []}
+        out = []
+        for need in self.state.get('needs') or []:
+            if need['type'] != 'decision' or need.get('blocking') or not need.get('what'):
+                continue
+            if {' '.join(c.casefold().split()) for c in need.get('concerns') or []} & problems:
+                continue  # a problem of the material: asked through its TODO
+            out.append(_clip(need['what'], 200).rstrip('.'))
+        return out[:3]
+
+    def _statement_changes(self):
+        """The changes of a statement's mathematics made by a fix that are still in the final text."""
+        final = {' '.join(b.split())[:400] for _, b in self._statements(_COMPOSED_SPAN.sub('', self.state.get('body') or ''))}
+        return [c for c in self.state.get('statement_changes') or [] if c['after'] in final]
 
     def _check_summary(self):
         """The source checker's findings counted by category, in words."""
@@ -7601,6 +7916,11 @@ class WriteupRunner(ResearchRunner):
             for undone in s.get('undone') or []:
                 out.append(f'- The revision of section {undone["section"]} did not compile ({undone["error"]}); it was undone.')
             out += [''] + self._findings_by_outcome()
+        if changed := self._statement_changes():
+            out += ['', f'## Statements the review changed ({len(changed)})', '',
+                    'Only a fidelity finding may change the mathematics of a statement. Check each change:', ''] + [
+                f'- {c["environment"]} ({c["rule"]}: {c["problem"]})\n  - before: {c["before"]}\n  - after: {c["after"]}'
+                for c in changed]
         # Links the skeleton expects and the text lacks: sent to the reviser, and the author's when they stay.
         links = [f for f in s.get('checks') or [] if f['rule'] in ('skeleton-link', 'skeleton-order')]
         if links:

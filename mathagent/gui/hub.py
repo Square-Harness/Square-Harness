@@ -17,6 +17,7 @@ from contextlib import contextmanager
 import copy
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -30,9 +31,9 @@ from ..format_request import can_recover_previous_markdown, compile_followup_req
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
 from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget
-from ..ledger import ProofStore
+from ..ledger import LedgerError, ProofStore
 from ..literature import LiteratureTools
-from ..proof import ProofRunner
+from ..proof import TERMINAL as PROOF_TERMINAL, ProofRunner, budget_stop, unsettled_interrupts
 from ..prompts import FRESH_REVIEW
 from ..litreview import ReviewRunner, review_outcome as _review_outcome
 from ..workers import REVIEW_MODES, run_worker
@@ -42,12 +43,12 @@ from ..style import StyleRunner, load_choice, style_path
 from ..source_tasks import excludes_external_sources, requests_workspace_search
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
-from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WorkerInterrupted
+from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted
 from ..numerics import PythonSandbox
 from ..tools import READ_GROUPS, Workspace, source_suffix
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
-from .. import briefs, images
+from .. import bibcheck, briefs, images
 from . import effort, personalization, projects, store
 from .inference import InferencePool
 from .store import one_line
@@ -409,15 +410,19 @@ class Task:
         self.work = None
         self.on_update = on_update
         self.origin_chat = target if kind == 'chat' else None
+        self.libraries = []  # literature tools of this task's engines: turning online off reaches them
         self.investigation_id = None
         self.investigation_phase = None
+        # A message sent with queue while its conversation was busy: (content, files, mode, effort).
+        self.followup = None
 
     def summary(self):
         return {'id': self.id, 'kind': self.kind, 'target': self.target, 'label': self.label,
                 'title': self.title[:500], 'state': self.state, 'error': self.error,
                 'result_status': self.result_status, 'started': self.started, 'finished': self.finished,
                 'origin_chat': self.origin_chat, 'waiting_model_calls': self.waiting_model_calls,
-                'queued_at': self.queued_at, 'slot': self.slot}
+                'queued_at': self.queued_at, 'slot': self.slot,
+                **({'followup': True} if self.followup is not None else {})}
 
 
 class Approval:
@@ -516,10 +521,21 @@ class Hub:
         self._lock = threading.Lock()
         self.task = None
         self._tasks = collections.OrderedDict()
+        # Limits set in the interface are saved with the interface root and outlive a restart;
+        # a launch flag given explicitly (--gui-concurrency, --gui-model-concurrency) wins.
+        try:
+            saved = store.saved_concurrency(self.base)
+        except (OSError, ValueError):
+            saved = {}
+        for key, name in (('chats', 'gui_concurrency'), ('requests', 'gui_model_concurrency')):
+            if key in saved and not getattr(args, name + '_explicit', False):
+                setattr(args, name, saved[key])
         self.concurrency = getattr(args, 'gui_concurrency', 2)
         self.inference = InferencePool(getattr(args, 'gui_model_concurrency', 2))
         self._closing = False
         self.queue = collections.deque()
+        # At most one queued follow-up message per conversation, started when its current turn ends.
+        self.followups = {}
         self.routing = {}
         self._approvals = {}
         self._models = (0.0, None)
@@ -548,8 +564,9 @@ class Hub:
         return sum(t.slot for t in self._tasks.values())
 
     def _queue_summary(self):
-        # Caller holds the lock.
-        return [{**t.summary(), 'position': position} for position, t in enumerate(self.queue, 1)]
+        # Caller holds the lock. Follow-ups wait for their conversation, not for a task slot: listed last.
+        return [{**t.summary(), 'position': position}
+                for position, t in enumerate([*self.queue, *self.followups.values()], 1)]
 
     def _capacity(self):
         return {'chats': self.concurrency, 'requests': self.inference.capacity,
@@ -570,6 +587,11 @@ class Hub:
             if requests is not None:
                 self.inference.set_capacity(requests)
                 self.args.gui_model_concurrency = requests
+        try:
+            store.save_concurrency(self.base, {key: value for key, value in (('chats', chats), ('requests', requests))
+                                               if value is not None})
+        except (OSError, ValueError):
+            pass  # The new limits apply now; only their persistence failed.
         self._advance()
         with self.bus._cond:
             limits = self.limits()
@@ -599,8 +621,11 @@ class Hub:
             self.bus.publish('queue', queue=queue)
 
     def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None, allow_routing=False,
-               light=False):
-        """Start or queue one task. A light task starts at once without a task slot (see _hold_slot)."""
+               light=False, task=None):
+        """Start or queue one task. A light task starts at once without a task slot (see _hold_slot).
+
+        ``task`` is a queued follow-up placeholder that becomes this task, keeping its ID.
+        """
         with self._lock:
             if self._closing:
                 raise Busy('The interface is shutting down.')
@@ -618,7 +643,10 @@ class Hub:
             queued = not light and (self._held() >= self.concurrency or bool(self.queue))
             if queued and not queue:
                 raise Busy('All active task slots are occupied. Queue this request or wait for a slot.')
-            task = Task(kind, target, label, title, on_update)
+            if task is None:
+                task = Task(kind, target, label, title, on_update)
+            else:
+                task.state = 'starting'
             task.origin_chat = origin_chat
             task.live, task.work = live, work
             if queued:
@@ -693,7 +721,7 @@ class Hub:
 
     def _advance(self, finished=None):
         """Fill available task slots in FIFO order, after all final writes."""
-        launch, changed = [], False
+        launch, changed, followup = [], False, None
         with self._lock:
             if finished is not None:
                 self._tasks.pop(finished.id, None)
@@ -701,6 +729,15 @@ class Hub:
                 self.task = next(iter(self._tasks.values()), finished)
                 if finished in self.queue:  # a slot request the turn no longer needs
                     self.queue.remove(finished)
+                    changed = True
+                chat = finished.origin_chat
+                # A turn the user paused keeps its follow-up waiting: Resume runs it afterwards, or cancel it.
+                # A turn that stopped by itself (finished, failed, provider pause) lets it start.
+                ended = finished.state in ('done', 'error') or finished.state == 'paused' and not finished.cancel.is_set()
+                if (chat in self.followups and ended and not self._closing
+                        and chat not in self.routing
+                        and not any(t.origin_chat == chat or t.target == chat for t in [*self._tasks.values(), *self.queue])):
+                    followup = self.followups.pop(chat)
                     changed = True
             while not self._closing and self._held() < self.concurrency and self.queue:
                 task = self.queue.popleft()
@@ -716,8 +753,47 @@ class Hub:
             self._publish_queue()
         for task in launch:
             self._launch(task)
+        if followup is not None:
+            threading.Thread(target=self._start_followup, args=(followup,), daemon=True,
+                             name='square-followup').start()
         if finished is not None and finished.origin_chat and finished.state == 'done':
             self._schedule_title(self.root, finished.origin_chat)
+
+    def _queue_followup(self, chat_id, content, files, required_mode, required_effort):
+        """Hold a message sent while the conversation is busy; None when it can start now."""
+        chat = store.load_chat(self.root, chat_id)
+        if chat['mode'] != 'free':
+            raise ValueError('Only Assistant conversations orchestrate workers.')
+        if not isinstance(content, str) or not content.strip() or len(content) > 60000:
+            raise ValueError('Write a message of at most 60000 characters.')
+        with self._lock:
+            if self._closing:
+                raise Busy('The interface is shutting down.')
+            if chat_id in self.followups:
+                raise Busy('A follow-up message is already queued for this conversation. Cancel it to send another.')
+            if not (chat_id in self.routing or any(t.origin_chat == chat_id or t.target == chat_id
+                                                   for t in [*self._tasks.values(), *self.queue])):
+                return None
+            task = Task('chat', chat_id, 'Assistant', content)
+            task.state, task.queued_at = 'queued', time.time()
+            task.followup = (content, list(files), required_mode, required_effort)
+            self.followups[chat_id] = task
+        self._publish_queue()
+        self._publish_task(task)
+        return task
+
+    def _start_followup(self, task):
+        content, files, mode, effort = task.followup
+        task.followup = None  # from here on an ordinary Assistant turn with the same ID
+        try:
+            self._assistant_turn(task.target, content, files, required_mode=mode, required_effort=effort, task=task)
+        except (Busy, ValueError, OSError, AgentError, store.NotFound) as exc:
+            with self._lock:
+                task.state, task.error, task.finished = 'error', str(exc), time.time()
+                task.ready.set()
+            self._discarded(task.target, content, AgentError('The queued message could not start: ' + str(exc)),
+                            files=files, attached_files=files)
+            self._publish_task(task)
 
     def _hold_slot(self, task, budget, waiting=None, resumed=False):
         """Give an Assistant turn a task slot before its first worker starts.
@@ -816,8 +892,13 @@ class Hub:
                 if done and title and len(title) <= 120 and not task.cancel.is_set():
                     store.set_chat_title(root, chat_id, title, manual=False)
                     self.bus.publish('chat_saved', chat=chat_id)
-            except (Exception, KeyboardInterrupt):
-                pass  # A title must never turn a successful research task into an error.
+            except KeyboardInterrupt:
+                pass
+            except Exception as exc:
+                # A title must never turn a successful task into an error, but a failure is logged:
+                # silently swallowed errors hid that automatic titles never worked on one profile.
+                print(f'Automatic title failed for conversation {chat_id}: {type(exc).__name__}: {exc}',
+                      file=sys.stderr, flush=True)
             finally:
                 with self._lock:
                     self._titles.pop(chat_id, None)
@@ -828,6 +909,18 @@ class Hub:
         task.thread.start()
 
     def cancel_queued(self, task_id):
+        with self._lock:
+            followup = next((t for t in self.followups.values() if t.id == task_id), None)
+            if followup is not None:
+                # Never started: the message was not added to the conversation.
+                del self.followups[followup.target]
+                followup.state, followup.finished = 'cancelled', time.time()
+                followup.cancel.set()
+                followup.ready.set()
+        if followup is not None:
+            self._publish_queue()
+            self._publish_task(followup)
+            return followup
         with self._lock:
             task = next((t for t in self.queue if t.id == task_id), None)
             if task is None:
@@ -878,8 +971,13 @@ class Hub:
             self._title_queue.clear()
             # A running turn waiting for a worker slot pauses with the other running tasks.
             queued = [t for t in self.queue if t.thread is None]
-            waiting = bool(self.queue)
+            waiting = bool(self.queue or self.followups)
             self.queue.clear()
+            for task in self.followups.values():
+                task.state, task.finished = 'cancelled', time.time()
+                task.cancel.set()
+                task.ready.set()
+            self.followups.clear()
             for task in queued:
                 task.state, task.finished = 'cancelled', time.time()
                 task.cancel.set()
@@ -922,7 +1020,8 @@ class Hub:
             chat = store.load_chat(self.root, chat_id)
             route_tasks = {item.get('task') for item in chat['transcript']
                            if item.get('role') == 'route' and item.get('task')}
-            tasks = list(self._tasks.values()) + ([self.task] if self.task else []) + list(self.queue)
+            tasks = (list(self._tasks.values()) + ([self.task] if self.task else []) + list(self.queue)
+                     + list(self.followups.values()))
             def belongs(task):
                 return (getattr(task, 'origin_chat', None) == chat_id
                         or (task.kind == 'chat' and task.target == chat_id)
@@ -957,6 +1056,22 @@ class Hub:
 
     def update_project(self, project_id, *, revision, name=None, notes=None):
         return projects.update_project(self.root, project_id, revision=revision, name=name, notes=notes)
+
+    def delete_project(self, project_id):
+        """Retire an idle project: its conversations move to no project; its files stay in place."""
+        with self._lock:
+            projects.read_project(self.root, project_id)
+            members = [row['id'] for row in store.list_chats(self.root, self.base) if row.get('project_id') == project_id]
+            pending = list(self._tasks.values()) + list(self.queue)
+            if any(chat in self.routing or any(t.origin_chat == chat or t.target == chat for t in pending) for chat in members):
+                raise Busy('A conversation in this project is still running or queued. Pause it or wait for it to finish first.')
+            projects.delete_project(self.root, project_id)
+            for chat in members:
+                store.set_chat_project(self.root, chat, None)
+        for chat in members:
+            self.bus.publish('chat_saved', chat=chat)
+        self.bus.publish('projects')
+        return {'ok': True, 'moved': len(members)}
 
     def set_chat_project(self, chat_id, project_id):
         with self._lock:
@@ -1063,10 +1178,24 @@ class Hub:
             return False
         return True if requested is None else bool(requested)
 
+    def stop_online(self, chat_id):
+        """Turning a conversation's online search off also applies to its running work: each running job of the
+        conversation makes no further web request (cached sources stay usable). Returns how many were reached."""
+        reached = 0
+        for task in self.active_tasks():
+            if task.origin_chat == chat_id:
+                for library in task.libraries:
+                    reached += bool(library.online)
+                    library.online = False
+        return reached
+
     def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
         args = self.args
         library = LiteratureTools(self.root, online=self.online(online),
                                   max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
+        library.offline_locked = self.online_locked  # launched --offline: online search cannot be turned on
+        if isinstance(getattr(task, 'libraries', None), list):
+            task.libraries.append(library)
         # Conversational engines (chats, the Assistant and its Explore workers) may run
         # automatic sanity checks; the @python_lab and @sanity_check workers bind explicitly.
         numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
@@ -1074,7 +1203,7 @@ class Hub:
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root),
                               numerics=numerics)
-        workspace.cancelled = task.cancel.is_set
+        workspace.cancelled = library.cancelled = task.cancel.is_set
         client_class = INTERRUPTIBLE[args.backend]
         if args.backend == 'openai':
             profile = resolve_api_profile(getattr(args, 'api_profile', None))
@@ -1210,8 +1339,9 @@ class Hub:
         # Proof allocates its own output from the actual prompt and context.
         # A DS4 context override is independent of the ordinary-chat ceiling.
         _check_ctx(ctx, None if getattr(args, 'api_profile', None) == 'deepinfra' else args.predict)
-        _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx)
+        _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx, explicit_ctx=ctx)
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
+        job_id = str(uuid.uuid4())  # known at once, so a queued proof can be followed by its id
 
         def work(task):
             agent, _ = self._engine(task, mode='prove', ctx=ctx, online=False)
@@ -1222,23 +1352,81 @@ class Hub:
             return runner.start(goal, max_rounds=rounds, max_tokens=tokens, max_seconds=seconds,
                                 max_predict=solve, verify_tokens=verify, min_solve_tokens=args.proof_min_solve_tokens,
                                 repair_tokens=repair, verify_temperature=args.proof_verify_temperature,
-                                source_files=list(source_files))
-        return self._started(self._begin('proof', None, 'Proof', goal, work, queue=queue, on_update=on_update))
+                                source_files=list(source_files), job_id=job_id)
+        return self._started(self._reserve_id(self._begin('proof', None, 'Proof', goal, work, queue=queue,
+                                                          on_update=on_update), job_id))
 
-    def resume_proof(self, proof_id, queue=False):
+    def _reserve_id(self, task, job_id):
+        """A queued job already has its id: the one its runner will create when the task starts."""
+        with self._lock:
+            reserved = task.state == 'queued' and task.target is None
+            if reserved:
+                task.target = job_id
+        if reserved:
+            self._publish_task(task)
+            self._publish_queue()
+        return task
+
+    def _proof_owner(self, proof_id):
+        """The running conversation whose Proof worker is running this job, if any (summary of its task)."""
+        with self._lock:
+            tasks = [t for t in self._tasks.values() if t.kind == 'chat' and t.state in RUNNING]
+        for task in tasks:
+            try:
+                chat = store.load_chat(self.root, task.target)
+            except (ValueError, OSError, store.NotFound):
+                continue
+            if any(c.get('job_id') == proof_id and c.get('status') == 'running'
+                   for c in (chat.get('assistant_state') or {}).get('children', [])):
+                return task
+        return None
+
+    def resume_proof(self, proof_id, queue=False, *, add_tokens=0, add_seconds=0, add_rounds=0):
         state = ProofStore.load(self.root, proof_id).state
         if state['version'] != 2:
             raise ValueError('This proof was made by the earlier v0.4 engine. It stays readable here, '
                              'but v0.5 cannot resume it: start a new proof instead.')
+        owner = self._proof_owner(proof_id)
+        if owner is not None:
+            raise Busy(f'A conversation is running this proof ({one_line(owner.title, 60)}). '
+                       'Pause that conversation, or wait for it, before resuming the proof here.')
+        additions = {k: v for k, v in (('tokens', add_tokens), ('seconds', add_seconds), ('rounds', add_rounds)) if v}
+        if state['status'] in PROOF_TERMINAL:
+            if not budget_stop(state):
+                raise Busy(f'This proof has finished ({state["status"].replace("_", " ")}); resuming cannot change its '
+                           'result. Start a new proof to try again.')
+            if not additions and not unsettled_interrupts(state):
+                raise Busy(f'This proof stopped on its allowance ({state["status"].replace("_", " ")}). '
+                           'Resume it with more budget (tokens, time or attempts) to continue.')
+        if additions:
+            ProofRunner.check_additions(state, additions)
 
         def work(task):
             agent, _ = self._engine(task, online=False)
             runner = ProofRunner(agent)
             runner.emit = self._job_emit(task, runner, 'proof')
-            return runner.resume(proof_id)
+            return runner.resume(proof_id, add_tokens=add_tokens, add_seconds=add_seconds, add_rounds=add_rounds)
         task = self._begin('proof', proof_id, 'Proof', state['goal'], work, queue=queue)
         task.ready.set()
         return task
+
+    def delete_proof(self, proof_id):
+        """Move an idle proof job to .mathagent/trash/proofs, where it can be recovered by moving it back."""
+        directory = store._proof_directory(self.root, proof_id)
+        with self._lock:
+            pending = list(self._tasks.values()) + list(self.queue)
+            if any(t.kind == 'proof' and t.target == proof_id for t in pending):
+                raise Busy('This proof is running or queued. Pause it, or cancel its queued work, before deleting it.')
+        if self._proof_owner(proof_id) is not None or store.locked(directory):
+            raise Busy('This proof is being run by a conversation or another process. Pause it before deleting it.')
+        try:
+            store.trash_proof(self.root, proof_id)
+        except LedgerError as exc:
+            if 'already in use' in str(exc):
+                raise Busy('This proof is being run by another process. Pause it before deleting it.') from None
+            raise
+        self.bus.publish('job', job='proof', id=proof_id, status='deleted', phase=None, updated_at=None)
+        return {'ok': True}
 
     # -- literature, referee and write-up reports -----------------------
 
@@ -1261,6 +1449,7 @@ class Hub:
                        variant=None, target='', **limits):
         if kind not in ('literature', 'referee'):
             raise ValueError('Research kind must be literature or referee')
+        self._check_pinned(source_files)  # before any slot check: a wrong request is answered as such
         budgets = self._research_budgets(**limits)
         if kind == 'literature':
             if getattr(self.args, 'research_seconds_explicit', False):
@@ -1274,6 +1463,7 @@ class Hub:
         if budgets['max_requests'] is None and kind != 'literature':
             budgets['max_requests'] = 12
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
+        job_id = str(uuid.uuid4())  # known at once, so a queued job can be followed by its id
 
         def work(task):
             agent, _ = self._engine(task, mode=kind, online=online)
@@ -1283,12 +1473,31 @@ class Hub:
                 runner = ReviewRunner(agent, concurrency=self.review_concurrency())
                 runner.cancel = task.cancel
                 runner.emit = self._job_emit(task, runner, 'research')
-                return runner.start(goal, source_files=list(source_files), **budgets)
+                return runner.start(goal, source_files=list(source_files), job_id=job_id, **budgets)
             runner = review_runner(variant)(agent, concurrency=self.review_concurrency())
             runner.emit = self._job_emit(task, runner, 'research')
-            return runner.start(goal, source_files=list(source_files), target=target, **budgets)
+            return runner.start(goal, source_files=list(source_files), target=target, job_id=job_id, **budgets)
         label = VARIANT_LABELS[variant] if variant else LABELS[kind]
-        return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
+        return self._started(self._reserve_id(self._begin('research', None, label, goal, work, queue=queue,
+                                                          on_update=on_update), job_id))
+
+    def _check_pinned(self, source_files):
+        """Pinned files are existing files inside the workspace. The messages name the file as given, never a
+        server path (hosted testers share a server)."""
+        root = Path(self.root).resolve()
+        for name in source_files:
+            rel = Path(name)
+            if rel.is_absolute() or name.startswith('~') or '..' in rel.parts or any(p.startswith('.') for p in rel.parts):
+                raise ValueError(f'Pinned files must be workspace-relative paths, without "..", "~" or hidden '
+                                 f'folders: {rel.name or name}')
+            try:
+                path = (root / rel).resolve()
+            except (OSError, RuntimeError):
+                raise ValueError(f'File not found in the workspace: {name}') from None
+            if not path.is_relative_to(root):
+                raise ValueError(f'Pinned files must be inside the workspace: {name}')
+            if not path.is_file():
+                raise ValueError(f'File not found in the workspace: {name}')
 
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
                       notes='', output='', conversation='', variant=None, scoped=False, deliver='folder', experiment_ids=(),
@@ -1298,14 +1507,20 @@ class Hub:
             budgets['max_requests'] = 12
         texts = store.load_template(self.base, template) if template else []
         if save_template:
-            store.save_template(self.base, Workspace(self.root), save_template, list(template_files))
+            store.check_template(save_template, list(template_files))  # a bad name fails before the job starts
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
+        personal_context = personalization.context(personalization.load(self.base))
 
         def work(task):
             # A write-up works from the pinned notes only; it never searches.
             agent, _ = self._engine(task, mode='writeup', online=False)
+            agent.personal_context = personal_context
             images.bind(agent, image_refs)
             runner = WriteupRunner(agent, styles_root=self.base)
+            if save_template:
+                # Saved only once the job is accepted: a rejected request leaves no template behind.
+                runner.on_accepted = lambda: store.save_template(self.base, Workspace(self.root), save_template,
+                                                                 list(template_files))
             style_choice = load_choice(self.base)
             if (variant or notes.strip() or template_files or texts or image_refs
                     or not markdown_conversion_request(goal, source_files or runner._inferred_sources(goal),
@@ -1336,7 +1551,7 @@ class Hub:
             return runner.start(goal, name=name, source_files=list(source_files), template_files=list(template_files), **budgets)
         return self._started(self._begin('research', None, LABELS['style'], goal or name, work, queue=queue, on_update=on_update))
 
-    def resume_research(self, job_id, queue=False, additional_seconds=0):
+    def resume_research(self, job_id, queue=False, additional_seconds=0, additional_tokens=0):
         state = store.research_state(self.root, job_id)
         # Old reading lists go to ReviewRunner too: it keeps them readable and refuses to resume them.
         runner_class = (WriteupRunner if state['kind'] == 'writeup' else StyleRunner if state['kind'] == 'style' else
@@ -1355,7 +1570,7 @@ class Hub:
                 runner.previous_markdown = store.previous_markdown_for_job(self.root, state)
             runner.cancel = task.cancel
             runner.emit = self._job_emit(task, runner, 'research')
-            return runner.resume(job_id, additional_seconds=additional_seconds)
+            return runner.resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
         label = (LABELS['summarize'] if state.get('variant') == 'summary' else
                  VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup']))
         task = self._begin('research', job_id, label, state['goal'], work, queue=queue)
@@ -1427,7 +1642,7 @@ class Hub:
         label = 'Conversation' if legacy else 'Exploration'
         return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
 
-    def check(self, chat_id, question, *, effort='medium', on_update=None, queue=False):
+    def check(self, chat_id, question, *, effort='medium', on_update=None, queue=False, files=()):
         """A literature check answered in a Default conversation (its evidence stays in .mathagent/checks)."""
         session = store.load_chat(self.root, chat_id)
         if not isinstance(question, str) or not question.strip() or len(question) > 8000:
@@ -1456,7 +1671,9 @@ class Hub:
                     work_limit = workflow_budget(effort, self.args)
                     limits = dict(max_tokens=work_limit['tokens'], max_seconds=work_limit['seconds'],
                                   max_input_tokens=self.args.research_input_tokens)
-                result = runner.start(question, effort=effort, **limits,
+                # An attached .bib (or reference list) is checked entry by entry.
+                material = bibcheck.attached_material(Workspace(root, read_types=store.read_types(root)), files)
+                result = runner.start(question, effort=effort, **limits, material=material,
                     lookup='precise' if precise_reference_request(question) else 'standard')
             except BaseException as exc:
                 self._discarded(chat_id, '', exc)
@@ -1466,7 +1683,10 @@ class Hub:
             if state['status'] in ('paused', 'error', 'budget_exhausted', 'budget_violation'):
                 answer = f'*The check stopped early ({state.get("stop_reason", state["status"])}).*\n\n' + answer
             if not online:
-                answer = '*Online search is off for this conversation, so only cached sources were used.*\n\n' + answer
+                answer = ('*This interface was launched with --offline: web research is off, so only sources already in the '
+                          'local cache were used.*' if self.online_locked else
+                          '*Online search is off for this conversation, so only sources already in the local cache were used.*'
+                          ) + '\n\n' + answer
             answer += f'\n\nFull log: `.mathagent/checks/{result["id"]}/report.md`'
             history = fresh['history'] + [{'role': 'user', 'content': question}, {'role': 'assistant', 'content': answer}]
             store.commit_turn(root, chat_id, history, [], [], echo_user=False, mode='check', job_id=result['id'])
@@ -1531,7 +1751,16 @@ class Hub:
 
     # -- Assistant: bounded main agent and existing workers -----------------
 
-    def route(self, chat_id, content, files=(), *, required_mode=None, required_effort=None):
+    def route(self, chat_id, content, files=(), *, required_mode=None, required_effort=None, queue=False):
+        """Start an Assistant turn; with ``queue``, a busy conversation runs it after its current turn."""
+        with self._lock:
+            waiting = self.followups.get(chat_id)
+        if waiting is not None:
+            raise Busy('A follow-up message is already queued for this conversation. Cancel it to send another.')
+        if queue:
+            task = self._queue_followup(chat_id, content, files, required_mode, required_effort)
+            if task is not None:
+                return task
         return self._assistant_turn(chat_id, content, files, required_mode=required_mode, required_effort=required_effort)
 
     def resume_assistant(self, chat_id):
@@ -1584,7 +1813,7 @@ class Hub:
         return {'job_id': previous['id'], 'source': copy.deepcopy(previous['sources'][0]),
                 'report': previous['draft'], 'followup': not full_review_requested(content)}
 
-    def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None, required_effort=None):
+    def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None, required_effort=None, task=None):
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
             raise ValueError('Only Assistant conversations orchestrate workers.')
@@ -1802,6 +2031,7 @@ class Hub:
                 if kind == 'tool':
                     name = str(value).split(' ', 1)[0]
                     message = ('Delegating a mathematical task…' if name == 'delegate' else
+                               'Waiting for your approval to save a file…' if name == 'write_file' else
                                'Reading web sources…' if name in ('open_url', 'read_page', 'search_page', 'read_references', 'search_web')
                                else 'Reading earlier results…' if name in briefs.IndexReader.names else 'Reading mathematical sources…')
                     capture.emit('progress', message)
@@ -1872,8 +2102,14 @@ class Hub:
                 return {'status': parent.state['status'] if exhausted or permanent else 'paused', 'answer': ''}
             if result['status'] == 'complete':
                 if not parent.state.get('investigation'):
-                    store.commit_turn(root, chat_id, parent.conversation_history(), capture.calls, capture.notices,
+                    notices = capture.notices
+                    if WRITEUP_NEEDS in notices and WRITEUP_NEEDS not in parent.state.get('warnings', []):
+                        notices = [n for n in notices if n != WRITEUP_NEEDS]  # a later write-up delivered its document
+                    store.commit_turn(root, chat_id, parent.conversation_history(), capture.calls, notices,
                                       echo_user=False, mode='free')
+                suggestion = parent.state.get('open_problem_suggestion')
+                if suggestion:
+                    store.append_items(root, chat_id, [self._open_problem_card(suggestion)])
             else:
                 store.append_items(root, chat_id, [{'role': 'assistant', 'content': result.get('answer', ''),
                                                   'mode': 'free', 'time': store._now(), 'discarded': True,
@@ -1912,10 +2148,25 @@ class Hub:
 
         live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'free'}
         try:
-            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True, allow_routing=True, light=True)
+            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True, allow_routing=True, light=True,
+                               task=task)
         finally:
             with self._lock:
                 self.routing.pop(chat_id, None)
+
+    def _open_problem_card(self, suggestion):
+        """A Proof the user starts (Start on the card), never the Assistant, with its cost stated."""
+        level = suggestion['effort']
+        budget = effort.limits('prove', level, self.args)
+        cost = [f'{budget["rounds"]} rounds' if budget.get('rounds') else '',
+                f'{budget["tokens"]:,} output tokens' if budget.get('tokens') else '',
+                (f'about {budget["seconds"] / 3600:.0f} h' if budget['seconds'] >= 3600 else
+                 f'about {budget["seconds"] / 60:.0f} min') if budget.get('seconds') else '']
+        stamp = store._now()
+        return {'role': 'route', 'status': 'proposed', 'mode': 'prove', 'request': suggestion['request'],
+                'files': suggestion['files'], 'effort': level, 'time': stamp, 'status_time': stamp,
+                'reason': ('Not started: this is a famous open problem. A ' + level + '-effort Proof may use up to '
+                           + ', '.join(part for part in cost if part) + ' and is very unlikely to settle it.')}
 
     def _assistant_worker(self, task, root, chat_id, parent, budget, action, child, save, online, state_lock):
         host = _ChatWorkerHost(self, task, root, chat_id, online)
@@ -2031,7 +2282,7 @@ class Hub:
                                            variant=REVIEW_MODES.get(mode), online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
             elif mode == 'check':
-                task = self.check(chat_id, request, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
+                task = self.check(chat_id, request, files=files, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
                                   queue=True, on_update=on_update)
             elif mode in ('writeup', 'summarize'):
                 task = self.start_writeup(request, source_files=files,
@@ -2080,11 +2331,18 @@ def _check_ctx(ctx, predict):
         raise ValueError('Context must exceed the output budget + 1024')
 
 
-def _check_proof(args, *, tokens, solve, verify, ctx):
+def _check_proof(args, *, tokens, solve, verify, ctx, explicit_ctx=None):
     """The terminal's checks for a new proof, made before the job exists."""
     if getattr(args, 'api_profile', None) == 'deepinfra' and max(solve, verify) > MODEL_OUTPUT_TOKENS:
         raise ValueError(f'DeepInfra DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     cap = getattr(args, 'specialist_output_tokens', None)
+    if explicit_ctx is not None and getattr(args, 'api_profile', None) == 'deepinfra':
+        # DS4 calls need their whole output allowance beside the statement; a smaller context only fails later.
+        needed = max(min(solve, cap or solve), min(verify, cap or verify)) + 2048
+        if explicit_ctx < needed:
+            raise ValueError(f'ctx {explicit_ctx} is too small for this proof: each solve or review needs its output '
+                             f'allowance plus room for the statement, at least {needed} tokens. Raise ctx or lower '
+                             'solve_tokens and verify_tokens.')
     required = min(solve, cap) + min(verify, cap) if cap is not None else solve + verify
     if tokens is not None and tokens < required:
         raise ValueError(f'The token budget must cover one full solve and its review: at least {required} tokens')

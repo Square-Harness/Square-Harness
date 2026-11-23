@@ -11,7 +11,8 @@ import { BrandMark, SideSpine, Sidebar, TopBar } from './components/Shell'
 import { MODES } from './modes'
 import { usePanelHidden } from './panels'
 import { useRoute, type Route } from './router'
-import { useApp } from './store'
+import { dismissFolderNotice, useApp } from './store'
+import { CloseIcon } from './components/Icons'
 import { AboutView } from './views/AboutView'
 import { ChatView } from './views/ChatView'
 import { ProofNew } from './views/ProofNew'
@@ -70,17 +71,27 @@ export function App() {
   if (app.auth === 'needed') return <Login />
   return (
     <div className={'app' + (listHidden ? ' list-hidden' : '')}>
+      <button type="button" className="skip-link" onClick={() => {
+        const box = document.querySelector<HTMLTextAreaElement>('.composer textarea')
+        if (box) box.focus(); else document.querySelector<HTMLElement>('main')?.focus()
+      }}>Skip to the message box</button>
       <div ref={navigation} className={'nav' + (drawer ? ' nav-open' : '')}
         role={drawer ? 'dialog' : undefined} aria-modal={drawer || undefined} aria-label={drawer ? 'Navigation' : undefined}>
         <Sidebar route={route} />
       </div>
       {listHidden && <SideSpine route={route} />}
       {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
-      <main className="main">
+      <main className="main" tabIndex={-1}>
         <TopBar route={route} onMenu={() => setDrawer(true)} />
         <FeedbackButton chatId={feedbackChatId} chatTitle={app.chats?.find((chat) => chat.id === feedbackChatId)?.title} />
         {app.connection === 'reconnecting' && (
           <div className="connection" role="status">Reconnecting to the harness. Saved work is safe; live updates resume when it answers.</div>
+        )}
+        {app.folderNotice && (
+          <div className="connection connection-notice" role="status">
+            <span>Another tab opened the folder {app.folderNotice.split('/').filter(Boolean).pop() || app.folderNotice}. This tab now shows it too: conversations and jobs belong to the folder they started in.</span>
+            <button type="button" className="icon-btn" aria-label="Dismiss" onClick={dismissFolderNotice}><CloseIcon size={14} /></button>
+          </div>
         )}
         <JobNavigation route={route} />
         <View route={route} />

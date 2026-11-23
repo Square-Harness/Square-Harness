@@ -98,3 +98,39 @@ implied when absent. The input is never mutated or clipped.
             'No hypotheses, sources or saved work were clipped.', allocation)
     options['num_predict'] = cap
     return fitted, allocation
+
+
+# Output tokens a cut-off stream may have generated beyond what reached its journal: events the
+# provider sent but the journal had not yet synchronized (at most half a second of output), and
+# tokens generated while the connection was closing.
+INTERRUPTED_MARGIN = 1024
+
+
+def streamed_characters(lines):
+    """Characters of answer, reasoning and tool-call text in journal lines (a partial last line ends it)."""
+    total = 0
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            break  # a killed writer can leave an incomplete last event
+        message = event.get('message') if isinstance(event, dict) else None
+        if not isinstance(message, dict):
+            continue
+        for field in ('content', 'thinking'):
+            if isinstance(message.get(field), str):
+                total += len(message[field])
+        if message.get('tool_calls'):
+            total += len(json.dumps(message['tool_calls'], ensure_ascii=False))
+    return total
+
+
+def interrupted_charge(reserved, characters):
+    """Conservative output charge for a call cut off with no provider usage report.
+
+    Like the hosted ledger's estimated settlement: every streamed character counts as a token (a token is
+    at least one character, reasoning included, since every backend streams reasoning), plus
+    ``INTERRUPTED_MARGIN``; never more than the call's reservation."""
+    if type(reserved) is not int or reserved < 0:
+        return reserved
+    return min(reserved, max(0, int(characters)) + INTERRUPTED_MARGIN)

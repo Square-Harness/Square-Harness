@@ -46,18 +46,56 @@ _RATE_LOCK = threading.Lock()
 _LAST_REQUEST = {}
 _HOST_LOCKS = {}
 MAX_BYTES = 10_000_000
+# Scholarly hosts whose plain-HTTP links (old papers, MathSciNet exports, .bib files) are read over HTTPS.
+_UPGRADABLE = re.compile(r'http://((?:www\.)?arxiv\.org|export\.arxiv\.org|(?:dx\.)?doi\.org|(?:www\.)?zbmath\.org)(?=[/?#]|$)', re.I)
+ARXIV_BACKOFF = (15.0, 30.0)  # seconds after an arXiv HTTP 429 without Retry-After: at least its 15 s pacing
 STRIKES = 2  # failed requests in a row (each retried once) before a provider is marked down
 DOWN_COOLDOWN = 240  # seconds before a provider marked down is probed again (never for TLS failures)
 MAX_TEXT = 4_000_000
 DOCUMENT_META_BYTES = 1_000_000
 ARXIV_HOSTS = frozenset({'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'})
 MAX_RESULT = 8000
-TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'}
+TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper', 'lookup_identifier'}
 PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath', 'crossref', 'openlibrary')
 API_HOSTS = frozenset({'api.crossref.org', 'api.opencitations.net', 'api.search.brave.com',
                       'api.semanticscholar.org', 'api.zbmath.org', 'export.arxiv.org'})
 ARXIV_ID = re.compile(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', re.I)
 DOC_ID = re.compile(r'doc-[0-9a-f]{24}')
+
+
+def upgrade_url(value):
+    """A plain-HTTP link to arXiv, doi.org or zbMATH read over HTTPS; every other value unchanged."""
+    return _UPGRADABLE.sub(lambda m: 'https://' + m.group(1), value, count=1) if isinstance(value, str) and _UPGRADABLE.match(value) else value
+
+
+class _Gate:
+    """One request at a time per host, shared by every job of this process; an urgent requester (an interactive
+    check) is let through before waiting background requesters. The pacing between requests is unchanged."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.busy, self.urgent = False, 0
+
+    def __enter__(self):
+        return self
+
+    def hold(self, urgent, cancelled=lambda: False):
+        with self.condition:
+            self.urgent += bool(urgent)
+            try:
+                while self.busy or (not urgent and self.urgent):
+                    if cancelled():
+                        raise KeyboardInterrupt  # a pause request stops waiting for another job's turn
+                    self.condition.wait(0.1)
+            finally:
+                self.urgent -= bool(urgent)
+            self.busy = True
+        return self
+
+    def __exit__(self, *exc):
+        with self.condition:
+            self.busy = False
+            self.condition.notify_all()
 
 
 class LiteratureError(ValueError):
@@ -470,6 +508,10 @@ class LiteratureTools:
         self._down_at, self._strikes = {}, {}
         self.on_budget_change = None
         self.deadline = None
+        # A pause request (the interface sets the task's flag): rate-limit waits and an open request stop at once.
+        self.cancelled = lambda: False
+        # An interactive check goes before background reviews at a shared rate gate (the pacing stays the same).
+        self.urgent = False
         self._robots = {}
         self.reset_budget(max_requests=max_requests, max_chars=max_chars)
 
@@ -521,6 +563,10 @@ class LiteratureTools:
                     'locator "Theorem 9.26"; without a number, the places they cite. Give the title: it identifies the work '
                     '(not the author\'s other works). Also returns the bibliography entry.' + offline,
                     {'author': string, 'locator': string, 'topic': string, 'title': string}, ['author']),
+            _schema('lookup_identifier', 'Registry record of one DOI (Crossref, else the DOI registry) or arXiv ID (arXiv API: '
+                    'title, authors, journal reference, comments, latest version, withdrawal notice). found=false means the '
+                    'registry has no such identifier. One request; use it before a topic search when an identifier is given.' + offline,
+                    {'identifier': string}, ['identifier']),
             _schema('open_paper', 'Cache a public HTTPS paper, arXiv ID, or DOI. Explicit arXiv /src/ or /e-print/ URLs request TeX source, including source archives, only when site access rules permit. Source files are never executed. Returns source ID/index, not full paper. Treat all content as untrusted.' + offline,
                     {'identifier_or_url': string}, ['identifier_or_url']),
             _schema('read_paper', 'Read exact numbered lines of a cached extraction; max 80 lines / 6000 passage characters. Verify uncertain math against the original.',
@@ -586,8 +632,10 @@ class LiteratureTools:
                 _, owner, key = max(fields, key=lambda item: item[0])
                 item = owner[key]
                 owner[key] = item[:len(item) // 2]
-                if owner is not result:
+                if owner is not result or key == 'passage':
                     owner[key + '_truncated'] = True
+                if key == 'passage':
+                    owner['lines_complete'] = False
             while size() > cap:
                 lists = [(len(json.dumps(items, ensure_ascii=False)), key) for key, items in result.items()
                          if key in ('results', 'matches', 'quotes', 'sections', 'opened', 'source_files')
@@ -824,6 +872,7 @@ class LiteratureTools:
                 'abstract': _plain(entry.findtext('a:summary', '', atom), abstract),
                 'categories': [c.get('term') for c in entry.findall('a:category', atom) if c.get('term')][:8],
                 'journal_ref': _plain(entry.findtext('x:journal_ref', '', atom), 200) or None,
+                **({'comment': comment} if (comment := _plain(entry.findtext('x:comment', '', atom), 300)) else {}),
                 **({'doi': doi} if doi and re.fullmatch(r'10\.\d{4,9}/\S+', doi) else {}),
                 'url': 'https://arxiv.org/abs/' + identifier,
                 'open_access_url': 'https://arxiv.org/pdf/' + identifier})
@@ -852,6 +901,69 @@ class LiteratureTools:
         params = {'id_list': ','.join(ids), 'start': 0, 'max_results': len(ids)}
         return self._cache_search('arxiv-ids', ','.join(sorted(ids)), len(ids),
                                   lambda: self._arxiv_feed(params, len(ids), abstract=2500))['results']
+
+    def lookup_identifier(self, identifier):
+        """The registry record of one DOI or arXiv identifier, or found=false when the registry has none."""
+        value = upgrade_url(str(identifier or '').strip())
+        value = re.sub(r'^https://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/', 'arxiv:', value, flags=re.I)
+        value = re.sub(r'\.pdf$|/$', '', value, flags=re.I)
+        value = re.sub(r'^https://(?:dx\.)?doi\.org/', 'doi:', value, flags=re.I)
+        arxiv_doi = re.fullmatch(r'(?:doi:\s*)?10\.48550/arxiv\.(.+)', value, re.I)
+        if arxiv_doi:
+            value = 'arxiv:' + arxiv_doi.group(1)
+        bare = re.sub(r'^(?:arxiv|doi)\s*:\s*', '', value, flags=re.I)
+        if ARXIV_ID.fullmatch(bare) and not bare.startswith('10.'):
+            versioned = re.search(r'v(\d+)$', bare)
+            records = self.arxiv_records([bare])
+            if not records:
+                return {'identifier': 'arxiv:' + bare, 'registry': 'arXiv API', 'found': False,
+                        'note': 'arXiv has no paper with this identifier.'}
+            record = dict(records[0])
+            latest = re.search(r'v(\d+)$', record['identifier'])
+            if latest:
+                record['latest_version'] = int(latest.group(1))
+                record['identifier'] = re.sub(r'v\d+$', '', record['identifier'])
+            if versioned and latest and int(versioned.group(1)) > int(latest.group(1)):
+                return {'identifier': 'arxiv:' + bare, 'registry': 'arXiv API', 'found': False,
+                        'note': f'arXiv has this paper only up to version {latest.group(1)}.', 'record': record}
+            text = ' '.join(str(record.get(k) or '') for k in ('comment', 'abstract'))
+            if re.search(r'\b(?:this (?:paper|article|submission) (?:has been|is) withdrawn|withdrawn by (?:the )?(?:author|arxiv))', text, re.I):
+                record['withdrawn'] = True
+            return {'identifier': 'arxiv:' + bare, 'registry': 'arXiv API', 'found': True, 'record': record}
+        if not re.fullmatch(r'10\.\d{4,9}/\S+', bare):
+            raise LiteratureError('Give one DOI (10.xxxx/...) or arXiv identifier (2303.09521, math/0601001)')
+        doi = bare.lower().rstrip('.,;')
+        records = self.crossref(dois=[doi], limit=1, abstract=1200)
+        if records:
+            return {'identifier': 'doi:' + doi, 'registry': 'Crossref', 'found': True,
+                    'record': {k: v for k, v in records[0].items() if k not in ('references', 'reference_texts')}}
+        # Not every DOI is Crossref's (DataCite, mEDRA): the DOI registry itself says whether it exists.
+        try:
+            body = self._cache_search('doi-handle', doi, 1, lambda: [self._doi_handle(doi)])['results'][0]
+        except LiteratureError as exc:
+            if 'Offline mode' in str(exc):
+                raise
+            return {'identifier': 'doi:' + doi, 'registry': 'Crossref', 'found': False,
+                    'note': 'Crossref has no record of this DOI; the DOI registry could not be asked (' + str(exc)[:120] + ').'}
+        if not body.get('exists'):
+            return {'identifier': 'doi:' + doi, 'registry': 'DOI registry', 'found': False,
+                    'note': 'The DOI registry (doi.org) has no such DOI: it does not resolve.'}
+        return {'identifier': 'doi:' + doi, 'registry': 'DOI registry', 'found': True,
+                'note': 'The DOI exists but Crossref has no metadata for it (another registration agency).',
+                'record': {'identifier': 'doi:' + doi, 'doi': doi, 'url': body.get('url') or 'https://doi.org/' + doi}}
+
+    def _doi_handle(self, doi):
+        try:
+            body, _, _ = self._fetch('https://doi.org/api/handles/' + quote(doi, safe='/():._-;<>'), max_bytes=200_000)
+        except LiteratureError as exc:
+            if 'HTTP 404' in str(exc):
+                return {'exists': False}
+            raise
+        value = json.loads(body)
+        url = next((v.get('data', {}).get('value') for v in value.get('values') or []
+                    if isinstance(v, dict) and v.get('type') == 'URL' and isinstance(v.get('data'), dict)), None)
+        return {'exists': value.get('responseCode') == 1,
+                **({'url': url} if isinstance(url, str) and url.startswith('https://') else {})}
 
     def zbmath_search(self, query, *, limit=25):
         """A zbMATH Open search for controller code: up to 50 records, with their open reference lists."""
@@ -1209,7 +1321,7 @@ class LiteratureTools:
     def _canonical(self, value):
         if not isinstance(value, str) or not value.strip() or len(value) > 2000:
             raise LiteratureError('Provide an arXiv identifier, DOI, or public HTTPS URL')
-        value = value.strip()
+        value = upgrade_url(value.strip())
         if value.lower().startswith('arxiv-source:'):
             identifier = value[len('arxiv-source:'):]
             if not ARXIV_ID.fullmatch(identifier):
@@ -1325,6 +1437,8 @@ class LiteratureTools:
             raise LiteratureError('No readable text found (possibly scanned PDF). Provide a text-accessible paper; OCR is not available.')
         if len(text.encode('utf-8')) > MAX_TEXT:
             raise LiteratureError('Extracted document exceeds the 4 MB text limit')
+        if canonical.startswith('https://doi.org/') and suffix == '.html':
+            self._landing_check(unquote(canonical[len('https://doi.org/'):]), title, text, source_url)
         if metadata is not None and (metadata.get('sha256') != _digest(body)
                                      or metadata.get('text_sha256') != _digest(text)):
             # Preserve saved locators when the source OR its extraction changes.
@@ -1347,6 +1461,23 @@ class LiteratureTools:
         if document_id != canonical_id:
             self._write(('document-index', canonical_id + '.json'), json.dumps({'document_id': document_id}))
         return self._document_summary(metadata)
+
+    def _landing_check(self, doi, title, text, source_url):
+        """A DOI's web page must show its work: a page that never names the registered title (a journal's home
+        or current issue) is refused, so it is not cached and read as the paper."""
+        try:
+            records = self.crossref(dois=[doi], limit=1)
+        except LiteratureError:
+            return  # the registry could not be asked: nothing to compare with
+        expected = records[0].get('title') if records else ''
+        words = {w for w in re.findall(r'[a-z]{4,}', _fold(expected))} - {'with', 'from', 'that', 'this', 'their', 'into', 'some', 'remarks'}
+        if len(words) < 2:
+            return
+        page = set(re.findall(r'[a-z]{4,}', _fold(title + '\n' + '\n'.join(text.splitlines()[:600]))))
+        if len(words & page) < .6 * len(words):
+            raise LiteratureError(f'The page this DOI leads to ({source_url}) does not show the work: Crossref registers it as '
+                                  f'"{expected[:200]}", which the page never names (a journal or issue page?). '
+                                  'Open the PDF or an arXiv version of the paper instead.', code='landing_page_mismatch')
 
     def import_local(self, path):
         """Import a workspace manuscript without uploading or permitting symlinks."""
@@ -1481,6 +1612,9 @@ class LiteratureTools:
                 'start_line': start_line, 'end_line': actual_end,
                 **({'pdf_pages_first_excerpt_line': pages} if pages else {}),
                 'passage': '\n'.join(selected), 'truncated': clipped or end < min(end_line, len(lines)),
+                # Truncation means more text existed; every line from start_line to end_line was still returned in
+                # full, unless the only line returned had to be cut.
+                'lines_complete': bool(selected) and not (clipped and len(selected) == 1 and len(selected[0]) < len(f'{start_line}: {lines[start_line - 1]}')),
                 'evidence_kind': 'untrusted_cached_extraction'}
 
     def search_paper(self, document_id, query):
@@ -1498,6 +1632,11 @@ class LiteratureTools:
                 'query': query, 'matches': hits, 'match_limit': 8, 'text_sha256': metadata['text_sha256']}
 
     def _pdf(self, body):
+        if b'%PDF-' not in body[:1024]:
+            head = body[:4000].decode('utf-8', 'replace')
+            raise LiteratureError('This file is not a PDF' + (
+                ': it looks like LaTeX source; rename it to .tex.' if re.search(r'\\(?:documentclass|begin\{|section\b)', head)
+                else ' (it does not start with %PDF-).' if body.strip() else ': it is empty.'))
         command = shutil.which('pdftotext')
         if command:
             with tempfile.TemporaryDirectory(prefix='mathagent-paper-') as directory:
@@ -1509,8 +1648,11 @@ class LiteratureTools:
                         timeout=self._remaining_timeout(), check=False, preexec_fn=_limit_output)
                 except subprocess.TimeoutExpired:
                     raise LiteratureError('PDF extraction timed out') from None
-                if result.returncode or not target.exists() or target.stat().st_size > MAX_TEXT:
-                    raise LiteratureError('PDF extraction failed or exceeded 4 MB')
+                if result.returncode or not target.exists():
+                    raise LiteratureError('This PDF could not be read: pdftotext failed on it (the file may be damaged '
+                                          'or truncated). Export it again, or supply the TeX source.')
+                if target.stat().st_size > MAX_TEXT:
+                    raise LiteratureError('This PDF could not be read: its extracted text exceeds 4 MB.')
                 return target.read_text(encoding='utf-8'), 'pdftotext -layout'
         import importlib.util
         if importlib.util.find_spec('pypdf') is None:
@@ -1536,12 +1678,19 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             source.write_bytes(body)
             try:
                 result = subprocess.run([sys.executable, '-I', '-c', script, str(source), str(target)],
-                    cwd=directory, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=directory, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                     timeout=self._remaining_timeout(), check=False)
             except subprocess.TimeoutExpired:
                 raise LiteratureError('PDF extraction timed out') from None
-            if result.returncode or not target.exists() or target.stat().st_size > MAX_TEXT:
-                raise LiteratureError('PDF extraction failed or exceeded size/page limits')
+            if result.returncode or not target.exists():
+                # The reader's own last error line (bounded), never a path: it names what is wrong with the file.
+                last = (result.stderr or b'')[-2000:].decode('utf-8', 'replace').strip().splitlines()[-1:] or ['']
+                reason = re.sub(r'^[\w.]+(?:Error|Exception):\s*', '', last[0]).replace(directory, '')[:200]
+                raise LiteratureError('This PDF could not be read' + (
+                    ': it is encrypted or has more than 300 pages.' if 'Unsupported PDF' in reason else
+                    f': {reason}.' if reason else '.') + ' Export it again, or supply the TeX source.')
+            if target.stat().st_size > MAX_TEXT:
+                raise LiteratureError('This PDF could not be read: its extracted text exceeds 4 MB.')
             return target.read_text(encoding='utf-8'), 'pypdf subprocess'
 
     def _url(self, url):
@@ -1586,6 +1735,19 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         context = _tls_context()
         timeout = self._remaining_timeout()
         conn = http.client.HTTPSConnection(parts.hostname, timeout=timeout, context=context)
+        finished = threading.Event()
+
+        def stop_on_pause():
+            # A blocked read wakes when its socket is shut down; a pause need not wait for the source.
+            while not finished.wait(0.1):
+                if self.cancelled():
+                    try:
+                        if conn.sock is not None:
+                            conn.sock.shutdown(socket.SHUT_RDWR)
+                    except (OSError, ValueError):
+                        pass
+                    return
+        threading.Thread(target=stop_on_pause, daemon=True, name='mathagent-literature-pause').start()
         try:
             # Pin the validated IP while retaining the original TLS verification name.
             deadline = time.monotonic() + timeout
@@ -1624,7 +1786,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             response_headers = {k.lower(): v for k, v in response.getheaders()}
             length = response_headers.get('content-length', '')
             if length.isdigit() and int(length) > max_bytes:
-                raise LiteratureError('Remote response exceeds the download byte limit')
+                raise LiteratureError(f'The document is larger than the {max_bytes // 1_000_000} MB download limit. Attach a smaller part '
+                                      '(a chapter or section) or download it yourself and attach it.', code='document_too_large')
             encoding = response_headers.get('content-encoding', 'identity').lower()
             if encoding not in ('', 'identity', 'gzip'):
                 raise LiteratureError('Unsupported response compression')
@@ -1644,13 +1807,15 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                     break
                 downloaded += len(chunk)
                 if downloaded > max_bytes:
-                    raise LiteratureError('Remote response exceeds the download byte limit')
+                    raise LiteratureError(f'The document is larger than the {max_bytes // 1_000_000} MB download limit. Attach a smaller part '
+                                      '(a chapter or section) or download it yourself and attach it.', code='document_too_large')
                 if decoder is not None:
                     chunk = decoder.decompress(chunk, max_bytes + 1 - size)
                 chunks.append(chunk)
                 size += len(chunk)
                 if size > max_bytes:
-                    raise LiteratureError('Remote response exceeds the download byte limit')
+                    raise LiteratureError(f'The document is larger than the {max_bytes // 1_000_000} MB download limit. Attach a smaller part '
+                                      '(a chapter or section) or download it yourself and attach it.', code='document_too_large')
             if decoder is not None and (not decoder.eof or decoder.unused_data):
                 raise LiteratureError('Invalid or concatenated gzip response')
             return status, response_headers, b''.join(chunks)
@@ -1659,8 +1824,11 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         except ssl.SSLCertVerificationError:
             raise LiteratureError('HTTPS certificate verification failed; configure SSL_CERT_FILE with a current trusted CA bundle', code='source_unavailable') from None
         except (OSError, http.client.HTTPException, zlib.error):
+            if self.cancelled():
+                raise KeyboardInterrupt from None  # Paused: not a source failure, no strike.
             raise LiteratureError('HTTPS retrieval failed; check network and source availability', code='source_unavailable') from None
         finally:
+            finished.set()
             conn.close()
 
     def _remaining_timeout(self):
@@ -1674,7 +1842,11 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
     def _pause(self, duration):
         if self.deadline is not None and time.monotonic() + duration >= self.deadline:
             raise LiteratureError('Literature workflow time budget insufficient for provider rate limit', code='workflow_budget')
-        time.sleep(duration)
+        end = time.monotonic() + duration
+        while (left := end - time.monotonic()) > 0:
+            if self.cancelled():
+                raise KeyboardInterrupt
+            time.sleep(min(0.1, left))
 
     def _check_robots(self, url):
         parts = self._url(url)
@@ -1747,8 +1919,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             # the allowed rate by the number of concurrent DS4 workers.
             rate_host = 'arxiv.org' if host.endswith('arxiv.org') else host
             with _RATE_LOCK:
-                host_lock = _HOST_LOCKS.setdefault(rate_host, threading.Lock())
-            with host_lock:
+                host_lock = _HOST_LOCKS.setdefault(rate_host, _Gate())
+            with host_lock.hold(self.urgent, self.cancelled):  # a pause stops waiting for other jobs' turns
                 delay = interval - (time.monotonic() - _LAST_REQUEST.get(rate_host, -1e9))
                 if delay > 0:
                     self._pause(delay)
@@ -1782,10 +1954,17 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 continue
             if status == 429 and retries < 2:
                 # Shared key-less quotas (Semantic Scholar) refuse in bursts: back off twice before giving up.
+                # arXiv asks for at least 15 s between requests: wait that long (or its Retry-After), and hold
+                # every job of this process back at the shared gate meanwhile.
                 retry = response_headers.get('retry-after', '')
-                delay = float(retry) if retry.isdigit() else (2.0, 6.0)[retries]
-                if delay <= 15:
-                    self._pause(max(1, delay))
+                slow = rate_host == 'arxiv.org'
+                delay = float(retry) if retry.isdigit() else (ARXIV_BACKOFF if slow else (2.0, 6.0))[retries]
+                if delay <= (60 if slow else 15):
+                    delay = max(ARXIV_BACKOFF[0] if slow else 1, delay)
+                    if self.deadline is not None and time.monotonic() + delay >= self.deadline:
+                        raise LiteratureError('Literature workflow time budget insufficient for provider rate limit', code='workflow_budget')
+                    with _RATE_LOCK:  # the shared gate makes this request and every other one wait
+                        _LAST_REQUEST[rate_host] = max(_LAST_REQUEST.get(rate_host, 0), time.monotonic() + delay - interval)
                     retries += 1
                     continue
             if status >= 500 and failures < 1:

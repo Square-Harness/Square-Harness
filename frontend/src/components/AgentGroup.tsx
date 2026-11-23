@@ -13,12 +13,15 @@ import { ErrorNote, useLoad } from './common'
 import { BackIcon, ChevronIcon } from './Icons'
 import { Glyph } from './Glyph'
 import { Inline, Markdown } from './Markdown'
-import { Square } from './Square'
+import { Square, type Variant } from './Square'
 import '../agentGroups.css'
 
-export function AgentSquares({ agents }: { agents: { id: string; mode: string; status: AgentStatus }[] }) {
+export function AgentSquares({ agents }: { agents: { id: string; mode: string; status: AgentStatus; result?: { variant: Variant; label: string } }[] }) {
+  // A lane that is merely paused shows the paused square, not the red stopped one.
+  const look = (agent: (typeof agents)[number]) => agent.status === 'stopped' && agent.result?.variant === 'paused'
+    ? agent.result : { variant: agentSquares[agent.status], label: agentLabels[agent.status] }
   return <span className="agent-squares">{agents.slice(0, 8).map(agent =>
-    <Square key={agent.id} variant={agentSquares[agent.status]} size={12} label={skillName(agent.mode) + ' · ' + agentLabels[agent.status]} />
+    <Square key={agent.id} variant={look(agent).variant} size={12} label={skillName(agent.mode) + ' · ' + look(agent).label} />
   )}{agents.length > 8 && <span>+{agents.length - 8}</span>}</span>
 }
 
@@ -57,7 +60,7 @@ function SingleAgent({ lane, prompt }: { lane: AgentLane; prompt?: string }) {
     <div className="agent-single-copy">
       <h3>{skillName(lane.mode)}</h3>
       {showObjective && <div className="agent-single-question"><Inline mathProse limit={210}>{lane.objective}</Inline></div>}
-      <p className="agent-single-phase"><Square variant={agentSquares[lane.status]} size={12} />{lane.step || lane.stateLabel}</p>
+      <p className="agent-single-phase"><Square variant={lane.status === 'stopped' ? lane.result.variant : agentSquares[lane.status]} size={12} />{lane.step || lane.stateLabel}</p>
       <div className="agent-single-actions">
         {lane.notebook && <NotebookAction lane={lane} primary />}
         <button type="button" className="agent-single-activity" onClick={() => openWorkPanel('agents', lane.id)}>
@@ -93,6 +96,8 @@ function batchTitle(lanes: AgentLane[]) {
   if (running) return agents(running) + (running > 1 ? ' working in parallel' : ' working') + (waiting ? ' · ' + waiting + ' waiting' : '')
   if (waiting) return agents(waiting) + ' waiting to start'
   if (done === n) return agents(n) + ' finished'
+  const paused = lanes.filter(lane => lane.result.variant === 'paused').length
+  if (paused && done + paused === n) return (done ? done + ' of ' + n + ' agents finished · ' : '') + (paused === 1 && !done ? 'Agent paused' : paused + ' paused')
   return done ? done + ' of ' + n + ' agents finished' : n === 1 ? 'Agent interrupted' : 'Agents interrupted'
 }
 

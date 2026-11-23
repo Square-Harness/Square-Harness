@@ -11,6 +11,7 @@ from contextlib import contextmanager, nullcontext
 from .agent import AgentError, ModelNotDispatched
 from .backends import MeasuredStreamCancellation, TokenBudgetError, ToolCallError
 from .deepinfra import DeepInfraGenerationError, generation_deadline, rejected_before_inference
+from .call_policy import interrupted_charge
 from .proof import count_input
 
 
@@ -251,6 +252,24 @@ class BudgetClient:
                 raise AssistantBudget('Assistant inference timed out during generation.') from exc
             raise AssistantAdmissionRefused('Assistant time budget exhausted while waiting for inference.') from exc
 
+    def _settle_input(self, estimate, measured):
+        """Replace the admission estimate by the provider's prompt count, as research and review do.
+
+        The byte-based estimate only admits the call; the meter and later input-limit checks use what
+        the provider reports. An absent or malformed count keeps the estimate.
+        """
+        if type(measured) is int and measured >= 0:
+            self.pool.state['input_tokens'] = max(0, self.pool.state['input_tokens'] + measured - estimate)
+            self.usage['input_tokens'] = max(0, self.usage['input_tokens'] + measured - estimate)
+
+    def _settle_estimate(self, cap, streamed):
+        """A call stopped here with no usage report: charge the streamed estimate, not the whole cap (call_policy)."""
+        estimate = interrupted_charge(cap, streamed)
+        with self.pool.lock:
+            self.pool.state['reserved_tokens'] -= cap
+            self.pool.state['tokens'] -= cap - estimate
+            self.usage['tokens'] -= cap - estimate
+
     def _stream(self, payload):
         cap = payload.get('options', {}).get('num_predict')
         if type(cap) is not int or cap <= 0:
@@ -286,9 +305,13 @@ class BudgetClient:
         events = None
         charged = False
         reserved = True
+        streamed = 0  # characters of answer, reasoning and tool calls received
         try:
             events = self.client.stream(payload)
             for event in events:
+                message = event.get('message') if isinstance(event.get('message'), dict) else {}
+                streamed += sum(len(message[k]) for k in ('content', 'thinking') if isinstance(message.get(k), str))
+                streamed += len(json.dumps(message['tool_calls'], ensure_ascii=False)) if message.get('tool_calls') else 0
                 if not event.get('done') and self.remaining_seconds <= 0:
                     raise AssistantBudget('Assistant time budget exhausted during generation.')
                 if event.get('done'):
@@ -306,6 +329,7 @@ class BudgetClient:
                             self.pool.state['tokens'] -= cap - used
                             self.usage['tokens'] -= cap - used
                             self.pool.state['measured_tokens'] += used
+                        self._settle_input(count, event.get('prompt_eval_count'))
                     self.pool.checkpoint()
                 yield event
         except (AgentError, KeyboardInterrupt) as exc:
@@ -329,9 +353,19 @@ class BudgetClient:
                     self.pool.state['tokens'] += used - cap
                     self.usage['tokens'] += used - cap
                     self.pool.state['measured_tokens'] += used
+                    self._settle_input(count, exc.stats.get('prompt_eval_count'))
                 raise
+            if reserved and not charged and isinstance(exc, KeyboardInterrupt):
+                self._settle_estimate(cap, streamed)
+                reserved = False
             if isinstance(exc, AgentError) and not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
                 raise AssistantBudget('Assistant time budget exhausted during generation.') from exc
+            raise
+        except GeneratorExit:
+            # The worker stopped reading (its own deadline or pause): settle what was streamed.
+            if reserved and not charged:
+                self._settle_estimate(cap, streamed)
+                reserved = False
             raise
         finally:
             try:
