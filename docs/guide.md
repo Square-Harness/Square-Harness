@@ -378,6 +378,11 @@ one with a message.
   `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
   Hover over the chip above the text box to read what the skill does and to
   choose its effort. **Auto** means Medium, or High for a detailed review.
+  This is for users who know the skills: each one is built for a specific goal,
+  while the Assistant divides a large task into jobs the skills can handle.
+  A skill forced onto a larger task can fail in unexpected ways (for example,
+  `@writeup` on a whole 80-page paper). The start page therefore does not list
+  the skills; it points to **About**, which does.
 - **Your folder** is shown above the text box. Click it to open another folder
   (below `--gui-root`; by default only the workspace itself). Drop files onto the
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
@@ -415,7 +420,8 @@ one with a message.
   - **Personalization** saves standing chat instructions and LaTeX commands
     across folders under the same GUI root. New chat turns apply these
     preferences alongside the current request and any project notes.
-  - **About** explains the skills and which ones the Assistant can call itself.
+  - **About** lists the skills with their `@` commands, explains which ones the
+    Assistant can call itself, and warns that forcing a skill can lead to errors.
 - **On a phone**: launch with `--gui-host 0.0.0.0` and open the printed address
   once; the phone stays paired. This is plain HTTP on your network: use it only
   on a trusted network, or through an SSH tunnel or a VPN.

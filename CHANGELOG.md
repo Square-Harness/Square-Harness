@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The start page no longer shows the skills as buttons: they suggested calling a
+  skill directly, and a skill called on a task beyond its specific goal can fail
+  (a `@writeup` of a whole 79-page paper stopped on a false missing
+  bibliography), while the Assistant divides such a task into jobs the skills
+  can handle. The start page now points to **About**, which lists the skills
+  with their `@` commands and warns that forcing a skill can lead to unexpected
+  errors. `@` in the text box still calls a skill.
+
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model
