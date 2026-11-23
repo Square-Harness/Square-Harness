@@ -1165,8 +1165,17 @@ name and reused in any folder.
 
 ### Writing styles
 
-**Learn my writing style** condenses the `.tex` sources of your earlier articles
-into a named style. The articles are sorted into kinds of paper (by field and
+On **Learn my writing style**, drop an article onto the page or click **Upload
+articles** to select it from your computer. The file appears under **Your articles**.
+You can also **Choose from workspace** to use papers you uploaded earlier.
+Enter a name and click **Learn the style**. One article is enough to start.
+
+PDFs with selectable text provide examples of phrasing and explanation. The
+local PDF reader accepts files up to 10 MB.
+For a scanned PDF, use an OCR copy with selectable text, the TeX source, or
+screenshots of representative pages with a vision-capable model. Supply the
+`.tex` files or a TeX source archive to teach exact macros and typesetting.
+The articles are sorted into kinds of paper (by field and
 readership), and for each kind the style answers, from what your papers actually
 do:
 
@@ -1190,14 +1199,15 @@ what they do, all definitions in a preliminaries section) is a departure, kept
 for a kind of paper when most of its articles show it (both of two, two of
 three). Names, typesetting examples, phrasings and departure examples are kept
 only when they occur in your articles; a LaTeX quotation is kept as your article
-writes it, even when the model dropped its backslashes. With the DS4 profile each article is read whole (any `.tex` the
-harness can read, up to 1 MB); smaller models read representative passages, and
-the job's warnings name every article that was not read whole. Choose main
+writes it, even when the model dropped its backslashes. DS4 can read the whole
+body of a `.tex` article up to the 1 MB limit. When an article's text exceeds
+the model's available context, the learner takes representative passages and
+names the article in the job's warnings. Choose main
 article files, ideally two or more per kind of paper; `\input` parts are not
 followed, so pin them as well (a pinned macro file counts). A style can also keep a LaTeX template (an
 article's preamble, `.sty`, `.cls` or `.bib` files), which write-ups in that
-style build on unless you attach one. An article that cannot be read as text
-(binary, over 1 MB) is left out and named in the job's warnings; the style is
+style build on unless you attach one. An article whose text cannot be read
+is left out and named in the job's warnings; the style is
 learnt from the others. If no article or a template file cannot be read, the
 job does not start and lists every such file.
 

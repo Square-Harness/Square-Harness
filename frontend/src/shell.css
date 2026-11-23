@@ -459,7 +459,6 @@
 .style-saved { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .style-template { margin: 4px 0 16px; padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 10px; }
 .style-template-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.style-ask { padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: 10px; background: var(--ink-soft); }
 
 /* The composer's chips: the open folder, the project, attachments. */
 .workspace-switch { display: flex; align-items: center; gap: 8px; min-width: 0; }

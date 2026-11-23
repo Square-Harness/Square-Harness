@@ -1,6 +1,6 @@
 # Writing style
 
-Describe how the user writes mathematics, from the LaTeX of their own earlier articles, so that a later write-up can be written the way they would write it. In mathematics, style is above all what is explained, why and how; wording and typesetting come after. The result is a style guide for another writer, not a summary of the mathematics.
+Describe how the user writes mathematics from their earlier articles, so that a later write-up can follow their style. Use legible passages of extracted PDF text to learn how the author writes and explains. Exact TeX conventions, macros and examples of departures from the write-up rules require the author's TeX sources. In mathematics, style is above all what is explained, why and how. The result is a style guide for another writer.
 
 ## The questions
 

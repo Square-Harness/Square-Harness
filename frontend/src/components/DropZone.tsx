@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { beginUpload, dropTarget, useUploadsPending } from '../drop'
 import { useApp } from '../store'
-import { isImagePath } from './ImageAttachments'
+import { IMAGE_SUFFIXES, isImagePath } from './ImageAttachments'
 
 type Toast = { id: number; text: string; error?: boolean }
 
@@ -85,7 +85,14 @@ export function DropZone() {
       event.preventDefault(); void upload(files)
     }
     let pickerTarget: ReturnType<typeof dropTarget> | undefined
-    const choose = () => { pickerTarget = dropTarget(); input.current?.click() }
+    const choose = (event: Event) => {
+      if (!input.current) return
+      pickerTarget = dropTarget()
+      const formats = ['.tex', '.sty', '.cls', '.bib', '.tar.gz', '.tgz', '.tar', '.gz', '.md', '.txt', '.pdf', '.py']
+      if (imageSupport.current) formats.push(...IMAGE_SUFFIXES)
+      input.current.accept = event instanceof CustomEvent && typeof event.detail === 'string' ? event.detail : formats.join(',')
+      input.current.click()
+    }
     const selected = () => {
       const files = Array.from(input.current?.files || [])
       if (input.current) input.current.value = ''
@@ -116,7 +123,7 @@ export function DropZone() {
   const project = projects?.find((item) => item.id === target?.project_id)
   return (
     <>
-      <input ref={input} type="file" multiple hidden accept={'.tex,.sty,.cls,.bib,.tar.gz,.tgz,.tar,.gz,.md,.txt,.pdf,.py' + (status?.image_support ? ',.png,.jpg,.jpeg,.webp' : '')} aria-label="Attach files or images" />
+      <input ref={input} type="file" multiple hidden aria-label="Attach files or images" />
       {over && (
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-card">

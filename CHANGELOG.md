@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix dropping a PDF on a fresh Writing Styles page. The uploaded paper is
+  selected immediately and the learner can use its text. A PDF without readable
+  text gives guidance on using TeX, OCR or screenshots. Articles can also be
+  uploaded directly from the form or selected from the workspace.
+
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model

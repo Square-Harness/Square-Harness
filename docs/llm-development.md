@@ -1147,6 +1147,12 @@ without departures stay readable and usable. The active style is
 `style-choice.json`: mode `none` is the default style (the guidelines alone),
 always offered.
 
+The Writing Styles form pins each eligible upload as soon as the upload succeeds.
+PDFs use the same bounded local text extraction as other research jobs. The
+style job records `source_kind: pdf_text` for these articles and checks prose
+quotations against the extraction. TeX scanning and source-level typesetting
+evidence require TeX input.
+
 Write-ups (`writeup.py`) run the phases `style` (pick a saved style, one short
 call) → `outline` (one structured call, role `plan`, `OUTLINE_SCHEMA`: kind of
 document, language, requirements, inventory of the material with statuses,
