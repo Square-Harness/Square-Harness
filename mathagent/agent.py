@@ -9,6 +9,7 @@ from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
+from .model_client import ModelClient, register_model_client
 from .prompts import SYSTEM, MODES
 from .model_limits import input_limit
 
@@ -28,8 +29,12 @@ class _NoModelRedirects(HTTPRedirectHandler):
         return None
 
 
-class Ollama:
+@register_model_client('ollama')
+class Ollama(ModelClient):
     backend = 'ollama'
+    display_name = 'Ollama'
+    default_host = 'http://localhost:11434'
+    capabilities = frozenset({'streaming', 'tool_calls', 'thinking_toggle'})
 
     def __init__(self, host='http://localhost:11434', timeout=600):
         self.host = host.rstrip('/')

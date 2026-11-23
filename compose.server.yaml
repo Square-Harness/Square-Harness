@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
+
+services:
+  square-harness:
+    environment:
+      SQUARE_HARNESS_MODE: server
+      SQUARE_DATA_DIR: /data/server
+      SQUARE_TRUSTED_PROXY_SECRET_SOURCE: /run/secrets/trusted_proxy_secret
+      SQUARE_PROVIDER_HOST_ALLOWLIST: ${SQUARE_PROVIDER_HOST_ALLOWLIST:?Set the server provider-origin allowlist}
+      SQUARE_SERVER_SECRET_MANAGER: ${SQUARE_SERVER_SECRET_MANAGER:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      SQUARE_ACCOUNT_ACTIVE_WORKFLOWS: ${SQUARE_ACCOUNT_ACTIVE_WORKFLOWS:-2}
+      SQUARE_ACCOUNT_MODEL_CONCURRENCY: ${SQUARE_ACCOUNT_MODEL_CONCURRENCY:-2}
+      SQUARE_ACCOUNT_REQUESTS_PER_MINUTE: ${SQUARE_ACCOUNT_REQUESTS_PER_MINUTE:-60}
+      SQUARE_ACCOUNT_DAILY_TOKENS: ${SQUARE_ACCOUNT_DAILY_TOKENS:-1000000}
+    secrets:
+      - trusted_proxy_secret
+
+secrets:
+  trusted_proxy_secret:
+    file: ${SQUARE_PROXY_SECRET_FILE:?Set the absolute path to the private trusted-proxy secret file}

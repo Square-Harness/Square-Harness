@@ -20,6 +20,7 @@ import re
 import socket
 import threading
 import time
+import sys
 import uuid
 
 from ..agent import Agent, AgentError, ModelNotDispatched, Ollama
@@ -29,8 +30,8 @@ from ..conversation_sources import conversation_sources, references_previous_pdf
 from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, generation_deadline
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..source_tasks import automatic_source_action, source_overview
-from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
-from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
+from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible
+from ..api_profiles import MLX, DeepInfra
 from ..model_limits import MODEL_OUTPUT_TOKENS, input_limit as model_input_limit, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
@@ -45,12 +46,19 @@ from ..mode_calls import USER_MODES, ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT, MAIN_PREDICT, WorkerInterrupted
 from ..numerics import PythonSandbox, SandboxUnavailable
+from ..model_client import ModelClient, model_client_type
 from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from .. import images
 from . import effort, personalization, projects, store
+from .account_limits import AccountLimits
 from .inference import InferencePool
+from .provider_settings import (LocalProviderStore, allowed_origins_from_environment,
+                                default_provider_data, display_origins, merge_persisted,
+                                merge_server_credentials,
+                                public_provider_settings, updated_provider_data,
+                                validate_provider_host)
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
@@ -127,10 +135,12 @@ class Interruptible:
 
     FIRST_OUTPUT_NOTICE_SECONDS = 12
 
-    def __init__(self, host, cancel, timeout=600, *, pool=None, owner=None):
-        super().__init__(host, timeout)
+    def __init__(self, host, cancel, timeout=600, *, pool=None, owner=None,
+                 account_limits=None, account_id=None, **client_options):
+        super().__init__(host, timeout, **client_options)
         self.cancel = cancel
         self.pool, self.owner = pool, owner
+        self.account_limits, self.account_id = account_limits, account_id
         self._admitted = threading.local()
         self._response_lock = threading.Lock()
         self._active_responses = {}
@@ -203,15 +213,33 @@ class Interruptible:
         if self.cancel.is_set():
             raise KeyboardInterrupt
         if getattr(self._admitted, 'active', False):
-            yield from self._interruptible_stream(payload)
+            reservation = self._reserve_account_usage(payload)
+            yield from self._interruptible_stream(payload, reservation)
         else:
             try:
                 with self.inference_slot(deadline=time.monotonic() + self.timeout):
-                    yield from self._interruptible_stream(payload)
+                    reservation = self._reserve_account_usage(payload)
+                    yield from self._interruptible_stream(payload, reservation)
             except TimeoutError as exc:
                 raise AgentError('Time budget exhausted while waiting for model capacity.') from exc
 
-    def _interruptible_stream(self, payload):
+    def _reserve_account_usage(self, payload):
+        if self.account_limits is None:
+            return None
+        return self.account_limits.reserve_payload(
+            self.account_id, payload, len(getattr(self, 'image_refs', ())))
+
+    def _settle_account_usage(self, reservation, input_tokens, output_tokens):
+        if reservation is None:
+            return True
+        try:
+            self.account_limits.settle(reservation, input_tokens, output_tokens)
+            return True
+        except AgentError as exc:
+            print(f'Account usage settlement failed; reservation retained: {exc}', file=sys.stderr)
+            return False
+
+    def _interruptible_stream(self, payload, reservation=None):
         if self.cancel.is_set():
             raise KeyboardInterrupt
         owner = threading.get_ident()
@@ -254,6 +282,12 @@ class Interruptible:
                 if (self.cancel.is_set() or state['expired']) and event.get('done') and all(
                         type(event.get(k)) is int and event[k] >= 0 for k in ('eval_count', 'prompt_eval_count')):
                     terminal_usage = {k: event[k] for k in ('eval_count', 'prompt_eval_count')}
+                if event.get('done') and all(
+                        type(event.get(k)) is int and event[k] >= 0 for k in ('eval_count', 'prompt_eval_count')):
+                    if not self._settle_account_usage(
+                            reservation, event['prompt_eval_count'], event['eval_count']):
+                        event['accounting_warning'] = 'Account usage could not be finalized; the full reservation remains charged.'
+                    reservation = None
                 if self.cancel.is_set():
                     if terminal_usage:
                         raise MeasuredStreamCancellation(terminal_usage)
@@ -271,6 +305,13 @@ class Interruptible:
             # Preserve confirmed zero usage even when a stop/deadline races the HTTP status.
             raise
         except Exception as exc:
+            stats = getattr(exc, 'stats', None)
+            if (reservation is not None and isinstance(stats, dict)
+                    and type(stats.get('prompt_eval_count')) is int
+                    and stats['prompt_eval_count'] >= 0
+                    and type(stats.get('eval_count')) is int and stats['eval_count'] >= 0):
+                self._settle_account_usage(reservation, stats['prompt_eval_count'], stats['eval_count'])
+                reservation = None
             if self.cancel.is_set():
                 if isinstance(exc, DeepInfraGenerationError) and exc.stats:
                     raise MeasuredStreamCancellation(exc.stats) from None
@@ -292,28 +333,26 @@ class Interruptible:
                 watcher.join(timeout=0.2)
 
 
-# Subclasses rather than wrappers: the runners set client.timeout for their time guards.
-class InterruptibleOllama(Interruptible, Ollama):
-    pass
+_INTERRUPTIBLE_CLIENTS: dict[type[ModelClient], type[ModelClient]] = {}
 
 
-class InterruptibleOpenAI(Interruptible, OpenAICompatible):
-    pass
+def _interruptible_client_type(client_type: type[ModelClient]) -> type[ModelClient]:
+    """Compose the shared GUI cancellation/admission behavior with any adapter."""
+    if not issubclass(client_type, ModelClient):
+        raise TypeError('Interruptible clients must implement ModelClient')
+    if client_type not in _INTERRUPTIBLE_CLIENTS:
+        name = f'Interruptible{client_type.__name__}'
+        _INTERRUPTIBLE_CLIENTS[client_type] = type(
+            name, (Interruptible, client_type), {'__module__': __name__})
+    return _INTERRUPTIBLE_CLIENTS[client_type]
 
 
-class InterruptibleMLX(Interruptible, MLX):
-    pass
-
-
-class InterruptibleDeepInfra(Interruptible, DeepInfra):
-    pass
-
-
-class InterruptibleLlamaCpp(Interruptible, LlamaCpp):
-    pass
-
-
-INTERRUPTIBLE = {'ollama': InterruptibleOllama, 'openai': InterruptibleOpenAI, 'llamacpp': InterruptibleLlamaCpp}
+# Keep these import-compatible names for scripts that instrument the GUI clients.
+InterruptibleOllama = _interruptible_client_type(Ollama)
+InterruptibleOpenAI = _interruptible_client_type(OpenAICompatible)
+InterruptibleMLX = _interruptible_client_type(MLX)
+InterruptibleDeepInfra = _interruptible_client_type(DeepInfra)
+InterruptibleLlamaCpp = _interruptible_client_type(LlamaCpp)
 
 
 class Task:
@@ -421,8 +460,27 @@ class ChatCapture:
 
 
 class Hub:
-    def __init__(self, args, bus=None):
+    def __init__(self, args, bus=None, *, provider_mode='local', provider_store=None,
+                 provider_allowlist=None, account_limits=None, account_id=None,
+                 server_credential_store=None):
+        if provider_mode not in {'local', 'server'}:
+            raise ValueError('Provider mode must be local or server')
+        if server_credential_store is not None and (provider_mode != 'server' or account_id is None):
+            raise ValueError('Managed provider credentials require a server account')
         self.args = args
+        self.provider_mode = provider_mode
+        self.provider_store = provider_store
+        self.server_credential_store = server_credential_store
+        self.account_limits, self.account_id = account_limits, account_id
+        self.provider_allowlist = (allowed_origins_from_environment() if provider_allowlist is None
+                                   and provider_mode == 'server' else provider_allowlist or frozenset())
+        self.provider_data = default_provider_data(args)
+        if provider_store is not None:
+            self.provider_data = merge_persisted(self.provider_data, provider_store.load())
+        if server_credential_store is not None:
+            self.provider_data = merge_server_credentials(
+                self.provider_data, server_credential_store, account_id)
+        self._activate_provider(self.provider_data['providers'][self.provider_data['selected']])
         # Shared Docker sandbox for automatic numerical sanity checks.
         self.sandbox = PythonSandbox.from_args(args)
         self.root = Path(args.workspace).resolve(strict=True)
@@ -437,8 +495,15 @@ class Hub:
         self._lock = threading.Lock()
         self.task = None
         self._tasks = collections.OrderedDict()
+        account_policy = account_limits.policy if provider_mode == 'server' and account_limits is not None else None
         self.concurrency = getattr(args, 'gui_concurrency', 2)
-        self.inference = InferencePool(getattr(args, 'gui_model_concurrency', 2))
+        request_concurrency = getattr(args, 'gui_model_concurrency', 2)
+        if account_policy is not None:
+            self.concurrency = min(self.concurrency, account_policy.active_workflows)
+            request_concurrency = min(request_concurrency, account_policy.concurrent_requests)
+            args.gui_concurrency = self.concurrency
+            args.gui_model_concurrency = request_concurrency
+        self.inference = InferencePool(request_concurrency)
         self._closing = False
         self.queue = collections.deque()
         self.routing = {}
@@ -446,6 +511,55 @@ class Hub:
         self._models = (0.0, None)
         self._titles = {}
         self._title_queue = collections.OrderedDict()
+
+    def _activate_provider(self, config):
+        self.args.backend = config['backend']
+        self.args.host = config['host']
+        self.args.model = config['model']
+        self.args.api_profile = config['profile']
+
+    def provider_settings(self):
+        with self._lock:
+            data = copy.deepcopy(self.provider_data)
+        origins = display_origins(self.provider_allowlist) if self.provider_mode == 'server' else ()
+        store_name = (self.server_credential_store.display_name
+                      if self.server_credential_store is not None else None)
+        return public_provider_settings(data, mode=self.provider_mode, allowed_hosts=origins,
+                                        remember_store=store_name)
+
+    def account_usage(self):
+        if self.account_limits is None or self.account_id is None:
+            return None
+        return self.account_limits.status(self.account_id)
+
+    def update_provider_settings(self, body):
+        with self._lock:
+            if (any(task.state in RUNNING for task in self._tasks.values())
+                    or self.queue or self.routing or self._titles):
+                raise Busy('Pause or finish all model work before changing provider settings.')
+            updated = updated_provider_data(self.provider_data, body, mode=self.provider_mode,
+                                            allowed_origins=(self.provider_allowlist
+                                                             if self.provider_mode == 'server' else None),
+                                            managed_secret_storage=self.server_credential_store is not None)
+            if self.provider_store is not None:
+                self.provider_store.save(updated)
+            if self.server_credential_store is not None:
+                previous = self.provider_data['providers'][updated['selected']]
+                current = updated['providers'][updated['selected']]
+                if current['remembered']:
+                    if not previous['remembered'] or current['api_key'] != previous['api_key']:
+                        self.server_credential_store.save_api_key(
+                            self.account_id, updated['selected'], current['api_key'])
+                elif previous['remembered']:
+                    self.server_credential_store.delete_api_key(self.account_id, updated['selected'])
+            self.provider_data = updated
+            self._activate_provider(updated['providers'][updated['selected']])
+            self._models = (0.0, None)
+        return self.provider_settings()
+
+    def _active_provider(self):
+        with self._lock:
+            return copy.deepcopy(self.provider_data['providers'][self.provider_data['selected']])
 
     # -- task lifecycle -------------------------------------------------
 
@@ -473,9 +587,14 @@ class Hub:
             return self._capacity()
 
     def set_concurrency(self, *, chats=None, requests=None):
-        for value in (chats, requests):
-            if value is not None and (type(value) is not int or not 1 <= value <= 8):
-                raise ValueError('Concurrency limits must be integers from 1 to 8.')
+        account_policy = (self.account_limits.policy
+                          if self.provider_mode == 'server' and self.account_limits is not None else None)
+        max_chats = account_policy.active_workflows if account_policy else 8
+        max_requests = account_policy.concurrent_requests if account_policy else 8
+        if chats is not None and (type(chats) is not int or not 1 <= chats <= max_chats):
+            raise ValueError(f'Chat concurrency must be an integer from 1 to {max_chats}.')
+        if requests is not None and (type(requests) is not int or not 1 <= requests <= max_requests):
+            raise ValueError(f'Model request concurrency must be an integer from 1 to {max_requests}.')
         with self._lock:
             if chats is not None:
                 self.concurrency = chats
@@ -880,6 +999,9 @@ class Hub:
 
     def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
         args = self.args
+        provider = self._active_provider()
+        if self.provider_mode == 'server':
+            validate_provider_host(provider['host'], self.provider_allowlist)
         library = LiteratureTools(self.root, online=self.online(online),
                                   max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
         # Conversational engines (chats, the Assistant and its Explore workers) may run
@@ -890,21 +1012,22 @@ class Hub:
                               args.allow_python, literature=library, read_types=store.read_types(self.root),
                               numerics=numerics)
         workspace.cancelled = task.cancel.is_set
-        client_class = INTERRUPTIBLE[args.backend]
-        if args.backend == 'openai':
-            profile = resolve_api_profile(getattr(args, 'api_profile', None))
-            client_class = {'default': InterruptibleOpenAI, 'mlx': InterruptibleMLX,
-                            'deepinfra': InterruptibleDeepInfra}[profile]
+        client_type = model_client_type(provider['backend'], provider['profile'])
+        client_class = _interruptible_client_type(client_type)
+        client_options = {}
+        if client_type.supports_api_key and (provider['api_key'] is not None or self.provider_mode == 'server'):
+            client_options['api_key'] = provider['api_key']
         client = client_class(args.host, task.cancel, timeout=args.request_timeout,
-                              pool=self.inference, owner=task.id)
-        if isinstance(client, InterruptibleDeepInfra) and task.kind != 'title':
+                              pool=self.inference, owner=task.id, account_limits=self.account_limits,
+                              account_id=self.account_id, **client_options)
+        if getattr(client, 'profile', None) == 'deepinfra' and task.kind != 'title':
             def update_wait(waiting):
                 with self.bus._cond:
                     task.waiting_model_calls += 1 if waiting else -1
                     if task.state in RUNNING:
                         self.bus.publish('task', task=task.summary())
             client.on_model_wait = update_wait
-        agent = Agent(client, workspace, args.model, ctx or args.ctx, args.predict,
+        agent = Agent(client, workspace, provider['model'], ctx or args.ctx, args.predict,
                       (not args.no_think) if think is None else bool(think), mode, args.max_rounds,
                       seed=args.seed, temperature=args.temperature, top_p=args.top_p)
         agent.document_output_cap = getattr(args, 'specialist_output_tokens', None)
@@ -950,10 +1073,14 @@ class Hub:
         if time.monotonic() - stamp < 10 and value is not None:
             return value
         try:
-            if self.args.backend == 'openai':
-                client = create_profile_client(getattr(self.args, 'api_profile', None), self.args.host, timeout=3)
-            else:
-                client = create_client(self.args.backend, self.args.host, timeout=3)
+            provider = self._active_provider()
+            if self.provider_mode == 'server':
+                validate_provider_host(provider['host'], self.provider_allowlist)
+            client_type = model_client_type(provider['backend'], provider['profile'])
+            client_options = {}
+            if client_type.supports_api_key and (provider['api_key'] is not None or self.provider_mode == 'server'):
+                client_options['api_key'] = provider['api_key']
+            client = client_type(provider['host'], timeout=3, **client_options)
             value = {'reachable': True, 'models': client.models()}
         except AgentError as exc:
             value = {'reachable': False, 'models': [], 'error': str(exc)}

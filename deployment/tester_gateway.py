@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Cloudflare Access entry point for fixed, separately isolated SH workspaces.
+"""Cloudflare Access gateway for fixed workspaces or a shared authenticated backend.
 
-Only this optional deployment layer needs PyJWT. SH remains a loopback service
-with its ordinary workspace token; the gateway keeps those tokens server-side.
+The shared-backend mode forwards a short-lived signed principal assertion. The
+backend remains private and verifies that assertion before selecting a workspace.
 """
 import argparse
 from dataclasses import dataclass
@@ -16,9 +16,15 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 from urllib.parse import parse_qsl, urlsplit
 
 import jwt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mathagent.gui.identity import (AuthenticatedPrincipal, issue_assertion,
+                                    validate_secret)
 
 MAX_BODY = 32 * 1024 * 1024
 REQUEST_HEADERS = {'accept', 'accept-encoding', 'content-type', 'last-event-id', 'range',
@@ -29,12 +35,12 @@ RESPONSE_DROP = HOP_HEADERS | {'set-cookie', 'cache-control', 'expires', 'server
                                'access-control-allow-origin', 'access-control-allow-credentials'}
 
 
-def private_text(path, limit=65536):
-    """Read a private regular file, allowing only modes 0600 and 0640."""
+def private_text(path, limit=65536, modes=(0o400, 0o600, 0o640)):
+    """Read a private regular file without following symlinks."""
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, 'rb') as source:
         info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in {0o600, 0o640}:
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in modes:
             raise ValueError('Gateway files must be private regular files')
         data = source.read(limit + 1)
     if len(data) > limit:
@@ -55,12 +61,20 @@ class Tenant:
 
 
 @dataclass(frozen=True)
+class SharedBackend:
+    port: int
+    identity_secret_file: Path
+
+
+@dataclass(frozen=True)
 class Settings:
     hostname: str
     issuer: str
     audience: str
     tenants: dict
     feedback_admins: tuple = ()
+    shared_backend: SharedBackend | None = None
+    allowed_emails: frozenset[str] | None = None
 
     @classmethod
     def load(cls, path):
@@ -77,26 +91,57 @@ class Settings:
             raise ValueError('Configure the exact HTTPS Cloudflare Access issuer')
         if not isinstance(audience, str) or not audience or len(audience) > 256 or audience.strip() != audience:
             raise ValueError('Configure the Access application audience')
-        tenants, ports = {}, set()
-        for email, entry in value['tenants'].items():
-            email = email.strip().casefold()
-            port, token_file = entry['port'], Path(entry['token_file'])
-            if (not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) or email in tenants
-                    or type(port) is not int or not 1024 <= port <= 65535 or port in ports
-                    or not token_file.is_absolute()):
-                raise ValueError('Invalid or duplicate tenant mapping')
-            tenants[email] = Tenant(port, token_file)
-            ports.add(port)
-        if not tenants or len(tenants) > 50:
-            raise ValueError('Configure between one and fifty tenant identities')
+        shared = None
+        tenants = {}
+        allowed = None
+        if 'shared_backend' in value:
+            if 'tenants' in value:
+                raise ValueError('Configure either a shared backend or fixed tenant backends, not both')
+            config = value['shared_backend']
+            if not isinstance(config, dict):
+                raise ValueError('The shared backend configuration must be an object')
+            port = config.get('port')
+            secret_path = config.get('identity_secret_file')
+            secret_file = Path(secret_path) if isinstance(secret_path, str) else Path()
+            if (type(port) is not int or not 1024 <= port <= 65535
+                    or not isinstance(secret_path, str) or not secret_file.is_absolute()):
+                raise ValueError('Configure a loopback backend port and absolute identity secret file')
+            shared = SharedBackend(port, secret_file)
+            raw_allowed = value.get('allowed_emails')
+            if raw_allowed is not None:
+                if (not isinstance(raw_allowed, list) or not raw_allowed
+                        or any(not isinstance(email, str) for email in raw_allowed)):
+                    raise ValueError('Allowed identities must be a nonempty email list')
+                normalized = [email.strip().casefold() for email in raw_allowed]
+                if (len(normalized) > 1000 or len(set(normalized)) != len(normalized)
+                        or any(not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email)
+                               for email in normalized)):
+                    raise ValueError('Allowed identities must be distinct valid emails')
+                allowed = frozenset(normalized)
+        else:
+            ports = set()
+            for email, entry in value['tenants'].items():
+                email = email.strip().casefold()
+                port, token_file = entry['port'], Path(entry['token_file'])
+                if (not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) or email in tenants
+                        or type(port) is not int or not 1024 <= port <= 65535 or port in ports
+                        or not token_file.is_absolute()):
+                    raise ValueError('Invalid or duplicate tenant mapping')
+                tenants[email] = Tenant(port, token_file)
+                ports.add(port)
+            if not tenants or len(tenants) > 50:
+                raise ValueError('Configure between one and fifty tenant identities')
         admins = value.get('feedback_admins', [])
         if (not isinstance(admins, list) or any(not isinstance(email, str) for email in admins)
                 or len(admins) > 10):
             raise ValueError('Feedback administrators must be a list of invited emails')
         admins = tuple(email.strip().casefold() for email in admins)
-        if len(set(admins)) != len(admins) or any(email not in tenants for email in admins):
+        if (len(set(admins)) != len(admins)
+                or any(not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) for email in admins)
+                or (not shared and any(email not in tenants for email in admins))
+                or (shared and allowed is not None and any(email not in allowed for email in admins))):
             raise ValueError('Feedback administrators must be distinct invited identities')
-        return cls(hostname, issuer, audience, tenants, admins)
+        return cls(hostname, issuer, audience, tenants, admins, shared, allowed)
 
 
 class AccessVerifier:
@@ -105,7 +150,7 @@ class AccessVerifier:
         self.keys = key_client or jwt.PyJWKClient(settings.issuer + '/cdn-cgi/access/certs',
                                                 cache_jwk_set=True, lifespan=300, timeout=10)
 
-    def email(self, token):
+    def principal(self, token):
         if not isinstance(token, str) or not token or len(token) > 32768:
             raise ValueError('Missing identity assertion')
         if jwt.get_unverified_header(token).get('alg') != 'RS256':
@@ -116,7 +161,10 @@ class AccessVerifier:
                             options={'require': ['exp', 'iat', 'aud', 'iss', 'sub', 'email']})
         if not isinstance(claims['email'], str) or not isinstance(claims['sub'], str) or not claims['sub']:
             raise ValueError('Invalid identity claims')
-        return claims['email'].strip().casefold()
+        return AuthenticatedPrincipal(claims['sub'], claims['email'].strip().casefold())
+
+    def email(self, token):
+        return self.principal(token).email
 
 
 class Gateway(ThreadingHTTPServer):
@@ -128,6 +176,11 @@ class Gateway(ThreadingHTTPServer):
             raise ValueError('The tester gateway must listen on loopback')
         self.settings = settings
         self.verifier = verifier or AccessVerifier(settings)
+        self.identity_secret = None
+        if settings.shared_backend is not None:
+            self.identity_secret = private_text(settings.shared_backend.identity_secret_file, 4096,
+                                                modes=(0o400, 0o600, 0o640)).strip()
+            validate_secret(self.identity_secret)
         super().__init__(address, Handler)
 
     def handle_error(self, request, client_address):
@@ -177,13 +230,18 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Cross-site request')
         if len(assertions) != 1:
             raise ValueError('Missing identity assertion')
-        email = self.server.verifier.email(assertions[0])
-        if email not in settings.tenants:
+        principal = self.server.verifier.principal(assertions[0])
+        if settings.shared_backend is not None:
+            if settings.allowed_emails is not None and principal.email not in settings.allowed_emails:
+                raise ValueError('Identity is not invited')
+            return principal, None
+        tenant = settings.tenants.get(principal.email)
+        if tenant is None:
             raise ValueError('Identity is not invited')
-        return email, settings.tenants[email]
+        return principal, tenant
 
-    def account(self, email):
-        body = json.dumps({'email': email, 'logout_url': 'https://' + self.server.settings.hostname
+    def account(self, principal):
+        body = json.dumps({'email': principal.email, 'logout_url': 'https://' + self.server.settings.hostname
                            + '/cdn-cgi/access/logout'}).encode()
         self.send_response_only(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -217,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
             try:
-                email, tenant = self.identity()
+                principal, tenant = self.identity()
             except (ValueError, KeyError, jwt.PyJWTError, OSError):
                 return self.refuse(403)
             lengths = self.headers.get_all('Content-Length', [])
@@ -231,10 +289,12 @@ class Handler(BaseHTTPRequestHandler):
             if body is not None and len(body) != length:
                 return self.refuse(400)
             if target.path == '/api/account':
-                return self.account(email) if self.command in {'GET', 'HEAD'} else self.refuse(405)
+                return self.account(principal) if self.command in {'GET', 'HEAD'} else self.refuse(405)
             backend_path = self.path
             if target.path.startswith('/api/admin/feedback'):
-                if email not in self.server.settings.feedback_admins:
+                if principal.email not in self.server.settings.feedback_admins:
+                    return self.refuse(403)
+                if self.server.settings.shared_backend is not None:
                     return self.refuse(403)
                 match = re.fullmatch(r'/api/admin/feedback/([0-9a-f]{16})/'
                                      r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})/archive', target.path)
@@ -246,22 +306,32 @@ class Handler(BaseHTTPRequestHandler):
                 if tenant is None:
                     return self.refuse(404)
                 backend_path = '/api/feedback/' + match[2] + '/archive'
-            token = tenant.token()
-            origin = 'http://127.0.0.1:' + str(tenant.port)
             headers = {name: value for name, value in self.headers.items() if name.lower() in REQUEST_HEADERS}
-            headers.update(Host='127.0.0.1:' + str(tenant.port), Authorization='Bearer ' + token,
-                           Origin=origin, Connection='close')
-            # Never trust a browser-supplied reporter identity.
-            headers['X-SH-User-Email'] = email
+            if self.server.settings.shared_backend is not None:
+                backend = self.server.settings.shared_backend
+                assertion = issue_assertion(principal, self.server.identity_secret)
+                headers.update(Host='127.0.0.1:' + str(backend.port),
+                               Origin='http://127.0.0.1:' + str(backend.port), Connection='close',
+                               **{'X-SH-Identity': assertion})
+                port = backend.port
+            else:
+                token = tenant.token()
+                port = tenant.port
+                headers.update(Host='127.0.0.1:' + str(port), Authorization='Bearer ' + token,
+                               Origin='http://127.0.0.1:' + str(port), Connection='close')
+                # Never trust a browser-supplied reporter identity.
+                headers['X-SH-User-Email'] = principal.email
             if self.command not in {'GET', 'HEAD'}:
                 headers['Content-Length'] = str(length)
-            connection = http.client.HTTPConnection('127.0.0.1', tenant.port, timeout=45)
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=45)
             connection.request('GET' if self.command == 'HEAD' else self.command, backend_path, body, headers)
             response = connection.getresponse()
             self.send_response_only(response.status)
             connection_headers = {part.strip().lower() for part in response.getheader('Connection', '').split(',')}
             for name, value in response.getheaders():
-                if name.lower() in RESPONSE_DROP | connection_headers or token in value:
+                if (name.lower() in RESPONSE_DROP | connection_headers
+                        or (self.server.settings.shared_backend is None and token in value)
+                        or (self.server.settings.shared_backend is not None and assertion in value)):
                     continue
                 if name.lower() == 'location':
                     redirect = urlsplit(value)

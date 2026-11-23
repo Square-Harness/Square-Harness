@@ -1,4 +1,60 @@
-# Install Square Harness (instructions for an AI agent)
+# Start and install Square Harness
+
+## Run locally with Docker (no Python setup)
+
+This is the recommended way to start the web app without installing Python,
+Node.js or Square Harness directly on your computer. You still need Docker:
+Docker Desktop on Windows/macOS, or Docker Engine and the Compose plugin on
+Linux. [Download the source ZIP](https://github.com/Square-Harness/Square-Harness/archive/refs/heads/main.zip),
+extract it, then run the launcher from the extracted project folder (usually
+named `Square-Harness-main`):
+
+```sh
+# macOS or Linux
+bash deployment/start-local.sh
+```
+
+```powershell
+# Windows PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local.ps1
+```
+
+The Bash launcher is for macOS/Linux (and Windows only when using WSL or Git
+Bash); the PowerShell launcher is for native Windows. Both check that Docker and
+the Compose plugin are available, build the image from the source checkout,
+start local mode, and open the private app link. The image is not currently
+published to a container registry, so the first start builds it and needs an
+internet connection to download its base image and dependencies.
+
+The launchers do not install Docker. Docker installation is operating-system
+specific, may require administrator approval or a restart, and should be done
+through the official instructions: <https://docs.docker.com/get-docker/>. If
+Docker is installed but stopped, start Docker Desktop/Engine and run the
+launcher again.
+
+The local app listens only on `127.0.0.1:8765`. Its workspace and saved
+settings are kept in the named Docker volume `square-harness-local-data`; this
+persists when the container stops. From the repository folder, stop the app
+without deleting its data with:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example down
+```
+
+The image contains the app, not an LLM. In the app's **Model provider** panel,
+select a provider and enter its endpoint URL, exact model name and API key (if
+required), then save. Use a provider endpoint reachable from the container.
+Keys are session-only by default. Local **Remember** stores a key in a private
+file in the persistent data volume; it is permission-restricted but not
+encrypted.
+
+For a server deployment, use the same image with the server Compose
+configuration, but first set up the trusted identity gateway, persistent
+storage and provider-origin allowlist. The backend port must remain private
+behind that gateway. Continue at [Run the full app in Docker](#run-the-full-app-in-docker)
+for server configuration.
+
+## Native installation (instructions for an AI agent)
 
 You are a coding agent with shell access. A user asked you to install Square
 Harness by following this file. Do the whole installation yourself, check every
@@ -98,19 +154,21 @@ Requirements: Linux or macOS (native Windows is not supported); Python 3.10 or
 newer; git; about 100 MB of disk for the harness, plus the model (1–20 GB with
 Ollama, about 40 GB with HyperQwen). Optional:
 
-- Docker, for the Python sandbox;
+- Docker Engine and the Compose plugin, to run the full app image or the
+  separate Python sandbox;
 - a TeX distribution with `latexmk` (and BibTeX or Biber, which TeX Live and
   MacTeX include), to compile write-ups and their bibliographies;
 - `zstd`, to unpack Ollama without `sudo`.
 
 ## Hosted tester deployment
 
-The ordinary GUI is a trusted single-workspace service. Before sharing it with
-testers, give each person a separate Linux service account, private home and
-workspace, model credential and rootless sandbox runtime. Keep backend listeners
-on loopback and their service configuration and credentials outside all served
-workspaces. Use separate backend ports and `--gui-root` fixed to each workspace.
-LaTeX compilation retains paranoid file access and disabled shell escape.
+The ordinary native GUI is a trusted single-workspace service. The `tenants`
+gateway configuration below supports separate backend instances, each with its
+own Linux service account, private home and workspace, model credential and
+rootless sandbox runtime. Keep backend listeners on loopback and service
+configuration and credentials outside served workspaces. Use separate backend
+ports and `--gui-root` fixed to each workspace. LaTeX compilation retains
+paranoid file access and disabled shell escape.
 TeX Live and MacTeX include `kpsewhich`, which Write-Up uses to locate the
 installed base and AMS symbol declarations for Markdown previews.
 
@@ -132,6 +190,34 @@ the model key there. The gateway binds to `127.0.0.1:8790`; publish that listene
 through Tunnel, with no public backend ports. Copy existing mail DNS records
 before moving nameservers, and migrate DNSSEC rather than leaving an old DS key.
 Do not cache private app responses or enable prompt/body logging.
+
+For one shared authenticated backend, configure `shared_backend` instead of
+`tenants`, for example:
+
+```json
+{
+  "hostname": "app.example.org",
+  "issuer": "https://example.cloudflareaccess.com",
+  "audience": "the-cloudflare-access-application-audience",
+  "shared_backend": {
+    "port": 8765,
+    "identity_secret_file": "/etc/square-harness/identity.secret"
+  },
+  "allowed_emails": ["person@example.org"]
+}
+```
+
+The shared backend port is the loopback-published Docker port. The gateway
+validates Access and forwards only a short-lived signed identity assertion;
+the application selects the account workspace from that verified identity.
+This option provides application-enforced workspace ownership, not an operating
+system boundary between accounts: the backend host and its operator can access
+all workspaces. Use separate tenant services when stronger host-level
+separation is required.
+The host identity secret file must be a private regular file with mode 0400,
+0600 or 0640, readable by the gateway. The container entrypoint stages it in a
+mode-0600 runtime file, then starts the app as UID 10001; the original secret
+is not copied to the persistent data volume.
 
 Onboarding must provision the private backend, workspace, sandbox and allowance,
 then add the same identity to the gateway's `tenants` mapping and Access email
@@ -851,6 +937,76 @@ A3; on these GPUs it takes a few minutes at most.
 
 ## 3. Start the web app
 
+After the interface opens, use **Model provider** in the sidebar to select a
+registered backend/profile and configure its endpoint and model. The current
+choices are Ollama, OpenAI-compatible, llama.cpp, MLX-compatible and DeepInfra.
+Enter API keys in the interface; the backend uses them for provider calls and
+never returns them to the browser. Session-only is the default.
+
+In local mode, the optional **Remember** choice stores the key in
+`secrets/provider-settings.json` under the app data directory, with directory
+mode 0700 and file mode 0600. Set `SQUARE_DATA_DIR` to an absolute path to place
+that directory on a persistent mount (for example, `/data` in a local
+container). Otherwise it uses the platform's standard app-data location. The
+file is outside workspaces and job artifacts. This is permission-restricted
+storage, not encryption; protect the data directory and its backups.
+
+For the shared server mode, set `SQUARE_HARNESS_MODE=server` and configure the
+trusted identity gateway as described above. Also set
+`SQUARE_PROVIDER_HOST_ALLOWLIST` to comma-separated trusted HTTP(S) origins,
+for example `https://api.deepinfra.com,http://ollama:11434`. Origins match on
+scheme, hostname and port; endpoint paths may be supplied in the interface.
+The allowlist is required at startup. Server keys remain session-only unless
+the operator configures a managed credential store. The first adapter is
+Google Cloud Secret Manager. Install the optional extra for a native server:
+
+```sh
+python -m pip install -e '.[research,gcp-secrets]'
+```
+
+Set `SQUARE_SERVER_SECRET_MANAGER=google` and `GOOGLE_CLOUD_PROJECT` in the
+server environment to enable the Remember toggle. The Docker server Compose
+configuration passes these settings through; add them to the ignored
+`.local/compose.server.env` file. The full app image includes the required extra;
+native installs use the command above. Enable the Secret Manager API in the
+project and grant the runtime identity only `secretmanager.secrets.create`,
+`secretmanager.secrets.delete`, `secretmanager.versions.add` and
+`secretmanager.versions.access`. The app uses Google Application Default
+Credentials. Prefer workload identity or an attached service account; do not
+put service-account JSON keys or provider API keys in the image or environment.
+
+The app creates a Google Secret Manager secret for each account/provider pair,
+using the account's stable hash and a provider hash in the resource name, and
+adds each saved key as a new secret version. Disabling Remember deletes that
+secret. On a shared backend, the app enforces account scoping, but the cloud
+identity and project administrators can access all secrets. The adapter uses
+Google's automatic replication. If your deployment has a regional
+data-residency requirement, do not enable this adapter until it is configured
+for the required location.
+
+Server mode also enforces application-level account limits; provider quotas do
+not replace these. Defaults are two active workflows, two concurrent model
+requests, 60 model requests per minute and 1,000,000 combined input/output
+tokens per UTC day. Set these optional server environment variables to adjust
+the caps:
+
+| Variable | Default | Range |
+| --- | ---: | ---: |
+| `SQUARE_ACCOUNT_ACTIVE_WORKFLOWS` | 2 | 1–8 |
+| `SQUARE_ACCOUNT_MODEL_CONCURRENCY` | 2 | 1–8 |
+| `SQUARE_ACCOUNT_REQUESTS_PER_MINUTE` | 60 | 1–100,000 |
+| `SQUARE_ACCOUNT_DAILY_TOKENS` | 1,000,000 | 1–1,000,000,000,000 |
+
+The shared usage ledger is stored at `<server-data-root>/.private/account-limits.sqlite`,
+outside account workspaces, with a mode-0700 directory and mode-0600 file. Keep
+the server data root on persistent storage to retain daily usage accounting
+across restarts. A request reserves its declared output ceiling plus an input
+estimate based on serialized request size and a fixed per-image allowance
+before dispatch; when final provider usage arrives it replaces the reservation.
+Requests without final usage retain the reservation for that UTC day.
+Active-workflow and simultaneous-request caps are enforced in each backend
+process; multiple app replicas do not share those in-memory concurrency counts.
+
 Launch it in the background, with the `FLAGS` that passed the checks:
 
 ```bash
@@ -870,7 +1026,74 @@ sleep 5; grep -o 'Open: http://[^/]*' "$REPO/.local/gui.log"
   in [guide.md](guide.md#the-web-app), and explain the plain-HTTP risk to the user
   first.
 
-Check that the server answers and accepts the token, without printing the token:
+### Run the full app in Docker
+
+The app image packages the Python backend and the committed React build. Local
+and server Compose configurations use that same image; they differ only in
+startup environment and storage. The app does not mount the Docker socket, so
+the isolated numerical sandbox remains unavailable inside this container.
+Never add a Docker-socket mount to the shared server deployment.
+
+Start local mode from the repository root:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example up --build -d
+docker compose --env-file deployment/compose.local.env.example ps
+```
+
+Open `http://127.0.0.1:8765` and use the `Open:` URL from the app logs, which
+contains the local workspace token. To view it, run:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example logs -f square-harness
+```
+
+The default named volume is `square-harness-local-data`; it holds workspaces
+and any explicitly remembered provider key. Stop the app with:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example down
+```
+
+Do not add `-v` if the data should remain.
+
+For server mode, prepare the gateway's shared-backend configuration described
+above and a private identity secret file. Copy the Compose example to an ignored
+local configuration file, then set its absolute secret path and exact
+provider-origin allowlist:
+
+```sh
+mkdir -p .local
+cp deployment/compose.server.env.example .local/compose.server.env
+chmod 600 .local/compose.server.env
+```
+
+Edit `.local/compose.server.env`, then start:
+
+```sh
+docker compose --env-file .local/compose.server.env \
+  -f compose.yaml -f compose.server.yaml up --build -d
+```
+
+Set the gateway's `shared_backend.port` to the published host port
+(`SQUARE_GUI_PORT`, default `8765`). The backend port is published on host
+loopback only for the trusted gateway;
+the public HTTPS entry point must be the Access-protected gateway, never this
+port. The server volume defaults to `square-harness-server-data` and stores
+account workspaces and the private usage ledger. Provider keys remain
+session-only. Set `SQUARE_ACCOUNT_*` overrides in the server environment as
+documented above. The app process runs as UID 10001 and does not include or
+mount a Docker daemon socket.
+
+Stop the server without deleting its persistent account data:
+
+```sh
+docker compose --env-file .local/compose.server.env \
+  -f compose.yaml -f compose.server.yaml down
+```
+
+For the native installation above, check that the server answers and accepts
+the token, without printing the token:
 
 ```bash
 cd "$REPO" && . .local/square.env
@@ -878,8 +1101,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat "$WS/.m
   http://127.0.0.1:<port>/api/status        # 200; 401 means the token was not accepted
 ```
 
-On a desktop, open the `Open:` address for the user (`xdg-open` on Linux, `open`
-on macOS).
+For a native installation, open the `Open:` address for the user (`xdg-open` on
+Linux, `open` on macOS).
 
 ## 4. Optional parts
 

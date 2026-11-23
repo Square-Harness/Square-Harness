@@ -1,67 +1,122 @@
 # Square Harness
 
-**A source-available harness for mathematical research with open-weights models.**
+**A source-available harness for mathematical research, using local or API
+model providers.**
 
-Square Harness turns a language model running on your computer, or on a GPU in
-your lab, into a research assistant for mathematics. Its core is a simple proof
-workflow, **solve → verify → repair when needed**. It keeps the original answer,
-reviews the complete proof, and saves every candidate and objection for
-inspection. Around it, the same principles serve literature checks, reading
-lists, manuscript reviews, explanations, LaTeX write-ups and numerical
-experiments.
+Square Harness turns a language model into a research assistant for
+mathematics. Its core is a simple proof workflow, **solve → verify → repair
+when needed**. It keeps the original answer, reviews the complete proof, and
+saves every candidate and objection for inspection. The same principles serve
+literature checks, reading lists, manuscript reviews, explanations, LaTeX
+write-ups and numerical experiments.
 
-**Version 1.1.0. Self-host first.** Run the model, harness and workspace on your own
-computer or research server. This setup needs no model-provider API key.
+**Version 1.1.0. One Docker image, for local use or your own server.** The app
+does not need a separate Python or Node.js installation. Docker is required;
+the model itself is not included in the image.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-dark.png">
   <img alt="The Square Harness web app with a conversation" src="https://raw.githubusercontent.com/Square-Harness/Square-Harness/main/docs/images/interface-light.png">
 </picture>
 
-## Quick start
+## Quick start: run locally with Docker
 
-Choose where your model runs:
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) on
+   Windows or macOS, or Docker Engine with the Compose plugin on Linux. Start
+   Docker Desktop/Engine.
+2. [Download the source ZIP](https://github.com/Square-Harness/Square-Harness/archive/refs/heads/main.zip)
+   and extract it.
+3. From the extracted project folder (usually named `Square-Harness-main`),
+   run the launcher:
 
-| Route | Setup | Guide |
-| --- | --- | --- |
-| **1. Local self-hosting** | Run the model on your computer with Ollama, or another local model server. | [Plan A](docs/llm-install.md#plan-a-local-model) |
-| **2. Remote GPU or cluster** | Self-host the model on a lab/remote GPU and connect SH through SSH. | [Plan B](docs/llm-install.md#plan-b-model-on-a-cluster-gpu-reached-by-ssh) |
-| **3. API trial only** | Test SH without a GPU using DeepInfra and a provider API key; selected inputs are sent to the provider. | [Plan C](docs/llm-install.md#plan-c-deepinfra-api-with-a-local-interface) |
+   **macOS or Linux**
+   ```bash
+   bash deployment/start-local.sh
+   ```
 
-**The API route is an optional testing setup.** Local and remote self-hosting
-remain the intended ways to run SH with control over the model and research data.
+   **Windows PowerShell**
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local.ps1
+   ```
 
-Ask a coding agent (Claude Code, Codex, …) in a terminal:
+The launcher checks Docker and Compose, builds the app image from the downloaded
+source on first run, starts it in local mode, and opens the private app link in
+your browser. It does **not** install Docker automatically: Docker installation
+requires operating-system-specific steps and your approval. The image is not
+currently published as a prebuilt download. Python and Node.js are not needed.
+The PowerShell command's execution-policy bypass applies only to that
+PowerShell process; it does not change your system policy.
 
-```text
-Install Square Harness following https://github.com/Square-Harness/Square-Harness/blob/main/docs/llm-install.md
+The app and its saved workspace data remain in Docker. To stop the app without
+deleting data, run this from the extracted folder:
+
+```sh
+docker compose --env-file deployment/compose.local.env.example down
 ```
 
-For local self-hosting by hand, use Python 3.10+ on Linux or macOS with
-[Ollama](https://ollama.com) running:
+### Change or create a workspace
 
-```bash
-git clone https://github.com/Square-Harness/Square-Harness.git
-cd Square-Harness
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[research]'
-ollama pull qwen3.8:27b
-mkdir -p ~/research/square-workspace
-.venv/bin/square-harness --gui --workspace ~/research/square-workspace
-```
+The current workspace folder is shown above the message box. Click its name to
+open the folder browser. Select a folder and choose **Open this folder**, or
+enter a name and choose **Create folder here**, then open the new folder.
+Pause running work and clear queued turns before switching. Each folder keeps
+its own conversations and saved jobs.
 
-Your browser opens on the web app. Without `--gui`, the same harness runs in the
-terminal:
+In the Docker setup, these folders live inside Square Harness's persistent
+Docker data volume; the initial folder is named `default`. The browser does not
+provide access to arbitrary folders on your computer; add files through the app
+or use a native installation if you need to work directly in existing computer
+folders.
 
-```text
-/prove Prove that every bounded sequence in H¹(0,1) has a subsequence converging strongly in L²(0,1).
-/proofs
-/proof-report
-```
+### Choose and configure a model
 
-`qwen3.8:27b` (18 GB) with the default 40,960-token context needs a large GPU or
-Mac. For smaller machines and other model servers, see the
-[install guide](docs/llm-install.md).
+The app image does not include or start a model. Choose a provider that the
+Docker container can reach, or run a model server separately. In the app, open
+**Model provider** in the sidebar and set:
+
+1. **Provider** — select the service you use.
+2. **Endpoint URL** — the provider's API base URL.
+3. **Model name** — the exact model identifier accepted by that provider.
+4. **API key** — enter the key supplied by your provider, if required, then
+   choose **Save provider**.
+
+The key is sent to the app backend and is never returned to the browser or
+written into conversations. It is session-only by default. In local mode,
+**Remember API key on this computer** saves it in a permission-restricted file
+inside Docker's persistent data volume; this is not encryption, so protect the
+computer and its Docker data/backups. Prompts and selected research material are
+sent to the chosen model provider; check that provider's data and retention
+terms.
+
+### Deploy on your own server
+
+The same app image supports server mode, but a server deployment also needs a
+trusted authentication gateway, persistent storage, and a provider-origin
+allowlist. Do not expose the app container directly to the internet. Follow
+[the Docker server setup](docs/llm-install.md#run-the-full-app-in-docker).
+Server API keys are session-only by default; persistent **Remember** requires an
+operator-configured managed secret store. See the [user guide](docs/guide.md)
+and [full installation guide](docs/llm-install.md) for provider and server
+details.
+
+For native Python/terminal use, remote GPU setups, or advanced model hosting,
+see the [installation guide](docs/llm-install.md).
+
+### Use Square Harness on Android
+
+There is no native Android APK; the app is a Progressive Web App (PWA). The
+local Docker launcher publishes only on your computer's loopback address, so it
+cannot be opened from your phone. Deploy the app in server mode behind an
+HTTPS-enabled, authenticated gateway first. Then on Android:
+
+1. Open the server's HTTPS app address in Chrome and sign in.
+2. Open Chrome's **⋮** menu and choose **Install app** or **Add to Home screen**.
+3. Confirm, then launch Square Harness from the new home-screen icon.
+
+The installed PWA still needs a network connection to reach the server and model
+provider for agent work. Offline, it can show only the cached app interface;
+conversations, credentials and workspace data are not cached on the phone.
+Server-side workspaces and provider-key storage remain on the server.
 
 ## What it does
 
@@ -79,22 +134,27 @@ Mac. For smaller machines and other model servers, see the
 - **Projects**: private saved conversations, project notes and research files.
 
 Every job has a bounded budget, can be paused and resumed, and saves what the
-model saw and wrote under `.mathagent/` in your folder. The web app runs locally,
-also works on a phone, and shares its jobs with the terminal. The
-[guide](docs/guide.md) explains each skill and how it is built.
+model saw and wrote under `.mathagent/` in its workspace. The Docker quick start
+keeps that workspace in a persistent Docker volume. The app container does not
+mount the Docker socket, so Python Lab and Sanity check are unavailable in this
+Docker setup; they are available in a native installation with Docker. To use
+the app on a phone, deploy it behind HTTPS; its PWA caches only the interface,
+not conversations or offline model access. The [guide](docs/guide.md) explains
+each skill and how it is built.
 
 ## Documentation
 
 - [Guide](docs/guide.md): philosophy, every skill, how skills are made, effort,
   data and privacy.
-- [Install guide](docs/llm-install.md): local self-hosting, remote GPU/cluster,
-  and the optional API trial, written for a coding agent.
+- [Install guide](docs/llm-install.md): Docker quick start, native installation,
+  remote GPU/cluster setup and server deployment.
 - [Development guide](docs/llm-development.md): architecture, rules, how to add a
   feature, benchmarks.
 - [Changelog](CHANGELOG.md).
 
-Ollama, llama.cpp, vLLM and MLX servers are supported. Solver and verifier calls
-use separate contexts, keeping the original statement, candidate and review.
+Ollama, llama.cpp, vLLM and MLX servers, plus API providers, are supported.
+Solver and verifier calls use separate contexts, keeping the original
+statement, candidate and review.
 
 ## Contributing and license
 

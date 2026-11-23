@@ -160,6 +160,16 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `model_limits.py` through API status, so forms and Assistant workers use the
   same profile. Keep Proof-specific allowances separate from research limits;
   changing Proof must not increase unrelated workflows.
+- **Server account limits.** `gui/server.py` creates one `AccountLimits` manager
+  for server mode; `gui/hub.py` passes the verified account ID to each model
+  client. `gui/account_limits.py` stores account-hashed request reservations
+  and settled token usage in the private SQLite ledger outside account
+  workspaces. The transaction is the admission boundary: rate and daily-token
+  limits must refuse before model dispatch, and a request with unknown final
+  usage keeps its full reservation for that UTC day. Provider-reported usage
+  replaces the reservation even when the stream then reports an error. App
+  concurrency is capped per backend process; do not claim global concurrency
+  enforcement across multiple replicas.
 - **Storage.** State files are written atomically (`ledger._atomic_write`), jobs
   are locked with `fcntl`, and paths are validated against symlinks and escapes.
   State and text artifacts have a bounded 64 MiB ceiling; reject an oversized
@@ -426,6 +436,24 @@ Version 1.1.0. The source of truth for the machine-readable version is
   - unexpected `Host` headers and cross-site requests are refused;
   - the CSP is strict, and uploads never overwrite a file;
   - folders are confined to `--gui-root`.
+- The app container binds its listener on the container interface so Docker can
+  publish it only on host loopback. Server-mode API access still requires a
+  signed assertion from the trusted gateway. Keep the published host port
+  loopback-only; do not expose the backend directly to the internet.
+- The Docker entrypoint starts as root for startup setup and to stage the
+  gateway identity secret in its runtime tmpfs; it then drops to UID 10001
+  before starting the app. Never persist that staged secret in the app data
+  volume.
+- The PWA service worker caches only the static shell and `/assets/` resources.
+  Never cache `/api` responses, credentials or workspace files; offline mode
+  may render the shell but cannot run workflows without the backend.
+- Server mode requires an authenticated principal for every API request. Its
+  account ID is the stable hash used for workspace isolation and quota
+  accounting; the UI receives only that account's usage summary. The shared
+  ledger lives in `<server-data-root>/.private/account-limits.sqlite` (directory
+  0700, file 0600), not inside a tenant workspace. The default per-account caps
+  and their `SQUARE_ACCOUNT_*` environment overrides are documented in
+  [llm-install.md](llm-install.md#3-start-the-web-app).
 - In the terminal, the model `--host` must be loopback unless `--online`. Online
   research is opt-in in the terminal and on by default in the web app, except
   when launched with `--offline`, which locks it off.
@@ -609,9 +637,10 @@ documented together when releasing these features.
 | --- | --- | --- |
 | Entry | `__main__.py`, `cli.py` | Flags and their validation, terminal REPL and slash commands, one-shot runs (`--prompt`, `--resume`, `--research-resume`), `--gui` → `gui.serve` |
 | Transport | `agent.py` | Ollama client; `Agent`, the bounded tool loop of ordinary chat and Explore |
-| | `backends.py` | `create_client`: Ollama, OpenAI-compatible (vLLM, optional `thinking_token_budget` from `SQUARE_OPENAI_*THINKING_FRACTION`), llama.cpp (exact token counts) |
+| | `model_client.py` | Shared model-client contract and registry; built-in adapters are registered by backend/profile |
+| | `backends.py` | Ollama, OpenAI-compatible (vLLM, optional `thinking_token_budget` from `SQUARE_OPENAI_*THINKING_FRACTION`), llama.cpp (exact token counts) |
 | | `api_profiles.py` | MLX profile: prompted JSON, validated afterwards |
-| | `deepinfra.py`, `model_limits.py` | Opt-in DS4 API authentication/dialect, explicit model-dependent call limits and GUI effort presets |
+| | `deepinfra.py`, `model_limits.py` | DeepInfra API dialect, explicit model-dependent call limits and GUI effort presets |
 | | `call_policy.py` | `allocate_call`: count the full request, fit the output to the context, never drop prompt material |
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
@@ -624,11 +653,25 @@ documented together when releasing these features.
 | Assistant | `orchestrator.py` | Owns the conversation, delegates to `router.JOB_MODES`, persists each child before running it and its result before returning it |
 | | `assistant_budget.py`, `mode_calls.py`, `router.py`, `source_tasks.py`, `conversation_sources.py`, `worker_errors.py`, `reporting.py` | Shared accounting; explicit `@mode` calls; mode list and task schema; source selection; permanent-failure errors; report footers |
 | Sandbox | `numerics/` (`executor`, `policy`, `session`, `artifacts`, `docker/`), `skill_catalog.py` | Docker runs, limits bound by code, model tools, experiment records, pinned image; SKILL.md frontmatter |
-| Web app | `gui/server.py` | Standard-library HTTP server, `@route` table, token, CSP, static files |
-| | `gui/hub.py` | Tasks, queue and threads; `EventBus`; approvals; engine wiring; interruptible clients |
-| | `gui/inference.py`, `gui/store.py`, `gui/watch.py`, `gui/effort.py` | Fair model-request admission; read-only job views, chats, settings, uploads, templates; watching `.mathagent/`; effort budgets |
+| Web app | `gui/server.py` | Standard-library HTTP server, `@route` table, identity boundary, token, CSP, static files |
+| | `gui/hub.py`, `gui/provider_settings.py` | Tasks, queue and threads; provider selection; per-account in-memory credentials; local private-file persistence; interruptible clients |
+| | `gui/server_credentials.py`, `gui/google_secret_manager.py` | Provider-neutral server credential-store interface and registry; Google Secret Manager adapter |
+| | `gui/account_limits.py`, `gui/inference.py` | Durable per-account rate/token reservations and account-scoped model-request admission |
+| | `Dockerfile`, `compose.yaml`, `compose.server.yaml`, `deployment/docker-entrypoint.sh`, `deployment/docker-launch.py`, `deployment/start-local.sh`, `deployment/start-local.ps1` | One full-app image; local and authenticated server modes; platform-specific local launchers, persistent data mounts, secret staging and loopback-published listener |
+| | `gui/store.py`, `gui/watch.py`, `gui/effort.py` | Read-only job views, chats, settings, uploads, templates; watching `.mathagent/`; effort budgets |
 | Frontend | `frontend/src` | `store.ts` (state from one SSE stream), `api.ts` (types mirror `gui/store.py`), `router.ts`, `modes.ts`, `modeCalls.ts`, `effort.ts`, `views/`, `components/` |
+| | `frontend/public/sw.js` | Static-only PWA cache; API requests always go to the backend |
 | Benchmarks | `benchmark.py`, `lemmabench.py`, `scripts/`, `deployment/` | See [Benchmarks](#benchmarks) |
+
+### Adding a server credential store
+
+Add a module under `gui/` with a subclass of the `ServerCredentialStore`
+interface, register it under a short name, and import it in the built-in store
+loader in `server_credentials.py`. The adapter supplies environment-based
+construction plus account/provider-scoped load, save and delete operations.
+The provider-settings API, UI and workflow clients remain unchanged. Keep
+secret values out of logs and durable app state; add an optional dependency
+extra if the adapter needs an SDK.
 
 ### How a skill runs
 
@@ -961,10 +1004,16 @@ mode touches, in this order:
   - return bounded, source-addressable text;
   - treat its output as untrusted.
 - **A model backend or API dialect**:
-  - add a client in `backends.py` or `api_profiles.py` that implements the native
-    stream and event interface, and add it to `create_client`;
-  - add the file to the proof provenance hashes in `proof._provenance`, and add
-    an interruptible subclass in `gui/hub.py`;
+  - implement `ModelClient` and register its backend/profile with
+    `register_model_client`; include display name, default endpoint/model,
+    credential and capability metadata;
+  - keep provider-specific parsing in the adapter. The registry supplies
+    clients to workflows and the provider-settings UI; the GUI composes shared
+    cancellation and request-admission behavior around each registered client;
+  - accept per-client API keys as constructor arguments, never through a
+    process-wide environment mutation. Shared server mode must not fall back to
+    another account's environment credential;
+  - add the file to the proof provenance hashes in `proof._provenance`;
   - verify thinking, structured output, exact or conservative token counting,
     and output-cap enforcement against a live server (see
     `scripts/test-local-mlx.py` for a protocol check).

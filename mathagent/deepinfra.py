@@ -27,6 +27,7 @@ from .agent import AgentError, ModelNotDispatched
 from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
                        ToolCallError)
 from .model_limits import MODEL_OUTPUT_TOKENS
+from .model_client import register_model_client
 
 
 BASE_URL = 'https://api.deepinfra.com/v1/openai'
@@ -35,6 +36,7 @@ LEGACY_MODEL = 'deepseek-ai/DeepSeek-V4-Flash-0731'
 SUPPORTED_MODELS = (MODEL, LEGACY_MODEL)
 CONTEXT_TOKENS = 1_048_576
 MAX_OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
+_ENV_API_KEY = object()
 
 
 class DeepInfraGenerationError(AgentError):
@@ -287,35 +289,46 @@ def _retry_delay(header):
     return seconds if seconds <= 5 else None
 
 
-def read_api_key():
+def read_api_key(explicit=_ENV_API_KEY):
     """Read a private file without following its final symlink, or an env key."""
-    path = os.environ.get('DEEPINFRA_API_KEY_FILE')
-    if path:
-        try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(descriptor, 'rb') as source:
-                info = os.fstat(source.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                    raise AgentError('DeepInfra key file must be an owned, private regular file (mode 600)')
-                raw = source.read(16_385)
-            if len(raw) > 16_384:
-                raise AgentError('DeepInfra key file is too large')
-            key = raw.decode('ascii').strip()
-        except (OSError, UnicodeError):
-            raise AgentError('Cannot read the private DeepInfra key file') from None
+    if explicit is not _ENV_API_KEY:
+        key = explicit
     else:
-        key = os.environ.get('DEEPINFRA_API_KEY', '').strip()
-    if not key or len(key) > 16_384 or any(ord(char) <= 32 or ord(char) >= 127 for char in key):
-        raise AgentError('Set DEEPINFRA_API_KEY_FILE to a private API-key file, or DEEPINFRA_API_KEY')
+        path = os.environ.get('DEEPINFRA_API_KEY_FILE')
+        if path:
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, 'rb') as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                        raise AgentError('DeepInfra key file must be an owned, private regular file (mode 600)')
+                    raw = source.read(16_385)
+                if len(raw) > 16_384:
+                    raise AgentError('DeepInfra key file is too large')
+                key = raw.decode('ascii').strip()
+            except (OSError, UnicodeError):
+                raise AgentError('Cannot read the private DeepInfra key file') from None
+        else:
+            key = os.environ.get('DEEPINFRA_API_KEY', '').strip()
+    if (not isinstance(key, str) or not key or len(key) > 16_384
+            or any(ord(char) <= 32 or ord(char) >= 127 for char in key)):
+        raise AgentError('Set a valid API key for the selected provider')
     return key
 
 
+@register_model_client('openai', 'deepinfra')
 class DeepInfra(OpenAICompatible):
     """Authenticated stateless Chat Completions; no redirects or proxy env."""
     profile = 'deepinfra'
+    display_name = 'DeepInfra'
+    default_host = BASE_URL
+    default_model = MODEL
+    supports_api_key = True
+    requires_api_key = True
     require_terminal_usage = True
+    capabilities = frozenset({'streaming', 'tool_calls', 'structured_outputs', 'image_input'})
 
-    def __init__(self, host=BASE_URL, timeout=600):
+    def __init__(self, host=BASE_URL, timeout=600, *, api_key=_ENV_API_KEY):
         parsed = urlsplit(host.rstrip('/'))
         try:
             port = parsed.port
@@ -344,7 +357,7 @@ class DeepInfra(OpenAICompatible):
         self.service_tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
         if self.service_tier not in {'standard', 'priority'}:
             raise AgentError('DeepInfra service tier must be standard or priority')
-        self._api_key = read_api_key()
+        self._api_key = read_api_key(api_key)
         self.observed_context_tokens = CONTEXT_TOKENS
         self.input_token_count_method = 'DeepInfra preflight estimate'
 

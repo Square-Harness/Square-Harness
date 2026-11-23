@@ -105,6 +105,7 @@ export type Status = {
   defaults: Defaults
   concurrency?: Concurrency
   tester_allowance?: TesterAllowance | null
+  account_limits?: AccountLimitStatus
   ollama: { reachable: boolean; models: string[]; error?: string }
   pair_urls?: string[]
   root: string
@@ -112,6 +113,51 @@ export type Status = {
   read: ReadSettings
   latex: boolean
   recent: string[]
+}
+
+export type AccountLimitStatus = {
+  daily_token_limit: number
+  charged_tokens: number
+  reserved_tokens: number
+  input_tokens: number
+  output_tokens: number
+  requests_per_minute: number
+  requests_last_minute: number
+  active_workflows_limit: number
+  concurrent_requests_limit: number
+}
+
+export type ProviderOption = {
+  id: string
+  backend: string
+  profile: string
+  name: string
+  default_host: string
+  host: string
+  model: string
+  supports_api_key: boolean
+  requires_api_key: boolean
+  has_api_key: boolean
+  remembered: boolean
+  capabilities: string[]
+}
+
+export type ProviderSettings = {
+  mode: 'local' | 'server'
+  selected: string
+  providers: ProviderOption[]
+  allowed_hosts: string[]
+  remember_available: boolean
+  remember_store: string | null
+}
+
+export type ProviderSettingsUpdate = {
+  provider_id: string
+  host: string
+  model: string
+  api_key?: string
+  remember: boolean
+  clear_api_key?: boolean
 }
 
 export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
@@ -631,6 +677,8 @@ export type StartResult = { task: TaskSummary; id: string | null }
 
 export const api = {
   status: () => get<Status>('/api/status'),
+  providerSettings: () => get<ProviderSettings>('/api/provider-settings'),
+  updateProviderSettings: (settings: ProviderSettingsUpdate) => post<ProviderSettings>('/api/provider-settings', settings),
   account: async (): Promise<Account | null> => {
     try {
       const account = await get<Account>('/api/account')

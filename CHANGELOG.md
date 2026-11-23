@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add a registry-driven provider settings interface for Ollama,
+  OpenAI-compatible servers, llama.cpp, MLX and DeepInfra. API keys are
+  session-only by default; local Remember uses a private mode-0600 file, while
+  shared server mode can persist per-account keys through Google Cloud Secret
+  Manager. Server mode enforces the operator-configured provider-origin
+  allowlist.
+- Enforce configurable per-account server limits for active workflows,
+  simultaneous model requests, requests per minute and daily token usage.
+  Persist usage reservations outside account workspaces, settle them from
+  provider usage, and show each account's usage in the interface.
+- Package the backend and React interface in one app image with local/server
+  Compose modes. Add an installable PWA shell that caches static assets only;
+  agent work still requires the hosted backend.
+- Add Bash (macOS/Linux) and PowerShell (Windows) local launchers that check
+  Docker/Compose, build the app image from source, start local mode and open the
+  private app link. Update the README with Docker-first startup and provider
+  setup instructions.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same

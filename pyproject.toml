@@ -33,6 +33,7 @@ Issues = "https://github.com/Square-Harness/Square-Harness/issues"
 [project.optional-dependencies]
 math = ["sympy>=1.12,<2", "numpy>=1.26,<3"]
 research = ["pypdf>=5,<7"]
+gcp-secrets = ["google-cloud-secret-manager>=2.20,<3"]
 
 [project.scripts]
 square-harness = "mathagent.cli:main"

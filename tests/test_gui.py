@@ -16,9 +16,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mathagent import cli, proof
 from mathagent.agent import Agent
-from mathagent.deepinfra import LEGACY_MODEL as DEEPINFRA_LEGACY_MODEL, MODEL as DEEPINFRA_MODEL
+from mathagent.deepinfra import (DeepInfraGenerationError, LEGACY_MODEL as DEEPINFRA_LEGACY_MODEL,
+                                 MODEL as DEEPINFRA_MODEL)
 from mathagent.gui import effort, server, store
-from mathagent.gui.hub import Hub
+from mathagent.gui.account_limits import AccountLimitExceeded, AccountLimitPolicy, AccountLimits
+from mathagent.gui.hub import Hub, Interruptible
+from mathagent.gui.identity import AuthenticatedPrincipal, issue_assertion
+from mathagent.gui.server_credentials import ServerCredentialStoreError
+from mathagent.gui.provider_settings import (LocalProviderStore, default_provider_data, merge_persisted,
+                                             parse_host_allowlist)
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
 from mathagent.model_limits import MODEL_OUTPUT_TOKENS, PROFILE as DS4_PROFILE
@@ -191,6 +197,326 @@ class SecurityTests(GuiCase):
         self.assertTrue(value['ollama']['reachable'])
         self.assertNotIn('pair_urls', value)
         self.assertEqual(headers['Cache-Control'], 'no-store')
+
+
+class ServerModeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.fake = FakeOllama()
+        self.addCleanup(self.fake.close)
+        self.secret = 'server-mode-test-secret-not-a-real-credential'
+        args = cli.parser().parse_args([
+            '--workspace', str(self.root), '--host', self.fake.host, '--model', MODEL,
+            '--ctx', '16384', '--predict', '1024', '--gui-concurrency', '1',
+        ])
+        args.workspace = args.gui_root = self.root
+        args.gui_auto_titles = False
+        self.server = server.Server(('127.0.0.1', 0), None, '', True, mode='server',
+                                    proxy_secret=self.secret, args=args, data_root=self.root,
+                                    provider_allowlist=parse_host_allowlist(
+                                        f'{self.fake.host},https://api.deepinfra.com'))
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       kwargs={'poll_interval': 0.05}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.stop)
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(3)
+
+    def request(self, method, path, principal=None, body=None, raw=None, assertion=None,
+                server_instance=None):
+        target = server_instance or self.server
+        host = f'127.0.0.1:{target.server_port}'
+        headers = {'Host': host}
+        if principal is not None:
+            headers['X-SH-Identity'] = issue_assertion(principal, self.secret)
+        elif assertion is not None:
+            headers['X-SH-Identity'] = assertion
+        data = raw
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers['Content-Type'] = 'application/json'
+        if method != 'GET':
+            headers['Origin'] = 'http://' + host
+        if raw is not None:
+            headers['Content-Type'] = 'application/octet-stream'
+        connection = http.client.HTTPConnection('127.0.0.1', target.server_port, timeout=10)
+        connection.request(method, path, body=data, headers=headers)
+        response = connection.getresponse()
+        payload = response.read()
+        connection.close()
+        try:
+            value = json.loads(payload) if payload else {}
+        except ValueError:
+            value = payload.decode(errors='replace')
+        return response.status, value
+
+    def test_server_mode_requires_a_valid_gateway_assertion(self):
+        self.assertEqual(self.request('GET', '/api/status')[0], 401)
+        self.assertEqual(self.request('GET', '/', principal=AuthenticatedPrincipal('bad', 'bad@example.test'))[0], 200)
+        valid = issue_assertion(AuthenticatedPrincipal('forged', 'forged@example.test'), self.secret)
+        version, payload, signature = valid.split('.')
+        payload = ('A' if payload[0] != 'A' else 'B') + payload[1:]
+        forged = '.'.join((version, payload, signature))
+        self.assertEqual(self.request('GET', '/api/status', assertion=forged)[0], 401)
+        expired = issue_assertion(AuthenticatedPrincipal('old', 'old@example.test'), self.secret,
+                                  now=int(time.time()) - 120)
+        self.assertEqual(self.request('GET', '/api/status', assertion=expired)[0], 401)
+
+    def test_server_mode_fails_closed_without_proxy_configuration(self):
+        args = cli.parser().parse_args(['--workspace', str(self.root), '--gui-host', '127.0.0.1',
+                                        '--gui-port', '8765'])
+        with patch.dict(os.environ, {'SQUARE_HARNESS_MODE': 'server',
+                                     'SQUARE_TRUSTED_PROXY_SECRET_FILE': '',
+                                     'SQUARE_SERVER_SECRET_MANAGER': ''}):
+            with self.assertRaisesRegex(ValueError, 'SQUARE_TRUSTED_PROXY_SECRET_FILE'):
+                server.serve(args)
+
+    def test_server_container_listener_requires_container_configuration(self):
+        args = cli.parser().parse_args(['--workspace', str(self.root), '--gui-port', '8765'])
+        with patch.dict(os.environ, {'SQUARE_HARNESS_CONTAINER': ''}):
+            with self.assertRaisesRegex(ValueError, 'app-container listener'):
+                server.Server(('0.0.0.0', 0), None, '', False, mode='server',
+                              proxy_secret=self.secret, args=args, data_root=self.root)
+        with patch.dict(os.environ, {'SQUARE_HARNESS_CONTAINER': '1'}):
+            container_server = server.Server(('0.0.0.0', 0), None, '', False, mode='server',
+                                             proxy_secret=self.secret, args=args, data_root=self.root)
+            container_server.server_close()
+
+    def test_trusted_proxy_secret_allows_dedicated_group_read_permissions(self):
+        path = self.root / 'trusted-proxy.secret'
+        path.write_text(self.secret + '\n')
+        path.chmod(0o640)
+        self.assertEqual(server._trusted_proxy_secret(path), self.secret)
+
+    def test_each_verified_subject_uses_an_isolated_workspace(self):
+        alice = AuthenticatedPrincipal('stable-alice-subject', 'alice@example.test')
+        bob = AuthenticatedPrincipal('stable-bob-subject', 'bob@example.test')
+        status, alice_status = self.request('GET', '/api/status', alice)
+        self.assertEqual(status, 200, alice_status)
+        self.assertEqual(alice_status['account_limits']['requests_last_minute'], 0)
+        alice_root = Path(alice_status['workspace'])
+        self.assertEqual(alice_root.name, alice.account_id)
+        self.assertEqual(alice_root.parent.name, 'accounts')
+        self.assertEqual(alice_root.stat().st_mode & 0o077, 0)
+        ledger = self.root / '.private' / 'account-limits.sqlite'
+        self.assertEqual(ledger.stat().st_mode & 0o777, 0o600)
+        status, rejected = self.request('POST', '/api/concurrency', alice, {'chats': 3})
+        self.assertEqual(status, 400)
+        self.assertIn('from 1 to 2', rejected['error'])
+
+        status, uploaded = self.request('POST', '/api/files/upload?name=private.txt',
+                                        alice, raw=b'alice-only')
+        self.assertEqual(status, 200, uploaded)
+        self.assertEqual((alice_root / uploaded['path']).read_bytes(), b'alice-only')
+
+        status, bob_status = self.request('GET', '/api/status', bob)
+        self.assertEqual(status, 200, bob_status)
+        bob_root = Path(bob_status['workspace'])
+        self.assertNotEqual(alice_root, bob_root)
+        status, bob_files = self.request('GET', '/api/files', bob)
+        self.assertEqual(status, 200)
+        self.assertEqual(bob_files['files'], [])
+
+    def test_provider_keys_are_account_scoped_session_only_and_never_returned(self):
+        alice = AuthenticatedPrincipal('provider-alice', 'alice@example.test')
+        bob = AuthenticatedPrincipal('provider-bob', 'bob@example.test')
+        key = 'synthetic-server-provider-key'
+        config = {'provider_id': 'openai/deepinfra', 'host': 'https://api.deepinfra.com/v1/openai',
+                  'model': DEEPINFRA_MODEL, 'api_key': key, 'remember': False}
+        status, saved = self.request('POST', '/api/provider-settings', alice, config)
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(saved['selected'], 'openai/deepinfra')
+        alice_provider = next(item for item in saved['providers'] if item['id'] == 'openai/deepinfra')
+        self.assertTrue(alice_provider['has_api_key'])
+        self.assertFalse(alice_provider['remembered'])
+        self.assertNotIn(key, json.dumps(saved))
+
+        status, bob_settings = self.request('GET', '/api/provider-settings', bob)
+        self.assertEqual(status, 200, bob_settings)
+        bob_provider = next(item for item in bob_settings['providers'] if item['id'] == 'openai/deepinfra')
+        self.assertFalse(bob_provider['has_api_key'])
+        self.assertNotIn(key, json.dumps(bob_settings))
+
+        status, rejected = self.request('POST', '/api/provider-settings', alice,
+                                        {**config, 'host': 'https://not-allowlisted.example'})
+        self.assertEqual(status, 400)
+        self.assertIn('allowlist', rejected['error'])
+        status, rejected = self.request('POST', '/api/provider-settings', alice,
+                                        {**config, 'remember': True})
+        self.assertEqual(status, 400)
+        self.assertIn('session-only', rejected['error'])
+        self.assertNotIn(key, json.dumps(rejected))
+
+    def test_managed_provider_keys_are_remembered_per_account_across_server_restarts(self):
+        class FakeCredentialStore:
+            display_name = 'Test Secret Manager'
+
+            def __init__(self):
+                self.keys = {}
+                self.fail_saves = False
+
+            def load_api_key(self, account_id, provider_id):
+                return self.keys.get((account_id, provider_id))
+
+            def save_api_key(self, account_id, provider_id, api_key):
+                if self.fail_saves:
+                    raise ServerCredentialStoreError('synthetic managed store failure')
+                self.keys[account_id, provider_id] = api_key
+
+            def delete_api_key(self, account_id, provider_id):
+                self.keys.pop((account_id, provider_id), None)
+
+        root = self.root / 'managed-credentials'
+        root.mkdir()
+        credential_store = FakeCredentialStore()
+
+        def start_server():
+            args = copy.copy(self.server.args)
+            args.workspace = args.gui_root = root
+            instance = server.Server(
+                ('127.0.0.1', 0), None, '', True, mode='server', proxy_secret=self.secret,
+                args=args, data_root=root, provider_allowlist=self.server.provider_allowlist,
+                server_credential_store=credential_store)
+            thread = threading.Thread(target=instance.serve_forever, daemon=True)
+            thread.start()
+            return instance, thread
+
+        alice = AuthenticatedPrincipal('remembered-provider-user', 'alice@example.test')
+        bob = AuthenticatedPrincipal('other-provider-user', 'bob@example.test')
+        key = 'synthetic-remembered-provider-key'
+        config = {'provider_id': 'openai/deepinfra', 'host': 'https://api.deepinfra.com/v1/openai',
+                  'model': DEEPINFRA_MODEL, 'api_key': key, 'remember': True}
+        first, first_thread = start_server()
+        try:
+            status, settings = self.request('GET', '/api/provider-settings', alice, server_instance=first)
+            self.assertEqual(status, 200, settings)
+            self.assertTrue(settings['remember_available'])
+            self.assertEqual(settings['remember_store'], credential_store.display_name)
+            credential_store.fail_saves = True
+            status, unavailable = self.request('POST', '/api/provider-settings', alice, config,
+                                               server_instance=first)
+            self.assertEqual(status, 503)
+            self.assertNotIn(key, json.dumps(unavailable))
+            credential_store.fail_saves = False
+            status, saved = self.request('POST', '/api/provider-settings', alice, config,
+                                         server_instance=first)
+            self.assertEqual(status, 200, saved)
+            alice_provider = next(item for item in saved['providers'] if item['id'] == 'openai/deepinfra')
+            self.assertTrue(alice_provider['has_api_key'])
+            self.assertTrue(alice_provider['remembered'])
+            self.assertNotIn(key, json.dumps(saved))
+            self.assertEqual(credential_store.keys[alice.account_id, 'openai/deepinfra'], key)
+        finally:
+            first.shutdown()
+            first.server_close()
+            first_thread.join(3)
+
+        second, second_thread = start_server()
+        try:
+            status, restored = self.request('GET', '/api/provider-settings', alice,
+                                            server_instance=second)
+            self.assertEqual(status, 200, restored)
+            alice_provider = next(item for item in restored['providers'] if item['id'] == 'openai/deepinfra')
+            self.assertTrue(alice_provider['has_api_key'])
+            self.assertTrue(alice_provider['remembered'])
+            self.assertNotIn(key, json.dumps(restored))
+
+            status, other = self.request('GET', '/api/provider-settings', bob, server_instance=second)
+            self.assertEqual(status, 200, other)
+            bob_provider = next(item for item in other['providers'] if item['id'] == 'openai/deepinfra')
+            self.assertFalse(bob_provider['has_api_key'])
+
+            status, unremembered = self.request(
+                'POST', '/api/provider-settings', alice,
+                {'provider_id': 'openai/deepinfra', 'host': config['host'], 'model': config['model'],
+                 'remember': False}, server_instance=second)
+            self.assertEqual(status, 200, unremembered)
+            alice_provider = next(item for item in unremembered['providers'] if item['id'] == 'openai/deepinfra')
+            self.assertTrue(alice_provider['has_api_key'])
+            self.assertFalse(alice_provider['remembered'])
+            self.assertNotIn((alice.account_id, 'openai/deepinfra'), credential_store.keys)
+        finally:
+            second.shutdown()
+            second.server_close()
+            second_thread.join(3)
+
+
+class LocalProviderStoreTests(unittest.TestCase):
+    def test_only_explicitly_remembered_keys_are_written_to_private_storage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'secrets' / 'provider-settings.json'
+            saved = LocalProviderStore(path)
+            args = cli.parser().parse_args(['--workspace', temporary])
+            args.host, args.model = 'http://localhost:11434', MODEL
+            data = default_provider_data(args)
+            deepinfra = data['providers']['openai/deepinfra']
+            deepinfra.update(host='https://api.deepinfra.com/v1/openai',
+                             model=DEEPINFRA_MODEL, api_key='session-only-test-key', remembered=False)
+            saved.save(data)
+            content = path.read_text()
+            self.assertNotIn('session-only-test-key', content)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+            deepinfra['remembered'] = True
+            saved.save(data)
+            content = path.read_text()
+            self.assertIn('session-only-test-key', content)
+            restored = merge_persisted(default_provider_data(args), saved.load())
+            self.assertEqual(restored['providers']['openai/deepinfra']['api_key'], 'session-only-test-key')
+            self.assertTrue(restored['providers']['openai/deepinfra']['remembered'])
+
+
+class AccountLimitsTests(unittest.TestCase):
+    def test_usage_reservations_persist_and_rate_and_daily_caps_are_account_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / '.private' / 'account-limits.sqlite'
+            policy = AccountLimitPolicy(active_workflows=2, concurrent_requests=2,
+                                        requests_per_minute=2, daily_tokens=1000)
+            limits = AccountLimits(path, policy)
+            alice, bob = 'a' * 64, 'b' * 64
+            held = limits.reserve(alice, 750, 100)
+            with self.assertRaisesRegex(AccountLimitExceeded, 'daily token'):
+                limits.reserve(alice, 100, 100)
+            limits.settle(held, 100, 80)
+            limits.reserve(alice, 10, 10)
+            with self.assertRaisesRegex(AccountLimitExceeded, 'rate limit'):
+                limits.reserve(alice, 1, 1)
+
+            limits.reserve(bob, 100, 100)
+            restored = AccountLimits(path, policy)
+            alice_status = restored.status(alice)
+            self.assertEqual((alice_status['charged_tokens'], alice_status['reserved_tokens']), (180, 20))
+            self.assertEqual(restored.status(bob)['reserved_tokens'], 200)
+
+    def test_known_usage_from_a_failed_stream_is_settled(self):
+        class FailedClient:
+            def __init__(self, host, timeout, **options):
+                self.timeout = timeout
+
+            def stream(self, payload):
+                raise DeepInfraGenerationError(
+                    'Provider stream ended after reporting usage.',
+                    stats={'prompt_eval_count': 120, 'eval_count': 30})
+
+        class InterruptibleFailedClient(Interruptible, FailedClient):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            limits = AccountLimits(
+                Path(temporary) / '.private' / 'account-limits.sqlite',
+                AccountLimitPolicy(daily_tokens=1000))
+            client = InterruptibleFailedClient(
+                'https://provider.example', threading.Event(), timeout=1,
+                account_limits=limits, account_id='c' * 64)
+            with self.assertRaises(DeepInfraGenerationError):
+                list(client.stream({'messages': [], 'options': {'num_predict': 100}}))
+            usage = limits.status('c' * 64)
+            self.assertEqual((usage['charged_tokens'], usage['reserved_tokens']), (150, 0))
 
 
 PROOF = ('Let x be an arbitrary real number. Equality is reflexive, so $x=x$. '
@@ -509,6 +835,12 @@ class DeepInfraWorkflowTests(GuiCase):
         approval['notes'] = ['A harmless notation typo does not affect reflexivity.']
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
                              (json.dumps(approval), 'Reviewer reasoning.', 23)]
+        provider_settings = self.ok('POST', '/api/provider-settings', {
+            'provider_id': 'openai/deepinfra', 'host': self.fake.host, 'model': DEEPINFRA_MODEL,
+            'api_key': self.fake.key, 'remember': False,
+        })
+        self.assertNotIn(self.fake.key, json.dumps(provider_settings))
+        os.environ['DEEPINFRA_API_KEY'] = 'ambient-decoy-key'
         status = self.ok('GET', '/api/status')
         self.assertTrue(status['ollama']['reachable'])
         self.assertFalse(status['online'])

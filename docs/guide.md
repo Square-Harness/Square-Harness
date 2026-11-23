@@ -3,8 +3,9 @@
 What Square Harness is for, the ideas behind it, and every skill: what it does,
 how to call it and how it works inside.
 
-- To install it, see [llm-install.md](llm-install.md). It is written for a coding
-  agent, so you can ask one to do the installation (see [Install](#install)).
+- To start it with Docker or install it natively, see
+  [llm-install.md](llm-install.md). Its native installation steps are written
+  for a coding agent (see [Install](#install)).
 - To change the code, see [llm-development.md](llm-development.md).
 
 ## What it is
@@ -42,6 +43,28 @@ verified email and opens the user's allowance details and Sign out action.
 Signing out ends the browser's Access session; saved files, conversations and
 running work remain on the server. A local installation without the hosted
 gateway keeps its existing interface.
+
+Open **Model provider** in the sidebar to select a registered provider, endpoint
+and model for new work. The current choices are Ollama, OpenAI-compatible,
+llama.cpp, MLX-compatible and DeepInfra. API keys are entered in the web
+interface and sent to the backend; the browser never gets a key back. Keys are
+session-only by default. In local mode, **Remember** stores a key in a private
+mode-0600 file in the app data directory, outside workspaces and job records.
+In shared server mode, keys stay in that account's backend memory by default.
+When the operator enables Google Cloud Secret Manager, **Remember** stores the
+key there under an account- and provider-specific secret; other managed
+credential stores can be added through the backend adapter interface. Server
+endpoints must match the operator's configured host allowlist.
+
+Shared server mode also applies per-account limits, independent of provider
+quotas: by default, two active workflows, two simultaneous model requests, 60
+model requests per minute and 1,000,000 combined input/output tokens per UTC
+day. The account menu shows daily token use and recent request count. Requests
+reserve their declared output ceiling and an input estimate based on request
+size (plus a fixed allowance per image) before dispatch; reported usage replaces
+that reservation when available. If a stream ends without usage, its
+reservation remains in the daily total for that UTC day. These limits do not
+apply to local mode.
 
 Hosted testers may have a separate allowance shared across their conversations.
 Its meter counts output-equivalent tokens, including thinking, with input
@@ -326,7 +349,7 @@ Open a coding agent (Claude Code, Codex, …) in a terminal and ask:
 Install Square Harness following https://github.com/Square-Harness/Square-Harness/blob/main/docs/llm-install.md
 ```
 
-The guide has two plans:
+For model hosting, the guide has two plans:
 
 - **Local:** a small Qwen for a quick test, or a larger one on a gaming GPU or an
   Apple Silicon Mac, served by Ollama. On Linux with an NVIDIA GPU of 24 GB or
@@ -347,6 +370,10 @@ mkdir -p ~/research/my-paper
 .venv/bin/square-harness --gui --workspace ~/research/my-paper
 ```
 
+The same full-app Docker image can run in local or authenticated server mode;
+Compose selects the mode at startup. It is separate from the numerical sandbox
+image. See the Docker instructions in [llm-install.md](llm-install.md#run-the-full-app-in-docker).
+
 ## Using it
 
 ### The web app
@@ -356,6 +383,11 @@ mkdir -p ~/research/my-paper
 address that carries the access token. One interface serves a folder: a second
 one on the same folder refuses to start, and a busy port moves to the next free
 one with a message.
+
+On an HTTPS deployment, install the interface as a Progressive Web App on a
+phone. It caches the static interface only; conversations, credentials and
+other API responses are never cached. The app shell may open without a network,
+but agent work still needs the hosted Python backend and model provider.
 
 - **Conversations** are the entry point (the sidebar title is "Square Harness").
   Ask in plain words. The Assistant answers directly, or starts focused jobs

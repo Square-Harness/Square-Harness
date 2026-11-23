@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError, type Account, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
+import { api, ApiError, type Account, type AccountLimitStatus, type ChatListItem, type TaskSummary, type TesterAllowance } from '../api'
 import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
 import { ago, count } from '../format'
@@ -13,6 +13,7 @@ import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus,
 import { ProjectNav } from './Projects'
 import { CellScale, ErrorNote, Meter, Modal } from './common'
 import { PersonalizationSettings } from './Personalization'
+import { ProviderSettings } from './ProviderSettings'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
@@ -363,7 +364,9 @@ function PilotAllowance({ allowance, detailed = false }: { allowance: TesterAllo
   )
 }
 
-function AccountMenu({ account, allowance }: { account: Account; allowance?: TesterAllowance | null }) {
+function AccountMenu({ account, allowance, accountLimits }: {
+  account: Account; allowance?: TesterAllowance | null; accountLimits?: AccountLimitStatus
+}) {
   const menu = useRef<HTMLDetailsElement>(null)
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
@@ -395,6 +398,15 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
       </summary>
       <div className="account-popover">
         <div className="account-heading"><span className="muted small">Signed in</span><strong>{account.email}</strong></div>
+        {accountLimits && <>
+          <div className="account-heading">
+            <span className="muted small">Daily model tokens</span>
+            <strong>{count(accountLimits.charged_tokens + accountLimits.reserved_tokens)} / {count(accountLimits.daily_token_limit)}</strong>
+          </div>
+          {accountLimits.reserved_tokens > 0 &&
+            <p className="muted small">{count(accountLimits.reserved_tokens)} tokens are reserved for requests whose final usage is not known yet.</p>}
+          <p className="muted small">{accountLimits.requests_last_minute} of {accountLimits.requests_per_minute} model requests in the past minute.</p>
+        </>}
         {allowance ? <PilotAllowance allowance={allowance} detailed />
           : <p className="muted small">This account has no tester spending limit.</p>}
         <button type="button" className="btn btn-block" onClick={() => {
@@ -414,6 +426,7 @@ function WorkspacePanel({ about }: { about: boolean }) {
   const [pairing, setPairing] = useState(false)
   const [access, setAccess] = useState(false)
   const [personalization, setPersonalization] = useState(false)
+  const [providerSettings, setProviderSettings] = useState(false)
   const [account, setAccount] = useState<Account | null>(null)
   const accountEmail = useRef<string | null>(null)
   useEffect(() => {
@@ -446,6 +459,7 @@ function WorkspacePanel({ about }: { about: boolean }) {
   }, [hasAllowance])
   if (!status) return null
   const allowance = status.tester_allowance
+  const accountLimits = status.account_limits
   const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
   const readValue = readable.length === 4 ? 'all types' : readable.length ? readable.join(', ') : 'none'
   const reachable = status.ollama.reachable
@@ -488,16 +502,21 @@ function WorkspacePanel({ about }: { about: boolean }) {
           <SlidersIcon size={16} />
           <span className="side-menu-label">Personalization</span>
         </button>
+        <button type="button" className="side-menu-item" title="Select a model provider and configure its endpoint and API key" onClick={() => setProviderSettings(true)}>
+          <StackIcon size={16} />
+          <span className="side-menu-label">Model provider</span>
+        </button>
         <a className="side-menu-item" href={href('about')} aria-current={about ? 'page' : undefined} title="What Square Harness does and the skills you can call">
           <InfoIcon size={16} />
           <span className="side-menu-label">About</span>
         </a>
       </nav>
-      {account ? <AccountMenu account={account} allowance={allowance} />
+      {account ? <AccountMenu account={account} allowance={allowance} accountLimits={accountLimits} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {personalization && <PersonalizationSettings onClose={() => setPersonalization(false)} />}
+      {providerSettings && <ProviderSettings onClose={() => setProviderSettings(false)} />}
       {pairing && (
         <Modal title="Connect a phone" icon={<PhoneIcon />} onClose={() => setPairing(false)}>
           <p>On a phone connected to the same network, open one of these addresses. It contains this workspace's access token, so share it only with your own devices.</p>
@@ -546,13 +565,16 @@ function WorkRow({ task, app, queued, onOpen }: { task: TaskSummary; app: AppSta
 function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const app = useApp()
   const limits = concurrencyLimits(app.snapshot, app.status)
+  const maxChats = app.status?.account_limits?.active_workflows_limit ?? 8
+  const maxRequests = app.status?.account_limits?.concurrent_requests_limit ?? 8
   const [chats, setChats] = useState(limits.chats)
   const [requests, setRequests] = useState(limits.requests)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const active = activeTasks(app.snapshot)
   const queue = app.snapshot.queue
-  const valid = [chats, requests].every((value) => Number.isInteger(value) && value >= 1 && value <= 8)
+  const valid = Number.isInteger(chats) && chats >= 1 && chats <= maxChats
+    && Number.isInteger(requests) && requests >= 1 && requests <= maxRequests
   const save = async () => {
     if (!valid || saving) return
     setSaving(true)
@@ -577,9 +599,9 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
       </section>}
       <h3 className="work-heading">Limits</h3>
       <div className="field-grid">
-        <CellScale label="Conversations and jobs at once" value={chats} onChange={setChats} min={1} max={8}
+        <CellScale label="Conversations and jobs at once" value={chats} onChange={setChats} min={1} max={maxChats}
           hint="One turn at a time in each conversation." />
-        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={8}
+        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={maxRequests}
           hint="Shared by all active conversations and their workers." />
       </div>
       <p className="muted small">Active requests share the model's throughput, so their speed depends on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>

@@ -15,6 +15,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from .agent import AgentError, Ollama, _NoModelRedirects
 from .jsonutil import loads_strict
+from .model_client import ModelClient, create_model_client, register_model_client
 
 
 def openai_thinking_budget_policy():
@@ -85,16 +86,8 @@ class MeasuredStreamCancellation(KeyboardInterrupt):
         self.stats = dict(stats)
 
 
-def create_client(backend, host, timeout=600):
-    if backend == 'ollama':
-        client = Ollama(host, timeout=timeout)
-        client.backend = 'ollama'
-        return client
-    if backend == 'openai':
-        return OpenAICompatible(host, timeout=timeout)
-    if backend == 'llamacpp':
-        return LlamaCpp(host, timeout=timeout)
-    raise AgentError(f'Unknown model backend: {backend}')
+def create_client(backend, host, timeout=600, *, profile='default'):
+    return create_model_client(backend, host, timeout, profile=profile)
 
 
 def _messages(messages):
@@ -151,9 +144,14 @@ def _arguments(value):
     return value
 
 
-class OpenAICompatible:
+@register_model_client('openai')
+class OpenAICompatible(ModelClient):
     """Local vLLM /v1 adapter; no credentials, redirects or ambient proxies."""
     backend = 'openai'
+    profile = 'default'
+    display_name = 'OpenAI-compatible API'
+    default_host = 'http://localhost:8000'
+    capabilities = frozenset({'streaming', 'tool_calls', 'structured_outputs'})
 
     def __init__(self, host='http://localhost:8000', timeout=600):
         self.host = host.rstrip('/')
@@ -478,6 +476,7 @@ class OpenAICompatible:
         raise self._stream_failure(error, 'interrupted', progress, final_usage, output_started)
 
 
+@register_model_client('llamacpp')
 class LlamaCpp(OpenAICompatible):
     """llama-server chat API with exact, template-aware per-slot context checks.
 
@@ -486,6 +485,11 @@ class LlamaCpp(OpenAICompatible):
     handling and special-token policy as generation, without running inference.
     """
     backend = 'llamacpp'
+    profile = 'default'
+    display_name = 'llama.cpp'
+    default_host = 'http://localhost:8000'
+    capabilities = frozenset({'streaming', 'tool_calls', 'structured_outputs',
+                              'exact_input_token_count'})
 
     def __init__(self, host='http://localhost:8000', timeout=600):
         super().__init__(host, timeout)

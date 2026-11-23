@@ -16,6 +16,7 @@ try:
     import jwt
     from cryptography.hazmat.primitives.asymmetric import rsa
     from deployment import tester_gateway as gateway
+    from mathagent.gui.identity import verify_assertion
 except ImportError:
     jwt = None
 
@@ -45,6 +46,11 @@ class Backend:
             def authorized(self):
                 backend.seen.append(dict(self.headers))
                 backend.paths.append(self.path)
+                if self.headers.get('X-SH-Identity'):
+                    if self.headers.get('Authorization') is not None:
+                        self.send_error(401)
+                        return False
+                    return True
                 if self.headers.get('Authorization') != 'Bearer ' + backend.token:
                     self.send_error(401)
                     return False
@@ -143,17 +149,62 @@ class TesterGatewayTests(unittest.TestCase):
         claims.update(overrides)
         return jwt.encode(claims, key or self.private_key, algorithm='RS256', headers={'kid': 'test-signing-key'})
 
-    def request(self, method='GET', path='/api/files', token=None, headers=None, body=None):
+    def request(self, method='GET', path='/api/files', token=None, headers=None, body=None, server=None):
         values = {'Host': 'sh.example.test', 'Origin': 'https://sh.example.test',
                   'Cf-Access-Jwt-Assertion': token or self.token()}
         values.update(headers or {})
-        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        target = server or self.server
+        connection = http.client.HTTPConnection('127.0.0.1', target.server_port, timeout=3)
         connection.request(method, path, body=body, headers=values)
         response = connection.getresponse()
         data = response.read()
         result = response.status, dict(response.getheaders()), data
         connection.close()
         return result
+
+    def test_shared_backend_receives_only_a_signed_verified_principal(self):
+        secret = 'shared-test-secret-that-is-not-a-real-credential'
+        secret_file = Path(self.temp.name) / 'identity.secret'
+        secret_file.write_text(secret + '\n')
+        secret_file.chmod(0o640)
+        settings = gateway.Settings.from_dict({
+            'hostname': 'sh.example.test',
+            'issuer': 'https://sh-test.cloudflareaccess.com',
+            'audience': 'test-app-audience',
+            'shared_backend': {
+                'port': self.backends[0].server.server_port,
+                'identity_secret_file': str(secret_file),
+            },
+            'allowed_emails': ['alice@example.test', 'bob@example.test'],
+        })
+        shared = gateway.Gateway(('127.0.0.1', 0), settings, verifier=self.server.verifier)
+        thread = threading.Thread(target=shared.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for email in ('alice@example.test', 'bob@example.test'):
+                code, _, body = self.request(
+                    path='/api/files',
+                    token=self.token(email, sub='subject-' + email.split('@')[0]),
+                    headers={'X-SH-Identity': 'browser-forgery'},
+                    server=shared,
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(body), {'files': []})
+                forwarded = self.backends[0].seen[-1]
+                self.assertNotIn('Cf-Access-Jwt-Assertion', forwarded)
+                self.assertNotIn('X-Forwarded-User', forwarded)
+                self.assertNotIn('Authorization', forwarded)
+                self.assertNotEqual(forwarded['X-SH-Identity'], 'browser-forgery')
+                principal = verify_assertion(forwarded['X-SH-Identity'], secret)
+                self.assertEqual(principal.email, email)
+                self.assertEqual(principal.subject, 'subject-' + email.split('@')[0])
+            self.assertEqual(self.request(
+                token=self.token('uninvited@example.test'), server=shared)[0], 403)
+            self.assertEqual(len(self.backends[0].seen), 2)
+        finally:
+            shared.shutdown()
+            shared.server_close()
+            thread.join(3)
 
     def test_signed_identity_is_required_before_private_workspaces_are_selected(self):
         bad = [self.token(key=self.other_key), self.token(exp=int(time.time()) - 100),

@@ -20,6 +20,13 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean
 
 applyTheme(readTheme())
 start()
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((error: unknown) => {
+      console.error('Square Harness service worker registration failed.', error)
+    })
+  })
+}
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary><App /></ErrorBoundary>

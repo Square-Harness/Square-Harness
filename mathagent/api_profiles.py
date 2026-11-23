@@ -15,23 +15,29 @@ from http.client import HTTPException
 from .agent import AgentError
 from .backends import OpenAICompatible
 from .deepinfra import DeepInfra
+from .model_client import create_model_client, register_model_client, registered_profiles
 
 
 def resolve_api_profile(profile=None):
     selected = os.environ.get('SQUARE_OPENAI_PROFILE', 'default') if profile is None else profile
-    if selected not in {'default', 'mlx', 'deepinfra'}:
-        raise AgentError('API profile must be default, mlx or deepinfra')
+    profiles = registered_profiles('openai')
+    if selected not in profiles:
+        available = ', '.join(sorted(profiles))
+        raise AgentError(f'API profile must be one of: {available}')
     return selected
 
 
 def create_profile_client(profile, host, timeout=600):
-    classes = {'default': OpenAICompatible, 'mlx': MLX, 'deepinfra': DeepInfra}
-    return classes[resolve_api_profile(profile)](host, timeout=timeout)
+    return create_model_client('openai', host, timeout, profile=resolve_api_profile(profile))
 
 
+@register_model_client('openai', 'mlx')
 class MLX(OpenAICompatible):
     """MLX-compatible streaming, with optional Local LLM Lab token counting."""
     profile = 'mlx'
+    display_name = 'MLX-compatible API'
+    default_host = 'http://localhost:8000'
+    capabilities = frozenset({'streaming', 'tool_calls', 'prompted_json_output'})
 
     def __init__(self, host='http://localhost:8000', timeout=600):
         super().__init__(host, timeout)

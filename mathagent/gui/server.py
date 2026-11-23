@@ -14,6 +14,8 @@ The security model matches the terminal interface:
 - network and Python permissions stay fixed at launch; proof jobs use
   pinned text and no tools, as in the terminal.
 """
+import copy
+from contextlib import contextmanager
 import hmac
 import http.cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,11 +37,16 @@ import webbrowser
 
 from .. import __version__
 from ..agent import AgentError
+from .identity import validate_secret, verify_assertion
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
 from .. import images
+from .account_limits import AccountLimitPolicy, AccountLimits
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
+from .provider_settings import LocalProviderStore, allowed_origins_from_environment
+from .server_credentials import (ServerCredentialStoreError,
+                                 server_credential_store_from_environment)
 from .watch import Watcher
 
 VERSION = __version__
@@ -87,6 +94,10 @@ class Streamed:
 
 class Unauthorized(Exception):
     """A login attempt used the wrong access token."""
+
+
+class WorkspaceUnavailable(Exception):
+    """An authenticated account's isolated workspace cannot be opened."""
 
 
 def _int(body, key, low=None, high=None):
@@ -193,9 +204,7 @@ def feedback_submit(h, body):
     metadata = {'version': VERSION, 'build': build_id(), 'model': hub.args.model,
                 'api_profile': getattr(hub.args, 'api_profile', 'default'),
                 'service_tier': os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')}
-    # Hosted gateways overwrite this header with the verified Access identity.
-    # A local backend is a single trusted workspace and has no account identity.
-    email = h.headers.get('X-SH-User-Email', '')
+    email = h.principal.email if h.principal is not None else h.headers.get('X-SH-User-Email', '')
     if email and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) and len(email) <= 254:
         metadata['reporter_email'] = email
     return feedback.save(hub.root, body, metadata)
@@ -243,14 +252,29 @@ def status(h, body):
     if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
         from ..hosted_quota import quota_status
         out['tester_allowance'] = quota_status()
+    account_usage = hub.account_usage()
+    if account_usage is not None:
+        out['account_limits'] = account_usage
     if not h.server.loopback:
         # Only an authenticated device can read the pairing addresses.
         out['pair_urls'] = [url + '/?' + urlencode({'token': h.server.token}) for url in h.server.urls]
     return out
 
 
+@route('GET', '/api/provider-settings')
+def provider_settings(h, body):
+    return h.server.hub.provider_settings()
+
+
+@route('POST', '/api/provider-settings')
+def provider_settings_save(h, body):
+    return h.server.hub.update_provider_settings(body)
+
+
 @route('POST', '/api/login', auth=False)
 def login(h, body):
+    if h.server.mode == 'server':
+        raise Unauthorized('Server authentication is managed by the configured identity gateway')
     token = body.get('token')
     if not isinstance(token, str) or not hmac.compare_digest(token.strip().encode(), h.server.token.encode()):
         raise Unauthorized('That access token is not valid for this workspace')
@@ -857,11 +881,32 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, method):
         self.cookie = None
         self.body_read = method == 'GET'
+        self.principal = None
+        if not self._host_allowed():
+            return self.error(403, 'Unexpected Host header; open the address printed in the terminal')
+        try:
+            with self.server.request_context(self) as principal:
+                self.principal = principal
+                self._handle_request(method)
+        except Unauthorized as exc:
+            self.error(401, str(exc))
+        except WorkspaceUnavailable as exc:
+            print(f'Account workspace unavailable: {type(exc.__cause__ or exc).__name__}: {exc.__cause__ or exc}',
+                  file=sys.stderr)
+            self.error(503, 'The account workspace is unavailable; see the server log')
+        except (OSError, ValueError, AgentError) as exc:
+            print(f'Interface request setup failed: {type(exc).__name__}: {exc}', file=sys.stderr)
+            self.error(503, 'The authenticated service is unavailable; see the server log')
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as exc:
+            print(f'Interface request setup failed: {type(exc).__name__}: {exc}', file=sys.stderr)
+            self.error(500, 'Internal error; see the terminal for details')
+
+    def _handle_request(self, method):
         try:
             url = urlsplit(self.path)
             self.query = parse_qs(url.query)
-            if not self._host_allowed():
-                return self.error(403, 'Unexpected Host header; open the address printed in the terminal')
             if url.path.startswith('/api/'):
                 return self._api(method, url.path)
             if method != 'GET':
@@ -887,6 +932,8 @@ class Handler(BaseHTTPRequestHandler):
         return name in ('localhost', '127.0.0.1', '[::1]')
 
     def _authorized(self):
+        if self.server.mode == 'server':
+            return self.principal is not None
         token = self.server.token.encode()
         header = self.headers.get('Authorization', '')
         if header.startswith('Bearer ') and hmac.compare_digest(header[7:].strip().encode(), token):
@@ -957,6 +1004,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.error(404, str(exc))
         except Unauthorized as exc:
             return self.error(401, str(exc))
+        except ServerCredentialStoreError as exc:
+            print(f'Managed provider credential storage unavailable: {exc}', file=sys.stderr)
+            return self.error(503, 'Managed provider credential storage is unavailable')
+        except WorkspaceUnavailable as exc:
+            print(f'Account workspace unavailable: {type(exc.__cause__ or exc).__name__}: {exc.__cause__ or exc}',
+                  file=sys.stderr)
+            return self.error(503, 'The account workspace is unavailable; see the server log')
         except (BrokenPipeError, ConnectionResetError):
             raise
         except (ValueError, AgentError, OSError) as exc:
@@ -970,6 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         token = (self.query.get('token') or [''])[0]
         if token:
+            if self.server.mode == 'server':
+                return self.error(403, 'Pairing tokens are disabled in server mode')
             if hmac.compare_digest(token.encode(), self.server.token.encode()):
                 self.cookie = self.server.token
             # Never leave the token in the address bar, history or screenshots.
@@ -1029,28 +1085,156 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, hub, token, loopback):
+    def __init__(self, address, hub, token, loopback, *, mode='local', proxy_secret=None,
+                 args=None, data_root=None, provider_allowlist=None,
+                 server_credential_store=None):
+        if mode not in {'local', 'server'}:
+            raise ValueError('Interface mode must be local or server')
+        if mode == 'server':
+            container_listener = (os.environ.get('SQUARE_HARNESS_CONTAINER') == '1'
+                                  and address[0] == '0.0.0.0')
+            if (not loopback and not container_listener) or proxy_secret is None or args is None or data_root is None:
+                raise ValueError('Server mode requires a loopback listener or the app-container listener, '
+                                 'trusted proxy, and data root')
+            validate_secret(proxy_secret)
+        resolved_data_root = Path(data_root).resolve(strict=True) if data_root is not None else None
+        account_limits = None
+        if mode == 'server':
+            if resolved_data_root is None:
+                raise ValueError('Server mode requires a data root')
+            private = resolved_data_root / '.private'
+            _private_directory(private)
+            account_limits = AccountLimits(private / 'account-limits.sqlite',
+                                           AccountLimitPolicy.from_environment())
         if ':' in address[0]:
             self.address_family = socket.AF_INET6
         super().__init__(address, Handler)
-        self.hub, self.token, self.loopback = hub, token, loopback
+        self._default_hub = hub
+        self._request = threading.local()
+        self._accounts = {}
+        self._accounts_lock = threading.Lock()
+        self.mode, self.proxy_secret = mode, proxy_secret
+        self.args = args
+        self.provider_allowlist = provider_allowlist
+        self.server_credential_store = server_credential_store
+        self.data_root = resolved_data_root
+        self.account_limits = account_limits
+        self.token, self.loopback = token, loopback
         self.cookie_name = f'{COOKIE}_{self.server_address[1]}'
         self.stopping = threading.Event()
         self.urls = []
+        self.watcher = None
+
+    @property
+    def hub(self):
+        hub = getattr(self._request, 'hub', None)
+        if hub is not None:
+            return hub
+        if self.mode == 'local':
+            return self._default_hub
+        principal = getattr(self._request, 'principal', None)
+        if principal is None:
+            raise WorkspaceUnavailable('No authenticated account is bound to this request')
+        try:
+            hub, watcher = self._account_hub(principal)
+        except ServerCredentialStoreError as exc:
+            raise WorkspaceUnavailable('Managed provider credentials are unavailable') from exc
+        except (OSError, ValueError, AgentError) as exc:
+            raise WorkspaceUnavailable('Cannot open this account workspace') from exc
+        self._request.hub, self._request.watcher = hub, watcher
+        return hub
+
+    @contextmanager
+    def request_context(self, handler):
+        previous = {name: getattr(self._request, name, None)
+                    for name in ('hub', 'watcher', 'principal')}
+        if self.mode == 'server':
+            assertions = handler.headers.get_all('X-SH-Identity', [])
+            if len(assertions) != 1:
+                raise Unauthorized('An authenticated account is required')
+            try:
+                principal = verify_assertion(assertions[0], self.proxy_secret)
+            except ValueError as exc:
+                raise Unauthorized('The identity gateway assertion is invalid or expired') from exc
+            self._request.hub = self._request.watcher = None
+            self._request.principal = principal
+        else:
+            self._request.hub = self._default_hub
+            self._request.watcher = self.watcher
+            self._request.principal = None
+            principal = None
+        try:
+            yield principal
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    self._request.__dict__.pop(name, None)
+                else:
+                    setattr(self._request, name, value)
+
+    def _account_hub(self, principal):
+        account_id = principal.account_id
+        with self._accounts_lock:
+            current = self._accounts.get(account_id)
+            if current is not None:
+                return current
+            if self.data_root is None or self.args is None:
+                raise WorkspaceUnavailable('Server account storage is not configured')
+            accounts = self.data_root / 'accounts'
+            _private_directory(accounts)
+            root = accounts / account_id
+            _private_directory(root)
+            args = copy.copy(self.args)
+            args.workspace = root
+            args.gui_root = root
+            hub = Hub(args, provider_mode='server', provider_allowlist=self.provider_allowlist,
+                      account_limits=self.account_limits, account_id=account_id,
+                      server_credential_store=self.server_credential_store)
+            try:
+                hub.folder_lock = folder_lock(root)
+                watcher = Watcher(root, hub.bus)
+                watcher.start()
+            except (OSError, ValueError):
+                hub.shutdown()
+                lock = getattr(hub, 'folder_lock', None)
+                if lock is not None:
+                    lock.close()
+                raise
+            self._accounts[account_id] = (hub, watcher)
+            return hub, watcher
+
+    def close_accounts(self):
+        with self._accounts_lock:
+            accounts, self._accounts = list(self._accounts.values()), {}
+        for hub, watcher in accounts:
+            watcher.stop()
+            hub.shutdown()
+            lock = getattr(hub, 'folder_lock', None)
+            if lock is not None:
+                lock.close()
 
     def shutdown(self):
         self.stopping.set()
         super().shutdown()
+        self.close_accounts()
 
     def switch(self, relative):
         """Open another folder below the root and follow its saved jobs instead."""
-        target = self.hub.set_workspace(relative)
-        old = getattr(self, 'watcher', None)
+        hub = self.hub
+        target = hub.set_workspace(relative)
+        old = getattr(self._request, 'watcher', None) or self.watcher
         if old is not None:
             old.stop()
-            self.watcher = Watcher(target, self.hub.bus, old.interval)
-            self.watcher.start()
-        self.hub.bus.publish('workspace', path=target.relative_to(self.hub.base).as_posix())
+            watcher = Watcher(target, hub.bus, old.interval)
+            watcher.start()
+            self._request.watcher = watcher
+            principal = getattr(self._request, 'principal', None)
+            if principal is not None:
+                with self._accounts_lock:
+                    self._accounts[principal.account_id] = hub, watcher
+            else:
+                self.watcher = watcher
+        hub.bus.publish('workspace', path=target.relative_to(hub.base).as_posix())
 
 
 # -- launch ------------------------------------------------------------------
@@ -1076,6 +1260,42 @@ def workspace_token(root):
     with os.fdopen(fd, 'w', encoding='ascii') as stream:
         stream.write(value + '\n')
     return value
+
+
+def _interface_mode():
+    mode = os.environ.get('SQUARE_HARNESS_MODE', 'local').strip().lower()
+    if mode not in {'local', 'server'}:
+        raise ValueError('SQUARE_HARNESS_MODE must be local or server')
+    return mode
+
+
+def _trusted_proxy_secret(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError('Server mode needs a readable trusted-proxy secret file') from exc
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in {0o400, 0o600, 0o640}:
+            raise ValueError('Trusted-proxy secret must be a private regular file (mode 0400, 0600 or 0640)')
+        data = source.read(4097)
+    if len(data) > 4096:
+        raise ValueError('Trusted-proxy secret file is too large')
+    try:
+        secret = data.decode('utf-8').rstrip('\n')
+        validate_secret(secret)
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError('Trusted-proxy secret file is malformed') from exc
+    return secret
+
+
+def _private_directory(path):
+    path.mkdir(mode=0o700, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError('Account data path must be a directory')
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(path, 0o700)
 
 
 def _loopback(host):
@@ -1119,50 +1339,105 @@ def folder_lock(root):
     return handle
 
 
-def bind(host, port, hub, token):
+def bind(host, port, hub, token, *, mode='local', proxy_secret=None, args=None, data_root=None,
+         provider_allowlist=None, server_credential_store=None):
+    if mode == 'server':
+        if not port:
+            raise ValueError('Server mode requires a fixed nonzero --gui-port for the identity gateway')
+        return Server((host, port), hub, token, _loopback(host), mode=mode,
+                      proxy_secret=proxy_secret, args=args, data_root=data_root,
+                      provider_allowlist=provider_allowlist,
+                      server_credential_store=server_credential_store)
     error = None
     for candidate in range(port, port + 10) if port else [0]:
         try:
-            return Server((host, candidate), hub, token, _loopback(host))
+            return Server((host, candidate), hub, token, _loopback(host), mode=mode)
         except OSError as exc:
             error = exc
     raise OSError(f'Cannot listen on {host} ports {port}–{port + 9}: {error}. Choose another --gui-port.')
 
 
 def serve(args):
-    root = Path(args.workspace).expanduser().resolve(strict=True)
-    if not root.is_dir():
-        raise ValueError('Workspace must be a directory')
-    if not _loopback(args.gui_host):
-        try:
-            ipaddress.ip_address(args.gui_host)
-        except ValueError:
-            raise ValueError('--gui-host must be an IP address such as 127.0.0.1 or 0.0.0.0') from None
-    base = Path(getattr(args, 'gui_root', None) or root).expanduser().resolve(strict=True)
-    if not base.is_dir() or not root.is_relative_to(base):
-        raise ValueError('--gui-root must be a folder that contains the --workspace folder')
-    args.workspace, args.gui_root = root, base
-    token = workspace_token(base)
-    hub = Hub(args)
-    hub.folder_lock = folder_lock(root)
-    server = bind(args.gui_host, args.gui_port, hub, token)
+    mode = _interface_mode()
+    server_credential_store = (server_credential_store_from_environment()
+                               if mode == 'server' else None)
+    if mode == 'server':
+        container_listener = (os.environ.get('SQUARE_HARNESS_CONTAINER') == '1'
+                              and args.gui_host == '0.0.0.0')
+        if args.gui_host != '127.0.0.1' and not container_listener:
+            raise ValueError('Server mode must bind to 127.0.0.1, or to 0.0.0.0 inside the app container')
+        if not 1024 <= args.gui_port <= 65535:
+            raise ValueError('Server mode requires a fixed --gui-port from 1024 to 65535')
+        base = Path(getattr(args, 'gui_root', None) or args.workspace).expanduser().resolve(strict=True)
+        if not base.is_dir():
+            raise ValueError('Server account data root must be an existing directory')
+        secret_path = os.environ.get('SQUARE_TRUSTED_PROXY_SECRET_FILE')
+        if not secret_path:
+            raise ValueError('Server mode requires SQUARE_TRUSTED_PROXY_SECRET_FILE')
+        proxy_secret = _trusted_proxy_secret(Path(secret_path))
+        provider_allowlist = allowed_origins_from_environment()
+        if not provider_allowlist:
+            raise ValueError('Server mode requires SQUARE_PROVIDER_HOST_ALLOWLIST with at least one trusted HTTP(S) origin')
+        root, token, hub = base, '', None
+        args.workspace = args.gui_root = base
+    else:
+        root = Path(args.workspace).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError('Workspace must be a directory')
+        if not _loopback(args.gui_host):
+            try:
+                ipaddress.ip_address(args.gui_host)
+            except ValueError:
+                raise ValueError('--gui-host must be an IP address such as 127.0.0.1 or 0.0.0.0') from None
+        base = Path(getattr(args, 'gui_root', None) or root).expanduser().resolve(strict=True)
+        if not base.is_dir() or not root.is_relative_to(base):
+            raise ValueError('--gui-root must be a folder that contains the --workspace folder')
+        args.workspace, args.gui_root = root, base
+        token = workspace_token(base)
+        provider_allowlist = None
+        hub = Hub(args, provider_store=LocalProviderStore.from_environment())
+    lock_root = base if mode == 'server' else root
+    root_lock = folder_lock(lock_root)
+    if hub is not None:
+        hub.folder_lock = root_lock
+    try:
+        server = bind(args.gui_host, args.gui_port, hub, token, mode=mode,
+                      proxy_secret=proxy_secret if mode == 'server' else None,
+                      args=args if mode == 'server' else None,
+                      data_root=base if mode == 'server' else None,
+                      provider_allowlist=provider_allowlist,
+                      server_credential_store=server_credential_store)
+    except Exception:
+        root_lock.close()
+        if hub is not None:
+            hub.shutdown()
+        raise
+    server.folder_lock = root_lock
     port = server.server_address[1]
     if args.gui_port and port != args.gui_port:
         print(f'Port {args.gui_port} is busy; this interface uses {port}.', file=sys.stderr)
-    local = f'http://127.0.0.1:{port}' if server.loopback or args.gui_host in ('0.0.0.0', '::') else f'http://{args.gui_host}:{port}'
-    if not server.loopback:
+    local = (f'http://127.0.0.1:{port}' if server.loopback or args.gui_host in ('0.0.0.0', '::')
+             else f'http://{args.gui_host}:{port}')
+    if mode == 'local' and not server.loopback and os.environ.get('SQUARE_HARNESS_CONTAINER') != '1':
         hosts = _lan_addresses() if args.gui_host in ('0.0.0.0', '::') else [args.gui_host]
         server.urls = [f'http://{h}:{port}' for h in hosts]
-    watcher = Watcher(root, hub.bus)
-    watcher.start()
-    server.watcher = watcher
-    query = '/?' + urlencode({'token': token})
+    if mode == 'local':
+        watcher = Watcher(root, hub.bus)
+        watcher.start()
+        server.watcher = watcher
+        query = '/?' + urlencode({'token': token})
+    else:
+        query = ''
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
              f'│ {args.model} · {args.backend} at {args.host}',
-             f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
-             f'│ Research: {"offline, locked by --offline (local/cache only)" if hub.online_locked else "online by default, switchable per job"}'
-             ' · proof: solve → verify → repair',
-             f'│ Open: {local}{query}']
+             (f'│ Account data root: {base}' if mode == 'server' else
+              f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else '')),
+             f'│ Research: {"offline, locked by --offline (local/cache only)" if getattr(args, "offline", False) else "online by default, switchable per job"}'
+             ' · proof: solve → verify → repair']
+    if mode == 'local':
+        lines.append(f'│ Open: {local}{query}')
+    else:
+        lines.append('│ Mode: authenticated server; identity is accepted only from the trusted gateway')
     for url in server.urls:
         lines.append(f'│ Phone / other device: {url}{query}')
     if server.urls:
@@ -1172,7 +1447,7 @@ def serve(args):
     print('\n'.join(lines), flush=True)
     if args.allow_python:
         print('Python enabled: each snippet requires approval in the interface and runs with your account permissions.')
-    if not args.no_browser:
+    if mode == 'local' and not args.no_browser:
         threading.Timer(0.4, webbrowser.open, [local + query]).start()
     previous_handlers = {}
     if threading.current_thread() is threading.main_thread():
@@ -1186,8 +1461,12 @@ def serve(args):
         print('\nStopping. Running work is pausing at its checkpoint…', flush=True)
     finally:
         server.stopping.set()
-        hub.shutdown()
-        server.watcher.stop()
+        server.close_accounts()
+        if hub is not None:
+            hub.shutdown()
+        if server.watcher is not None:
+            server.watcher.stop()
+        root_lock.close()
         server.server_close()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
