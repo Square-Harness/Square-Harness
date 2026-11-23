@@ -143,7 +143,9 @@ class _Source:
                 if prose[i] != '\n':
                     prose[i] = fill
             if b - a >= 2:
-                prose[a], prose[b - 1] = first, last
+                for i, mark in ((a, first), (b - 1, last)):
+                    if prose[i] != '\n':
+                        prose[i] = mark
 
         if tex:
             begin = text.find('\\begin{document}')
