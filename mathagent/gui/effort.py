@@ -8,6 +8,7 @@ DS4 presets come from model_limits and are sent to the interface by the server.
 """
 from ..litreview import breadth
 from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget
+from ..router import effort_for
 
 # Token estimates remain for older integrations. New jobs have no cumulative
 # token ceiling unless one was explicitly supplied at launch or in the form.
@@ -23,8 +24,9 @@ LEGACY_EFFORTS = {
 LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
 # A review reads the whole paper in each call, many calls at once: some 50 calls of 80k input tokens for a
 # 3,000-line paper at Medium, each reserving about three times that while it runs (no DS4 tokenizer: UTF-8 bytes).
-# Four times the input allowance of other DS4 workers. ('detailed_review' is the former name of a review at High.)
-REVIEW_MODES = ('referee', 'detailed_review')
+# Four times the input allowance of other DS4 workers. ('detailed_review' is the former name of the review; a typo
+# check reads the whole paper in each call too.) A review and a typo check run at one fixed level (router.FIXED_EFFORT).
+REVIEW_MODES = ('referee', 'detailed_review', 'typo_check')
 REVIEW_INPUT = 4
 
 
@@ -33,6 +35,7 @@ def level(mode, name, args=None):
     four times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
+    name = effort_for(mode, name)
     value = dict(table.get(name, legacy.get(name, table['medium'])))
     if table is DS4_EFFORTS:
         if mode == 'prove':
@@ -78,6 +81,7 @@ def limits(mode, level, args):
     ds4 = getattr(args, 'api_profile', None) == 'deepinfra'
     table = DS4_EFFORTS if ds4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if ds4 else LEGACY_EFFORTS
+    level = effort_for(mode, level)
     effort = table.get(level, legacy.get(level, table['medium']))
     seconds = effort['minutes'] * 60
     def ceiling(name, value):

@@ -25,7 +25,7 @@ from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
-from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA
+from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .tools import schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4
@@ -58,7 +58,7 @@ Do not describe a model's review as a formal proof certificate.
 You can delegate a precise objective to an existing worker when sustained proof
 search, independent proof review, exploration, a precise reference, a literature review,
 manuscript review or a write-up will help. The available modes are prove,
-explore, check, literature, referee, quick_review, explain, writeup and summarize.
+explore, check, literature, referee, typo_check, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
 least effort suitable for the objective: low, medium or high. For literature, use medium for an ordinary survey and high for broad or expressly in-depth coverage.
 High is the maximum effort. State the complete objective and its hypotheses. Children cannot
@@ -87,7 +87,8 @@ do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
 its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, every
-proof checked, typos, recommendation; high effort for a detailed review). For a numbered result of an attached file, delegate at
+proof checked, recommendation; it has one depth, whatever effort you give); typo_check lists the typos and
+presentation problems of a manuscript, with checked corrections, and checks no proof. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
 with the source file; explain is for one specified result and its proof, or one specified page, section
@@ -916,6 +917,7 @@ class Orchestrator:
                 args['effort'] in LEGACY_EFFORTS and args['effort'] == saved_effort
                 and self.state.get('resumed_checkpoint')):
             raise ValueError('Unknown worker effort; choose low, medium or high')
+        args['effort'] = effort_for(args['mode'], args['effort'])  # a review and a typo check have one depth
         for key, maximum in (('request', 8000), ('reason', 400)):
             if not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > maximum:
                 raise ValueError(f'{key} must be nonempty text of at most {maximum} characters; no text was truncated')
@@ -962,7 +964,7 @@ class Orchestrator:
                 workspace._readable(path)
                 if not path.is_file():
                     raise ValueError(filename + ' is not a file in this folder')
-                if args['mode'] in ('referee', 'detailed_review', 'quick_review', 'explain', 'writeup'):
+                if args['mode'] in ('referee', 'detailed_review', 'typo_check', 'quick_review', 'explain', 'writeup'):
                     human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
                     if filename not in self.state['files'] and not any(filename in text for text in human):
                         raise ValueError('Use only attached files or files named by the user: ' + filename)
@@ -1299,8 +1301,8 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
-        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup',
-                                                'summarize', 'python_lab', 'sanity_check')
+        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'typo_check',
+                                                'literature', 'writeup', 'summarize', 'python_lab', 'sanity_check')
                 and result.get('mode') == self.state['required_mode'] and isinstance(value, dict) and not handed_back):
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead

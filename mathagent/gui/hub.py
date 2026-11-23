@@ -54,9 +54,10 @@ from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
 LABELS = {'literature': 'Literature review', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
-          'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
-LABELS['detailed_review'] = 'Review'  # the former detailed review is the review at high effort
-VARIANT_LABELS = {'review': 'Review', 'journal': 'Review', 'quick': LABELS['quick_review'], 'explain': LABELS['explain']}
+          'quick_review': 'Review · quick check', 'explain': 'Review · explanation', 'typo_check': 'Typo check'}
+LABELS['detailed_review'] = 'Review'  # the former detailed review is the review
+VARIANT_LABELS = {'review': 'Review', 'journal': 'Review', 'typos': LABELS['typo_check'], 'quick': LABELS['quick_review'],
+                  'explain': LABELS['explain']}
 
 
 
@@ -1348,7 +1349,7 @@ class Hub:
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id, additional_seconds=additional_seconds)
         label = (LABELS['summarize'] if state.get('variant') == 'summary' else
-                 VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup']))
+                 VARIANT_LABELS.get(store._variant(state)) or LABELS.get(state['kind'], LABELS['writeup']))
         task = self._begin('research', job_id, label, state['goal'], work, queue=queue)
         task.ready.set()
         return task
@@ -1559,7 +1560,7 @@ class Hub:
             if (item.get('role') == 'route' and item.get('mode') == 'referee'
                     and item.get('status') == 'done' and item.get('job_id')):
                 state = store.research_state(self.root, item['job_id'])
-                if state.get('variant') == 'review' and state.get('draft') and state.get('status') in ('reviewed', 'partial'):
+                if store._variant(state) == 'review' and state.get('draft') and state.get('status') in ('reviewed', 'partial'):
                     reviews.append(state)
         if not reviews:
             return None

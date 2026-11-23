@@ -11,7 +11,7 @@ import { go } from '../router'
 import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 import { capacityFull } from '../concurrency'
-import { VARIANT_EFFORT, VARIANT_INPUT_SCALE, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
+import { FIXED_VARIANTS, VARIANT_EFFORT, VARIANT_INPUT_SCALE, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
 import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
@@ -25,7 +25,7 @@ const LITERATURE: Copy = {
   field: 'Scope and request', files: 'Pinned sources', noun: 'literature review',
 }
 
-// The Review notebook holds three kinds of review; the engine kind stays 'referee'.
+// The Review notebook holds four kinds of review; the engine kind stays 'referee'.
 const REVIEW: Record<ReviewVariant, Copy> = {
   quick: {
     title: 'Check a proof',
@@ -36,10 +36,17 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, gives every objection a second opinion (a defence of the paper, then a judge), and lists the typos with checked corrections. The report is rewritten as checks finish: a first draft is readable within minutes. Low effort checks the typos and presentation only.',
+    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, and gives every objection a second opinion (a defence of the paper, then a judge). The report is rewritten as checks finish: a first draft is readable within minutes. There is one depth, so no effort to choose. Typos are a separate, faster job: the Typo Check.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
-    pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
+    pinHint: 'Pin the manuscript (a TeX source gives the best results; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
+  },
+  typos: {
+    title: 'Check the typos of a manuscript',
+    lede: 'Pin the manuscript. The harness proofreads the whole paper part by part for typos, misprinted formulas, undefined symbols, wrong cross-references and unclear sentences, then checks every suggested correction against the paper. No proof is checked: ask for a Review for that.',
+    placeholder: 'Optional focus, e.g. only Sections 3 and 4.',
+    pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
+    field: 'Focus of the typo check (optional)', files: 'Manuscript', noun: 'typo check',
   },
   journal: {
     title: 'Review a manuscript',
@@ -72,7 +79,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [variant, setVariant] = useState<ReviewVariant>(savedVariant)
   const review = kind === 'referee'
   const copy = review ? REVIEW[variant] : LITERATURE
-  const manuscript = review && (variant === 'review' || variant === 'journal')
+  const manuscript = review && FIXED_VARIANTS.includes(variant)
   const pasted = review && !manuscript
   const [goal, setGoal] = useState('')
   const [target, setTarget] = useState('')
@@ -149,7 +156,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     setBusy(true)
     setError('')
     setQueuedNote('')
-    const request = goal.trim() || (manuscript ? 'Referee this manuscript for a mathematics journal.'
+    const request = goal.trim() || (variant === 'typos' && review ? 'Check the typos and the presentation of this manuscript.'
+      : manuscript ? 'Referee this manuscript for a mathematics journal.'
       : `${variant === 'quick' ? 'Check the proof of' : 'Explain'} ${target.trim()}.`)
     try {
       const result = await api.startResearch({
@@ -192,7 +200,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             {pasted ? (
               <p className="network-note">Works on this computer only: the {noun} reads the text and the statements it cites, and searches nothing online.</p>
             ) : offline ? (
-              <p className="network-note">The {noun} searches nothing online. To place the paper's results in the literature, it suggests a literature review.</p>
+              <p className="network-note">The {noun} searches nothing online.{variant === 'typos' ? '' : ' To place the paper\'s results in the literature, ask the Assistant for a review (@referee) in a conversation: it starts a literature review beside it.'}</p>
             ) : (
               <p className={'network-note' + (searching ? ' network-online' : '')}>
                 {searching
@@ -232,15 +240,15 @@ export function ResearchNew({ kind }: { kind: Kind }) {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {d && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
-            {review && manuscript && <p className="field-hint">A review reads the whole paper in every call: it allows {d?.api_profile === 'deepinfra' ? 'four times the input' : 'twice the working time'} of the other modes at the same effort.</p>}
+            {d && !manuscript && <EffortSlider kind={review ? 'research' : 'literature'} defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
+            {manuscript && <p className="field-hint">{variant === 'typos' ? 'A typo check' : 'A review'} has one depth: there is no effort to choose. It reads the whole paper in every call and allows {d?.api_profile === 'deepinfra' ? 'four times the input' : 'twice the working time'} of the other modes.</p>}
             {!offline && (
               <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
                 hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />
             )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
-                <NumberField label={review ? 'Tries (sets passes and depth)' : 'Investigation rounds'} value={rounds} onChange={setRounds} min={1} max={100} />
+                {!manuscript && <NumberField label={review ? 'Tries (sets passes and depth)' : 'Investigation rounds'} value={rounds} onChange={setRounds} min={1} max={100} />}
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />

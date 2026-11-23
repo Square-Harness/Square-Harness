@@ -13,9 +13,18 @@ import json
 import re
 from .model_limits import output_limit
 
-JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup', 'summarize')
-# detailed_review is the former name of a review at high effort: still accepted (saved chats, explicit calls), never offered.
+JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'typo_check', 'quick_review', 'explain',
+             'writeup', 'summarize')
+# detailed_review is the former name of the review: still accepted (saved chats, explicit calls), never offered.
 OFFERED_MODES = tuple(mode for mode in JOB_MODES if mode != 'detailed_review')
+# A review and a typo check have one depth each: no effort is chosen for them. The level names their budget (the
+# review has the working time and tokens of High, the typo check those of Low) and is what their cards save.
+FIXED_EFFORT = {'referee': 'high', 'detailed_review': 'high', 'typo_check': 'low'}
+
+
+def effort_for(mode, effort):
+    """The effort a task of this mode runs at: its fixed one, else the effort chosen."""
+    return FIXED_EFFORT.get(mode, effort)
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high')
 LEGACY_EFFORTS = ('xhigh', 'poincare')  # Read saved jobs without offering these levels for new work.
@@ -57,8 +66,10 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   Treat any proposed theorem or status as a question to investigate. Select low for a brief focused
   review, medium for an ordinary survey and high for broad or explicitly in-depth coverage.
 - referee: a referee report on a whole manuscript file the user names or attaches: an overview of the paper,
-  a check of every proof, its typos and presentation problems, and a recommendation. Select high when the user
-  asks for a detailed or thorough review, low when they ask only for typos or the presentation.
+  a check of every proof, and a recommendation. It has one depth: effort does not change it. It does not list typos.
+- typo_check: only the typos, misprints and presentation problems of a manuscript file the user names or
+  attaches, each correction checked; no proof is checked. Choose it when the user asks only for typos,
+  proofreading or the presentation; when they ask for a review and the typos, give both tasks.
 - quick_review: check whether a given proof of a given statement is correct, with a saved verdict and
   located issues, e.g. "is this proof right?", "check the proof of Lemma 3.2 in paper.tex". The request
   must contain the statement and its proof word for word, or name the file and the result.
@@ -70,7 +81,7 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
 A question (why, what, how, is it true that) is answered with explore. A request for a
 reference or citation to a known result is a check, not a literature review. A given proof to verify is
 a quick_review; a whole manuscript to referee, or all of its proofs to check, is a referee report. Choose prove,
-literature, referee, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
+literature, referee, typo_check, quick_review, explain, writeup or summarize only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
 statement or request is exactly one task. Give several (at most 4) only when the message
@@ -87,7 +98,7 @@ When the message is too ambiguous to choose, return no tasks and ask one short `
 otherwise `question` is empty. Return only JSON matching the schema."""
 
 FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a result, explore an idea, find a reference, '
-                     'write a literature review or a review of a manuscript, or write up notes in LaTeX?')
+                     'write a literature review or a review of a manuscript, check its typos, or write up notes in LaTeX?')
 
 
 
@@ -100,12 +111,12 @@ def clarify(message, files=(), question='', reason=''):
 def _task(value, message, files):
     request = value.get('request') if isinstance(value.get('request'), str) else ''
     proposed = [f for f in value.get('files') or [] if isinstance(f, str) and f.strip()]
-    legacy = value['mode'] == 'detailed_review'  # the review at high effort
+    mode = 'referee' if value['mode'] == 'detailed_review' else value['mode']  # the former name of the review
     return {
-        'mode': 'referee' if legacy else value['mode'],
+        'mode': mode,
         'request': repair_latex(request.strip() or message)[:8000],
         'files': list(dict.fromkeys([*files, *proposed]))[:20],
-        'effort': 'high' if legacy else value.get('effort') if value.get('effort') in EFFORTS else 'medium',
+        'effort': effort_for(mode, value.get('effort') if value.get('effort') in EFFORTS else 'medium'),
         'reason': repair_latex(str(value.get('reason') or ''))[:400],
         'question': '',
     }

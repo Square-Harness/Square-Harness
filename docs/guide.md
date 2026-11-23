@@ -374,11 +374,12 @@ one with a message.
   Each job has a card in the conversation and a page of its own showing
   everything it did.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
-  `@literature`, `@quick_review`, `@referee`, `@explain`,
+  `@literature`, `@quick_review`, `@referee`, `@typo_check`, `@explain`,
   `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
   Hover over the chip above the text box to read what the skill does and to
-  choose its effort. **Auto** means Medium. (`@detailed_review`, the former
-  detailed review, still works: it is `@referee` at High.)
+  choose its effort. **Auto** means Medium. A review and a typo check have one
+  depth each and no effort to choose. (`@detailed_review`, the former detailed
+  review, still works: it is `@referee`.)
 - **Your folder** is shown above the text box. Click it to open another folder
   (below `--gui-root`; by default only the workspace itself). Drop files onto the
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
@@ -475,7 +476,7 @@ a statement, or `/prove <statement>`. Other commands:
 | `/explore` | Switch to exploration chat |
 | `/check <result>` | Find or verify a reference (needs `--online`) |
 | `/literature <topic>` | Write a literature review of a topic |
-| `/quick_review`, `/referee`, `/explain` | The three review kinds (the manuscript comes from `--research-file`; `/detailed_review` is `/referee` at High) |
+| `/quick_review`, `/referee`, `/typo_check`, `/explain` | The review kinds (the manuscript comes from `--research-file`; `/detailed_review` is `/referee`) |
 | `/writeup <instructions>` | LaTeX write-up of `--research-file` notes in the `--template-file` style |
 | `/python-lab`, `/sanity-check` | Python in the sandbox |
 | `/review` | Fresh-context critique of the last answer |
@@ -508,7 +509,8 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Referee report: every proof checked, typos, presentation, a recommendation | `@referee`, New review | `/referee` |
+| Review | Referee report: every proof checked, second opinions, a recommendation | `@referee`, New review | `/referee` |
+| Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
@@ -832,9 +834,9 @@ at most twice; in a conversation, where the answer was already shown, it is not.
 Each logical call gets at most four replacements within its own time allowance;
 the job shows "sending it again (k of 4 retries)" and pauses only when they are used.
 
-### Quick review, Review, Explain
+### Quick review, Review, Typo check, Explain
 
-The three review kinds work on a proof you paste, or on a manuscript you attach
+The review kinds work on a proof you paste, or on a manuscript you attach
 (TeX gives the best results: formulas extracted from a PDF can be garbled).
 
 - **Quick review**: is this proof correct? Independent verifier passes read it
@@ -846,31 +848,35 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review**: a referee report on the whole paper. At **Low** it is a typo and
-  presentation check only: the paper is proofread in parts of about 220 lines
-  (each call with the whole paper in view) for typos, misprinted formulas,
-  undefined symbols, wrong cross-references and unclear sentences, every
-  suggested correction is checked against the paper, and no proof is checked
-  (about 16 calls with DS4 for a 3,000-line paper). From **Medium**, every proof
-  is checked, appendices included; effort sets how deeply:
+- **Review** (`@referee`): a referee report on the whole paper. It has one
+  depth and no effort to choose (it is the former High; Medium, a faster screen
+  without reasoning, found about half as much with more false alarms and was
+  removed). Every proof is checked, appendices included:
 
-  | | Medium | High |
-  | --- | --- | --- |
-  | Passes on the main results / on the results their proofs use / on the others | 2 / 1 / 1 | 2 / 2 (those used directly) / 1 |
-  | Hidden reasoning (DS4) | none: every call answers at once | the second pass and the second opinions reason first |
-  | Read across the whole paper | cited results, consistency, unproved claims | the same |
-  | Second opinion on | findings said to break a proof or a statement | the same |
-  | Repairs that would make a major finding minor are checked | yes | yes |
+  | | |
+  | --- | --- |
+  | Passes on the main results and the results their proofs use directly / on the others | 2 / 1 |
+  | Hidden reasoning (DS4) | the second pass, the judge and the repair check reason first; the other calls answer at once |
+  | Read across the whole paper | cited results, consistency, unproved claims |
+  | Second opinion on | findings said to break a proof or a statement, and gaps near the main results |
+  | Repairs that would make a major finding minor are checked | yes |
 
   Hidden reasoning is most of what a model writes (15–30k tokens for one proof
   check) and the provider limits how much an account generates per second, so it,
-  not the number of calls, sets how long a review takes. Measured with DS4 on a
-  3,100-line paper: Low 2.5 minutes, Medium 4, High 15–18. Medium is a fast
-  screen: without reasoning its checks find about half of what High finds and
-  raise more false alarms, and it can miss an error that breaks a main result;
-  use High for a report you would rely on. The review does not
+  not the number of calls, sets how long a review takes: about a quarter of an
+  hour with DS4 for a 3,100-line paper. The review does not list typos: its
+  report ends by saying so and naming the typo check, which you can start at the
+  same time on the same file. The review does not
   search the literature: it names the closest works the paper cites and suggests
   a literature review (`@literature …`), which the Assistant can start.
+- **Typo check** (`@typo_check`): the typos and presentation problems of a
+  manuscript, and nothing else. The paper is proofread in parts of about 220
+  lines (each call with the whole paper in view) for typos, misprinted formulas,
+  undefined symbols, wrong cross-references and unclear sentences; every
+  suggested correction is then checked against the paper (a formula change with
+  its computation; names and bibliography entries are never "corrected"). No
+  proof is checked and there is no recommendation. About 16 calls and 2.5
+  minutes with DS4 for a 3,000-line paper.
 
   How it works. The code maps the paper: its statements and proofs (theorem
   numbers come from your `.sty` and, when present, the `.aux` file), proofs that
@@ -878,7 +884,7 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   Theorem 1.2"), and which result uses which. A first call writes the overview,
   names the main results (those proved only in an appendix stay main) and locates
   the proofs the map missed. Then all the calls run in one pool, the main results
-  and what they use first: a reading for typos and presentation, a check of each
+  and what they use first: a check of each
   proof (a long proof line by line in parts, with the whole paper in view), and
   reads across the paper for inconsistent constants or conventions, claims never
   established and cited results applied outside their hypotheses. Each check
@@ -896,9 +902,7 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   Minor findings that got no second opinion are checked against the paper, twenty
   per call: a finding the paper does not support leaves the report, and so does a
   finding whose quoted words are not in the paper (the scope at the end of the
-  report counts both; the saved job keeps them). Typo corrections are checked against the paper (a formula
-  change with its computation; names and bibliography entries are never
-  "corrected").
+  report counts both; the saved job keeps them).
 
   The report is **rewritten after every call**: within minutes it shows the
   overview, the first findings and the main-results table, then a first prose
@@ -907,13 +911,14 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   issue, affected by a comment and where it comes from, open, or not checked), an
   assessment, numbered major and minor comments (assembled by the code from the
   findings: the prose cannot add, drop or renumber one; the same problem found
-  twice is one comment), questions to the authors, typos grouped by kind, a
+  twice is one comment), questions to the authors, a
   recommendation and a confidential note to the editor. A major comment upheld
   after a defence of the paper rules out "accept" and "minor revision"; the
   recommendation is provisional while a main result rests on an unchecked proof or
   an open point. With a small local context the paper is read in parts and each
-  check sees one proof with the statements and equations it cites; the sweeps
-  across the paper need a large context (DS4). On DS4 a Medium review of a
+  check sees one proof with the statements and equations it cites (what that
+  reading notices about the writing is listed in the report); the sweeps
+  across the paper need a large context (DS4). On DS4 a review of a
   3,000-line paper makes several dozen calls, each reading the whole paper; how
   long it takes depends on how many run at once (the model-request limit in
   Settings, up to 16; with DS4, set it to 16 for reviews).
@@ -926,8 +931,10 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   or say "explain this page" for a short attachment. When the text states a result
   in prose or proves it elsewhere, the model locates the lines first.
 
-Reviews saved before the review and the detailed review became one stay readable;
-resuming one continues it as a review.
+Saved reviews stay readable whatever their age. Resuming one saved at Low effort
+continues it as a typo check; one saved at Medium or High, or before the review
+and the detailed review became one, continues as the review (it no longer reads
+for typos, and keeps the remarks it had).
 
 To discuss a completed report, select `@referee` again and explain which comments
 you dispute. When the target is unambiguous, the follow-up reuses the reviewed
@@ -1377,9 +1384,10 @@ described above for Proof and the other modes.
 | High | 5 | 30 min | 80 |
 
 Each skill translates the level into its own terms. For a proof, it is the number
-of attempts. For a quick review, the number of verifier passes. For a detailed
-review, how far down the dependencies the checks go (Low: the main results only;
-High: deeper dependencies), with twice the working time. There
+of attempts. For a quick review, the number of verifier passes. A review and a
+typo check have no effort to choose: the review always runs with the allowance
+of High, the typo check with that of Low, and a review gets twice the working
+time on a local model. There
 is no fixed token allowance for the original profiles unless one was supplied
 explicitly, but every model call is still limited by the model's context. A
 paused job resumes with what is left; it never gets a new allowance silently.

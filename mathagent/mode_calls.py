@@ -12,7 +12,7 @@ from .backends import MeasuredStreamCancellation
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
-from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS
+from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, effort_for
 from .source_tasks import access_check_source, automatic_source_action, _instruction_text
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
@@ -565,7 +565,7 @@ class ModeOrchestrator(Orchestrator):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         if self.required_mode is not None:
             action = {'mode': self.required_mode, 'request': query, 'files': list(files),
-                      'effort': self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium'),
+                      'effort': effort_for(self.required_mode, self.required_effort or 'medium'),
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
         elif compile_job:
             action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'low',
@@ -613,7 +613,7 @@ class ModeOrchestrator(Orchestrator):
         # An explicitly selected review is shown as written, so its comment numbers are those of
         # the saved report that a later dispute refers to.
         mode = self.state.get('required_mode')
-        if mode in ('referee', 'detailed_review'):
+        if mode in ('referee', 'detailed_review', 'typo_check'):
             child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
             if child is not None and child['status'] == 'complete':
                 answer = (child.get('result') or {}).get('answer')

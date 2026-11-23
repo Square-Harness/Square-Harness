@@ -8,7 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mathagent.agent import Agent
-from mathagent.review import PaperReviewRunner
+from mathagent.research import _read_state
+from mathagent.review import PaperReviewRunner, TypoCheckRunner, runner_for_state, variant_for_state
+from mathagent.ledger import _atomic_write
 from mathagent.tools import Workspace
 from tests.test_research import FakeClient
 
@@ -165,6 +167,84 @@ class FewerFalseAlarmsTests(ReviewCase):
         runner, result = self.run_review({'check': self.checks(found), 'minor-check': {'items': []}})
         self.assertEqual({tuple(entry) for entry in runner.state['minor_checks'].values()}, {('failed',)})
         self.assertEqual(len(runner.state['ledger']), 2)
+
+
+class ScriptedTypos(Scripted, TypoCheckRunner):
+    pass
+
+
+TYPO = {'start_line': 20, 'end_line': 20, 'quote': BASE_CASE, 'check': 'Read.', 'is_problem': True, 'kind': 'clarity',
+        'importance': 'suggestion', 'comment': 'Say why the base case holds.', 'suggestion': 'Since $a_1 = 1$.'}
+
+
+class ModesTests(ReviewCase):
+    def test_review_does_not_read_for_typos_and_names_the_typo_check(self):
+        runner, result = self.run_review({})
+        self.assertEqual(self.roles('read') + self.roles('typo-check'), [])
+        self.assertEqual((runner.state['level'], runner.state['pipeline'], result['status']), ('high', 'review-v2', 'reviewed'))
+        shown = result['report'].rstrip().splitlines()[-1]
+        self.assertIn('Typos and presentation were not checked', shown)
+        self.assertIn('`@typo_check`', shown)
+        self.assertNotIn('## Typos and presentation', result['report'])
+        # The second pass on the main result reasons; the first pass and the defence do not (the High of old).
+        think = {call['key']: call['think'] for call in self.roles('check')}
+        main = self.unit('thm:main')
+        self.assertEqual((think[main + '#0'], think[main + '#1']), (False, True))
+
+    def test_typo_check_reads_and_checks_its_remarks_only(self):
+        runner = self.runner({'read': {'summary': 'The paper.', 'comments': [TYPO]},
+                              'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}]}}, ScriptedTypos)
+        result = runner.start('Check the typos.', source_files=['paper.tex'], max_rounds=5)
+        self.assertEqual({call['role'] for call in runner.asked}, {'read', 'typo-check'})
+        self.assertEqual((runner.state['level'], runner.state['pipeline'], runner.state['settings']['max_rounds']),
+                         ('low', 'typo-check-v1', 1))
+        self.assertEqual(result['status'], 'reviewed')
+        self.assertTrue(result['report'].startswith('# Typos and presentation'))
+        self.assertIn('Say why the base case holds.', result['report'])
+        self.assertIn('The proofs were not checked', result['report'])
+
+    def saved(self, cls, script, **fields):
+        """A job interrupted at its first call, then rewritten as a review saved before the modes changed."""
+        def stop(key, prompt):
+            raise KeyboardInterrupt
+        first = 'read' if cls is ScriptedTypos else 'scope'
+        runner = self.runner({first: stop}, cls)
+        paused = runner.start('Review this paper.', source_files=['paper.tex'])
+        self.assertEqual(paused['status'], 'paused')
+        state = _read_state(runner.directory, paused['id'])
+        state.update(pipeline='review-v2', variant='review', **fields)
+        _atomic_write(runner.directory / 'state.json', __import__('json').dumps(state).encode())
+        return paused['id'], state
+
+    def resumed(self, job_id, state, script, cls=None):
+        base = cls or runner_for_state(state)
+        runner = self.runner(script, type('Resumed', (Scripted, base), {}))
+        return runner, runner.resume(job_id)
+
+    def test_saved_low_review_resumes_as_a_typo_check(self):
+        script = {'read': {'summary': 'The paper.', 'comments': [TYPO]},
+                  'typo-check': {'items': [{'id': 'R1', 'check': 'Read.', 'keep': True}]}}
+        for cls in (None, PaperReviewRunner):  # by its saved state, and as the saved child of a chat's review card
+            job_id, state = self.saved(ScriptedTypos, {}, level='low')
+            self.assertEqual(variant_for_state(state), 'typos')
+            self.assertIs(runner_for_state(state), TypoCheckRunner)
+            runner, result = self.resumed(job_id, state, script, cls)
+            self.assertEqual({call['role'] for call in runner.asked}, {'read', 'typo-check'})
+            self.assertEqual(result['status'], 'reviewed')
+            self.assertTrue(result['report'].startswith('# Typos and presentation'))
+
+    def test_saved_medium_and_high_reviews_resume_as_the_review(self):
+        for level in ('medium', 'high'):
+            # Such a review had planned to read the paper for typos; the resumed review does not.
+            job_id, state = self.saved(Scripted, {}, level=level, read_parts=[[1, 22]])
+            self.assertIs(runner_for_state(state), PaperReviewRunner)
+            runner, result = self.resumed(job_id, state, {})
+            roles = {call['role'] for call in runner.asked}
+            self.assertEqual(roles & {'read', 'typo-check'}, set())
+            self.assertLessEqual({'scope', 'check', 'citations', 'write'}, roles)
+            self.assertTrue(any(call['think'] for call in self.roles('check')))
+            self.assertEqual(result['status'], 'reviewed')
+            self.assertTrue(result['report'].startswith('# Referee report'))
 
 
 if __name__ == '__main__':

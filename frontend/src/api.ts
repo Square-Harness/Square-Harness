@@ -378,8 +378,8 @@ export type ResearchListItem = {
   verdict?: string | null
 }
 
-/** The four kinds of review behind the Review notebook (engine kind 'referee'). */
-export type ReviewVariant = 'quick' | 'review' | 'journal' | 'explain'
+/** The kinds of review behind the Review notebook (engine kind 'referee'); 'journal' is the former detailed review. */
+export type ReviewVariant = 'quick' | 'review' | 'journal' | 'typos' | 'explain'
 
 export type WriteupSection = { title: string; sources: string[]; goal: string; latex: string; complete: boolean; truncated: boolean }
 // The outline call's plan, as the controller settled it (writeup.WriteupRunner._settle_outline).
@@ -521,7 +521,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'investigate' | 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
+export type RouteMode = 'investigate' | 'prove' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'typo_check' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 
 export type TranscriptItem = AgentOrigin & {

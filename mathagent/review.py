@@ -40,16 +40,17 @@ from .model_limits import input_limit, is_ds4, output_limit, substantive_output
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
 
-# 'review' is the referee report on a whole paper: a typo check at Low, every proof checked from Medium.
-VARIANTS = ('quick', 'review', 'explain')
-PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v2', 'explain': 'explain-v1'}
+# 'review' is the referee report on a whole paper (every proof checked, one depth, no effort to choose); 'typos' is
+# the typo check, the paper read for typos and presentation only.
+VARIANTS = ('quick', 'review', 'typos', 'explain')
+PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v2', 'typos': 'typo-check-v1', 'explain': 'explain-v1'}
 # Saved jobs of the retired split between a review (overview and typos) and a detailed review (also the proofs):
 # both are read, and resumed, as one review.
 LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
-SKILLS = {'quick': 'review-quick', 'review': 'review', 'explain': 'explain'}
-TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'explain': 'Explanation'}
-MANUSCRIPT_VARIANTS = ('review',)  # it needs a pinned manuscript
-LEVELS = ('low', 'medium', 'high')
+SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
+TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
+MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
+LEVELS = ('low', 'medium', 'high')  # of a quick check and an explanation; a review and a typo check have none
 
 
 def full_review_requested(query):
@@ -70,22 +71,17 @@ def full_review_requested(query):
                      r'\b(?:relis|relire)\s+(?:tout\s+)?(?:le\s+|cet\s+|ce\s+|l.)?(?:article|papier|manuscrit)\b', clause):
             return True
     return False
-# Per effort: verifier passes of a quick check; for a paper review, whether the proofs are checked at all (Low reads
-# the paper for typos and presentation only), then how deeply (from Medium, every proof is checked): passes on the
-# main results and the results they use and on the others, the
-# sweeps across the paper, which findings get a second opinion and how many, whether a repair that would make a
-# major finding minor is checked, whether the typo list is checked, cited results looked up in their source and
-# literature queries; explanation extras. Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
+# Per effort, for a quick check and an explanation: verifier passes and whether alleged errors are re-checked;
+# explanation extras. Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
 EFFORT = {
-    'low': dict(passes=1, confirm=False, proofs=False, main_passes=1, other_passes=1, depth=0, think=False, sweeps=(),
-                adjudicate='major', adjudications=0, repair=False, typos=True, explain_check=False, fills=1),
-    'medium': dict(passes=2, confirm=True, proofs=True, main_passes=2, other_passes=1, depth=0, think=False,
-                   sweeps=('consistency', 'completeness'), adjudicate='major', adjudications=10, repair=True, typos=True,
-                   explain_check=True, fills=1),
-    'high': dict(passes=3, confirm=True, proofs=True, main_passes=2, other_passes=1, depth=1, think=True,
-                 sweeps=('consistency', 'completeness'), adjudicate='near', adjudications=16, repair=True, typos=True,
-                 explain_check=True, fills=2),
+    'low': dict(passes=1, confirm=False, explain_check=False, fills=1),
+    'medium': dict(passes=2, confirm=True, explain_check=True, fills=1),
+    'high': dict(passes=3, confirm=True, explain_check=True, fills=2),
 }
+# The one depth of a paper review (the High of the retired Low/Medium/High): passes on the main results and what
+# they use directly (depth 1) and on the other proofs, the sweeps across the paper, and how many findings get a
+# second opinion. A saved Medium or High review resumes at this depth; a saved Low review resumes as a typo check.
+PAPER = dict(main_passes=2, other_passes=1, depth=1, sweeps=('consistency', 'completeness'), adjudications=16)
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
 # Explain: the part of a text a request names when it names no numbered result.
 PAGE_REQUEST = re.compile(r'\b(?:pages?|p\.|pp\.)\s*(\d{1,4})(?:\s*(?:-|–|—|to|à|and|et)\s*(\d{1,4}))?\b', re.I)
@@ -121,6 +117,8 @@ PART_LINES = 110
 DIRECT_CAP = 32_768
 READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
 TYPO_BATCH = 40  # remarks checked against the paper per call
+TYPOS_NOT_CHECKED = ('*Typos and presentation were not checked by this review. For those, run a typo check on the same '
+                     'file: `@typo_check`.*')
 MINOR_BATCH = 20  # minor findings without a second opinion checked against the paper per call
 
 
@@ -145,20 +143,23 @@ _NOT_A_PROBLEM = re.compile(r'(?i)(?:(?:^|[.;:]\s*)|\b(?:is|are|looks|seems)\s+)
 
 
 def level_for(rounds):
-    """The effort level for a new review (Low 1, Medium 3, High 5 or more)."""
+    """The effort level of a new quick check or explanation (Low 1, Medium 3, High 5 or more)."""
     rounds = int(rounds)
     return 'low' if rounds <= 1 else 'medium' if rounds <= 3 else 'high'
 
 
 def runner_class(variant):
     """The runner of a review kind; 'journal' (the retired detailed review) is the review."""
-    return {'quick': QuickReviewRunner, 'review': PaperReviewRunner, 'journal': PaperReviewRunner, 'explain': ExplainRunner}[variant]
+    return {'quick': QuickReviewRunner, 'review': PaperReviewRunner, 'journal': PaperReviewRunner,
+            'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
 
 
 def variant_for_state(state):
-    """quick, review or explain for a saved review job; None for older referee jobs."""
-    return next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
-                LEGACY_PIPELINES.get(state.get('pipeline')))
+    """quick, review, typos or explain for a saved review job; None for older referee jobs. A review saved at Low
+    effort, when the typo check was the review's lowest effort, is a typo check."""
+    variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
+                   LEGACY_PIPELINES.get(state.get('pipeline')))
+    return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
 
 def runner_for_state(state):
@@ -1441,7 +1442,7 @@ class ReviewBase(ResearchRunner):
         if notes:
             tail += ['## Limits of this review', ''] + ['- ' + n for n in notes] + ['']
         tail += appendix + ['', '## Usage', '',
-                            f'Status: `{s["status"]}`. Phase: `{s["phase"]}`. Effort: {s.get("level")}. Job ID: `{s["id"]}`.', '',
+                            f'Status: `{s["status"]}`. Phase: `{s["phase"]}`.{self._effort_note()} Job ID: `{s["id"]}`.', '',
                             self._usage(), '',
                             'state.json keeps the pinned source, the map, every check and re-check; artifacts/ keeps each request and streamed answer.']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(head + body + tail)))
@@ -1450,6 +1451,9 @@ class ReviewBase(ResearchRunner):
 
     def _report_title(self):
         return TITLES[self.VARIANT]
+
+    def _effort_note(self):
+        return f' Effort: {self.state.get("level")}.'
 
     def _report(self):
         with self._mutex:  # running jobs change the state; render and save one consistent snapshot
@@ -2065,14 +2069,16 @@ class ExplainRunner(ReviewBase):
 
 
 class PaperReviewRunner(ReviewBase):
-    """The referee report on a manuscript, in one workflow whatever the effort: understand the paper, check every
-    proof (appendices included) with the whole paper in view, sweep the paper for what no single proof shows, give
-    every objection a second opinion (a defence of the paper, then a judge), and write the report from the findings
-    as they come. Effort sets the depth of each check (passes, second opinions, repairs checked), never what is
-    checked. One continuous pool runs the calls: a finding is judged as soon as its proof is checked, and the report
-    is rewritten after every call."""
+    """The referee report on a manuscript, at one depth: understand the paper, check every proof (appendices
+    included) with the whole paper in view, sweep the paper for what no single proof shows, give every objection a
+    second opinion (a defence of the paper, then a judge), and write the report from the findings as they come.
+    One continuous pool runs the calls: a finding is judged as soon as its proof is checked, and the report is
+    rewritten after every call. It does not read for typos: that is the typo check (TypoCheckRunner), which shares
+    this class's reading and report code. A job whose saved level is 'low' is a typo check whatever class resumes
+    it (reviews saved when Low was the review's typo-only effort)."""
     VARIANT = 'review'
     PIPELINE = PIPELINES['review']
+    LEVEL, ROUNDS = 'high', 5  # the rounds name the budget of that level (research.start, gui/effort.py)
     DROP_UNLOCATED = True
 
     def start(self, goal, *, review_reference=None, **kwargs):
@@ -2091,6 +2097,7 @@ class PaperReviewRunner(ReviewBase):
             if kwargs.get('source_files'):
                 raise WorkerInputError('Choose either a new manuscript or the saved review manuscript.', code='ambiguous_source')
             self._review_reference = reference
+        kwargs['max_rounds'] = self.ROUNDS  # one depth: the caller chooses no effort
         self._prepare(goal, kwargs)
         return super().start(goal, **kwargs)
 
@@ -2102,7 +2109,7 @@ class PaperReviewRunner(ReviewBase):
         return [reference['source']] if reference else super()._extra_sources()
 
     def _extra_state(self):
-        state = {**super()._extra_state(), 'scope': None, 'plan_units': [], 'unchecked': [],
+        state = {**super()._extra_state(), 'level': self.LEVEL, 'scope': None, 'plan_units': [], 'unchecked': [],
                  'presentation': [], 'write': None, 'reading': {},
                  'read_parts': [], 'citations': [], 'merged': None, 'adjudications': {}, 'typo_check': None,
                  'packages': [], 'located': [], 'ledger': [], 'minor_checks': {}}
@@ -2115,6 +2122,23 @@ class PaperReviewRunner(ReviewBase):
     def _followup_mode(self):
         return bool((self.state.get('review_reference') or {}).get('followup'))
 
+    @property
+    def typos_only(self):
+        return self.state.get('level') == 'low'
+
+    @property
+    def effort(self):
+        return PAPER
+
+    def _effort_note(self):
+        return ''
+
+    def _reads(self):
+        """The parts read for typos and presentation. A typo check reads the whole paper. A review does not, except
+        with a small local context, where the overview is written from the reading notes; the parts a saved review
+        had planned with the whole paper in view are no longer read."""
+        return (self.state.get('read_parts') or []) if self.typos_only or not self.state.get('whole') else []
+
     def _progress(self):
         s = self.state
         if self._followup_mode():
@@ -2124,9 +2148,10 @@ class PaperReviewRunner(ReviewBase):
                     'resumable': s['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
         items = [p for parts in s.get('check_plan', {}).values() for p in parts]
         done = sum(bool(s.get('checks', {}).get(p['key'], {}).get('usable')) for p in items)
-        reads = s.get('read_parts') or []
+        reads = self._reads()
         done += sum(self._reading_usable(f'L{a}') for a, _ in reads)
-        return {'phase': s['phase'], 'completed': done, 'total': len(items) + len(reads), 'unit': 'reading and proof checks',
+        unit = 'reading parts' if self.typos_only else 'reading and proof checks' if reads else 'proof checks'
+        return {'phase': s['phase'], 'completed': done, 'total': len(items) + len(reads), 'unit': unit,
                 'scope': s['goal'], 'partial': s['status'] in ('partial', 'error', 'budget_exhausted'),
                 'resumable': s['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
 
@@ -2205,15 +2230,15 @@ class PaperReviewRunner(ReviewBase):
         return chain
 
     def _deep(self, pass_index=0):
-        """Whether a call reasons before it answers. Hidden reasoning is most of a review's output (15-30k tokens a
-        proof check), and the provider's throughput per account, not the number of calls at once, sets how long a
-        review takes: every call answers at once, except at High the second pass on the main results and what they
-        use directly, and the second opinions."""
-        return bool(self.effort.get('think')) and pass_index >= 1
+        """Whether a proof check reasons before it answers. Hidden reasoning is most of a review's output (15-30k
+        tokens a proof check), and the provider's throughput per account, not the number of calls at once, sets how
+        long a review takes: the first pass answers at once, the second pass on the main results and what they use
+        directly reasons (and so do the judge and the repair check)."""
+        return pass_index >= 1
 
     def _near_chain(self):
-        """The results that get the effort's extra passes: the main results and, at Medium, what they use directly
-        (the whole chain of a paper often covers nearly every proof)."""
+        """The results that get the extra pass: the main results and what they use directly (the whole chain of a
+        paper often covers nearly every proof)."""
         return self._main_chain(self.effort.get('depth'))
 
     def _host(self, cluster):
@@ -2330,8 +2355,8 @@ class PaperReviewRunner(ReviewBase):
                            f'{", ".join(others)} {"was" if len(others) == 1 else "were"} not read.')
             if not manuscript.checkable(self.state['map']):
                 self._warn('No proofs were recognised in the manuscript map; the overview may locate them.')
-            self.state['read_parts'] = self._read_parts()
-            if self.effort['proofs']:
+            self.state['read_parts'] = self._read_parts() if self.typos_only or not self.state.get('whole') else []
+            if not self.typos_only:
                 self._plan_units()
             self.state['phase'] = 'audit'
         elif phase in ('audit', 'read', 'scope', 'check', 'confirm', 'literature', 'presentation'):
@@ -2339,7 +2364,7 @@ class PaperReviewRunner(ReviewBase):
             self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
             self.state['phase'] = 'write'
         elif phase == 'write':
-            if self.effort['proofs']:  # Low lists typos only: no comments to merge, no referee prose
+            if not self.typos_only:  # a typo check has no comments to merge and no referee prose
                 self._merge()
                 self._write()
             self.state['phase'] = 'done'
@@ -2432,14 +2457,14 @@ class PaperReviewRunner(ReviewBase):
 
     def _audit_jobs(self):
         """Every call that can run now, with its priority (lower first): the overview, the main results and what
-        they use, the reading, then the other proofs, the sweeps, second opinions and the literature."""
+        they use, then the other proofs, the sweeps and the second opinions. A typo check only reads."""
         s = self.state
         whole, effort = bool(s.get('whole')), self.effort
-        reads = s.get('read_parts') or []
+        reads = self._reads()
         sid = s['sources'][0]['id']
         pdf = self._source(sid)['path'].lower().endswith('.pdf')
-        if not effort['proofs']:
-            # Low: the paper is read for typos and presentation, and the list is checked against the paper.
+        if self.typos_only:
+            # The paper is read for typos and presentation, and the list is checked against the paper.
             jobs = [(1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)) for a, b in reads if not self._reading_usable(f'L{a}')]
             return jobs + (self._typo_jobs(2) if whole else [])
         chain = self._main_chain()
@@ -2469,8 +2494,6 @@ class PaperReviewRunner(ReviewBase):
         jobs += self._adjudication_jobs(chain)
         if whole:
             jobs += self._minor_check_jobs(7)  # after the second opinions: a finding they take is not checked twice
-        if whole and effort['typos']:
-            jobs += self._typo_jobs(6)
         if s.get('write') is None and scope_done and self._chain_settled(self._near_chain()):
             jobs.append((2, 'write:draft', lambda: self._write(draft=True)))
         return jobs
@@ -2876,11 +2899,9 @@ class PaperReviewRunner(ReviewBase):
     # -- second opinions -----------------------------------------------------------------------------------
 
     def _eligible(self, cluster):
-        """Findings that get a second opinion: those alleged major; at High also the gaps in the main results and what
-        they use directly (a checker can call a broken step a gap: the judge applies the new-ingredient rule)."""
-        rule = self.effort['adjudicate']
-        return (rule == 'all' or cluster['effect'] in P.MAJOR_EFFECTS or (rule == 'substantive' and cluster['effect'] == 'gap')
-                or (rule == 'near' and cluster['effect'] == 'gap' and self._host(cluster) in self._near_chain()))
+        """Findings that get a second opinion: those alleged major, and the gaps in the main results and what they
+        use directly (a checker can call a broken step a gap: the judge applies the new-ingredient rule)."""
+        return cluster['effect'] in P.MAJOR_EFFECTS or (cluster['effect'] == 'gap' and self._host(cluster) in self._near_chain())
 
     def _adjudication_jobs(self, chain):
         """Second opinions on the findings of every proof (or sweep) whose checks are complete: a defence of the
@@ -2987,7 +3008,7 @@ class PaperReviewRunner(ReviewBase):
             elif step == 'repair':
                 prompt += f'\nTHE PROPOSED REPAIR (it would make the effect {adjudication["repair_wanted"]["effect"]}):\n{adjudication["repair_wanted"]["repair"]}\n'
             # The defence answers at once; the judge and the repair check, which decide severity, reason first.
-            think = bool(self.effort.get('think')) and step != 'defend'
+            think = step != 'defend'
             result = self._judge(role, prompt, cap=self._call_cap(think, self._confirm_cap()), schema=schema,
                                  key=f'{step}:{key}', reason=think)
             value = result['value']
@@ -3038,8 +3059,6 @@ class PaperReviewRunner(ReviewBase):
         if verdict == 'valid' and alleged in P.MAJOR_EFFECTS and effect not in P.MAJOR_EFFECTS:
             if not repair.strip():
                 effect, note = alleged, 'Kept major: the judgement that it is minor came without a repair.'
-            elif not self.effort['repair']:
-                effect, note = alleged, 'Kept major: the repair that would make it minor was not checked at this effort.'
             else:
                 check = adjudication.get('repair_check')
                 if check is None:
@@ -3134,7 +3153,7 @@ class PaperReviewRunner(ReviewBase):
         is worse than none."""
         s = self.state
         waiting = [i for i, c in enumerate(s['presentation']) if not ({'checked', 'check_pending', 'check_failed'} & set(c))]
-        reading_over = all(f'L{a}' in s['reading'] for a, _ in s.get('read_parts') or [])
+        reading_over = all(f'L{a}' in s['reading'] for a, _ in self._reads())
         jobs = []
         while waiting and (len(waiting) >= TYPO_BATCH or reading_over):
             batch, waiting = waiting[:TYPO_BATCH], waiting[TYPO_BATCH:]
@@ -3143,21 +3162,15 @@ class PaperReviewRunner(ReviewBase):
             jobs.append((priority, f'typo-check:{batch[0]}', self._typo_check_job(batch)))
         return jobs
 
-    def _formula_remark(self, comment):
-        """A remark that changes mathematics (a formula, a constant, a sign), as opposed to the language."""
-        return comment.get('importance') == 'error' or bool(re.search(r'[$\\^_]', comment.get('suggestion') or ''))
-
     def _typo_check_job(self, batch):
         def run():
             items = [(i, self.state['presentation'][i]) for i in batch]
             rows = [f'R{n} (lines {c["start_line"]}-{c["end_line"]}, {c["kind"]}): "{c["quote"]}" — {c["comment"]}'
                     + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
             self.emit('notice', f'Checking {len(rows)} typo and presentation remarks against the paper')
-            # At High a batch with corrections to formulas reasons first: unchecked, four in ten were wrong.
-            deep = bool(self.effort.get('think')) and any(self._formula_remark(c) for _, c in items)
             result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
-                                 cap=self._call_cap(deep), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
-                                 reason=deep)
+                                 cap=self._call_cap(False), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
+                                 reason=False)
             value = result['value']
             with self._mutex:
                 verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
@@ -3241,7 +3254,7 @@ class PaperReviewRunner(ReviewBase):
                 and entry.get('complete', True))
 
     def _unread_parts(self):
-        return [r for r in self.state.get('read_parts') or [] if not self._reading_usable(f'L{r[0]}')]
+        return [r for r in self._reads() if not self._reading_usable(f'L{r[0]}')]
 
     def _warn_reading_gaps(self):
         reading = self.state.get('reading', {})
@@ -3574,7 +3587,8 @@ class PaperReviewRunner(ReviewBase):
                                    'status': c['status'], 'issue': _clip(c['evidence'], 600)} for c in major],
                         'minor': [{'label': c['label'], 'where': c['unit_name'], 'issue': _clip(c['evidence'], 300)} for c in minor],
                         'questions_to_the_authors': len(questions),
-                        'typos_and_presentation_comments': kinds,
+                        'typos_and_presentation_comments': kinds if self._reads() or kinds else
+                        'not checked by this review: a separate typo check does that',
                         'parts_not_read': len(self._unread_parts()),
                         'cited_results_compared_with_the_literature': {
                             a: sum(r['assessment'] == a for r in citations) for a in ('consistent', 'misapplied', 'misstated', 'unknown')},
@@ -3628,7 +3642,7 @@ class PaperReviewRunner(ReviewBase):
         if self._followup_mode():
             return self.state.get('followup_usable', False)
         self._warn_reading_gaps()
-        if not self.effort['proofs']:
+        if self.typos_only:
             return not self._unread_parts() and (not self.state.get('whole') or all(c.get('checked') for c in self.state['presentation']))
         missing, no_proof = self._provisional()
         whole = self.state.get('whole')
@@ -3639,11 +3653,11 @@ class PaperReviewRunner(ReviewBase):
 
     def _at_a_glance(self, major, minor, questions, presentation):
         """The controller's own summary line: what was checked and what was found (no model prose)."""
-        lines = ['**' + self._proofs_scope() + ' (every proof is checked from Medium).**']
+        lines = ['**' + self._proofs_scope() + '.**']
         confirmed = sum(c['status'] == 'confirmed' for c in major)
         lines.append(f'Major comments: {len(major)}' + (f' ({confirmed} upheld after a defence of the paper)' if major else '')
                      + f'. Minor comments: {len(minor)}.' + (f' Questions to the authors: {len(questions)}.' if questions else '')
-                     + f' Typos and presentation: {len(presentation)}.')
+                     + (f' Typos and presentation: {len(presentation)}.' if presentation or self._reads() else ''))
         return ' '.join(lines)
 
     def _issue_lines(self, cluster, source_id, show_passes=True, unit=None):
@@ -3706,7 +3720,7 @@ class PaperReviewRunner(ReviewBase):
         s = self.state
         if not s.get('map'):
             return ['*The manuscript is not mapped yet.*'], []
-        if not self.effort['proofs']:
+        if self.typos_only:
             return self._render_typos()
         sid = s['sources'][0]['id']
         write = s.get('write') or {}
@@ -3715,7 +3729,7 @@ class PaperReviewRunner(ReviewBase):
         missing, no_proof = self._provisional()
         scope = s.get('scope') or {}
         unread = self._unread_parts()
-        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
         hidden = self._hidden_presentation()
         presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
         self._headline = self._at_a_glance(major, minor, questions, presentation)
@@ -3723,7 +3737,7 @@ class PaperReviewRunner(ReviewBase):
         if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
             progress = self._progress()
             pending = sum(1 for a in s['adjudications'].values() if not a.get('final'))
-            body += [f'*Draft in progress: {progress["completed"]} of {progress["total"]} reading and proof checks done'
+            body += [f'*Draft in progress: {progress["completed"]} of {progress["total"]} {progress["unit"]} done'
                      + (f', {pending} finding(s) awaiting a second opinion' if pending else '')
                      + '. This report is rewritten as each check finishes.*', '']
         body += ['## Summary', '', write.get('summary') or scope.get('overview') or scope.get('contribution') or '*Written once the paper is read.*', '']
@@ -3754,13 +3768,16 @@ class PaperReviewRunner(ReviewBase):
                               self._issue_lines(c, sid, show_passes=title != 'Questions to the authors', unit=unit), '   ')
             if not group:
                 body += [empty, '']
-        body += ['## Typos and presentation', '']
-        body += self._presentation_section(presentation, sid, unread, bool(read))
-        if self._source(sid)['path'].lower().endswith('.pdf'):
-            dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
-            body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
-                     f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
-                     'Review the TeX source for typos in formulas and notation.', '']
+        if presentation or self._reads():
+            # A review with a small local context reads the paper in parts and lists what the reading noticed; a
+            # review saved when it still read for typos keeps its list.
+            body += ['## Typos and presentation', '']
+            body += self._presentation_section(presentation, sid, unread, bool(read))
+            if self._source(sid)['path'].lower().endswith('.pdf'):
+                dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
+                body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
+                         f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
+                         'Review the TeX source for typos in formulas and notation.', '']
         recommendation = P.RECOMMENDATIONS.get(write.get('recommendation'), 'No recommendation yet' if s['phase'] != 'done' else 'No recommendation')
         gaps = []
         if missing:
@@ -3786,22 +3803,25 @@ class PaperReviewRunner(ReviewBase):
             body += ['', 'Provisional: ' + '; '.join(gaps) + '; see the scope below.']
         body += ['', write.get('reasons') or '']
         body += ['', '## Confidential comments to the editor', '', write.get('confidential') or '—']
-        return body, self._scope_appendix(verdicts, rejected, no_proof)
+        appendix = self._scope_appendix(verdicts, rejected, no_proof)
+        if not self._reads():
+            appendix += ['', TYPOS_NOT_CHECKED]  # the last line of the report as shown
+        return body, appendix
 
     def _report_title(self):
-        return TITLES[self.VARIANT] if self.effort['proofs'] or self._followup_mode() else 'Typos and presentation'
+        return TITLES['typos'] if self.typos_only and not self._followup_mode() else TITLES['review']
 
     def _render_typos(self):
-        """Low effort: what the paper is about, then its typos and presentation problems; no proof was checked."""
+        """The typo check's report: the paper part by part, then its typos and presentation problems."""
         s = self.state
         sid = s['sources'][0]['id']
         unread = self._unread_parts()
-        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
         hidden = self._hidden_presentation()
         presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
         typo = s.get('typo_check') or {}
         removed = f'; {typo["rejected"]} wrong or unnecessary correction(s) removed by a check against the paper' if typo.get('rejected') else ''
-        self._headline = (f'**Typos and presentation only (Low effort): {len(presentation)} remark(s){removed}. '
+        self._headline = (f'**Typo check: {len(presentation)} remark(s){removed}. '
                           'The proofs were not checked.**')
         body = []
         if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
@@ -3817,10 +3837,10 @@ class PaperReviewRunner(ReviewBase):
             body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
                      f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
                      'Review the TeX source for typos in formulas and notation.', '']
-        body += ['## What was checked', '', 'At Low effort the review reads the paper for typos and presentation only: '
-                 'its proofs were not checked, and it gives no recommendation. Choose Medium or High for a referee report '
-                 'that checks every proof.']
-        total = sum(b - a + 1 for a, b in s.get('read_parts') or [])
+        body += ['## What was checked', '', 'A typo check reads the paper for typos and presentation only: '
+                 'its proofs were not checked, and it gives no recommendation. Ask for a review (`@referee`) for a '
+                 'referee report that checks every proof.']
+        total = sum(b - a + 1 for a, b in self._reads())
         appendix = ['## Scope of this review', '', f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines '
                     'before the bibliography.' + (' Every remark was then checked against the whole paper.' if typo.get('checked') else '')]
         if s.get('packages'):
@@ -3865,11 +3885,11 @@ class PaperReviewRunner(ReviewBase):
         units = {u['id']: u for u in self._units()}
         checkable = [u for u in self._units() if u['proofs']]
         checked = [u for u in checkable if self._checks_complete(u['id'])]
-        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
-        total = sum(b - a + 1 for a, b in s.get('read_parts') or [])
-        appendix += [('The whole paper was read at once, and every check saw the whole manuscript. ' if s.get('whole') else '')
-                     + f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines before the bibliography'
-                     + ('' if s.get('whole') else f' ({len(read)} parts)') + '.', '']
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
+        total = sum(b - a + 1 for a, b in self._reads())
+        appendix += ['Every check saw the whole manuscript. The paper was not read for typos and presentation.' if s.get('whole') else
+                     f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines before the bibliography '
+                     f'({len(read)} parts).', '']
         chain = self._main_chain()
         appendix += [f'Proofs checked completely: {len(checked)} of {len(checkable)} found in the manuscript. The main results '
                      f'and the {max(0, len([u for u in chain if u in units and units[u]["proofs"]]) - len(self._main_ids()))} '
@@ -4049,8 +4069,22 @@ class PaperReviewRunner(ReviewBase):
                       'The original report is unchanged; no new full review or proof verification is claimed.']
 
 
+class TypoCheckRunner(PaperReviewRunner):
+    """The typo check: the paper proofread part by part (each call with the whole paper in view when it fits), and
+    every remark checked against the paper. No proof is checked and no recommendation is given."""
+    VARIANT = 'typos'
+    PIPELINE = PIPELINES['typos']
+    LEVEL, ROUNDS = 'low', 1
+
+    def start(self, goal, *, review_reference=None, **kwargs):
+        if review_reference is not None:
+            raise WorkerInputError('A reply to a previous review is a review, not a typo check.', code='invalid_worker_input')
+        return super().start(goal, **kwargs)
+
+
 def export_evidence(state):
-    """Save what the review checked. Neither a step check nor a referee report determines proof direction."""
+    """Save what the review checked. Neither a step check nor a referee report determines proof direction. A typo
+    check checks no mathematics and saves nothing here."""
     variant = variant_for_state(state)
     if variant not in ('quick', 'review') or state.get('pipeline') == 'review-v1':
         return []

@@ -1084,15 +1084,23 @@ at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus fram
 streamed characters plus 256), so retries do not drain allowances with
 full-context reservations. Proof gives every replacement a fresh dispatch key.
 
-The Review (`PaperReviewRunner`, pipeline `review-v2`) is a typo and presentation check
-at Low (`EFFORT['low']['proofs']` is false: the reading and the typo check, rendered by
-`_render_typos`) and checks every proof from Medium; `EFFORT` then sets the depth
-(passes on the main chain and elsewhere, sweeps, which findings get a second opinion,
-repair checks, lookups). Saved
+The Review (`PaperReviewRunner`, pipeline `review-v2`, mode `referee`) checks every
+proof at one depth, `review.PAPER` (passes on the main chain and elsewhere, sweeps, the
+number of second opinions): there is no effort to choose. The Typo check
+(`TypoCheckRunner`, a subclass; pipeline `typo-check-v1`, mode `typo_check`, skill
+`typo-check`) only reads the paper and checks its remarks (`_render_typos`). The saved
+`level` tells them apart, `high` or `low`, whatever class resumes the job
+(`typos_only`): a `review-v2` job saved at `low`, when the typo check was the review's
+lowest effort, resumes as a typo check (`variant_for_state` returns `typos`, and so
+does `store._variant` for the interface), one saved at `medium` or `high` as the
+review. `router.FIXED_EFFORT` (`effort_for`) gives both modes their level wherever an
+effort is read (the router's tasks, `_validate_delegate`, `gui/effort.py`,
+`frontend/src/review.ts`), and `PaperReviewRunner.start` sets `max_rounds` itself,
+since the rounds name the DS4 budget. Saved
 `review-v1` and `journal-v1` jobs (the retired Review / Detailed review split) are read
 as reviews (`LEGACY_PIPELINES`); resuming one migrates it (`resume`: earlier re-checks
 move to `legacy_confirms`, the phase becomes `audit`). `@detailed_review` and
-`/detailed_review` are aliases of `referee` at High (`router.OFFERED_MODES` leaves it
+`/detailed_review` are aliases of `referee` (`router.OFFERED_MODES` leaves it
 out of the schemas; `workers.REVIEW_MODES` maps it to the review).
 
 Phases: `plan` (map, reading parts, plan of all proofs), `audit`, `write`. The map
@@ -1103,13 +1111,13 @@ attaches section-long proofs (`manuscript._section_proofs`; the nested results a
 `_audit_jobs()` (under the mutex) for every call that can now run, with a priority:
 the scope call (overview, main results, and the inventory the map missed:
 `_apply_inventory` validates located proofs and results stated in prose), the
-reading, the checks of the main chain (`_main_chain`: the main results, the union of
+checks of the main chain (`_main_chain`: the main results, the union of
 the map's flags and the scope's choice restricted to provable statements, and every
 result their proofs use through `refs`), the citations comparison (`CITE`), the
 other checks, the sweeps (`SWEEP_UNITS`: consistency and completeness, pseudo-units
-like `CITE`), the typo check, the literature, and a first prose report
+like `CITE`), and a first prose report
 (`write:draft`) once the main chain is checked and judged. A check plan is pinned per
-unit (`_audit_plan`): one pass before the scope is known, then the effort's passes;
+unit (`_audit_plan`): one pass before the scope is known, then `PAPER`'s passes;
 a proof longer than `BLOCK_LINES` is checked line by line in parts (`_blocks`) and
 whole by the other lenses; a section-long proof is read whole with a note naming its
 nested results. With a large context (DS4, `state['whole']`) every call starts with
@@ -1117,13 +1125,17 @@ the same text, `_block()` (the numbered manuscript, its packages and the cited
 bibliography), so a provider that caches prompt prefixes reads it once; without it
 (small local contexts) the paper is read in section-following parts, the scope waits
 for the reading and the checks for the scope, and a check sees its proof with the
-statements and equations it cites (`P.AUDIT_PARTS_NOTE`).
+statements and equations it cites (`P.AUDIT_PARTS_NOTE`). `_reads()` is what a job
+reads for typos and presentation: everything for a typo check, the parts of a
+small-context review (whose overview is written from the reading notes), nothing for
+a review with the whole paper in view, including the parts a saved review had planned.
+Such a review's report ends with `TYPOS_NOT_CHECKED`, which names `@typo_check`.
 
 Checks answer `P.AUDIT_SCHEMA`: every problem, with an `effect` (`P.EFFECTS`);
 severity is derived (`P.MAJOR_EFFECTS` are major). Findings are clusters of the
 passes' issues (`_clusters`, which carry the gravest effect). As soon as a unit's
 checks are complete, its eligible findings get a second opinion
-(`_adjudication_jobs`, at most `EFFORT['adjudications']`, the main chain's major
+(`_adjudication_jobs`, at most `PAPER['adjudications']`, the main chain's major
 findings first): `defend` (the paper's advocate), `arbiter` (`_judged`: always for a
 finding alleged `statement_false` or `breaks_proof`, whatever the defence says, with
 `P.ARBITER_UNOPPOSED_NOTE` when the defence gave way; otherwise when the defence holds
@@ -1139,25 +1151,25 @@ main result one status; `state['ledger']` saves the numbered findings with the j
 call of the pool (`_report`), with a progress line while the job runs. The review
 does not search the literature: `_literature_section` names the works the overview
 found the paper presents as closest and suggests a literature review. Every review
-call carries the delegation context. Hidden reasoning is off for every call except, at
-High, the second pass on the near chain and the second opinions (`EFFORT['think']`,
-`_deep`): DS4 on DeepInfra generates about 550 tokens per second per account and a
+call carries the delegation context. Hidden reasoning is off for every call except
+the second pass on the near chain (`_deep`), the judge and the repair check: DS4 on
+DeepInfra generates about 550 tokens per second per account and a
 thinking proof check writes 15–30k tokens, so reasoning, not concurrency, sets the
-duration (a live Medium review with reasoning everywhere took 40–64 minutes; the
+duration (a live review with reasoning everywhere took 40–64 minutes; the
 "low" reasoning level made checks think longer, not shorter). On DS4 a review gets four times the
 input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
 `inference.MAX_CAPACITY` (16) concurrent calls (`Hub.review_concurrency`, within the
 model-request limit). Pool admission counts only the new call: running calls have
 already reserved their output and input in the job's counters. Extra passes go to
-`_near_chain()` (the main results, and at High what they use directly:
-`EFFORT['depth']`); the repair
+`_near_chain()` (the main results and what they use directly:
+`PAPER['depth']`); the repair
 check treats a fact the paper neither proves nor cites as a new ingredient. A minor
 finding without a second opinion is checked against the paper (`_minor_check_jobs`,
 role `minor-check`, `MINOR_BATCH` per call, no hidden reasoning, once every planned
 check of its proof has answered); the verdicts are in `state['minor_checks']` by
 cluster key, and `_settle` makes an unsupported one `rejected`. `_comments` leaves
 out those and every finding whose quote is not in the source (`located == 'no'`,
-`DROP_UNLOCATED`): they stay in `state['checks']`, and the scope appendix counts them. Reading in
+`DROP_UNLOCATED`): they stay in `state['checks']`, and the scope appendix counts them. A typo check's reading in
 whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with
 the whole paper in view; typo remarks are checked `TYPO_BATCH` per call
 (`_typo_jobs`).

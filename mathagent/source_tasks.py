@@ -13,6 +13,7 @@ import re
 import unicodedata
 
 from . import manuscript
+from .router import FIXED_EFFORT
 from .tools import pdf_page_label
 
 
@@ -164,8 +165,7 @@ def automatic_source_action(query, files=()):
     correctness = bool(re.match(r'^(?:is|are|est.ce que)\b', request_lead)
                        and re.search(r'\b(?:correct|valid|right|rigorous|correcte?|valide|rigoureuse?)\b', text))
     if source_article and ((review and not proof_word) or ((review or check) and all_proofs)):
-        detailed = bool(re.search(r'\b(?:detailed|thorough|detaillee?|approfondie?)\b', text))
-        return {'mode': 'referee', 'request': query, 'files': refs, 'effort': 'high' if detailed else 'medium',
+        return {'mode': 'referee', 'request': query, 'files': refs, 'effort': FIXED_EFFORT['referee'],
                 'reason': 'Review the supplied manuscript with the explicitly requested scope.'}
     if proof_word and (review or check or correctness) and _RESULT.search(text):
         return {'mode': 'quick_review', 'request': query, 'files': refs, 'effort': 'medium',

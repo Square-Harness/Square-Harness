@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The Review has one depth and no effort to choose (the former High); Medium is removed. The
+  typo check, formerly the review at Low, is its own skill: `@typo_check`, `/typo_check`, and
+  "Typo Check" in the New review form. The review no longer reads the paper for typos (a sixth
+  of its output on DS4): its report ends by saying so and naming `@typo_check`. Saved reviews
+  stay readable and resumable: one saved at Low resumes as a typo check, one saved at Medium
+  or High as the review. `@detailed_review` still works as the review.
 - Review, fewer false alarms: a finding said to make a statement false or a proof fail always
   goes to the reasoning judge, also when the defence of the paper gives way; minor findings
   that got no second opinion are checked against the paper, twenty per call, and those the

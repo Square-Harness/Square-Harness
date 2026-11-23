@@ -7,13 +7,14 @@ import type { EffortLevel } from './effort'
 
 /** The cover a mode call is drawn with: the review kinds share the Review cover; Explain has its own. */
 export const coverOf = (mode: RouteMode): Cover =>
-  mode === 'quick_review' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
+  mode === 'quick_review' || mode === 'detailed_review' || mode === 'typo_check' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
   { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },
   { mode: 'literature', label: 'Literature', summary: 'Survey a mathematical question through its main results, methods and sources.' },
   { mode: 'quick_review', label: 'Quick Review', summary: 'Check whether a given proof is correct: verdict and located issues.' },
-  { mode: 'referee', label: 'Review', summary: 'Referee a manuscript: every proof checked, typos and presentation, a recommendation.' },
+  { mode: 'referee', label: 'Review', summary: 'Referee a manuscript: every proof checked, second opinions, a recommendation.' },
+  { mode: 'typo_check', label: 'Typo Check', summary: 'List the typos and presentation problems of a manuscript, each correction checked.' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
   { mode: 'writeup', label: 'Write-Up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
   { mode: 'summarize', label: 'Summarize', summary: 'Summarize the important results obtained so far as a .tex file.' },

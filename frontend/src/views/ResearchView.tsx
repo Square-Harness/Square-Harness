@@ -14,7 +14,7 @@ import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, roleInfo, useJobClass, useLiveStream } from './shared'
-import { LEGACY_REVIEW_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
+import { FIXED_VARIANTS, LEGACY_REVIEW_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review: code searches and follows citations; the model screens the records,
@@ -132,7 +132,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
         <div className="job-facts">
           {data.sources.map((source) => <span key={source.id} className="fact-file">{source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
           {data.unit && <span>{data.unit}</span>}
-          {data.level && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
+          {data.level && !(data.variant && FIXED_VARIANTS.includes(data.variant)) && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
           <span>{String(data.settings.model)}</span>
           <span>{data.settings.online ? 'Online' : 'Offline'}</span>
           <span>Started {ago(data.created_at)}</span>
