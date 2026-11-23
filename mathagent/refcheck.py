@@ -473,7 +473,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             self.state['draft'] = self.state['answer']
             self.state['phase'] = 'done'
         elif phase == 'plan':  # the research runner's first phase
-            entries = bibcheck.parse_entries(self.state.get('bibliography_material') or self.state['goal'])
+            # Entry-by-entry registry checking is only for a reference list the user gave: an attached list, or a
+            # request that is itself a list. A check nested in a review or another check, or a question about
+            # what a cited work states, keeps the ordinary path that reads the cited place.
+            nested = (self.state.get('check') or {}).get('asker') is not None
+            material = self.state.get('bibliography_material') or ''
+            entries = ([] if nested else bibcheck.parse_entries(material) if material else
+                       bibcheck.parse_entries(self.state['goal']) if bibcheck.is_reference_list(self.state['goal']) else [])
             if entries:
                 self.state['bibliography_entries'] = entries
             self.state['phase'] = 'bibliography' if entries else 'recall'
@@ -734,14 +740,6 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if calls:
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
-        if self.literature is not None and not self.literature.online and not any(
-                e.get('candidate') == index and 'Offline mode' not in e['result'] and not e['result'].startswith('{"error"')
-                for e in s['evidence']):
-            # Web research is off and the cache holds nothing on this work: model rounds could only repeat cache misses.
-            c['verdict'] = self._gate(index, {})
-            self.emit('notice', f'Guess {index + 1}: nothing cached and web research is off')
-            self._next()
-            return
         # Each guess gets a fair share of web requests, so the first cannot starve the others.
         share = max(6, settings['max_requests'] // (len(s['candidates']) + int(s['check']['discover'])))
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']

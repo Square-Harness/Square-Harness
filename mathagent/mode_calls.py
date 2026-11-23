@@ -326,10 +326,6 @@ class ModeOrchestrator(Orchestrator):
             raise ValueError('Give the requested recap in the conversation from its saved findings.')
         if self._proof_pending() and mode and mode != 'prove':
             raise ValueError('Proof mode is required; prepare its task and delegate to prove')
-        decision = (self.state or {}).get('proof_routing') or {}
-        if (decision.get('status') == 'complete' and decision.get('route') == 'direct' and mode and mode != 'prove'
-                and not self.required_mode and not self.state.get('required_mode')):
-            raise ValueError('This request was judged answerable directly: answer it, or delegate prove for a nontrivial proof.')
         selected_proof = (self.required_mode == 'prove' or (self.state or {}).get('required_mode') == 'prove'
                           or (self.state or {}).get('proof_routing_required'))
         if selected_proof and mode == 'prove':
@@ -501,12 +497,6 @@ class ModeOrchestrator(Orchestrator):
                         modes = tool['function']['parameters']['properties']['mode']
                         modes['enum'] = list(dict.fromkeys([*([] if narrowed else modes['enum']), *modes_to_start]))
                 return super()._payload(tools, instruction=instruction)
-            if decision.get('route') == 'direct' and decision.get('status') == 'complete':
-                # The router judged this an ordinary question or a very elementary proof. Proof stays
-                # available for a misjudged statement; other workers, and their rules, stay out of the call.
-                for tool in tools:
-                    if tool['function']['name'] == 'delegate':
-                        tool['function']['parameters']['properties']['mode']['enum'] = ['prove']
             if self.state.get('access_check_source'):
                 return super()._payload(tools, instruction=(
                     'Answer the access question from the current read_file result. If text was extracted, identify '

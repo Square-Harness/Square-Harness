@@ -5536,7 +5536,11 @@ class WriteupRunner(ResearchRunner):
             line = error.get('line') or 0
             if error.get('file') == 'document.tex' and 0 < line < first and line <= len(lines):
                 text = lines[line - 1].strip()
-                if len(text) >= 4 and text in template:
+                template_lines = [t.strip() for t in template.split('\n')]
+                preamble = [t.strip() for t in lines[:first - 1]]
+                # Only a line the template itself has, and no more often than the template: a copy the writer added
+                # (a duplicate \newcommand, say) is the writer's, and a body repair can still fix it.
+                if len(text) >= 4 and 0 < preamble.count(text) <= template_lines.count(text):
                     return f'line {line} of its preamble ({_clip(text, 120)}) gives the error: {texcheck.plain_error(error["message"])}'
             if error.get('file') and error['file'] != 'document.tex' and Path(error['file']).suffix.lower() in ('.sty', '.cls'):
                 return f'its file {error["file"]} gives the error: {texcheck.plain_error(error["message"])}'

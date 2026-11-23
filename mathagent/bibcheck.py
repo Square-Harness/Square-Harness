@@ -126,6 +126,43 @@ def parse_entries(text):
     return entries[:MAX_ENTRIES] if len(entries) >= 2 else []
 
 
+_PLACE = re.compile(r'\b(?:theorem|lemma|proposition|corollary|definition|remark|example|section|chapter|page|pp?\.|'
+                    r'equation|eq\.|§|th[ée]or[èe]me|lemme|does|do|is|are|state|states|prove|proves|show|shows)\b|\?', re.I)
+
+
+def is_reference_list(text):
+    """Whether a text IS a reference list to check entry by entry, rather than a question that cites works.
+
+    It needs at least two BibTeX entries or three list items that parse as references, and the text around them
+    must be a short instruction that asks nothing about a place or a statement ("Check my references:"). A
+    question about what one cited work states keeps the ordinary check, which reads the cited place."""
+    text = str(text or '')
+    entries = parse_entries(text)
+    bibtex = bool(re.search(r'@\s*\w+\s*\{', text))
+    if len(entries) < (2 if bibtex else 3):
+        return False
+    rest, depth, inside = [], 0, False
+    for line in text.splitlines():
+        if bibtex:
+            if depth == 0 and re.match(r'\s*@\s*\w+\s*\{', line):
+                inside = True
+            if inside:
+                depth += line.count('{') - line.count('}')
+                if depth <= 0:
+                    inside, depth = False, 0
+                continue
+        elif re.match(r'\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)]|[-*•])\s+', line):
+            inside = True
+            continue
+        elif inside and line.strip() and line[:1] in (' ', '\t'):
+            continue  # an indented continuation of the item above
+        else:
+            inside = False
+        rest.append(line)
+    instruction = ' '.join(' '.join(rest).split())
+    return len(instruction) <= 300 and not _PLACE.search(instruction)
+
+
 def attached_material(workspace, files):
     """The text of the attached reference lists (.bib, else .txt/.md files whose items parse as references), for
     the bibliography check. Unreadable files are skipped: the check then works from the question."""
@@ -137,7 +174,7 @@ def attached_material(workspace, files):
             text = workspace.text(workspace.path(name))
         except (OSError, ValueError, UnicodeError):
             continue
-        if name.lower().endswith('.bib') or parse_entries(text):
+        if name.lower().endswith('.bib') or is_reference_list(text):
             parts.append(text)
     return '\n\n'.join(parts)[:200_000]
 

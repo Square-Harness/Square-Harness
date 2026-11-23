@@ -1015,10 +1015,9 @@ class ReviewBase(ResearchRunner):
         target = self.state.get('target') or ''
         goal = self.state['goal']
         quick = self.VARIANT == 'quick'
-        every = quick and not target and bool(ALL_UNITS_REQUEST.search(goal))
         unit = manuscript.resolve(mapping, target) if target else None
-        if unit is None and not self._is_pasted() and not every:
-            unit = manuscript.resolve(mapping, goal)
+        if unit is None and not self._is_pasted():
+            unit = manuscript.resolve(mapping, goal)  # a named result wins: "all the claims in the proof of Theorem 2"
         candidates = manuscript.checkable(mapping) if quick else mapping['units']
         if unit is None:
             if len(candidates) == 1:
@@ -1850,8 +1849,13 @@ class ExplainRunner(ReviewBase):
             known = next((s for s in mapping['sections'] if str(s['number']).upper() == label), None)
             if known is None:
                 top = label.split('.')[0]
-                if mapping['format'] == 'tex' and not any(str(s['number']).upper() == top for s in mapping['sections']):
-                    # TeX sections are numbered reliably: an absent one is reported without a model call.
+                text = '\n'.join(lines)
+                reliable = (mapping['sections'] and not re.search(
+                    r'\\(?:chapter|setcounter\s*\{\s*(?:section|chapter)|input|include|subfile|import)\b', text))
+                if (mapping['format'] == 'tex' and reliable
+                        and not any(str(s['number']).upper() == top for s in mapping['sections'])):
+                    # Plain numbered TeX sections: an absent one is reported without a model call. Chapters, reset
+                    # counters or unexpanded inputs make the map unreliable, so the model locates the part instead.
                     raise WorkerInputError(f'{source["path"]} has no {"Appendix" if top.isalpha() else "Section"} {top}; '
                                            f'it contains: {_contents(mapping)}. Say which part to explain.',
                                            code='target_not_found', details={'target': label})

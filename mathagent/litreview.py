@@ -568,7 +568,8 @@ _NOT_NAMES = frozenset('the a an this that these those survey review give write 
                        'what which who is are was were does do did how why when where recent main strong weak '
                        'generalized generalised extended fundamental central prime last great little big small local '
                        'global four three two first second third new old modern classical please can could i we my our '
-                       'abc on of in for and to its their'.split())
+                       'abc on of in for and to its their literature review reviews survey overview introduction '
+                       'recent results status'.split())
 
 
 def _clip_words(text, limit):
@@ -1919,7 +1920,9 @@ class ReviewRunner(ResearchRunner):
         for record in s.get('pool') or []:
             text = _fold(' '.join([str(record.get('title') or ''), str(record.get('abstract') or ''), str(record.get('review') or ''),
                                    ' '.join(str(a) for a in record.get('authors') or [])]))
-            if all(p.search(text) for p in patterns):
+            # Any one of the names found in a record is enough: the override is only for a named object none of
+            # whose names any retrieved work mentions ("Literature Review on Mean Curvature Flow" finds "mean").
+            if any(p.search(text) for p in patterns):
                 return None
         return phrase
 
