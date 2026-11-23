@@ -120,8 +120,7 @@ def check(key, prompt):
     if row.startswith('8'):
         return {'check': 'Line 7 gives the factor 2.', 'verdict': 'correction'}
     if row.startswith('9'):
-        # The first look (keys T…) lets it through; the reasoning check (keys C…) drops it.
-        return {'check': 'Line 9 is right by definition.', 'verdict': 'look' if key.startswith('T') else 'drop'}
+        return {'check': 'Line 9 is right by definition.', 'verdict': 'drop'}
     return {'check': 'Nothing defines $c_n$.', 'verdict': 'look'}
 
 
@@ -159,12 +158,11 @@ class Lanes(unittest.TestCase):
         self.assertEqual(result['status'], 'reviewed')
         report = result['report']
         keys = [call['key'] for call in runner.asked]
-        self.assertEqual(sorted(keys), sorted(['L2', 'N', 'W0:2', 'W1:2', 'V0', 'T0', 'T1', 'T2', 'C0', 'C1', 'C2']))
-        # The language calls see no paper and do not reason; a formula remark gets a first look, then a check that reasons,
-        # both with the lines around it in front.
+        self.assertEqual(sorted(keys), sorted(['L2', 'N', 'W0:2', 'W1:2', 'V0', 'T0', 'T1', 'T2']))
+        # No call reasons. The language calls see no paper; a formula remark gets one quick look with the lines around it.
         for call in runner.asked:
-            self.assertEqual(call['think'], call['key'].startswith('C'))
-            self.assertEqual('THE MANUSCRIPT' in call['prompt'], call['key'][0] in 'LNCT', call['key'])
+            self.assertFalse(call['think'], call['key'])
+            self.assertEqual('THE MANUSCRIPT' in call['prompt'], call['key'][0] in 'LNT', call['key'])
         self.assertTrue(all(call.get('reference') is False for call in runner.asked if call['key'][0] in 'WV'))
         # An edit a rule already reports is not judged again; the edit one reading made and the check called wrong is gone.
         verdict = next(call['prompt'] for call in runner.asked if call['key'] == 'V0')
@@ -173,34 +171,36 @@ class Lanes(unittest.TestCase):
         language = section(report, 'Typos and language')
         self.assertIn('allows us to conclude', language)  # the rule
         self.assertIn('Read "sequence" for "sequences".', language)  # the language lane, both readings
-        corrections = section(report, 'Corrections in formulas and notation')
-        self.assertIn('a_{n+1} = 2 a_n', corrections)
-        self.assertEqual(corrections.count('line 8'), 1)  # formula reading and notation call merged
-        self.assertNotIn('c_n', corrections)
+        # Nothing verified a formula remark: whatever the quick look keeps is a place to check, never a correction.
+        self.assertNotIn('Corrections in formulas and notation', report)
         to_check = section(report, 'Formulas to check')
-        self.assertIn('Nothing defines $c_n$.', to_check)
-        self.assertNotIn('Suggested', to_check)  # a place to check is never a correction
-        self.assertNotIn('b_n \\ge a_n', report)  # dropped by its check
-        self.assertIn('1 wrong or unnecessary correction(s) removed', report)
+        self.assertIn('The factor contradicts line 7.', to_check)
+        self.assertEqual(to_check.count('line 8'), 1)  # formula reading and notation call merged
+        self.assertIn('The sign looks wrong.', to_check)
+        self.assertNotIn('Suggested', to_check)
+        self.assertNotIn('The inequality is reversed.', report)  # dropped by its quick look
+        self.assertIn('2 kept as place(s) to check, 1 left out.', report)
         self.assertIn('- Lines 2–11: Defines a doubling sequence.', report)
         self.assertEqual(runner.state['typo_lanes']['unlocated'], 1)
 
     def test_a_resumed_check_asks_nothing_again(self):
         def stop(key, prompt):
-            if key == 'C2':
+            if key == 'T2':
                 raise KeyboardInterrupt
             return check(key, prompt)
         runner = self.runner({'read': read, 'typo-check': stop})
         paused = runner.start('Check the typos.', source_files=['paper.tex'])
         self.assertEqual(paused['status'], 'paused')
-        answered = {call['key'] for call in runner.asked} - {'C2'}
+        answered = {call['key'] for call in runner.asked} - {'T2'}
         resumed = self.runner({'read': read, 'typo-check': check})
         result = resumed.resume(paused['id'])
         again = {call['key'] for call in resumed.asked}
-        self.assertIn('C2', again)
+        self.assertIn('T2', again)
         self.assertEqual(again & answered, set())
         self.assertEqual(result['status'], 'reviewed')
-        self.assertIn('Nothing defines $c_n$.', section(result['report'], 'Formulas to check'))
+        to_check = section(result['report'], 'Formulas to check')
+        self.assertIn('The sign looks wrong.', to_check)
+        self.assertEqual(to_check.count('The factor contradicts line 7.'), 1)
         self.assertEqual(result['report'].count('Read "sequence" for "sequences".'), 1)
 
     def test_a_small_context_reads_part_by_part_plus_the_rules(self):

@@ -10,9 +10,11 @@ paper (Nov 2026), three lanes do better, each with the check that suits it:
   corrected lines and the edits come from a word diff, which gives fewer junk remarks than a list of remarks. A quick
   second look sorts the edits into error / style / wrong; an edit both readings made is never dropped (the second
   look called one such key edit wrong);
-- mathematics: the whole paper in front, one formula-reading call per part and one call on notation; every remark is
-  then checked alone, with hidden reasoning, because the wrong corrections came from the model's own computations
-  and a no-reasoning batch check let them through.
+- mathematics: the whole paper in front, one formula-reading call per part and one call on notation, told to report
+  every doubt; a quick look at each remark, without hidden reasoning, against the lines around it drops most of them,
+  and the rest are shown as places to check, never as corrections. A reasoning check per remark was tried on live
+  runs (Nov 2026): it found no slip the reading had not raised, removed about as many real slips as wrong corrections,
+  and took half of the run's output.
 
 TypoLanes is a mixin for the typo check's runner (review.TypoCheckRunner). The lanes run when the whole paper fits in
 a call and the source is not a PDF; otherwise the runner reads part by part as before, plus the rules.
@@ -69,11 +71,7 @@ VERDICT_SCHEMA = {'type': 'object', 'required': ['items'], 'properties': {'items
 # -- the mathematics lane ------------------------------------------------------------------------------------
 
 FIND_CAP = 9000
-TRIAGE_CAP, CHECK_CAP = 500, 4000  # a first look writes its working; a second one reasons, and is cut if it loops
-# Remarks given the reasoning check. Measured on DS4 (about 450 output tokens a second for the whole job): a 3,100-line
-# paper raises some 120 remarks, the first look keeps about 30, and a reasoning check costs about 2,000 tokens; 33
-# checks made a five-minute run. Twelve keep it near three minutes; the others are shown as places to check.
-CHECK_LIMIT = 12
+TRIAGE_CAP = 500  # the quick look writes its working in a few lines, then decides
 FIND = """The whole manuscript is above, with line numbers. Proofread the formulas of lines {a}-{b}, one formula at a time
 (inline formulas too). For each formula compare it, symbol by symbol, with the places of the manuscript that fix what
 it must be: the definition of each symbol, the same formula or statement elsewhere (introduction, theorem, proof), the
@@ -84,7 +82,7 @@ line before and the line after in a computation, the equation a reference points
 - a symbol that changed (two notations for one object, one notation for two objects, a symbol never defined);
 - a formula restated differently from its first statement; a reference to the wrong equation, lemma or theorem;
 - a stray symbol or a typographic slip inside a formula.
-Report every formula you believe is misprinted, the small slips too. Each remark is checked again afterwards, so a
+Report every formula you believe is misprinted, the small slips too. Each remark is looked at again afterwards, so a
 doubt is worth reporting, while a misprint you pass over is lost. When another line of the manuscript shows the slip,
 give it (evidence_line, and evidence_quote copied exactly); otherwise evidence_line 0. Only formulas and notation:
 spelling, grammar, articles, punctuation and capitalisation are proofread separately, and a remark about words is
@@ -330,8 +328,9 @@ class TypoLanes:
         return [(f'W{sample}:{a}', sample, a, b) for sample, found in enumerate(self._lane_units()) for a, b in found]
 
     def _lane_jobs(self):
-        """Formula and notation calls first (the longest), then the language units, then the second looks and the
-        checks, each as soon as what it needs is there. Called after every finished job: it must stay cheap."""
+        """Formula and notation calls first (the longest), then the language units, then the second looks at the
+        language edits and the quick looks at the formula remarks, each as soon as what it needs is there. Called
+        after every finished job: it must stay cheap."""
         lanes, reads = self._lanes_state(), self._reads()
         jobs = [(0, f'L{a}', self._formula_job(a, b)) for a, b in reads if not self._reading_usable(f'L{a}')]
         if not lanes['notation']:
@@ -348,33 +347,19 @@ class TypoLanes:
             self._lane_pending |= set(batch)
             jobs.append((2, f'V{batch[0]}', self._verdict_job(batch)))
         jobs += [(2, f'T{i}', self._triage_job(i)) for i, r in enumerate(lanes['math']) if 'triage' not in r]
-        jobs += [(3, f'C{i}', self._check_job(i)) for i in self._to_check()]
         return jobs
-
-    def _to_check(self):
-        """The remarks that still need the reasoning check: those the first look did not drop, the likeliest first
-        (called a correction, with a line of evidence), CHECK_LIMIT in all."""
-        math = self._lanes_state()['math']
-        kept = sorted((i for i, r in enumerate(math) if r.get('triage') in ('correction', 'look')),
-                      key=lambda i: (math[i]['triage'] != 'correction', not math[i].get('evidence_line'), i))
-        # The limit counts the checks started: first looks keep arriving, and a better remark must not push the count up.
-        started = getattr(self, '_checks_started', set()) | {
-            i for i, r in enumerate(math) if r.get('checked') and r.get('triage') != 'drop' and not r.get('first_look_only')}
-        started |= set([i for i in kept if i not in started][:max(0, CHECK_LIMIT - len(started))])
-        self._checks_started = started
-        return [i for i in sorted(started) if not math[i].get('checked')]
 
     def _lanes_done(self):
         lanes = self._lanes_state()
         return (bool(lanes['notation']) and lanes['aggregated']
                 and all((lanes['units'].get(key) or {}).get('answered') for key, *_ in self._language_keys())
-                and all(e.get('judged') for e in lanes['edits']) and all('triage' in r for r in lanes['math'])
-                and not self._to_check())
+                and all(e.get('judged') for e in lanes['edits']) and all('triage' in r for r in lanes['math']))
 
     def _settle(self):
-        """After the last call: a list of language corrections must not depend on the checks of the formulas having
-        had the time or the budget to finish. Edits not yet merged are merged, and one without a second look is
-        kept as a correction when both readings made it, as optional otherwise."""
+        """After the last call: the list must not depend on every look having had the time or the budget to finish.
+        Edits not yet merged are merged, and one without a second look is kept as a correction when both readings
+        made it, as optional otherwise; a formula remark kept but not yet shown (a job saved by an earlier version)
+        is shown as a place to check."""
         lanes = self._lanes_state()
         if not lanes['aggregated'] and lanes['units']:
             self._aggregate()
@@ -382,14 +367,9 @@ class TypoLanes:
             if not e.get('judged'):
                 e['judged'], e['verdict'] = True, None
                 self.state['presentation'].append(self._language_comment(e, importance_of(None, e['votes'] >= len(LANGUAGE_SAMPLES))))
-        for r in lanes['math']:  # kept by the first look, beyond the checks there was time for: a place to check
+        for r in lanes['math']:
             if r.get('triage') in ('correction', 'look') and not r.get('checked'):
-                r['checked'], r['verdict'], r['first_look_only'] = True, 'look', True
-                self.state['presentation'].append({
-                    'start_line': r['start_line'], 'end_line': r['end_line'], 'quote': r['quote'],
-                    'kind': 'notation' if r['source'] == 'notation' else 'typo', 'importance': 'typo', 'look': True,
-                    'comment': r['comment'] + ' (A first look found this doubtful; it was not checked further.)',
-                    'suggestion': '', 'located': 'yes', 'lane': 'math', 'checked': True})
+                self._show_place(r)
         self._typo_counts()
         self._save()
 
@@ -584,8 +564,8 @@ class TypoLanes:
                 + (f' Evidence given: line {r["evidence_line"]}, "{r["evidence_quote"]}"' if r['evidence_line'] else ''))
 
     def _triage_job(self, i):
-        """A first look at one remark, without hidden reasoning: the reading reports every doubt, and most of them
-        fall here in a few seconds. What survives gets the reasoning check."""
+        """A quick look at one remark against the lines around it, without hidden reasoning: the reading reports
+        every doubt, and most of them fall here in a few seconds. What survives is shown as a place to check."""
         def run():
             r = self.state['typo_lanes']['math'][i]
             result = self._ask('typo-check', self._excerpt(r) + '\n\n' + TRIAGE + '\n\n' + self._row(r), cap=TRIAGE_CAP,
@@ -593,35 +573,20 @@ class TypoLanes:
             value = result['value'] if isinstance(result['value'], dict) else {}
             with self._mutex:
                 r['triage'] = value.get('verdict') if value.get('verdict') in ('correction', 'look', 'drop') else 'look'
-                self._save()
-        return run
-
-    def _check_job(self, i):
-        def run():
-            r = self.state['typo_lanes']['math'][i]
-            row = (f'REMARK (line {r["start_line"]}): "{r["quote"]}" — {r["comment"]} Proposed: {r["suggestion"]}'
-                   + (f' Evidence given: line {r["evidence_line"]}, "{r["evidence_quote"]}"' if r['evidence_line'] else ''))
-            self.emit('notice', f'Checking a formula remark on line {r["start_line"]}')
-            result = self._ask('typo-check', self._excerpt(r) + '\n\n' + CHECK1 + '\n\n' + row, cap=CHECK_CAP,
-                               schema=CHECK1_SCHEMA, key=f'C{i}', think=True)
-            value = result['value'] if isinstance(result['value'], dict) else {}
-            verdict = value.get('verdict') if value.get('verdict') in ('correction', 'look', 'drop') else None
-            check = _clip(value.get('check'), 600)
-            with self._mutex:
-                r['checked'], r['verdict'], r['check'] = True, verdict or 'look', check
-                comment = {'start_line': r['start_line'], 'end_line': r['end_line'], 'quote': r['quote'],
-                           'kind': 'notation' if r['source'] == 'notation' else 'typo', 'importance': 'error',
-                           'comment': r['comment'], 'suggestion': r['suggestion'], 'located': 'yes', 'lane': 'math',
-                           'checked': True}
-                if verdict == 'drop':
-                    comment['rejected'] = check or 'The check found the original right.'
-                elif verdict != 'correction':  # something is off, the right fix is not certain: never a correction
-                    comment.update(importance='typo', look=True, suggestion='',
-                                   comment=r['comment'] + (f' Check: {check}' if check else ''))
-                self.state['presentation'].append(comment)
+                if r['triage'] != 'drop':
+                    self._show_place(r)
                 self._typo_counts()
                 self._save()
         return run
+
+    def _show_place(self, r):
+        """A formula remark the quick look kept, shown as a place to check: no fix is suggested, since nothing
+        verified it (a reasoning check did no better on live runs than a reader will)."""
+        r['checked'], r['verdict'] = True, 'look'
+        self.state['presentation'].append({
+            'start_line': r['start_line'], 'end_line': r['end_line'], 'quote': r['quote'],
+            'kind': 'notation' if r['source'] == 'notation' else 'typo', 'importance': 'typo', 'look': True,
+            'comment': r['comment'], 'suggestion': '', 'located': 'yes', 'lane': 'math', 'checked': True})
 
     # -- the report
 
@@ -629,9 +594,10 @@ class TypoLanes:
         if not self._lanes_on() or not items:
             return super()._presentation_section(items, sid, unread, read_any, capped=capped)
         blocks = {
-            'math': ('Corrections in formulas and notation',
+            'math': ('Corrections in formulas and notation',  # jobs saved when each remark had a reasoning check
                      '*Each correction was checked against the paper; check it again before changing a formula.*'),
-            'look': ('Formulas to check', '*Something looks wrong at these places, but the right correction is not certain.*'),
+            'look': ('Formulas to check', '*Something may be wrong at these places. Each remark was compared with the '
+                                          'lines around it, but none was verified: read the formula before changing it.*'),
             'language': ('Typos and language', ''),
             'references': ('References and labels', ''),
             'patterns': ('Repeated patterns', '*The same slip in several places: one line each, with the places.*'),
@@ -671,10 +637,9 @@ class TypoLanes:
                     for e in lanes['edits'])
         how = (f' Rules (no model): {count("rule")} finding(s). Language: the paper read twice in small units with no '
                f'paper in front, {len(lanes["edits"])} proposed correction(s) given a second look, {wrong} left out as wrong. '
-               f'Formulas and notation: read with the whole paper in front, {len(lanes["math"])} remark(s) checked one by one '
-               f'against the paper: {count("math", lambda c: c.get("importance") == "error" and not c.get("rejected"))} '
-               f'correction(s), {count("math", lambda c: c.get("look"))} place(s) to check, '
-               f'{count("math", lambda c: c.get("rejected"))} removed.')
+               f'Formulas and notation: read with the whole paper in front, {len(lanes["math"])} remark(s), each compared '
+               f'with the lines around it: {count("math", lambda c: c.get("look"))} kept as place(s) to check, '
+               f'{sum(r.get("triage") == "drop" for r in lanes["math"])} left out.')
         appendix = [line.replace(' Every remark was then checked against the whole paper.', '') for line in appendix]
         if len(appendix) > 2:
             appendix[2] += how
