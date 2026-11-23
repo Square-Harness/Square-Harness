@@ -120,7 +120,8 @@ def check(key, prompt):
     if row.startswith('8'):
         return {'check': 'Line 7 gives the factor 2.', 'verdict': 'correction'}
     if row.startswith('9'):
-        return {'check': 'Line 9 is right by definition.', 'verdict': 'drop'}
+        # The first look (keys T…) lets it through; the reasoning check (keys C…) drops it.
+        return {'check': 'Line 9 is right by definition.', 'verdict': 'look' if key.startswith('T') else 'drop'}
     return {'check': 'Nothing defines $c_n$.', 'verdict': 'look'}
 
 
@@ -158,11 +159,12 @@ class Lanes(unittest.TestCase):
         self.assertEqual(result['status'], 'reviewed')
         report = result['report']
         keys = [call['key'] for call in runner.asked]
-        self.assertEqual(sorted(keys), sorted(['L2', 'N', 'W0:2', 'W1:2', 'V0', 'C0', 'C1', 'C2']))
-        # The language calls see no paper and do not reason; the checks of formulas reason with the paper in front.
+        self.assertEqual(sorted(keys), sorted(['L2', 'N', 'W0:2', 'W1:2', 'V0', 'T0', 'T1', 'T2', 'C0', 'C1', 'C2']))
+        # The language calls see no paper and do not reason; a formula remark gets a first look, then a check that reasons,
+        # both with the lines around it in front.
         for call in runner.asked:
             self.assertEqual(call['think'], call['key'].startswith('C'))
-            self.assertEqual('THE MANUSCRIPT' in call['prompt'], call['key'][0] in 'LNC', call['key'])
+            self.assertEqual('THE MANUSCRIPT' in call['prompt'], call['key'][0] in 'LNCT', call['key'])
         self.assertTrue(all(call.get('reference') is False for call in runner.asked if call['key'][0] in 'WV'))
         # An edit a rule already reports is not judged again; the edit one reading made and the check called wrong is gone.
         verdict = next(call['prompt'] for call in runner.asked if call['key'] == 'V0')

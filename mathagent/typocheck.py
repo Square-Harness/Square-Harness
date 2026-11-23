@@ -68,7 +68,12 @@ VERDICT_SCHEMA = {'type': 'object', 'required': ['items'], 'properties': {'items
 
 # -- the mathematics lane ------------------------------------------------------------------------------------
 
-FIND_CAP = 6000
+FIND_CAP = 9000
+TRIAGE_CAP, CHECK_CAP = 500, 4000  # a first look writes its working; a second one reasons, and is cut if it loops
+# Remarks given the reasoning check. Measured on DS4 (about 450 output tokens a second for the whole job): a 3,100-line
+# paper raises some 120 remarks, the first look keeps about 30, and a reasoning check costs about 2,000 tokens; 33
+# checks made a five-minute run. Twelve keep it near three minutes; the others are shown as places to check.
+CHECK_LIMIT = 12
 FIND = """The whole manuscript is above, with line numbers. Proofread the formulas of lines {a}-{b}, one formula at a time
 (inline formulas too). For each formula compare it, symbol by symbol, with the places of the manuscript that fix what
 it must be: the definition of each symbol, the same formula or statement elsewhere (introduction, theorem, proof), the
@@ -79,16 +84,16 @@ line before and the line after in a computation, the equation a reference points
 - a symbol that changed (two notations for one object, one notation for two objects, a symbol never defined);
 - a formula restated differently from its first statement; a reference to the wrong equation, lemma or theorem;
 - a stray symbol or a typographic slip inside a formula.
-Report a slip only when another line of the manuscript shows it. Give that line: evidence_line and evidence_quote
-(copied exactly). A formula that merely looks unusual, or that your own computation would write differently, is not
-a slip: mathematics papers are mostly right, and a correct formula "corrected" into an error is the worst outcome. If
-you believe a formula is wrong but no line of the manuscript settles it, you may report it with evidence_line 0; it
-will be shown as a place to check, not as a correction. Do not report anything outside lines {a}-{b}, and nothing
-about English, style, spacing or LaTeX commands.
+Report every formula you believe is misprinted, the small slips too. Each remark is checked again afterwards, so a
+doubt is worth reporting, while a misprint you pass over is lost. When another line of the manuscript shows the slip,
+give it (evidence_line, and evidence_quote copied exactly); otherwise evidence_line 0. Only formulas and notation:
+spelling, grammar, articles, punctuation and capitalisation are proofread separately, and a remark about words is
+discarded. Do not report anything outside lines {a}-{b}, and nothing about style, spacing or LaTeX commands. At most
+eight remarks, the likeliest first.
 Return JSON {{"summary": two to five sentences saying what lines {a}-{b} do, "remarks": [{{"line": n, "quote": the
 formula or part of it, copied exactly (at most 15 words), "problem": one sentence, "correction": the corrected formula
-or words, "evidence_line": n or 0, "evidence_quote": copied exactly or ""}}]}}. An empty list of remarks is a good
-answer for correct lines."""
+or words, "evidence_line": n or 0, "evidence_quote": copied exactly or ""}}]}}. An empty list of remarks is right
+only when every formula of these lines was compared and found consistent."""
 REMARKS = {'type': 'array', 'items': {
     'type': 'object', 'required': ['line', 'quote', 'problem', 'correction', 'evidence_line', 'evidence_quote'],
     'properties': {'line': {'type': 'integer'}, 'quote': {'type': 'string'}, 'problem': {'type': 'string'},
@@ -102,17 +107,24 @@ NOTATION = """The whole manuscript is above, with line numbers. Check its notati
 - a formula or a statement given twice (in the introduction and in a theorem, in a statement and in its proof, in two
   sections) where the two versions differ: a different set, constant, index, sign or hypothesis;
 - a symbol used but never defined.
+Only symbols and formulas: spelling, grammar and punctuation are proofread separately and must not be reported here.
 Each remark needs BOTH places: line and quote of the occurrence to change, and evidence_line and evidence_quote of the
 occurrence it conflicts with (for a symbol never defined, evidence_line 0). A remark with one side only is not a
 remark. At most 20, the surest first.
 Return JSON {"remarks": [{"line": n, "quote": copied exactly, "problem": one sentence, "correction": what to write,
 "evidence_line": n, "evidence_quote": copied exactly}]}."""
-CHECK1 = """The whole manuscript is above, with line numbers. A proofreader claims the formula or notation below is
-misprinted. Decide whether the manuscript is wrong there. Do the computation or the comparison yourself, from the
-manuscript's own definitions (its macros and notation included); a formula quoted from another paper, an equivalent
-form and a convention the authors may choose are not slips. Verdict: "correction" only if the original is certainly
-wrong and the proposed correction certainly right; "look" if the place is wrong or inconsistent but the right fix is
-not certain; "drop" if the original is right. Return JSON {"check": two sentences, "verdict": "correction" | "look" | "drop"}."""
+CHECK1 = """Above are the macros of a manuscript and numbered lines of it: the lines around a remark and, when the
+remark names one, the lines around its evidence. A proofreader claims the formula or notation below is misprinted.
+Decide whether the manuscript is wrong there. Do the computation or the comparison yourself, from the manuscript's
+own definitions (its macros and notation included); a formula quoted from another paper, an equivalent form and a
+convention the authors may choose are not slips. Verdict: "correction" only if the original is certainly wrong and
+the proposed correction certainly right; "look" if the place is wrong or inconsistent but the right fix is not
+certain, or if what settles it is not in the lines shown; "drop" if the original is right. Return JSON
+{"check": two sentences, "verdict": "correction" | "look" | "drop"}."""
+WORDS_REMARK = re.compile(r'(?i)\b(?:mis-?spell|spelling|grammar|ungrammatical|unidiomatic|article|lower-?case|upper-?case|'
+                          r'capitali[sz]|punctuat|full stop|comma|hyphen|typo in the word|stray (?:word|fragment))')
+CHECK_REACH, EVIDENCE_REACH, MACROS_CHARS = 110, 25, 24_000  # lines shown around a remark and its evidence
+TRIAGE = CHECK1 + '\nWrite the comparison or the computation itself in "check", in at most 80 words, before the verdict.'
 CHECK1_SCHEMA = {'type': 'object', 'required': ['check', 'verdict'], 'properties': {'check': {'type': 'string'},
                  'verdict': {'type': 'string', 'enum': ['correction', 'look', 'drop']}}}
 
@@ -335,16 +347,55 @@ class TypoLanes:
             batch = waiting[k:k + VERDICT_BATCH]
             self._lane_pending |= set(batch)
             jobs.append((2, f'V{batch[0]}', self._verdict_job(batch)))
-        jobs += [(2, f'C{i}', self._check_job(i)) for i, r in enumerate(lanes['math']) if not r.get('checked')]
+        jobs += [(2, f'T{i}', self._triage_job(i)) for i, r in enumerate(lanes['math']) if 'triage' not in r]
+        jobs += [(3, f'C{i}', self._check_job(i)) for i in self._to_check()]
         return jobs
+
+    def _to_check(self):
+        """The remarks that still need the reasoning check: those the first look did not drop, the likeliest first
+        (called a correction, with a line of evidence), CHECK_LIMIT in all."""
+        math = self._lanes_state()['math']
+        kept = sorted((i for i, r in enumerate(math) if r.get('triage') in ('correction', 'look')),
+                      key=lambda i: (math[i]['triage'] != 'correction', not math[i].get('evidence_line'), i))
+        # The limit counts the checks started: first looks keep arriving, and a better remark must not push the count up.
+        started = getattr(self, '_checks_started', set()) | {
+            i for i, r in enumerate(math) if r.get('checked') and r.get('triage') != 'drop' and not r.get('first_look_only')}
+        started |= set([i for i in kept if i not in started][:max(0, CHECK_LIMIT - len(started))])
+        self._checks_started = started
+        return [i for i in sorted(started) if not math[i].get('checked')]
 
     def _lanes_done(self):
         lanes = self._lanes_state()
         return (bool(lanes['notation']) and lanes['aggregated']
                 and all((lanes['units'].get(key) or {}).get('answered') for key, *_ in self._language_keys())
-                and all(e.get('judged') for e in lanes['edits']) and all(r.get('checked') for r in lanes['math']))
+                and all(e.get('judged') for e in lanes['edits']) and all('triage' in r for r in lanes['math'])
+                and not self._to_check())
+
+    def _settle(self):
+        """After the last call: a list of language corrections must not depend on the checks of the formulas having
+        had the time or the budget to finish. Edits not yet merged are merged, and one without a second look is
+        kept as a correction when both readings made it, as optional otherwise."""
+        lanes = self._lanes_state()
+        if not lanes['aggregated'] and lanes['units']:
+            self._aggregate()
+        for e in lanes['edits']:
+            if not e.get('judged'):
+                e['judged'], e['verdict'] = True, None
+                self.state['presentation'].append(self._language_comment(e, importance_of(None, e['votes'] >= len(LANGUAGE_SAMPLES))))
+        for r in lanes['math']:  # kept by the first look, beyond the checks there was time for: a place to check
+            if r.get('triage') in ('correction', 'look') and not r.get('checked'):
+                r['checked'], r['verdict'], r['first_look_only'] = True, 'look', True
+                self.state['presentation'].append({
+                    'start_line': r['start_line'], 'end_line': r['end_line'], 'quote': r['quote'],
+                    'kind': 'notation' if r['source'] == 'notation' else 'typo', 'importance': 'typo', 'look': True,
+                    'comment': r['comment'] + ' (A first look found this doubtful; it was not checked further.)',
+                    'suggestion': '', 'located': 'yes', 'lane': 'math', 'checked': True})
+        self._typo_counts()
+        self._save()
 
     def _complete(self):
+        if self._lanes_on():
+            self._settle()
         done = super()._complete()
         if not self._lanes_on():
             return done
@@ -495,6 +546,8 @@ class TypoLanes:
                 continue
             quote, correction = str(item.get('quote') or '').strip(), str(item.get('correction') or '').strip()
             n = near(lines, _int(item.get('line')), quote)
+            if WORDS_REMARK.search(str(item.get('problem') or '')):
+                continue  # spelling, grammar and punctuation belong to the rules and the language lane
             if n is None or not a <= n <= b or squash(quote) == squash(correction):
                 lanes['unlocated'] += 1
                 continue
@@ -510,13 +563,46 @@ class TypoLanes:
                                   'evidence_quote': str(item.get('evidence_quote') or '') if evidence else '',
                                   'source': source, 'votes': 1})
 
+    def _excerpt(self, r):
+        """What a check reads: the macros and the lines around the remark and around its evidence. The whole paper
+        in each of forty checks used up the job's input allowance; a slip is settled by the lines near it."""
+        sid = self._lane_source()[0]
+        total = len(self._lines(sid))
+        spans = [[max(1, r['start_line'] - CHECK_REACH), min(total, r['end_line'] + CHECK_REACH)]]
+        if r.get('evidence_line'):
+            spans.append([max(1, r['evidence_line'] - EVIDENCE_REACH), min(total, r['evidence_line'] + EVIDENCE_REACH)])
+        spans.sort()
+        if len(spans) == 2 and spans[1][0] <= spans[0][1] + 1:
+            spans = [[spans[0][0], max(spans[0][1], spans[1][1])]]
+        macros = '\n\n'.join(p['content'] for p in self.state.get('packages') or [] if p.get('content'))[:MACROS_CHARS]
+        text = ('MACROS AND PACKAGES OF THE MANUSCRIPT:\n' + macros + '\n\n') if macros else ''
+        return text + '\n\n'.join(f'LINES {a}-{b} OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b, mark=False) for a, b in spans)
+
+    @staticmethod
+    def _row(r):
+        return (f'REMARK (line {r["start_line"]}): "{r["quote"]}" — {r["comment"]} Proposed: {r["suggestion"]}'
+                + (f' Evidence given: line {r["evidence_line"]}, "{r["evidence_quote"]}"' if r['evidence_line'] else ''))
+
+    def _triage_job(self, i):
+        """A first look at one remark, without hidden reasoning: the reading reports every doubt, and most of them
+        fall here in a few seconds. What survives gets the reasoning check."""
+        def run():
+            r = self.state['typo_lanes']['math'][i]
+            result = self._ask('typo-check', self._excerpt(r) + '\n\n' + TRIAGE + '\n\n' + self._row(r), cap=TRIAGE_CAP,
+                               schema=CHECK1_SCHEMA, key=f'T{i}', temperature=0)
+            value = result['value'] if isinstance(result['value'], dict) else {}
+            with self._mutex:
+                r['triage'] = value.get('verdict') if value.get('verdict') in ('correction', 'look', 'drop') else 'look'
+                self._save()
+        return run
+
     def _check_job(self, i):
         def run():
             r = self.state['typo_lanes']['math'][i]
             row = (f'REMARK (line {r["start_line"]}): "{r["quote"]}" — {r["comment"]} Proposed: {r["suggestion"]}'
                    + (f' Evidence given: line {r["evidence_line"]}, "{r["evidence_quote"]}"' if r['evidence_line'] else ''))
             self.emit('notice', f'Checking a formula remark on line {r["start_line"]}')
-            result = self._ask('typo-check', self._block() + '\n\n' + CHECK1 + '\n\n' + row, cap=self._call_cap(True),
+            result = self._ask('typo-check', self._excerpt(r) + '\n\n' + CHECK1 + '\n\n' + row, cap=CHECK_CAP,
                                schema=CHECK1_SCHEMA, key=f'C{i}', think=True)
             value = result['value'] if isinstance(result['value'], dict) else {}
             verdict = value.get('verdict') if value.get('verdict') in ('correction', 'look', 'drop') else None
