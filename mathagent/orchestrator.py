@@ -87,7 +87,8 @@ do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks a given proof (verdict, located issues); explain explains a result and
 its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, every
-proof checked, recommendation; it has one depth, whatever effort you give); typo_check lists the typos and
+proof checked, recommendation; it has one depth, whatever effort you give; the controller starts a literature
+review beside it and adds the position of the results after the report, so do not delegate one for that); typo_check lists the typos and
 presentation problems of a manuscript, with checked corrections, and checks no proof. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
@@ -1234,7 +1235,11 @@ class Orchestrator:
             if pending['status'] != 'complete':
                 self._append_result(pending, results[index])
 
+    def _plan_pending(self):
+        """A subclass may add calls to the pending batch before it runs (the literature review beside a review)."""
+
     def _complete_pending(self, allow_tools=True):
+        self._plan_pending()
         offset = 0
         while offset < len(self.state['pending_calls']):
             pending = self.state['pending_calls'][offset]
@@ -1301,14 +1306,13 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
-        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'typo_check',
-                                                'literature', 'writeup', 'summarize', 'python_lab', 'sanity_check')
-                and result.get('mode') == self.state['required_mode'] and isinstance(value, dict) and not handed_back):
+        required = self._required_worker(pending)
+        if required is not None and not handed_back:
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead
             # of starting another whole-manuscript scan in the parent.
             self.state['force_final'] = True
-            if value.get('status') in ('failed', 'error', 'incomplete') or value.get('error'):
+            if required.get('status') in ('failed', 'error', 'incomplete') or required.get('error'):
                 self.state['required_failed'] = self.state['required_mode']
         if handed_back:
             self._warning(WRITEUP_NEEDS)
@@ -1331,6 +1335,25 @@ class Orchestrator:
             self.state['force_final'] = True
         self._save()
         self.emit('result', message['content'])
+
+    def _required_worker(self, pending):
+        """The result of the worker the user selected, once every call of its batch has returned; None before.
+
+        The answer is final when the selected worker has returned, and with it the calls started in the same batch
+        (a review runs beside its literature review: the reply needs both)."""
+        required = self.state.get('required_mode')
+        if required not in ('explain', 'quick_review', 'referee', 'detailed_review', 'typo_check', 'literature', 'writeup',
+                            'summarize', 'python_lab', 'sanity_check'):
+            return None
+        batch = [p for p in self.state['pending_calls']
+                 if p is pending or (pending.get('batch_id') and p.get('batch_id') == pending['batch_id'])]
+        if any(p['status'] != 'complete' for p in batch):
+            return None
+        selected = next((p for p in batch if p['call']['function']['name'] == 'delegate'
+                         and isinstance(p['call']['function']['arguments'], dict)
+                         and p['call']['function']['arguments'].get('mode') == required), None)
+        child = selected and next((c for c in self.state['children'] if c['id'] == selected.get('child_id')), None)
+        return child['result'] if child and child['status'] == 'complete' and isinstance(child.get('result'), dict) else None
 
     def _reference_only_request(self):
         from .source_tasks import _instruction_text
@@ -1370,6 +1393,7 @@ class Orchestrator:
         """This turn's finished literature reviews, as (child, review), in delegation order."""
         return [(child, child['result']['answer']) for child in self.state['children']
                 if child['action']['mode'] == 'literature' and child['status'] == 'complete'
+                and not child.get('companion')  # the one beside a review feeds the reply; its card holds it
                 and isinstance(child.get('result'), dict) and child['result'].get('status') in ('complete', 'partial')
                 and isinstance(child['result'].get('answer'), str) and child['result']['answer'].strip()]
 

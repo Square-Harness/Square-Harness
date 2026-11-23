@@ -324,3 +324,134 @@ class AttackTests(ReviewCase):
         runner, result = self.run_review({'attack': {**hit, 'hypothesis_check': ''}})
         self.assertEqual((runner.state['attacks'][main]['verdict'], runner.state['ledger']), ('none', []))
         self.assertEqual(self.roles('defend'), [])
+
+
+# -- the Assistant's fixed fan-out: a review and a literature review, then one reply ---------------------------------
+
+import json
+import threading
+from types import SimpleNamespace
+
+from mathagent.mode_calls import ModeOrchestrator
+from mathagent.review_position import literature_goal, own_marks, render_position
+from tests.test_research import response
+
+MANUSCRIPT = PAPER.replace(r'\title{On doubling sequences}', r'\title{On doubling sequences}' '\n' r'\author{Ada Martin \and Bo Chen}')
+BRIEF = {'question': 'Growth bounds for sequences whose consecutive terms at most double.',
+         'results': ['A sequence that at most doubles at each step is bounded by a power of two.'],
+         'closest': ['Okabe 1998: exponential bounds for subadditive recursions.']}
+POSITION = {'results': [{'result': 'Theorem (Main theorem)', 'closest': 'The exponential bound of [1]; [2] is the same statement; see also [9].',
+                         'difference': 'The bound of [1] needs monotone sequences.'}],
+            'recommendation': 'It changes nothing.'}
+REFERENCES = [
+    {'k': 1, 'title': 'Exponential bounds for subadditive recursions', 'authors': ['Okabe, Ken'], 'year': 1998, 'doi': '10.1000/x'},
+    {'k': 2, 'title': 'On doubling sequences', 'authors': ['Martin, Ada', 'Chen, Bo'], 'year': 2026, 'arxiv': '2601.00001'},
+    {'k': 3, 'title': 'Halving sequences', 'authors': ['Bo Chen', 'Ada Martin'], 'year': 2024},
+]
+REPORT = '# Referee report\n\n## Summary\n\nA bound.\n\n## Major comments\n\n1. A comment.\n\n## Recommendation\n\n**Minor revision**'
+
+
+class FanOutCase(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        (self.root / 'paper.tex').write_text(MANUSCRIPT)
+        self.saved = {'job-review': {'sources': [{'content': MANUSCRIPT}]},
+                      'job-lit': {'references': REFERENCES, 'draft': 'Okabe proved an exponential bound [1].\n\n## References\n\n1. Okabe.'}}
+        for name, value in (('_read_state', lambda directory, job_id: self.saved[job_id]),
+                            ('_job_directory', lambda root, job_id: Path(job_id))):
+            patcher = patch('mathagent.mode_calls.' + name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.events = []
+        self.literature = {'status': 'complete', 'answer': 'Okabe proved an exponential bound [1].', 'job_id': 'job-lit'}
+
+    def assistant(self, replies, *, online=True, concurrency=2, required_mode='referee'):
+        workspace = Workspace(self.root)
+        workspace.literature = SimpleNamespace(online=online)
+        self.client = FakeClient([response(json.dumps(reply) if isinstance(reply, dict) else reply) for reply in replies])
+        agent = SimpleNamespace(client=self.client, model='model', ctx=200_000, workspace=workspace, top_p=.95, seed=None,
+                                think=False, history=[], last_stats={})
+        self.parent = ModeOrchestrator(agent, self.delegate, required_mode=required_mode, concurrency=concurrency)
+        return self.parent
+
+    def delegate(self, action, child, save):
+        self.events.append(('start', action['mode'], self.parent.state['force_final'], len(self.client.requests)))
+        if action['mode'] == 'literature':
+            return dict(self.literature)
+        return {'status': 'reviewed', 'answer': REPORT, 'job_id': 'job-review'}
+
+    def test_review_and_literature_review_start_together_and_the_reply_joins_them(self):
+        for concurrency in (1, 2):
+            self.events = []
+            result = self.assistant([BRIEF, POSITION], concurrency=concurrency).run('Referee this paper.', files=['paper.tex'])
+            review, literature = result['children']
+            self.assertEqual((review['action']['mode'], literature['action']['mode']), ('referee', 'literature'))
+            self.assertEqual(review['batch_id'], literature['batch_id'])  # one batch, two cards and jobs
+            # The literature review: lowest breadth, no manuscript, its own question in public words.
+            action = literature['action']
+            self.assertEqual((action['effort'], action['files'], literature['context']['query']), ('low', [], action['request']))
+            self.assertIn(BRIEF['question'], action['request'])
+            self.assertNotIn('For every integer', action['request'])
+            # The answer was not final when the review returned: both workers ran, and the position was written last.
+            self.assertEqual(sorted(event[1] for event in self.events), ['literature', 'referee'])
+            if concurrency == 1:  # in turn: the review has returned when the literature review starts
+                self.assertEqual([event[1] for event in self.events], ['referee', 'literature'])
+            self.assertFalse(any(event[2] for event in self.events))
+            self.assertEqual({event[3] for event in self.events}, {1})  # one model call before them: the question
+            self.assertEqual(len(self.client.requests), 2)
+            self.assertTrue(self.parent.state['force_final'])
+            # The reply: the report as it is, then the position from the verified records.
+            answer = result['answer']
+            self.assertTrue(answer.startswith(REPORT))
+            position = answer[len(REPORT):]
+            self.assertIn('## Position in the literature', position)
+            self.assertIn('The exponential bound of [1]; [2] is the same statement; see also.', position)  # [9] is no record
+            self.assertIn("*On doubling sequences* (2026). [arXiv:2601.00001](https://arxiv.org/abs/2601.00001) — **the manuscript itself", position)
+            self.assertIn("Bo Chen, Ada Martin. *Halving sequences* (2024). — **a work of the manuscript's authors", position)
+            self.assertNotIn('Okabe proved an exponential bound [1].\n\n## References', answer)  # the review is on its card
+            self.assertEqual(sum(m.get('role') == 'assistant' and bool(m.get('content')) for m in self.parent.state['messages']), 1)
+            prompt = self.client.requests[1]['messages'][1]['content']
+            self.assertIn('*On doubling sequences* (2026). [arXiv:2601.00001](https://arxiv.org/abs/2601.00001) OWN', prompt)
+
+    def test_no_position_without_online_search(self):
+        result = self.assistant([], online=False).run('Referee this paper.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
+        self.assertIn('## Position in the literature\n\nMissing: online search is off', result['answer'])
+        self.assertEqual(self.client.requests, [])
+        result = self.assistant([]).run('Referee this paper, without searching online.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
+        self.assertIn('Missing: the request excludes online search', result['answer'])
+
+    def test_unfinished_literature_review_leaves_the_position_missing(self):
+        self.literature = {'status': 'budget_exhausted', 'answer': '', 'job_id': 'job-lit'}
+        result = self.assistant([BRIEF]).run('Referee this paper.', files=['paper.tex'])
+        self.assertEqual(len(result['children']), 2)
+        self.assertTrue(result['answer'].startswith(REPORT))
+        self.assertIn('Missing: the literature review started beside the report did not finish', result['answer'])
+        self.assertIn('no position was written from memory', result['answer'])
+        self.assertEqual(len(self.client.requests), 1)  # no position call without verified records
+
+    def test_question_copied_from_the_manuscript_starts_no_literature_review(self):
+        copied = {**BRIEF, 'question': 'For every integer $n\\ge 1$ we have $a_n \\le 2^n$ and more words.'}
+        result = self.assistant([copied]).run('Referee this paper.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
+        self.assertIn('could not be written in public words', result['answer'])
+
+    def test_review_the_assistant_routes_itself_gets_the_same_fan_out(self):
+        result = self.assistant([BRIEF, POSITION], required_mode=None).run('Review the paper paper.tex', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee', 'literature'])
+        self.assertEqual(result['children'][0]['action']['effort'], 'high')  # no effort is chosen for a review
+        self.assertTrue(result['answer'].startswith(REPORT))
+        self.assertIn('## Position in the literature\n\nWritten from the literature review', result['answer'])
+
+    def test_typo_check_and_follow_up_start_no_literature_review(self):
+        result = self.assistant([], required_mode='typo_check').run('Check the typos.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['typo_check'])
+        self.assertEqual(result['answer'], REPORT)
+
+    def test_own_records_and_citations(self):
+        self.assertEqual(own_marks(REFERENCES, MANUSCRIPT), {2: 'manuscript', 3: 'authors'})
+        self.assertIsNone(render_position({'results': [], 'recommendation': 'None.'}, REFERENCES, {}))
+        self.assertIsNone(literature_goal({'question': '', 'results': ['x'], 'closest': []}, MANUSCRIPT))

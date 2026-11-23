@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A review asked in a conversation starts with a literature review beside it, at its lowest
+  breadth, each with its own card. The Assistant writes the literature question from the
+  manuscript's title, abstract and introduction in public words. When both have returned, the
+  answer is the report as it is, then "Position in the literature": for each main result, the
+  closest earlier result, what differs and whether it changes the recommendation, written only
+  from the literature review's verified records; the manuscript's own preprint is labelled and
+  never counted as prior work. A failed or unfinished literature review, online search off, or
+  a request that excludes it leaves the position marked missing, with the reason. The review's
+  own "Position in the literature" section, which only suggested `@literature`, is gone.
 - Review: the statement of each main result (four at most) is attacked for a counterexample
   as soon as the overview is written, by a reasoning call that sees the whole paper
   (degenerate parameters, low dimension, boundary cases, known results it would contradict).

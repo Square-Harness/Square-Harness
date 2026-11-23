@@ -867,9 +867,26 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   not the number of calls, sets how long a review takes: about a quarter of an
   hour with DS4 for a 3,100-line paper. The review does not list typos: its
   report ends by saying so and naming the typo check, which you can start at the
-  same time on the same file. The review does not
-  search the literature: it names the closest works the paper cites and suggests
-  a literature review (`@literature …`), which the Assistant can start.
+  same time on the same file. The review itself does not search the literature.
+  In a conversation, the Assistant starts **two jobs at once** when you ask for a
+  review: the review, and a literature review at its lowest breadth, each with its
+  own card and page. The question of that literature review is written by the
+  Assistant from the title, abstract and introduction of your manuscript, in
+  public mathematical words; no manuscript text is pasted into it, and the
+  manuscript is not handed to the search. When both have returned, the answer is
+  the review's report as it is, followed by **Position in the literature**: for
+  each main result, the closest earlier result the literature review found, what
+  differs, and whether that changes the recommendation. This part is written
+  only from the literature review's checked text and verified records; the
+  references are printed by the code, a work with your manuscript's title is
+  labelled as the manuscript itself (your own preprint) and a work of the same
+  authors as theirs, and neither counts as prior work. If the literature review
+  failed or did not finish, the answer says that the position is missing; none
+  is written from memory. With online search off, or when your request excludes
+  it ("without searching online"), the review starts alone and the answer says
+  why there is no position. The literature review shares the provider's
+  throughput with the review, so the two together take longer than the review
+  alone. A review started from the New review form or the terminal runs alone.
 - **Typo check** (`@typo_check`): the typos and presentation problems of a
   manuscript, and nothing else. The paper is proofread in parts of about 220
   lines (each call with the whole paper in view) for typos, misprinted formulas,

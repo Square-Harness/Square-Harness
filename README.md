@@ -72,7 +72,7 @@ Mac. For smaller machines and other model servers, see the
   located, contradicted, not found).
 - **Reading lists**: built from verified records.
 - **Reviews**: a quick check of a proof, a referee report that checks every proof
-  of a paper, and step-by-step explanations.
+  of a paper, a typo check, and step-by-step explanations.
 - **Write-ups**: LaTeX in your own style (a template, or a style learnt from your
   articles), with numbered equations and checked references.
 - **Python Lab and Sanity check**: run in a Docker sandbox.

@@ -3694,21 +3694,6 @@ class PaperReviewRunner(ReviewBase):
         keys = [k.strip('[] ') for k in ((self.state.get('scope') or {}).get('closest') or [])]
         return [f'[{k}] {_clip(bibliography[k], 200)}' for k in keys if k in bibliography][:6]
 
-    def _literature_section(self):
-        """The review does not search the literature (a literature review does it better, and lookups made the review
-        slow): it names the closest works the paper cites and says what to ask for."""
-        scope = self.state.get('scope') or {}
-        if not scope:
-            return []
-        out = ['### Position in the literature', '']
-        closest = self._closest()
-        if closest:
-            out += ['The paper presents these works as the closest to its results:', ''] + ['- ' + c for c in closest] + ['']
-        topic = '; '.join(t.strip().rstrip('.') for t in (scope.get('field'), _clip(scope.get('contribution'), 240)) if t and t.strip())
-        out += ['This review did not search the literature, so it does not judge novelty. To place the results, ask '
-                'for a literature review' + (f', for example: `@literature {topic}`.' if topic else '.'), '']
-        return out
-
     def _recommendation_floor(self, major, questions, minor=()):
         """The mildest recommendation the findings allow: a major comment upheld after a defence of the paper rules
         out acceptance as it stands."""
@@ -3746,7 +3731,7 @@ class PaperReviewRunner(ReviewBase):
                         'parts_not_read': len(self._unread_parts()),
                         'cited_results_compared_with_the_literature': {
                             a: sum(r['assessment'] == a for r in citations) for a in ('consistent', 'misapplied', 'misstated', 'unknown')},
-                        'literature': 'not searched by this review; the report suggests a literature review',
+                        'literature': 'not searched by this review; a literature review made beside it places the results, after this report',
                         'closest_works_cited_by_the_paper': self._closest(),
                         'recommendation_at_least': floor}
             labels = {c['label'] for c in major + minor}
@@ -3912,7 +3897,6 @@ class PaperReviewRunner(ReviewBase):
         pending = '*Written when the checks are complete.*'
         body += ['## Assessment', '', '### Significance', '', write.get('significance') or pending, '',
                  '### Correctness', '', write.get('correctness') or pending, '', '### Presentation', '', write.get('presentation') or pending, '']
-        body += self._literature_section()
         for title, group, empty in (('Major comments', major, 'None.' if verdicts else 'No proof checked yet.'),
                                     ('Minor comments', minor, 'None in the proofs checked.'),
                                     ('Questions to the authors', questions, None)):
@@ -4038,7 +4022,9 @@ class PaperReviewRunner(ReviewBase):
         """What was and was not examined."""
         s = self.state
         sid = s['sources'][0]['id']
-        appendix = ['## Scope of this review', '']
+        appendix = ['## Scope of this review', '', 'This review did not search the literature and does not judge novelty. In a '
+                    'conversation, the Assistant starts a literature review beside it and adds the position of the results '
+                    'after this report.', '']
         units = {u['id']: u for u in self._units()}
         checkable = [u for u in self._units() if u['proofs']]
         checked = [u for u in checkable if self._checks_complete(u['id'])]

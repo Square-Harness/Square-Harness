@@ -684,6 +684,7 @@ documented together when releasing these features.
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
 | Assistant | `orchestrator.py` | Owns the conversation, delegates to `router.JOB_MODES`, persists each child before running it and its result before returning it |
 | | `assistant_budget.py`, `mode_calls.py`, `router.py`, `source_tasks.py`, `conversation_sources.py`, `worker_errors.py`, `reporting.py` | Shared accounting; explicit `@mode` calls; mode list and task schema; source selection; permanent-failure errors; report footers |
+| | `review_position.py` | The literature review started beside a review: its question, the own-preprint marks and the "Position in the literature" part of the reply |
 | Sandbox | `numerics/` (`executor`, `policy`, `session`, `artifacts`, `docker/`), `skill_catalog.py` | Docker runs, limits bound by code, model tools, experiment records, pinned image; SKILL.md frontmatter |
 | Web app | `gui/server.py` | Standard-library HTTP server, `@route` table, token, CSP, static files |
 | | `gui/hub.py` | Tasks, queue and threads; `EventBus`; approvals; engine wiring; interruptible clients |
@@ -1167,8 +1168,8 @@ main result one status; `state['ledger']` saves the numbered findings with the j
 `_recommendation_floor` keeps a major comment upheld after a defence out of an
 `accept` or `minor_revision` recommendation. The report is rewritten after every
 call of the pool (`_report`), with a progress line while the job runs. The review
-does not search the literature: `_literature_section` names the works the overview
-found the paper presents as closest and suggests a literature review. Every review
+does not search the literature and nests no other job: the Assistant starts a
+literature review beside it (next paragraph). Every review
 call carries the delegation context. Hidden reasoning is off for every call except
 the second pass on the near chain (`_deep`), the judge and the repair check: DS4 on
 DeepInfra generates about 550 tokens per second per account and a
@@ -1191,6 +1192,34 @@ out those and every finding whose quote is not in the source (`located == 'no'`,
 whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with
 the whole paper in view; typo remarks are checked `TYPO_BATCH` per call
 (`_typo_jobs`).
+
+A review in a conversation runs beside a literature review (the fixed fan-out,
+`mode_calls.ModeOrchestrator` and `review_position.py`). `_plan_pending`, called at the
+start of every `_complete_pending`, finds a pending `referee` delegation, whoever chose
+it (`@referee`, the router, the Assistant), and inserts a `literature` delegation at
+effort `low` right after it, in the same batch and in the assistant message that holds
+the call. Its request is `literature_goal`: one bounded call (`bounded_json`,
+`BRIEF_POLICY`) restates the manuscript's title, abstract and introduction
+(`manuscript_head`) as a question, the main results and the works named as closest, and
+an item that repeats `COPIED_WORDS` consecutive manuscript words is dropped. The
+child is marked `companion`, gets no file (`_worker_files`) and a context whose query
+is that request (the literature review would otherwise take the request to review as
+its question). No fan-out for a reply to an earlier report, when a literature
+delegation is already in the batch, when online search is off or the request excludes
+it (`_NO_SEARCH`, `excludes_external_sources`), or when no public question could be
+written: `state['review_fanout']` records `started` (with the call and request) or
+`none` with the reason, once per turn. `Orchestrator._required_worker` makes the
+answer final only when every call of the selected worker's batch has returned.
+`_review_reply` then gives the report as written, followed by `_position`: one bounded
+call (`POSITION_POLICY`) reads the start of the report, the literature review's draft
+and its `state['references']`; `own_marks` marks the records with the manuscript's
+title (`manuscript`) or by its authors (`authors`), `render_position` removes a
+citation of a number that is not a record and prints the references itself. Without a
+finished (`complete` or `partial`) literature review with records, the part is
+`missing_position(reason)`; the section is saved in `review_fanout['section']`, so a
+resumed turn shows the same text. The companion is left out of `_reviews()` (it is not
+shown verbatim). When the review is one of several works of the turn, the parent
+writes the answer and `_payload` adds `POSITION_NOTE` (or `NO_POSITION_NOTE`).
 
 The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
 text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a

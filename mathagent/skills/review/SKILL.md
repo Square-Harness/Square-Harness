@@ -10,7 +10,7 @@ Referee the pinned manuscript as for a mathematics journal and draft a construct
 4. Read across the whole paper for what no single proof shows: constants, normalisations and conventions that change between sections; results stated differently in the introduction and the body; claims the paper does not establish (left to the reader, announced but never proved, unfinished passages); results cited from the literature, compared with the result as known.
 5. Give each objection, a counterexample included, a second opinion: a defence of the paper, then an independent judgement, always for a finding alleged to make a statement false or a proof fail, and otherwise when the defence holds or partly holds. Such a finding becomes minor only through a repair that a separate check finds to work. A minor finding without a second opinion is checked against the paper and left out when the paper does not support it; so is a finding whose quoted words are not in the paper.
 6. Typos and presentation are not part of the review: the report says so and names the typo check. With a small local context the paper is read part by part, and what that reading notices is listed.
-7. The review does not search the literature. It neither claims nor denies novelty.
+7. The review does not search the literature and neither claims nor denies novelty. In a conversation, the Assistant starts a literature review beside the review and adds the position of the results after the report, from that review's verified records only.
 
 ## Required report
 

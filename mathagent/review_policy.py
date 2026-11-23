@@ -622,8 +622,8 @@ say about a main result must match it. Its counterexample_search is the outcome 
 with a counterexample: report a proposed or edge-case counterexample as given there, and never present "none found"
 as evidence that the statement is true. summary: one paragraph for the editor and the authors:
 what the paper does and claims, then what this review found. significance: importance and novelty in the field,
-relying only on the manuscript and the findings: the literature was not searched, so neither claim nor deny
-novelty; say that a literature review would place the results.
+relying only on the manuscript and the findings: this review did not search the literature, so neither claim nor
+deny novelty, and say that the position of the results in the literature is given separately, after this report.
 correctness: an overall assessment that matches the checks actually done (proofs_scope) and states what was not
 checked. presentation: overall quality of writing, in a few sentences. recommendation and reasons: accept,
 minor_revision, major_revision or reject, justified by the comments, and never milder than
