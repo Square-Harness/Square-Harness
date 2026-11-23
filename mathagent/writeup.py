@@ -3094,7 +3094,7 @@ class WriteupRunner(ResearchRunner):
             listing = '\n'.join(f'{key}: {author}, {title} ({year})' for key, author, title, year in entries)
             catalog = any(s.get('catalog') for s in self._templates_in(('.bib',)))
             out.append(("BIBLIOGRAPHY FROM RETRIEVED RECORDS" if catalog else "THE AUTHOR'S BIBLIOGRAPHY")
-                       + ' (cite these works with \\cite{key}, by these keys only):\n' + (listing if catalog else listing[:6000]))
+                       + ' (cite these works with \\cite{key}, by these keys only):\n' + (listing if catalog else listing[:18000]))
         return '\n\n'.join(out)
 
     def _standard(self):

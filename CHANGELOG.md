@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A write-up offers the writer the keys of a bibliography the user supplies up to
+  18,000 characters instead of 6,000 (a limit set for the earlier local model):
+  about 60 to 80 entries fit before, so in a paper with about a hundred references
+  the later ones could not be cited. 18,000 characters cover the bibliography of
+  almost any paper.
+
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model
