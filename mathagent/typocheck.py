@@ -122,7 +122,9 @@ certain, or if what settles it is not in the lines shown; "drop" if the original
 WORDS_REMARK = re.compile(r'(?i)\b(?:mis-?spell|spelling|grammar|ungrammatical|unidiomatic|article|lower-?case|upper-?case|'
                           r'capitali[sz]|punctuat|full stop|comma|hyphen|typo in the word|stray (?:word|fragment))')
 CHECK_REACH, EVIDENCE_REACH, MACROS_CHARS = 110, 25, 24_000  # lines shown around a remark and its evidence
-TRIAGE = CHECK1 + '\nWrite the comparison or the computation itself in "check", in at most 80 words, before the verdict.'
+TRIAGE = CHECK1 + ('\nA slip that changes nothing in the mathematics is still a slip, not a "drop": a variable left inside a '
+                   'norm, an open interval that should be half-closed, a missing index or superscript, a set written two '
+                   'ways. Write the comparison or the computation itself in "check", in at most 80 words, before the verdict.')
 CHECK1_SCHEMA = {'type': 'object', 'required': ['check', 'verdict'], 'properties': {'check': {'type': 'string'},
                  'verdict': {'type': 'string', 'enum': ['correction', 'look', 'drop']}}}
 
@@ -517,10 +519,14 @@ class TypoLanes:
         return run
 
     def _add_remarks(self, items, a, b, source):
-        """Remarks located with a loose match; one outside its part or not found is dropped. The same correction on
-        the same line (±1) from the formula reading and the notation call is one remark."""
+        """Remarks located with a loose match; one not found in the paper, or whose correction changes nothing, is
+        dropped. A remark on a line of another part is kept: a reader that compares a formula with a later line
+        sometimes reports the later one (8 of 119 remarks of a live run). The same correction on the same line (±1)
+        from two calls is one remark."""
         lanes = self._lanes_state()
         lines = self._lines(self._lane_source()[0])
+        reads = self._reads()
+        first, last = reads[0][0], reads[-1][1]
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -528,7 +534,7 @@ class TypoLanes:
             n = near(lines, _int(item.get('line')), quote)
             if WORDS_REMARK.search(str(item.get('problem') or '')):
                 continue  # spelling, grammar and punctuation belong to the rules and the language lane
-            if n is None or not a <= n <= b or squash(quote) == squash(correction):
+            if n is None or not first <= n <= last or squash(quote) == squash(correction):
                 lanes['unlocated'] += 1
                 continue
             evidence = near(lines, _int(item.get('evidence_line')), str(item.get('evidence_quote') or '')) if _int(item.get('evidence_line')) else None
