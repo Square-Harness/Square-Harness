@@ -4,15 +4,17 @@ Proofread the pinned manuscript as a careful referee would: its misprints, its l
 
 ## Working method
 
-1. Read the whole paper, part by part and slowly: sentence by sentence and formula by formula. With a large context every call sees the whole paper and reads one part closely; otherwise each part is read on its own.
-2. List what the authors should fix in the writing: misprinted formulas (an index, a sign, an exponent, a constant), symbols or notions used but never defined, notation that changes meaning, cross-references that do not fit, misspellings and grammar, sentences that cannot be understood, missing or wrong references. Each with its lines, a short exact quote and a correction.
-3. Before listing a problem, check it: the definition the symbol needs, the statement a reference points to, the computation, done in full for a formula. A remark whose check finds nothing wrong is not listed.
-4. Every remark is then checked once more against the whole paper, and a wrong or unnecessary correction is removed: a formula "corrected" into an error is worse than a typo left in.
-5. No remarks on the LaTeX source or on matters of taste, and never "correct" a person's name, a place's name or a bibliography entry. In text extracted from a PDF, broken formulas and split words are extraction artefacts, not typos: comment only on words and sentences.
+The check runs in three lanes, each with the check that suits it. With a large context and a TeX or text source:
+
+1. Rules, without a model: slips a program finds every time (a doubled word, a wrong article, "allows to", "the \cref", a display that ends without its period, an undefined label, two spellings of one term). They need no second opinion.
+2. Language: the paper is proofread twice in small units, without the rest of the paper, and only the lines that need a change are returned, corrected, with the smallest change. Mathematics, LaTeX commands, labels, citations, names, British or American spelling and the authors' style are never changed. A second look sorts each correction: an error, an optional improvement, or wrong (left out, unless both readings made it).
+3. Mathematics: with the whole paper in view, each part is read formula by formula, and the notation is compared across sections. A slip is reported only when another line of the paper shows it. Each remark is then checked alone, the computation or the comparison done in full from the paper's own definitions: kept as a correction only when the original is certainly wrong and the fix certainly right; shown as a place to check when something is off but the fix is not certain; removed when the original is right. A formula "corrected" into an error is worse than a typo left in.
+
+Otherwise (a PDF, or a paper too long for one call) one reader proofreads the paper part by part for all of these slips, and with the whole paper in view every remark is checked against it; the rules still run on a TeX or Markdown source. No remarks on matters of taste, and never "correct" a person's name, a place's name or a bibliography entry. In text extracted from a PDF, broken formulas and split words are extraction artefacts, not typos: comment only on words and sentences.
 
 ## Required report
 
-The paper part by part, in a few sentences each; then the typos and presentation problems grouped by kind (errors in formulas and statements first, then typos and language, notation and references, clarity), each with its place, its quote and its checked correction; then what was read and what was not. Say plainly that the proofs were not checked.
+The paper part by part, in a few sentences each; then the corrections in formulas and notation, the formulas to check, the typos and language, the references and labels, the repeated patterns (one line each, with the places) and the optional suggestions, each with its place and its quote; then what was read and how it was checked. Say plainly that the proofs were not checked.
 
 ## Trust and status
 
