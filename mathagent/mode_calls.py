@@ -436,21 +436,26 @@ class ModeOrchestrator(Orchestrator):
                 elif waiting:
                     instruction += ('\nThese objectives of the current request were not started. Say so plainly.\n'
                                     + json.dumps(waiting, ensure_ascii=False))
+                retry = self._write_up_waiting(tools)
+                modes_to_start = [task['mode'] for task in startable]
+                if retry:
+                    modes_to_start.append(retry['action']['mode'])
                 narrowed = bool(self.state.get('children')) and not decision.get('assignment_recovery')
                 if narrowed:
                     # Every branch that could start has run. The parent reads full results for
-                    # synthesis, and spends a worker only on an objective that was waiting for them.
-                    allowed = {'read_result', 'read_experiment'} | ({'delegate'} if startable else set())
+                    # synthesis and can start a deferred objective or retry a write-up that asked for material.
+                    allowed = {'read_result', 'read_experiment'} | ({'delegate'} if modes_to_start else set())
+                    if retry:
+                        allowed.add('read_conversation')
                     if decision.get('chat_recap'):
                         allowed.update(record_tools)
                     if self.state['files']:
                         allowed.add('read_file')
                     tools = [tool for tool in tools if tool['function']['name'] in allowed]
                 for tool in tools:
-                    if tool['function']['name'] == 'delegate' and startable:
+                    if tool['function']['name'] == 'delegate' and modes_to_start:
                         modes = tool['function']['parameters']['properties']['mode']
-                        modes['enum'] = list(dict.fromkeys([*([] if narrowed else modes['enum']),
-                                                            *(task['mode'] for task in startable)]))
+                        modes['enum'] = list(dict.fromkeys([*([] if narrowed else modes['enum']), *modes_to_start]))
                 return super()._payload(tools, instruction=instruction)
             if self.state.get('access_check_source'):
                 return super()._payload(tools, instruction=(

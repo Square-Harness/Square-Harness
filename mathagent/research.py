@@ -874,12 +874,21 @@ class ResearchRunner:
         """The system text of a call: the policy and the saved skill."""
         return self.POLICY + '\n' + self.state['skill']
 
+    def _call_cap(self, role, requested):
+        return output_limit(self.agent, 'research_' + role, requested)
+
+    @staticmethod
+    def _messages(system, fixed, optional, instruction, trailer):
+        user = fixed + '\n\n' + '\n\n'.join(optional) + '\n\nCURRENT TASK:\n' + instruction
+        return [{'role': 'system', 'content': system},
+                {'role': 'user', 'content': user + ('\n\n' + trailer if trailer else '')}]
+
     @retry_generation_call
     def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
               sampling=None):
         self._check_time()
         settings = self.state['settings']
-        cap = output_limit(self.agent, 'research_' + role, cap)
+        cap = self._call_cap(role, cap)
         remaining = remaining_limit(settings, 'max_tokens', self.state['tokens_charged'])
         if role in {'plan', 'investigate'}:
             remaining -= self._report_reserves()[0]
@@ -904,7 +913,7 @@ class ResearchRunner:
                   'Do not review, solve or write up its mathematics. Preserve uncertainty and missing text.'
                   if role == 'image_read' else self._system(role))
         while True:
-            payload['messages'] = [{'role': 'system', 'content': system}, {'role': 'user', 'content': fixed + '\n\n' + '\n\n'.join(optional) + '\n\nCURRENT TASK:\n' + instruction + ('\n\n' + trailer if trailer else '')}]
+            payload['messages'] = self._messages(system, fixed, optional, instruction, trailer)
             try:
                 payload, allocation = allocate_call(self.agent.client, payload, cap, minimum=minimum_output if minimum_output is not None else min(512, cap, getattr(self.agent, 'document_output_cap', None) or cap),
                     explicit_cap=getattr(self.agent, 'document_output_cap', None))

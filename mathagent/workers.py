@@ -590,11 +590,11 @@ def run_worker(host, parent, budget, action, child, save):
                     templates = [f for f in files if Path(f).suffix.lower() in ('.sty', '.cls', '.bib') or
                                  (f.lower().endswith('.tex') and '\\begin{document}' in agent.workspace.text(agent.workspace.path(f)))]
                     kwargs['template_files'] = templates
-                    kwargs['source_files'] = [f for f in files if f not in templates]
+                    kwargs['source_files'] = [f for f in selected_files if f not in templates]
                     kwargs['explain_templates'] = any(f.lower().endswith('.tex') for f in templates)
                     # The results so far, as the user saw them (this turn's finished jobs included, the
                     # request itself left out), in place of the raw history (which would fill the context twice).
-                    kwargs.update(host.writeup_inputs(parent.state, previous_markdown),
+                    kwargs.update(host.writeup_inputs(parent.state, previous_markdown, kwargs['source_files']),
                                   previous_markdown=previous_markdown, variant='summary' if mode == 'summarize' else None,
                                   scoped=True, deliver='download')
                 if mode not in ('writeup', 'summarize'):

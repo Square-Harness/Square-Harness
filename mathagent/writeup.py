@@ -36,6 +36,7 @@ import unicodedata
 from urllib.parse import unquote
 import zipfile
 
+from .call_policy import CONTEXT_MARGIN, count_input
 from .jsonutil import loads as json_loads
 from .format_request import can_recover_previous_markdown, conversion_source
 from .ledger import _atomic_write, _bytes, _directory, _now, _regular
@@ -828,6 +829,18 @@ def split_material(blocks, room):
         else:
             current = current + '\n\n' + piece if current else piece
     return parts + ([current] if current else [])
+
+
+def fitting_prefix(text, budget):
+    """The length of the longest prefix of `text` that adds at most `budget` bytes to a JSON string."""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(text[:middle], ensure_ascii=False).encode('utf-8')) - 2 <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def download_name(state):
@@ -2730,10 +2743,18 @@ class WriteupRunner(ResearchRunner):
             self._save()
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(),
-              conversation='', variant=None, scoped=False, deliver='folder', style_choice=None,
+              conversation='', variant=None, scoped=False, deliver='folder', style_choice=None, attached_files=None,
               explain_templates=False, experiment_ids=(), reference_records=(), previous_markdown=None, waive_needs=False, **budgets):
         self._waive_needs = bool(waive_needs)
         self.previous_markdown = previous_markdown
+        # Direct callers select their own files. Chat callers also know which selected files came from
+        # human attachments. Keep that distinction before images.capture separates the visual sources.
+        self._attached_files = []
+        for name in source_files if attached_files is None else attached_files:
+            path = Path(name)
+            if path.is_absolute():
+                path = path.resolve().relative_to(self.agent.workspace.root)
+            self._attached_files.append(str(path))
         source_files = images.capture(self.agent, source_files)
         if variant not in (None, 'summary'):
             raise ValueError('Unknown write-up variant')
@@ -2937,6 +2958,7 @@ class WriteupRunner(ResearchRunner):
 
     def _extra_state(self):
         return {'phase': 'style', 'output_name': self._output, 'variant': self._variant, 'scoped': self._scoped,
+                'attached_files': self._attached_files,
                 'inline_material': bool(self._inline_material),
                 'deliver': self._deliver, 'request_macros': self._request_macros,
                 'request_environments': self._request_environments, 'style_choice': self._style_choice,
@@ -2951,14 +2973,19 @@ class WriteupRunner(ResearchRunner):
                 'needs_waived': getattr(self, '_waive_needs', False), 'ledger': [], 'focus_done': [], 'layers': {},
                 'abstract': ''}
 
+    def _call_cap(self, role, requested):
+        if role in ('plan', 'skeleton'):
+            return requested  # bounded JSON, including on DS4
+        if role not in ('style', 'resolve_refs'):
+            requested = substantive_output(self.agent, requested)
+        return super()._call_cap(role, requested)
+
     def _call(self, role, instruction, *, thinking_budget=None, **kwargs):
         """A reasoning call whose reasoning share of the output is this call's own: a document needs most of
         its allowance for the text. The served share applies to every other call; it is set only on a
         server already configured with one (vLLM thinking budgets), and only for the duration of this call.
         Jobs cannot overlap on it: the hub builds a client per job and per Assistant worker (Hub._engine), and
         _transport unwraps only this job's budget wrappers."""
-        if role not in ('style', 'resolve_refs'):
-            kwargs['cap'] = substantive_output(self.agent, kwargs['cap'])
         transport = self._transport() if thinking_budget and kwargs.get('think') and not is_ds4(self.agent) else None
         policy = getattr(transport, 'thinking_budget_policy', None)
         if not policy or 'ordinary' not in policy:
@@ -3020,6 +3047,19 @@ class WriteupRunner(ResearchRunner):
     def _notes_in(self):
         return [s for s in self.state['sources'] if not s['id'].startswith('T') and s['id'] != 'B0']
 
+    def _conversation_material(self):
+        """Whether the material holds the conversation's results (conversation.md), not only notes or files."""
+        return bool(self.state.get('scoped')) and any(s['id'] == 'M0' and s['path'] == 'conversation.md' for s in self._notes_in())
+
+    def _attached_material(self):
+        """Whether a pinned manuscript, archive member or visual source belongs to a selected user attachment."""
+        attached = self.state.get('attached_files') or []
+        sources = [s for s in self._notes_in() if s['id'].startswith('M') and s['id'] != 'M0']
+        if attached is True:  # jobs from the first implementation only recorded a flag for text sources
+            return bool(sources)
+        return (any(s.get('source_archive', s['path']) in attached for s in sources)
+                or any(image['name'] in attached for image in self.state.get('images', [])))
+
     def _room(self):
         """Characters of material one writing call can read, leaving room for its output (about 2.5 a token)."""
         if is_ds4(self.agent):
@@ -3031,6 +3071,45 @@ class WriteupRunner(ResearchRunner):
                       getattr(self.agent, 'document_output_cap', None) or float('inf'))
             return max(4000, (self.agent.ctx - cap - min(32768, self.agent.ctx // 8)) // 4)
         return max(4000, int((self.agent.ctx - self._minimum_output() - 3000) * 2.5))
+
+    def _planning_material(self, role, head, schema, cap, suffix=''):
+        """Fit the source beside the actual instruction, schema, images, notebook and output.
+        Reserve two thirds of the available job input for later calls. With native tokenization try
+        the complete document first; when it cannot fit, size a prefix locally in JSON bytes."""
+        material = self._whole_material()
+        total = len(material)
+
+        def marker(shown):
+            if role == 'skeleton':
+                return '\n[The material continues.]'
+            return (f'\n[Only the first {shown:,} of {total:,} characters of the material are shown; the writer '
+                    'reads the rest. Plan the whole document from this beginning, and list no need for anything '
+                    'the rest may hold, such as its later sections or its list of references.]')
+
+        if is_ds4(self.agent):
+            fixed, optional = self._material(role)
+            system = self._system(role)
+            def count(source):
+                messages = self._messages(system, fixed, optional, head + source + suffix, 'Answer with the JSON object only.')
+                payload = {'model': self.agent.model, 'messages': messages, 'format': schema, 'think': False,
+                           'options': {'num_predict': cap}, 'stream': True}
+                return count_input(self.agent.client, payload)[0]
+
+            full = count(material)
+            context = min(self.agent.ctx, getattr(self.agent.client, 'observed_context_tokens', None) or self.agent.ctx)
+            output = min(cap, getattr(self.agent, 'document_output_cap', None) or cap)
+            remaining = remaining_limit(self.state['settings'], 'max_input_tokens', self.state['input_tokens_charged'])
+            if role == 'plan':
+                remaining -= self._report_reserves()[1]
+            limit = min(context - output - CONTEXT_MARGIN, remaining / 3)
+            shown = total
+            if full > limit:
+                # Use the longest possible omission marker when measuring the fixed part. No further
+                # tokenization requests are needed to find the conservative byte-bounded prefix.
+                shown = fitting_prefix(material, limit - count(marker(total)))
+        else:
+            shown = min(total, self._room())
+        return material[:shown] + (marker(shown) if shown < total else ''), shown, total
 
     def _minimum_output(self):
         return min(output_limit(self.agent, 'writeup_min', 12288), max(1024, self.agent.ctx // 3),
@@ -3348,14 +3427,14 @@ class WriteupRunner(ResearchRunner):
         self.state['macros'], self.state['theorems'], self.state['definitions'] = template_vocabulary(self._templates_in())
         if self.state.get('variant') == 'summary':
             self._pin_experiment_code()  # no outline for a summary
-        labels = {'conversation.md': 'CONVERSATION (as the user saw it: messages, answers and job results)',
-                  'typed-notes.md': 'NOTES TYPED BY THE USER'}
+        labels = {('M0', 'conversation.md'): 'CONVERSATION (as the user saw it: messages, answers and job results)',
+                  ('M0', 'typed-notes.md'): 'NOTES TYPED BY THE USER'}
         blocks = [s['content'].strip() if self.state.get('inline_material') else  # the request itself: _draft labels it
-                  f'=== {labels.get(s["path"], "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
+                  f'=== {labels.get((s["id"], s["path"]), "SOURCE FILE " + s["path"])} ===\n{s["content"].strip()}' for s in self._notes_in()]
         self.state['material'] = '\n\n'.join(blocks)
         self.state['parts'] = [{'text': text, 'body': '', 'complete': False} for text in split_material(blocks, self._room())]
         if len(self.state['parts']) > 1:
-            self.state['warnings'].append(f'The material is longer than one writing call can read; it was written in '
+            self.state['warnings'].append(f'The material is longer than one writing call can read; it was split into '
                                           f'{len(self.state["parts"])} consecutive parts.')
         choices, forced = self._allowed_styles()
         if choices and not self.state['style_checked']:
@@ -3421,30 +3500,36 @@ class WriteupRunner(ResearchRunner):
         """One structured call before writing: the kind of document, its language, what the request asks for, what the
         material holds and where it is wrong, the sections, and what is missing. The controller settles the answer
         (_settle_outline); without a usable answer the document is written without an outline, as before."""
-        material = self._whole_material()
-        if len(material) > self._room():
-            material = material[:self._room()] + '\n[The material continues; plan the whole document from this beginning.]'
-        given = ('USER REQUEST AND NOTES (one message: the instruction, then the notes it applies to):\n' + material
-                 if self.state.get('inline_material') else 'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n' + material)
-        scoped = (' The material is a conversation: plan from the final version of each result (the proof the review '
-                  'accepted, the repaired argument); a superseded or withdrawn claim is withdrawn.' if self.state.get('scoped') else '')
+        given = ('USER REQUEST AND NOTES (one message: the instruction, then the notes it applies to):\n'
+                 if self.state.get('inline_material') else 'USER REQUEST:\n' + self.state['goal'] + '\n\nMATERIAL:\n')
+        scoped = (' The material includes a conversation: plan from the final version of each result (the proof the '
+                  'review accepted, the repaired argument); a superseded or withdrawn claim is withdrawn.'
+                  if self._conversation_material() else '')
         again = self.state.get('outline_again')
         departures = settable((self.state.get('style') or {}).get('departures'))
-        instruction = ('Plan the document the user asks for, as the system message says.' + scoped
-                       + ('\n\n' + again if again else '') + '\n\nREQUIRED PARTS:\n' + required_parts()
-                       + '\n\nGUIDELINE RULES (every sheet; the ones of this kind of document apply unless the request or '
-                         'the author\'s style sets them aside):\n' + rule_index()
-                       + ('\n\nRULES THE AUTHOR\'S STYLE SETS ASIDE (the request may insist on them):\n'
-                          + '\n'.join(departure_line(d) for d in departures) if departures else '')
-                       + '\n\n' + given)
+        head = ('Plan the document the user asks for, as the system message says.' + scoped
+                + ('\n\n' + again if again else '') + '\n\nREQUIRED PARTS:\n' + required_parts()
+                + '\n\nGUIDELINE RULES (every sheet; the ones of this kind of document apply unless the request or '
+                  'the author\'s style sets them aside):\n' + rule_index()
+                + ('\n\nRULES THE AUTHOR\'S STYLE SETS ASIDE (the request may insist on them):\n'
+                   + '\n'.join(departure_line(d) for d in departures) if departures else '')
+                + '\n\n' + given)
         raw = None
         cap = int(min(16384, output_limit(self.agent, 'writeup', self.WRITE_TOKENS)))
         compact = ('\n\nThe material is long: keep the plan compact. At most forty inventory items (group routine steps), '
                    'each text in one line of at most 120 characters; one thread line per section; write the JSON '
                    'without indentation.')
-        for hint in ((compact,) if len(material) > 20_000 else ('', compact)):
+        for hint in ((compact,) if len(self._whole_material()) > 20_000 else ('', compact)):
+            material, shown, total = self._planning_material('plan', head, OUTLINE_SCHEMA, cap, hint)
+            # Only this attempt's actual view can establish coverage, including after a format retry.
+            self.state['outline_cut'] = {'shown': shown, 'total': total} if shown < total else None
+            if total and not shown:
+                self._pin_experiment_code()
+                self.state['warnings'].append('The remaining input or context cannot hold source material beside the outline instructions.')
+                self.state['phase'] = 'draft'
+                return
             try:
-                result = self._call('plan', instruction + hint, cap=cap, format_schema=OUTLINE_SCHEMA, think=False,
+                result = self._call('plan', head + material + hint, cap=cap, format_schema=OUTLINE_SCHEMA, think=False,
                                     trailer='Answer with the JSON object only.')
                 raw = json_loads(result['text']) if result['complete'] else None
             except ResearchBudget:
@@ -3477,7 +3562,8 @@ class WriteupRunner(ResearchRunner):
             self._plan_parts()
             if (any(n['blocking'] for n in outline['needs']) and self.state.get('scoped')
                     and not self.state.get('needs_waived') and self.state.get('variant') != 'summary'):
-                # From a conversation: nothing is written; the main agent obtains what is missing, or asks.
+                # From a conversation: nothing is written; the main agent obtains what is missing, or asks. A write-up
+                # of files the user attached is written from them, and what they lack becomes points to check.
                 self.state['needs_input'] = True
                 self.state['phase'] = 'done'
                 return
@@ -3504,24 +3590,22 @@ class WriteupRunner(ResearchRunner):
             self._artifact('skeleton', json.dumps(skeleton, ensure_ascii=False, indent=1))
             self.state['phase'] = 'draft'
             return
-        material = self._whole_material()
-        if len(material) > self._room():
-            material = material[:self._room()] + '\n[The material continues.]'
         dangling = list(dict.fromkeys(key for s in self._notes_in() if s['path'].lower().endswith('.tex')
                                       for key in reference_problems(s['content'])[0]))
         folders = [Path(self.agent.workspace.root, folder) for folder in self._figure_folders()]
-        figures = list(dict.fromkeys(_GRAPHIC.findall(_uncommented(material)) + sorted(
+        figures = list(dict.fromkeys(_GRAPHIC.findall(_uncommented(self._whole_material())) + sorted(
             p.name for folder in folders if folder.is_dir() for p in folder.iterdir()
             if p.suffix.lower() in GRAPHIC_SUFFIXES and not p.name.startswith('.'))))[:20]
         keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
-        instruction = ('Fix the skeleton of the document the outline plans, as the system message says.\n\nOUTLINE:\n'
-                       + self._outline_text()
-                       + '\n\nLABELS THE MATERIAL ALREADY HAS (keep them exactly): ' + (', '.join(sorted(self._material_labels())) or 'none')
-                       + '\nREFERENCES OF THE MATERIAL THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none')
-                       + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys[:60]) or 'none')
-                       + '\nFIGURE FILES: ' + (', '.join(figures) or 'none')
-                       + '\n\nMATERIAL:\n' + material)
-        raw = self._structured('skeleton', instruction, 8192, SKELETON_SCHEMA)
+        head = ('Fix the skeleton of the document the outline plans, as the system message says.\n\nOUTLINE:\n'
+                + self._outline_text()
+                + '\n\nLABELS THE MATERIAL ALREADY HAS (keep them exactly): ' + (', '.join(sorted(self._material_labels())) or 'none')
+                + '\nREFERENCES OF THE MATERIAL THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none')
+                + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys[:60]) or 'none')
+                + '\nFIGURE FILES: ' + (', '.join(figures) or 'none')
+                + '\n\nMATERIAL:\n')
+        material, shown, total = self._planning_material('skeleton', head, SKELETON_SCHEMA, 8192)
+        raw = self._structured('skeleton', head + material, 8192, SKELETON_SCHEMA) if shown or not total else None
         skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling)
         if skeleton['warning']:
             self.state['warnings'].append(skeleton['warning'])
@@ -3649,7 +3733,7 @@ class WriteupRunner(ResearchRunner):
         self.state['parts'], self.state['framed'] = parts, True
         self.state['warnings'] = [w for w in self.state['warnings'] if not w.startswith('The material is longer than one writing call')]
         body = sum(not p.get('frame') for p in parts)
-        self.state['warnings'].append(f'Written section by section: {body} call{"s" if body > 1 else ""} for the body, then '
+        self.state['warnings'].append(f'The writing plan calls for {body} call{"s" if body > 1 else ""} for the body, then '
                                       'the introduction and the abstract.')
         return True
 
@@ -3719,7 +3803,7 @@ class WriteupRunner(ResearchRunner):
                 grouped.append(piece)
         self.state['parts'] = [{'text': g['text'], 'body': '', 'complete': False, 'sections': g['sections']} for g in grouped]
         self.state['warnings'] = [w for w in self.state['warnings'] if not w.startswith('The material is longer than one writing call')]
-        self.state['warnings'].append(f'The material is longer than one writing call can read; it was written in '
+        self.state['warnings'].append(f'The material is longer than one writing call can read; it was split into '
                                       f'{len(grouped)} parts that follow the outline\'s sections.')
 
     def _settle_outline(self, raw):
@@ -3805,6 +3889,7 @@ class WriteupRunner(ResearchRunner):
         headings = {key(s['heading']) for s in kept} | {key(part) for s in kept for part in s['parts']}
         problem_ids = {key(p['inventory_id']) for p in problems}
         needs, decisions = [], 0
+        advisory = bool(self.state.get('outline_cut')) or self._attached_material()
         for item in items(raw.get('needs'))[:20]:
             need = {'type': pick(item.get('type'), NEED_TYPES, 'decision'), 'what': text(item.get('what'), 600),
                     'concerns': strings(item.get('concerns'))[:10], 'model_blocking': bool(item.get('blocking'))}
@@ -3814,6 +3899,9 @@ class WriteupRunner(ResearchRunner):
             need['blocking'] = need['model_blocking'] and depends and (need['type'] != 'decision' or decisions < 3)
             if need['type'] == 'literature' and any(not s.get('catalog') for s in self._templates_in(('.bib',))):
                 need['blocking'] = False  # the author gave their bibliography: the text cites it and nothing else
+            if advisory:
+                # The writer checks the source. A planner's guess cannot stop drafting or fail the final readiness gate.
+                need['blocking'] = False
             decisions += need['blocking'] and need['type'] == 'decision'
             needs.append(need)
         given = {part for s in kept for part in s['parts']}
@@ -3982,8 +4070,9 @@ class WriteupRunner(ResearchRunner):
         # the document cannot be written without it.
         missing = [n for n in o['needs'] if n['type'] != 'figure' and (n['type'] != 'decision' or n.get('blocking'))]
         if missing:
-            out += ['Missing from the material (do not supply it: mark the place with % TODO and say in general terms '
-                    'what is missing, without naming authors or works):'] + [
+            out += ['Possible gaps suggested by the planner. Use the supplied material wherever it answers them. '
+                    'For a genuine unresolved gap, mark its place with % TODO without inventing authors or works. '
+                    'An item outside this writing part may appear in another part.'] + [
                 f'- {n["type"]}' + (' for ' + ', '.join(n['concerns']) if n['concerns'] else '') for n in missing]
         return '\n'.join(out)
 
@@ -3996,10 +4085,13 @@ class WriteupRunner(ResearchRunner):
                     'only if it is recorded in the supplied material. Describe a source proposed for further work '
                     'as a lead, with its recorded purpose. Do not turn that purpose into a new claim or open '
                     'question. Report only the mathematical results and open questions the material actually states.')
-        elif self.state.get('scoped'):
+        elif self._conversation_material():
             task = ('Write the LaTeX document the USER REQUEST asks for, from the material below, a conversation the '
-                    'user had. Use the final version of each result (the proof the review accepted, the repaired '
-                    'argument), never a superseded attempt, write each result once, and keep its status as recorded.')
+                    'user had (with any files they attached). Use the final version of each result (the proof the '
+                    'review accepted, the repaired argument), never a superseded attempt, write each result once, and '
+                    'keep its status as recorded.')
+        elif self.state.get('scoped'):
+            task = 'Write the LaTeX document the USER REQUEST asks for, from the material below.'
         else:
             task = 'Write up the material below as a clean LaTeX document, as the USER REQUEST asks.'
         if count == 1:
@@ -7337,11 +7429,11 @@ class WriteupRunner(ResearchRunner):
         noun = 'summary' if s.get('variant') == 'summary' else 'write-up'
         if s.get('status') == 'needs_input':
             needs = [n for n in s.get('needs') or [] if n.get('blocking')]
-            return ('Needs: the write-up was not written, because the material lacks what it needs:\n'
+            return ('Needs: the write-up paused before drafting. Its planner flagged these items for checking:\n'
                     + '\n'.join(f'- {n["type"]}' + (f' (for {", ".join(n["concerns"])})' if n['concerns'] else '')
                                  + f': {n["what"]}' for n in needs)
-                    + '\nProvide it (find the literature, check or prove the result, or ask the author), then ask for the '
-                    'write-up again; or write it anyway from its page, with these as points to check.')
+                    + '\nCheck the conversation and the supplied files first. The write-up can be requested again '
+                    'with the available material, or continued with Write anyway on its page.')
         if not name:
             return f'The {noun} was not finished: {s.get("stop_reason") or s["status"]}'
         if s.get('conversion_source'):
@@ -7445,7 +7537,8 @@ class WriteupRunner(ResearchRunner):
             out += [f'- {x["heading"]} ({x["role"]}, {x["source"]})' + (f', parts {", ".join(x["parts"])}' if x['parts'] else '')
                     for x in o['sections']]
             out += [f'- Problem {p["inventory_id"]}: {p["what"]}' for p in o['problems']]
-            out += [f'- Need ({n["type"]}, {"blocking" if n["blocking"] else "not blocking"}): {n["what"]}' for n in o['needs']]
+            out += [f'- Planner suggestion ({n["type"]}, {"blocking" if n["blocking"] else "advisory"}): {n["what"]}'
+                    for n in o['needs']]
             if o.get('unassigned_parts'):
                 out.append('- Required parts no section provides: ' + ', '.join(o['unassigned_parts']))
         skeleton = s.get('skeleton') or {}

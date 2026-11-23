@@ -975,14 +975,16 @@ How it works:
    asks you which one to keep, with both versions. When the conversation has
    already settled it (a review found the statement false and gave the
    corrected one), the document uses the settled version and asks nothing.
-   In a conversation, when a section depends on something the material does
-   not contain (earlier work to cite, a proof, a definition, data, or a choice
-   only you can make about a problem in your notes), nothing is written: the
-   Assistant gets the list, obtains what it can (a literature search, a check,
-   a proof) or asks you, then asks for the write-up again. If it still lacks
-   something, it tells you what. On the write-up's page, **Write anyway**
-   writes it with those pieces marked as points to check, and **Stop** leaves
-   it.
+   When you attach source material, Write-Up drafts from it. A possible gap
+   flagged by the planner stays visible in the outline. The writer checks it
+   against the source and marks a genuine gap in the draft. For long documents,
+   the DeepInfra planner reads the whole attachment when the context and job
+   budget allow. If it reads only the beginning, its suggestions cannot stop
+   the job. The writer still receives the remaining material in later parts.
+   A write-up based on a conversation can pause before drafting if a section
+   depends on missing material. The Assistant is asked to check the relevant
+   conversation or file passage, obtain what it can and request the write-up
+   again. You can also choose **Write anyway** or **Stop** on the write-up page.
    Each kind follows written guidelines (`mathagent/skills/writeup/guidelines`):
    a paper's style rules for articles, notes and parts of papers; an
    introduction's required parts (motivation, literature, positioning, main

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed Write-Up stopping before drafting a long attached article because its
+  planner had missed the bibliography at the end. On DeepInfra the outline and
+  skeleton now read the full source when it fits their calls and the job budget.
+  Suggestions from a partial view or an attached source stay advisory through
+  drafting and final checks. When a conversation write-up pauses, the Assistant
+  is prompted to inspect the source passage and can retry the write-up.
 - A write-up offers the writer the keys of a bibliography the user supplies up to
   18,000 characters instead of 6,000 (a limit set for the earlier local model):
   about 60 to 80 entries fit before, so in a paper with about a hundred references
