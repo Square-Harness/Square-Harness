@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A write-up whose text uses `\C` (or another command the harness redefines) no
+  longer fails to compile: the preamble wrote `\renewcommand{\C}{\mathbb{C}}`,
+  and `\C` exists only with a Cyrillic font encoding, so LaTeX stopped with
+  "Command \C undefined" before the text. No repair could fix it, because the
+  preamble is rebuilt from the same definitions. Every `\renewcommand` the
+  write-up puts in a preamble (standard notation, the model's definitions, the
+  request's and the saved style's) is now preceded by an empty
+  `\providecommand`, so it holds whether or not the command exists.
+
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model
