@@ -96,10 +96,21 @@ class _ChatWorkerHost:
     def previous_writeup(self):
         return self.hub._previous_writeup(self.root, self.chat_id)
 
-    def writeup_inputs(self, state, previous):
+    def writeup_inputs(self, state, previous, material_files):
         root, chat = self.root, self.chat_id
-        start = self.hub._turn_start(root, chat)
-        return dict(reference_records=[] if previous else store.conversation_references(root, chat, skip=start),
+        transcript = store.load_chat(root, chat)['transcript']
+        start = self.hub._turn_start(root, chat, transcript=transcript)
+        # A selected workspace file can come from a filename in the request or a delegate.
+        # Only user attachments (including one selected again on a later turn) have this provenance.
+        attached = {Path(name) for item in transcript[:start + 1] if item.get('role') == 'user' and not item.get('discarded')
+                    for name in item.get('attached_files', [])}
+        if (not material_files and not previous and state.get('images') and start < len(transcript)
+                and (state.get('proof_routing') or {}).get('route') != 'workers'):
+            # A follow-up uses the frozen picture already in history. It is not re-attached on this turn.
+            chosen = conversation_sources(state['query'], [], transcript[:start], mode='writeup')
+            material_files = [name for name in chosen if images.is_image(name)]
+        return dict(attached_files=[name for name in material_files if Path(name) in attached],
+                    reference_records=[] if previous else store.conversation_references(root, chat, skip=start),
                     conversation='' if previous else store.conversation_record(root, chat, skip=start),
                     experiment_ids=[] if previous else state.get('previous_experiments') or store.conversation_experiments(root, chat),
                     style_choice={'mode': state['conversion_style_mode']} if state.get('conversion_style_mode') else load_choice(self.base),
@@ -1938,9 +1949,10 @@ class Hub:
             return None
 
     @staticmethod
-    def _turn_start(root, chat_id):
+    def _turn_start(root, chat_id, *, transcript=None):
         """Transcript index of the request being answered: the conversation before it is the material."""
-        transcript = store.load_chat(root, chat_id)['transcript']
+        if transcript is None:
+            transcript = store.load_chat(root, chat_id)['transcript']
         return next((i for i in range(len(transcript) - 1, -1, -1) if transcript[i].get('role') == 'user'), len(transcript))
 
     def _outcome(self, root, item):

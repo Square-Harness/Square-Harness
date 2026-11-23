@@ -417,16 +417,35 @@ Version 1.1.0. The source of truth for the machine-readable version is
   gives later parts their sections, the labels and the model's definitions so
   far, and `_definition_findings` blocks two different definitions of one
   command.
-- **Write-up hand-back.** A conversation write-up (`state['scoped']`) with a
-  blocking need stops after its outline with status `needs_input` (in
-  `WriteupRunner.TERMINAL`), writes nothing, and the hub adds `needs` and
-  `kind` to the child's result. The orchestrator does not force a final answer
-  on it and `_document_answer` gives no reply, so the main agent obtains the
-  material and delegates again; the duplicate-child test skips `needs_input`
-  children, and a second `needs_input` in the turn is the reply. The
-  instruction to obtain the material and delegate again reaches the model only
-  in its tool result (`next_step`, `orchestrator.WRITEUP_HAND_BACK`); the user's
-  notice is `WRITEUP_NEEDS`.
+- **Write-up planning view.** On DeepInfra, `_planning_material` counts the
+  assembled outline or skeleton request, including the project notebook,
+  response schema and provider framing. Each call can use up to one third
+  of the remaining input allowance after applicable reserves. Its output cap
+  is 16,384 tokens for the outline and 8,192 for the skeleton. When the full
+  source exceeds either limit, fit a prefix with the omission notice. Record
+  the outline's shown and total character counts in `outline_cut`. Other
+  backends retain their existing planning window. Drafting uses the original
+  material in parts independently of the planner's window.
+- **Write-up hand-back.** Needs from a partial planning view or a write-up of
+  attached source material are advisory. Keep the model's original judgment
+  in `model_blocking`. An advisory need alone cannot pause the worker, fail
+  the readiness check or certify an absence in the final answer. The writer
+  checks it against the source and marks an unresolved gap in the text.
+  For Assistant workers, intersect the selected material with the attachments
+  recorded on user messages. Workspace filenames mentioned in prose or chosen
+  by the Assistant alone do not establish attachment provenance.
+  A scoped conversation job with a blocking need returns `needs_input` after
+  its outline, with the needs on the child result. The first such result
+  leaves the turn open and the Assistant receives `WRITEUP_HAND_BACK`. It is
+  asked to read the relevant conversation or file passage and retry the same
+  write-up after resolving the needs it can. The model receives a reminder
+  only when another write-up is available, including on routed turns.
+  On a single-document turn, if the only blocking needs were bibliographic
+  and a reference worker has since processed that hand-back, an attempted
+  prose-only final triggers one retry with the original files, effort and
+  request when the remaining limits permit.
+  The second delegation can write with the available material. A second
+  hand-back ends the cycle. The user sees `WRITEUP_NEEDS` on a pause.
   `WriteupRunner.decide_needs` (POST `/api/research/<id>/needs`, waive or stop)
   is the author's answer on the page; waiving resumes at `skeleton` (then
   `draft`) with `needs_waived`.

@@ -75,11 +75,15 @@ also receive the conversation's results (proofs, reports) as their source and wr
 a .tex file; summarize recaps the important results obtained so far. Delegate a
 write-up only when the user asks for one, with the user's own words as its request
 (do not restate or correct the mathematics). A write-up that returns status
-needs_input has written nothing: obtain what its needs list (literature or check for
-earlier work; prove only when a main result of the document has no proof at all, at
-the lowest effort, never for a routine step; or ask the user a question), then
-delegate the write-up once more with the same request: it then writes with what
-there is and marks what is still missing; never write the document yourself in the reply. A delivered
+needs_input has written nothing. Its needs are its planner's reading, not checked
+facts: first look for each one in the conversation and the files (read the place);
+a need they already meet needs nothing. Obtain only what is really missing (check
+for a reference; literature for earlier work on a topic: it writes a survey and does
+not complete a given list of references; prove only when a main result of the
+document has no proof at all, at the lowest effort, never for a routine step; or ask
+the user a question), then delegate the write-up once more with the same request: it
+then writes with what there is and marks what is still missing. Report unresolved
+needs if further delegation is unavailable. Never write the document yourself in the reply. A delivered
 document ends the turn: never critique, review or redo it. Notes pasted without a question are not a request to prove them: ask what
 the user wants, or offer a write-up.
 Recorded sandbox code and figures are supplied automatically to write-up workers;
@@ -202,8 +206,11 @@ PROOF_OUTCOMES = {'proved': 'Model-reviewed proof', 'refuted': 'Model-reviewed r
 # message before the request: a model took an earlier record there for the current request.
 PROJECT_RECORDS = '\n\nEARLIER RECORDS (not the current request; use them only where they bear on it):\n'
 # Text sent only to the model when a write-up stopped for missing material; the user sees WRITEUP_NEEDS.
-WRITEUP_HAND_BACK = ('The write-up stopped before writing: its material lacks what it needs. Obtain it (or ask the '
-                     'user), then delegate the write-up once more; or report the needs.')
+WRITEUP_HAND_BACK = ('The write-up stopped before writing. Its planner listed possible gaps. Check each one in '
+                     'the conversation and the files. If a decision requires the user, ask for it. Otherwise obtain '
+                     'any missing material you can and delegate the same write-up once more. It writes from the '
+                     'available material and marks remaining gaps. Report unresolved needs if further delegation '
+                     'is unavailable.')
 WRITEUP_NEEDS = 'The write-up needs more material before it can be written.'
 
 
@@ -682,11 +689,21 @@ class Orchestrator:
                 '("by memory, I think it is in Chapter 3"), never as a checked place. '
                 'A bibliographic record confirms the work exists, not that the theorem is in a '
                 'particular chapter. Do not search again or promise another lookup.'})
+        waiting = self._write_up_waiting(tools)
         if self._reviews():
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER LITERATURE REVIEW: the finished literature review is shown to the user as is, '
                 'right after your answer. Do not rewrite, re-list, summarize at length or extend it, and never '
-                'add works recalled from memory. Answer the rest of the request; refer to the review briefly if useful.'})
+                'add works recalled from memory. ' + ('' if waiting else
+                'Answer the rest of the request; refer to the review briefly if useful.')})
+        if waiting:
+            # The write-up that stopped for material comes next, not the reply.
+            waiting_notice = {'role': 'user', 'content':
+                'CONTROLLER WRITE-UP WAITING: the write-up of this turn stopped for material and has not been '
+                'delegated again. Check its needs against the available sources. If you need a decision only the '
+                'user can make, ask it. Otherwise delegate the same request once more, keeping its files and effort. '
+                'It writes with what there is and marks what is still missing.'}
+            payload['messages'].append(waiting_notice)
         if self.state.get('tool_call_recovery_pending'):
             # Greedy decoding can reproduce the same malformed repetition.
             # Keep the exact premises and give one explicit correction request.
@@ -754,6 +771,8 @@ class Orchestrator:
             # sequence of new source reads fills the working context entirely.
             self.state['force_final'] = True
             payload.pop('tools', None)
+            if waiting:
+                payload['messages'].remove(waiting_notice)
             payload['messages'][0]['content'] += (
                 '\nFINAL ANSWER REQUIRED: the working context is nearly full. Use the exact saved '
                 'findings to answer now, identify unread or unresolved source obligations, and '
@@ -794,8 +813,9 @@ class Orchestrator:
     def _stream_once(self, payload, output_char_limit=None):
         self.agent.last_stats = {}
         assistant = {'role': 'assistant', 'content': ''}
-        calls, done = [], False
+        calls, done, warning = [], False, None
         self.state['main_calls'] += 1
+        retry = self._write_up_after_lookup(payload.get('tools')) if output_char_limit is None else None
         previous = self.state.get('last_call') or {}
         recovering = ('tools' not in payload and ((previous.get('stats') or {}).get('done_reason') == 'length'
                                                  or previous.get('final_recovery') is True))
@@ -817,7 +837,8 @@ class Orchestrator:
                                 and sum(len(assistant.get(k, '')) for k in ('content', 'thinking')) + len(value) > output_char_limit):
                             raise AgentError('Proof preparation exceeded its short text allowance')
                         assistant[key] = assistant.get(key, '') + value
-                        self.emit(kind, value)
+                        if not retry or kind != 'text':
+                            self.emit(kind, value)
                 calls.extend(copy.deepcopy(message.get('tool_calls') or []))
                 self.state['last_call']['partial'] = copy.deepcopy(assistant)
                 if event.get('done'):
@@ -826,6 +847,21 @@ class Orchestrator:
                     self.agent.last_stats = {key: event[key] for key in
                         ('eval_count', 'eval_duration', 'prompt_eval_count', 'done_reason') if key in event}
                     done = True
+            stats = self.agent.last_stats
+            if not done:
+                warning = 'The model stream ended without a completion event; displayed text is unfinished.'
+            elif any(type(stats.get(key)) is not int or stats[key] < 0 for key in ('eval_count', 'prompt_eval_count')):
+                warning = 'The model did not supply valid token usage; this response is unfinished.'
+            elif stats['eval_count'] > payload['options']['num_predict']:
+                warning = 'The model exceeded its output allowance; this response is unfinished.'
+            elif stats.get('done_reason') == 'length':
+                warning = 'Generation hit its output limit; displayed text is unfinished.'
+            elif stats.get('done_reason') not in {'stop', 'tool_calls'}:
+                warning = 'The model did not supply a supported completion reason; this response is unfinished.'
+            elif stats['done_reason'] == 'tool_calls' and not calls:
+                warning = 'The model requested tools without providing an action; this response is unfinished.'
+            else:
+                warning = ''
         except ToolCallError as exc:
             self.agent.last_stats = copy.deepcopy(exc.stats)
             self.state['last_call']['status'] = 'invalid_tool_call'
@@ -849,23 +885,18 @@ class Orchestrator:
             if calls:
                 self.state['last_call']['partial']['tool_calls'] = copy.deepcopy(calls)
             self.state['last_call']['stats'] = copy.deepcopy(self.agent.last_stats)
+            if retry and assistant['content'] and (calls or warning != ''):
+                self.emit('text', assistant['content'])
             self.emit('end', '')
         if calls:
             assistant['tool_calls'] = calls
-        stats = self.agent.last_stats
-        if not done:
-            return assistant, 'The model stream ended without a completion event; displayed text is unfinished.'
-        if any(type(stats.get(key)) is not int or stats[key] < 0 for key in ('eval_count', 'prompt_eval_count')):
-            return assistant, 'The model did not supply valid token usage; this response is unfinished.'
-        if stats['eval_count'] > payload['options']['num_predict']:
-            return assistant, 'The model exceeded its output allowance; this response is unfinished.'
-        if stats.get('done_reason') == 'length':
-            return assistant, 'Generation hit its output limit; displayed text is unfinished.'
-        if stats.get('done_reason') not in {'stop', 'tool_calls'}:
-            return assistant, 'The model did not supply a supported completion reason; this response is unfinished.'
-        if stats['done_reason'] == 'tool_calls' and not calls:
-            return assistant, 'The model requested tools without providing an action; this response is unfinished.'
+        if warning:
+            return assistant, warning
         self.state['last_call']['status'] = 'complete'
+        if retry and not calls and assistant['content'].strip():
+            # The reference work has returned. Deliver the requested document through the usual
+            # validated, budgeted, checkpointed delegation instead of publishing a premature final.
+            return {'role': 'assistant', 'content': '', 'tool_calls': [retry]}, ''
         return assistant, ''
 
     def _prepare_calls(self, assistant):
@@ -1476,6 +1507,61 @@ class Orchestrator:
     def _hand_backs(self):
         """Write-ups of this turn that stopped for missing material."""
         return sum(_needs_input(c.get('result')) for c in self.state['children'] if c['action']['mode'] in ('writeup', 'summarize'))
+
+    def _write_up_waiting(self, tools):
+        """The stopped write-up that these tools and the remaining child budget can still start again."""
+        if not tools or self.state.get('force_final') or not self._action_room() or (
+                self.max_children is not None and len(self.state['children']) >= self.max_children):
+            return None
+        latest = next((c for c in reversed(self.state['children']) if c['action']['mode'] in ('writeup', 'summarize')), None)
+        if latest is None or not _needs_input(latest.get('result')) or self._hand_backs() >= 2:
+            return None
+        for tool in tools:
+            function = tool['function']
+            if function['name'] == 'delegate' and latest['action']['mode'] in function['parameters']['properties']['mode']['enum']:
+                return latest
+        return None
+
+    def _write_up_after_lookup(self, tools):
+        """Recover a single-document hand-back after its only kind of need received a reference worker."""
+        waiting = self._write_up_waiting(tools)
+        if waiting is None or not self._call_room():
+            return None
+        needs = waiting['result'].get('needs') or []
+        if not needs or any(n.get('type') != 'literature' for n in needs):
+            return None
+        # An independent routed reference search can belong to another objective. Its result does
+        # not settle the write-up branch, and finishing a document could close the turn too early.
+        if (self.state.get('proof_routing') or {}).get('route') == 'workers':
+            return None
+        action = waiting['action']
+        if self.state.get('blockers') and self._blocked(action['mode'], self._delegate_target(action)):
+            return None
+        retry_id = waiting['id'] + '_after_lookup'
+        if any(call.get('id') == retry_id for msg in self.state['messages'] for call in msg.get('tool_calls', [])):
+            return None  # includes a previous retry whose admission failed
+        for child in reversed(self.state['children']):
+            if child is waiting:
+                break
+            if (child['action']['mode'] not in ('check', 'literature') or child['status'] != 'complete'
+                    or (child.get('result') or {}).get('status') not in ('answered', 'partial', 'complete')):
+                continue
+            # A parallel sibling cannot have acted on this need. Match the hand-back receipt in the
+            # lookup's saved input, even after resumption, without interpreting the model's prose.
+            for msg in (child.get('context') or {}).get('messages', []):
+                if msg.get('role') == 'tool' and msg.get('tool_name') == 'delegate':
+                    try:
+                        receipt = loads(msg['content'])
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(receipt, dict) and receipt.get('child_id') == waiting['id'] and receipt.get('next_step'):
+                        retry = copy.deepcopy(action)
+                        try:
+                            self._validate_delegate(retry)
+                        except (ValueError, TypeError, OSError):
+                            return None  # its original files or permissions may have changed
+                        return {'id': retry_id, 'type': 'function', 'function': {'name': 'delegate', 'arguments': retry}}
+        return None
 
     def _worker_reply(self, child, answer):
         provenance = {'kind': 'worker_result', 'job_id': child['job_id']}

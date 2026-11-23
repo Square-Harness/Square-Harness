@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed Write-Up stopping before drafting a long attached article because its
+  planner had missed the bibliography at the end. On DeepInfra the outline and
+  skeleton now read the full source when it fits their calls and the job budget.
+  Suggestions from a partial view or an attached source stay advisory through
+  drafting and final checks. When a conversation write-up pauses, the Assistant
+  is prompted to inspect the source passage and can retry the write-up.
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes
   of the message: a pasted preamble of packages and macros made the model
