@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { api, type ResearchDetail, type StyleChoice, type StyleDescription, type StyleProfile } from '../api'
 import { Collapse, ErrorNote, FilePicker, Loading, NumberField, OptionalNumberField, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
-import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
+import { effortLimits } from '../components/Effort'
 import { FileIcon, PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
 import { IMAGE_SUFFIXES, isImagePath } from '../components/ImageAttachments'
@@ -12,14 +12,16 @@ import { researchLook, researchResumable, Square, type Variant } from '../compon
 import { capacityFull, taskForJob } from '../concurrency'
 import { useDropTarget } from '../drop'
 import { ago } from '../format'
-import { go } from '../router'
+import { go, href } from '../router'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
-import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, queuedMessage, useJobClass, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, queuedMessage, useJobClass, useLiveStream } from './shared'
 
 const NAME = /^[\w][\w .-]{0,59}$/u
+const DEFAULT_NAME = 'My papers'
 const TEMPLATE = ['.tex', '.sty', '.cls', '.bib']
 const ARTICLE_FILES = ['.tex', '.pdf', '.tar.gz', '.tgz', '.tar', '.gz', ...IMAGE_SUFFIXES]
+const MAX_FILES = 20  // Hub._capture_images refuses more
 const isArticleFile = (path: string) => ARTICLE_FILES.some((suffix) => path.toLowerCase().endsWith(suffix))
 const STEPS = ['scan', 'classify', 'observe', 'condense', 'macros', 'save'] as const
 const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', macros: 'Macros', save: 'Save', done: 'Done' }
@@ -30,51 +32,56 @@ const QUESTIONS = [
   ['omissions', 'What is left out'], ['contribution', 'Pointing to the contribution'], ['tone', 'Tone and voice'],
 ] as const
 
-/** Learn from earlier articles or screenshots; exact macros require LaTeX sources. */
+/** A name no saved style has, so that learning a style never replaces one unasked. */
+function freeName(saved: StyleProfile[]) {
+  const taken = new Set(saved.map((item) => item.name))
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? DEFAULT_NAME : `${DEFAULT_NAME} ${n}`
+    if (!taken.has(name)) return name
+  }
+}
+
+/** Learn from earlier articles or screenshots; exact macros require LaTeX sources. Two things are asked, the articles
+ * and a name; a style is always learnt with the High limits, which More options can change. */
 export function StyleNew() {
   const { status, snapshot } = useApp()
   const d = status?.defaults
-  const filesChanged = useTick('files')
-  const articles = useLoad(async () => (await api.files()).files.filter((file) => isArticleFile(file.path)), [], filesChanged)
+  const images = status?.image_support === true
   const [selected, setSelected] = useState<string[]>([])
   const [otherFiles, setOtherFiles] = useState<string[]>([])
   const [templateFiles, setTemplateFiles] = useState<string[]>([])
   const [saved, setSaved] = useState<StyleProfile[]>([])
   const [choice, setChoice] = useState<StyleChoice>({ mode: 'auto' })
-  const [name, setName] = useState('')
+  const [typedName, setTypedName] = useState<string | null>(null)
   const [goal, setGoal] = useState('')
-  const [level, setLevel] = useState<EffortLevel>('medium')
   const [tokens, setTokens] = useState<number | null>(null)
-  const [minutes, setMinutes] = useState(15)
+  const [minutes, setMinutes] = useState(30)
   const [inputTokens, setInputTokens] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
 
   useEffect(() => { api.styles().then((result) => { setSaved(result.styles); setChoice(result.choice) }, () => undefined) }, [])
-  const applyLevel = (next: EffortLevel) => {
+  useEffect(() => {
     if (!d) return
-    const limits = effortLimits('style', d, next)
+    const limits = effortLimits('style', d, 'high')
     setTokens(limits.tokens)
     setMinutes(Math.max(1, Math.round(limits.seconds / 60)))
     setInputTokens(limits.input_tokens!)
-  }
-  useEffect(() => {
-    if (d) applyLevel(level)
-    // Only when the launch defaults arrive.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d])
-  const preset = d ? effortLimits('style', d, level) : null
-  const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
   const uploading = useDropTarget('Use PDFs, TeX sources or screenshots as style examples', (paths) => {
     setSelected((items) => [...new Set([...items, ...paths.filter(isArticleFile)])])
     setOtherFiles(paths.filter((path) => !isArticleFile(path)))
-    articles.reload()
   })
+  const browse = () => window.dispatchEvent(new CustomEvent('square-attach-files', {
+    detail: ARTICLE_FILES.filter((suffix) => images || !isImagePath(suffix)).join(','),
+  }))
 
   const running = capacityFull(snapshot, status)
-  const validName = NAME.test(name.trim())
-  const replaces = saved.some((item) => item.name === name.trim())
+  const name = (typedName ?? freeName(saved)).trim()
+  const validName = NAME.test(name)
+  const replaces = saved.some((item) => item.name === name)
+  const tooMany = selected.length > MAX_FILES
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (uploading) return
@@ -82,7 +89,7 @@ export function StyleNew() {
     setError('')
     setQueuedNote('')
     try {
-      const result = await api.startStyle({ name: name.trim(), goal: goal.trim(), source_files: selected, template_files: templateFiles,
+      const result = await api.startStyle({ name, goal: goal.trim(), source_files: selected, template_files: templateFiles,
         tokens, seconds: minutes * 60, input_tokens: inputTokens, queue: true })
       if (result.task.state === 'queued') {
         setQueuedNote(queuedMessage(result.task.title))
@@ -104,87 +111,92 @@ export function StyleNew() {
           <div>
             <h1 className="page-title">Learn your writing style</h1>
             <p className="lede">
-              Give PDFs with selectable text, TeX sources or screenshots of your writing. PDFs provide extracted text, screenshots show wording and layout, and TeX sources provide exact macros. The harness sorts the articles
-              by domain and readership (a numerics paper is not written like a geometry paper), and describes for each domain
-              who your papers are written for and how you explain: how you introduce definitions, motivate the work and
-              your proof strategies, organise proofs, what you leave out and how you point to the contribution. It also
-              keeps your names for results, your typesetting habits, your phrasings, and your macros with what you use
-              them for and the packages they need. Quotations are kept only when they occur word for word in your
-              articles. The result is a style guide a write-up follows.
+              Give a few of your own articles. Square Harness reads how you write, and your write-ups then follow your style.
             </p>
+            <Collapse summary="What it learns">
+              <ul className="style-learns">
+                <li>Who your papers are written for and how you explain: how you introduce definitions, motivate the work
+                  and your proof strategies, organise proofs, what you leave out and how you point to the contribution.</li>
+                <li>Your names for results, your typesetting habits and your phrasings, kept only when they occur word
+                  for word in your articles.</li>
+                <li>From TeX sources, your macros, what you use them for and the packages they need.</li>
+                <li>One style guide per field and readership: a numerics paper is not written like a geometry paper.</li>
+              </ul>
+            </Collapse>
           </div>
         </div>
 
-        <div className="entry">
-          <span className="in-margin" />
-          <ActiveStyle styles={saved} choice={choice} onChange={setChoice} />
-        </div>
+        {saved.length > 0 && (
+          <div className="entry">
+            <span className="in-margin" />
+            <SavedStyles styles={saved} choice={choice} onChoice={setChoice}
+              onSaved={(next) => setSaved((items) => items.map((item) => item.name === next.name ? next : item))} />
+          </div>
+        )}
+
+        {saved.length > 0 && (
+          <div className="entry">
+            <span className="in-margin" />
+            <h2 className="style-heading">Learn a new style</h2>
+          </div>
+        )}
 
         <div className="entry">
-          <span className="in-margin" />
+          <span className="in-margin round-number" aria-hidden="true">1</span>
           <div className="field">
-            <span className="field-label">Your articles</span>
-            <div className="picker-row">
-              <button type="button" className="btn" onClick={() => window.dispatchEvent(new CustomEvent('square-attach-files', {
-                detail: ARTICLE_FILES.filter((suffix) => status?.image_support || !isImagePath(suffix)).join(','),
-              }))}><FileIcon size={16} /> Upload articles</button>
-              <FilePicker selected={selected} onChange={setSelected} allowPdf allowImages accept={ARTICLE_FILES} label="Choose from workspace" />
-            </div>
-            <span className="field-hint">Drop a PDF with selectable text or TeX sources anywhere on this page{status?.image_support && ', or paste a screenshot'}.
-              {' '}Include any files used by \input. Choose up to 20 files, including up to 8 images.</span>
-            {articles.error ? <ErrorNote>Could not list workspace files. {articles.error}</ErrorNote>
-              : articles.data && articles.data.length > 0 && <span className="field-hint">{articles.data.length} article source{articles.data.length === 1 ? '' : 's'} in this workspace.</span>}
+            <span className="field-label">Add your articles</span>
+            <button type="button" className="style-drop" onClick={browse} disabled={!!uploading}>
+              <FileIcon size={24} />
+              <span className="style-drop-title">{uploading ? 'Uploading…' : 'Drop your articles here, or click to browse'}</span>
+              <span className="field-hint">PDFs with selectable text or TeX sources{images && '; you can also paste screenshots'}</span>
+            </button>
+            <FilePicker selected={selected} onChange={setSelected} allowPdf allowImages={images} accept={ARTICLE_FILES} label="Choose from workspace" />
+            {tooMany ? <ErrorNote>Choose at most {MAX_FILES} files: {selected.length} are selected.</ErrorNote>
+              : <span className="field-hint">One article is enough to start; two or more per field work better. TeX sources also teach your
+                macros: add the files they \input as well.</span>}
             {otherFiles.length > 0 && <p className="field-hint" role="status">Saved to the workspace only: {otherFiles.join(', ')}. Choose a PDF, TeX source or screenshot for the style.</p>}
           </div>
         </div>
 
         <div className="entry">
-          <span className="in-margin" />
-          <div className="field">
-            <span className="field-label">LaTeX template (optional)</span>
-            <FilePicker selected={templateFiles} onChange={setTemplateFiles} accept={TEMPLATE} label="Choose template files" />
-            <span className="field-hint">
-              A .tex whose preamble write-ups in this style should use (packages, macros, theorem environments; its title
-              is replaced), and/or .sty, .cls or .bib files. One of your articles works: only its preamble is used.
-              A write-up given a template of its own uses that one instead.
-            </span>
-          </div>
-        </div>
-
-        <div className="entry">
-          <span className="in-margin" />
+          <span className="in-margin round-number" aria-hidden="true">2</span>
           <label className="field">
-            <span className="field-label">Name</span>
-            <input type="text" value={name} onChange={(event) => setName(event.target.value)} placeholder="My papers" maxLength={60} />
-            <span className="field-hint">
-              {name && !validName ? 'Use letters, digits, spaces, dots and dashes.'
-                : replaces ? 'A saved style has this name: it will be replaced.'
-                : 'Saved for every folder you open in this interface.'}
-            </span>
+            <span className="field-label">Name this style</span>
+            <input type="text" className="text-input style-name" value={typedName ?? freeName(saved)} onChange={(event) => setTypedName(event.target.value)}
+              placeholder={DEFAULT_NAME} maxLength={60} />
+            {!validName ? <span className="field-hint">{name ? 'Use letters, digits, spaces, dots and dashes.' : 'Name the style.'}</span>
+              : replaces && <span className="field-hint">A saved style has this name: it will be replaced.</span>}
           </label>
         </div>
 
         <div className="entry">
           <span className="in-margin" />
-          <label className="field">
-            <span className="field-label">About these articles (optional)</span>
-            <textarea className="goal-input" rows={2} value={goal} onChange={(event) => setGoal(event.target.value)} />
-            <span className="field-hint">Helps the sorting by domain; never copied into the style.</span>
-          </label>
-        </div>
-
-        <div className="entry">
-          <span className="in-margin" />
-          <div>
-            {d && <EffortSlider kind="style" defaults={d} level={level} onLevel={(next) => { setLevel(next); applyLevel(next) }} custom={custom} />}
-            <Collapse summary="Advanced limits">
-              <div className="field-grid">
-                <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
-                <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
-                <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Each article is read once, then each domain is merged and the macros are described." />
+          <Collapse summary="More options">
+            <div className="style-options-more">
+              <div className="field">
+                <span className="field-label">LaTeX template</span>
+                <FilePicker selected={templateFiles} onChange={setTemplateFiles} accept={TEMPLATE} label="Choose template files" />
+                <span className="field-hint">
+                  Write-ups in this style start from its preamble (packages, macros, theorem environments). Give a .tex
+                  (one of your articles works: only its preamble is used) and/or .sty, .cls or .bib files. A write-up
+                  given a template of its own uses that one instead.
+                </span>
               </div>
-            </Collapse>
-          </div>
+              <label className="field">
+                <span className="field-label">About these articles</span>
+                <textarea rows={2} value={goal} onChange={(event) => setGoal(event.target.value)} />
+                <span className="field-hint">Helps the sorting by field; never copied into the style.</span>
+              </label>
+              <div className="field">
+                <span className="field-label">Limits</span>
+                <div className="field-grid">
+                  <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
+                  <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
+                  <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Each article is read once, then each field is merged and the macros are described." />
+                </div>
+              </div>
+            </div>
+          </Collapse>
         </div>
 
         <div className="entry">
@@ -193,107 +205,109 @@ export function StyleNew() {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || !validName}>
-              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn the style'}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || tooMany || !validName}>
+              {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn my style'}
             </button>
-            {!selected.length && <p className="field-hint">Upload or choose at least one article.</p>}
-            {selected.length > 0 && !validName && <p className="field-hint">Name the style.</p>}
+            <p className="field-hint">
+              {selected.length ? 'You get a style guide to read and correct; write-ups use it once it is saved.' : 'Add at least one article.'}
+            </p>
           </div>
         </div>
-
-        {saved.length > 0 && (
-          <div className="entry">
-            <span className="in-margin" />
-            <div className="field">
-              <span className="field-label">Saved styles</span>
-              <ul className="style-saved">
-                {saved.map((profile) => (
-                  <li key={profile.name}>
-                    <Collapse summary={<><strong>{profile.name}</strong> <span className="muted small">
-                      {profile.domains.map((item) => item.name).join(', ')} · {profile.articles.length} {profile.articles.some((article) => article.source_archive) ? 'text sources' : `article${profile.articles.length === 1 ? '' : 's'}`} · {profile.macros.length} macros · {ago(profile.updated_at)}</span></>}>
-                      <StyleTemplate profile={profile} onSaved={(next) => setSaved((items) => items.map((item) => item.name === next.name ? next : item))} />
-                      <Profile profile={profile} />
-                    </Collapse>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
       </form>
     </div>
   )
 }
 
-const choiceValue = (choice: StyleChoice) =>
-  choice.mode === 'style' ? `style:${choice.style}` : choice.mode === 'domain' ? `domain:${choice.style}\u0000${choice.domain}` : choice.mode
+const sameChoice = (a: StyleChoice, b: StyleChoice) => a.mode === b.mode && (a.style || '') === (b.style || '') && (a.domain || '') === (b.domain || '')
 
-function parseChoice(value: string): StyleChoice {
-  if (value.startsWith('style:')) return { mode: 'style', style: value.slice(6) }
-  if (value.startsWith('domain:')) {
-    const [style, domain] = value.slice(7).split('\u0000')
-    return { mode: 'domain', style, domain }
-  }
-  return { mode: value as 'auto' | 'none' }
-}
-
-/** The style write-ups use (@writeup, @summarize and the Write-up form), saved as soon as it changes: the default style
- * (no rules of its own: the write-up guidelines as they are), a learned style or one of its domains, or the learned style
- * that fits the material. The default style is always there, in case a learned style does not suit. */
-function ActiveStyle({ styles, choice, onChange }: { styles: StyleProfile[]; choice: StyleChoice; onChange: (choice: StyleChoice) => void }) {
+/** The saved styles and which one write-ups follow (@writeup, @summarize and the Write-up form), saved as soon as it
+ * changes: the learned style that fits the material (Automatic), a learned style or one of its domains, or the default
+ * style (no rules of its own: the write-up guidelines as they are), always there in case a learned style does not suit. */
+function SavedStyles({ styles, choice, onChoice, onSaved }: {
+  styles: StyleProfile[]; choice: StyleChoice; onChoice: (choice: StyleChoice) => void; onSaved: (profile: StyleProfile) => void
+}) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const choose = async (value: string) => {
+  const choose = async (next: StyleChoice) => {
+    if (sameChoice(next, choice)) return
     setBusy(true)
     setError('')
     try {
-      onChange((await api.setStyleChoice(parseChoice(value))).choice)
+      onChoice((await api.setStyleChoice(next)).choice)
     } catch (reason) {
       setError((reason as Error).message)
     } finally {
       setBusy(false)
     }
   }
-  const learned = choice.mode === 'style' || choice.mode === 'domain' ? styles.find((profile) => profile.name === choice.style) : undefined
-  const domains = learned ? learned.domains.filter((domain) => choice.mode !== 'domain' || domain.name === choice.domain) : []
-  const departures = domains.flatMap((domain) => (domain.departures || []).map((departure) => ({ ...departure, domain: domain.name })))
+  const learned = choice.mode === 'style' || choice.mode === 'domain'
   return (
-    <div className="field">
-      <label className="field-label" htmlFor="active-style">Active style</label>
-      <select id="active-style" value={choiceValue(choice)} disabled={busy} onChange={(event) => choose(event.target.value)}>
-        <option value="none">Default style: the write-up guidelines as they are</option>
-        <option value="auto">Automatic: the learned style that fits the material, else the default style</option>
-        {styles.map((profile) => (
-          <optgroup key={profile.name} label={profile.name}>
-            <option value={`style:${profile.name}`}>{profile.name}{profile.domains.length > 1 ? ': the domain that fits best' : ''}</option>
-            {profile.domains.length > 1 && profile.domains.map((domain) => (
-              <option key={domain.name} value={`domain:${profile.name}\u0000${domain.name}`}>{profile.name}: {domain.name}</option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
-      <span className="field-hint">
-        {choice.mode === 'none' ? 'The default style has no rules of its own: write-ups follow the write-up guidelines as they are. It is always here, if a learned style does not suit you.'
-          : choice.mode === 'auto' ? (styles.length ? 'Each write-up uses the learned style whose domain fits its material, or the default style when none fits.'
-            : 'No style is learned yet: write-ups use the default style.')
-          : learned ? (departures.length ? 'Write-ups follow this style before the write-up guidelines. It sets these rules aside:'
-            : 'Write-ups follow this style before the write-up guidelines. It sets no rule aside (a style learned before this version was not compared with the guidelines: learn it again).')
-          : 'This style is no longer saved: write-ups choose automatically.'}
-      </span>
-      {departures.length > 0 && (
-        <ul className="style-departures small">
-          {departures.map((departure) => (
-            <li key={departure.domain + departure.rule}><strong>{departure.rule}</strong> {departure.habit}
-              {domains.length > 1 && <span className="muted"> ({departure.domain})</span>}</li>
-          ))}
-        </ul>
-      )}
-      <span className="field-hint">
-        What you ask in so many words in a request comes first (for example “list the contributions as bullet points”).
-        The active style is used by @writeup, @summarize and the Write-up form, in every folder you open here.
-      </span>
+    <section className="style-saved" aria-labelledby="style-saved-title">
+      <h2 className="style-heading" id="style-saved-title">Your styles</h2>
+      <p className="field-hint">
+        Choose the style that @writeup, @summarize and the Write-up form follow, in every folder you open here. What you
+        ask for in a request always comes first (for example “list the contributions as bullet points”).
+      </p>
+      <ul className="style-options" role="radiogroup" aria-labelledby="style-saved-title">
+        <StyleOption on={choice.mode === 'auto'} busy={busy} onPick={() => choose({ mode: 'auto' })} title="Automatic"
+          note="Each write-up follows the saved style that fits its material, or the default style when none fits." />
+        {styles.map((profile) => {
+          const on = learned && choice.style === profile.name
+          const domains = profile.domains.filter((domain) => !on || choice.mode !== 'domain' || domain.name === choice.domain)
+          const departures = on ? domains.flatMap((domain) => (domain.departures || []).map((departure) => ({ ...departure, domain: domain.name }))) : []
+          const sources = profile.articles.some((article) => article.source_archive) ? 'text sources' : `article${profile.articles.length === 1 ? '' : 's'}`
+          return (
+            <StyleOption key={profile.name} on={on} busy={busy} onPick={() => choose({ mode: 'style', style: profile.name })} title={profile.name}
+              note={`${profile.domains.map((item) => item.name).join(', ')} · ${profile.articles.length} ${sources} · ${profile.macros.length} macros · ${ago(profile.updated_at)}`}>
+              {on && profile.domains.length > 1 && (
+                <label className="field style-option-domain">
+                  <span className="field-hint">Kind of paper</span>
+                  <select value={choice.mode === 'domain' ? choice.domain : ''} disabled={busy}
+                    onChange={(event) => choose(event.target.value ? { mode: 'domain', style: profile.name, domain: event.target.value } : { mode: 'style', style: profile.name })}>
+                    <option value="">The one that fits each write-up</option>
+                    {profile.domains.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}
+                  </select>
+                </label>
+              )}
+              {departures.length > 0 && (
+                <Collapse summary={`Sets ${departures.length} write-up guideline${departures.length === 1 ? '' : 's'} aside`}>
+                  <ul className="style-departures small">
+                    {departures.map((departure) => (
+                      <li key={departure.domain + departure.rule}><strong>{departure.rule}</strong> {departure.habit}
+                        {domains.length > 1 && <span className="muted"> ({departure.domain})</span>}</li>
+                    ))}
+                  </ul>
+                </Collapse>
+              )}
+              <Collapse summary="Read the style guide">
+                <StyleTemplate profile={profile} onSaved={onSaved} />
+                <Profile profile={profile} />
+              </Collapse>
+            </StyleOption>
+          )
+        })}
+        <StyleOption on={choice.mode === 'none'} busy={busy} onPick={() => choose({ mode: 'none' })} title="Default style"
+          note="No style of your own: write-ups follow the write-up guidelines as they are." />
+      </ul>
+      {learned && !styles.some((profile) => profile.name === choice.style) &&
+        <p className="field-hint" role="status">The style chosen earlier is no longer saved: write-ups choose automatically.</p>}
       <ErrorNote>{error}</ErrorNote>
-    </div>
+    </section>
+  )
+}
+
+/** One choice of the style write-ups follow; a saved style brings its settings and its guide. */
+function StyleOption({ on, busy, onPick, title, note, children }: {
+  on: boolean; busy: boolean; onPick: () => void; title: string; note: string; children?: ReactNode
+}) {
+  return (
+    <li className={'style-option' + (on ? ' style-option-on' : '')}>
+      <label className="style-option-head">
+        <input type="radio" name="active-style" checked={on} disabled={busy} onChange={onPick} />
+        <span className="style-option-text"><span className="style-option-name">{title}</span><span className="muted small">{note}</span></span>
+      </label>
+      {children && <div className="style-option-more">{children}</div>}
+    </li>
   )
 }
 
@@ -392,6 +406,29 @@ export function Profile({ profile }: { profile: StyleProfile }) {
   )
 }
 
+/** A quotation the model gave that is not in the article is left out (style.py, _observe): the filter at work, not a
+ * problem of the job. The wording is the runner's; any other warning stays a warning. */
+const DROPPED = /^(\d+) name\(s\), typesetting example\(s\), phrasing\(s\) or departure\(s\) quoted for .+ were not found in it and were dropped\.$/
+
+/** The goal a style job gets when the form's note about the articles is empty (style.py, StyleRunner.start). */
+const defaultGoal = (name: string) => `Condense my writing style "${name}" from these articles.`
+
+/** What the job is doing, in the author's words rather than the runner's phases. */
+function stepText(data: ResearchDetail) {
+  const articles = data.articles || []
+  const read = Object.keys(data.observations || {}).length
+  const next = articles.find((article) => !data.observations?.[article.id])
+  const domain = (data.domains || []).find((item) => !item.complete)
+  switch (data.phase) {
+    case 'scan': return 'Reading your files'
+    case 'classify': return 'Sorting your articles by field'
+    case 'observe': return next ? `Reading article ${read + 1} of ${articles.length}: ${next.title || next.path}` : 'Reading your articles'
+    case 'condense': return domain ? `Merging what your ${domain.name} articles share` : 'Merging what your articles share'
+    case 'macros': return 'Noting what you use your macros for'
+    default: return 'Saving the style'
+  }
+}
+
 export function StyleView({ id, tab }: { id: string; tab: string | null }) {
   const tick = useTick(id)
   const app = useApp()
@@ -404,16 +441,21 @@ export function StyleView({ id, tab }: { id: string; tab: string | null }) {
   if (!data) {
     return <div className="sheet paper"><div className="sheet-inner">{error ? <ErrorNote>{error}</ErrorNote> : <Loading />}</div></div>
   }
+  const dropped = data.warnings.reduce((sum, warning) => sum + Number(DROPPED.exec(warning)?.[1] || 0), 0)
+  const warnings = data.warnings.filter((warning) => !DROPPED.test(warning))
   const aside = (
     <div className="ledger">
       <section className="aside-section">
-        <h3 className="aside-title">Checks</h3>
-        {data.warnings.length ? <ul className="issue-list">{data.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
-          : <p className="muted small">No warnings.</p>}
+        <h3 className="aside-title">Notes</h3>
+        {warnings.length > 0 && <ul className="issue-list">{warnings.map((w) => <li key={w}>{w}</li>)}</ul>}
+        {dropped > 0 && <p className="muted small style-note">{dropped} quotation{dropped === 1 ? ' was' : 's were'} left out of the style:
+          the model gave {dropped === 1 ? 'it' : 'them'}, but {dropped === 1 ? 'it does' : 'they do'} not occur word for word in your articles.</p>}
+        {!warnings.length && !dropped && <p className="muted small">Nothing to report.</p>}
       </section>
       <section className="aside-section">
-        <h3 className="aside-title">Usage</h3>
-        <UsageMeters budget={data.budget} />
+        <Collapse summary="Usage">
+          <UsageMeters budget={data.budget} />
+        </Collapse>
       </section>
     </div>
   )
@@ -425,16 +467,15 @@ export function StyleView({ id, tab }: { id: string; tab: string | null }) {
           <Tabs active={active} onChange={(next) => go('style', id, next === 'style' ? null : next)} tabs={[
             { id: 'style', label: 'Style' },
             { id: 'articles', label: 'Articles', badge: data.articles?.length || undefined },
-            { id: 'checks', label: 'Checks', badge: data.warnings.length || undefined, narrowOnly: true },
+            { id: 'checks', label: 'Notes', badge: warnings.length || undefined, narrowOnly: true },
             { id: 'files', label: 'Files', badge: data.artifacts.length || undefined },
           ]} />
           {active === 'style' && (
             <div className="document">
-              {data.running && data.live && <LiveStyle id={data.id} role={data.live.role} file={data.live.file} ours={ours} />}
+              {data.running && <LiveStyle data={data} ours={ours} />}
               {data.profile ? (
                 <>
-                  <p className="caveat">A model description of how you write. Read it and correct what does not sound like you:
-                    the saved file is <code>{data.saved_to}</code>.</p>
+                  <Saved data={data} />
                   <Profile profile={data.profile} />
                 </>
               ) : !data.running && <Markdown>{data.report}</Markdown>}
@@ -445,7 +486,7 @@ export function StyleView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
-      <JobAside label="Checks">{aside}</JobAside>
+      <JobAside label="Notes">{aside}</JobAside>
       {artifact && <ArtifactViewer job="research" id={id} name={artifact} onClose={() => setArtifact(null)} />}
     </div>
   )
@@ -461,14 +502,15 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const resumable = data.progress?.resumable ?? researchResumable(data.status)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const current = STEPS.indexOf(data.phase as typeof STEPS[number])
+  const name = data.style_name || ''
   return (
     <header className="job-head">
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">Writing Style “{data.style_name}”</span>
       </div>
-      <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
+      <h1 className="style-job-title">{data.profile ? 'Your style' : data.running ? 'Learning the style' : 'Style'} “{name}”</h1>
+      {data.goal !== defaultGoal(name) && <div className="style-job-about muted"><Markdown>{data.goal}</Markdown></div>}
       <ol className="phases phases-wide" aria-label="Workflow">
         {STEPS.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
@@ -477,8 +519,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} taskId={ownTask?.id} />
       <div className="job-facts">
-        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path}</span>)}
-        <span>{String(data.settings.model)}</span>
+        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.path}</span>)}
         <span>Started {ago(data.created_at)}</span>
       </div>
       <div className="job-actions">
@@ -496,14 +537,45 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   )
 }
 
-function LiveStyle({ id, role, file, ours }: { id: string; role: string; file: string; ours: boolean }) {
-  const stream = useLiveStream('research', id, file)
+/** The running job: what it is doing in plain words, with the model's own output one click away. */
+function LiveStyle({ data, ours }: { data: ResearchDetail; ours: boolean }) {
   const app = useApp()
   return (
     <div className="live" id="live">
-      <p className="live-head"><Square variant="running" size={14} /> {ROLES[role]?.active || role}</p>
-      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
-      <StreamBody stream={stream} role={role} live />
+      <p className="live-head"><Square variant="running" size={14} /> {stepText(data)}</p>
+      <p className="muted small style-note">You can leave this page: the style is saved when the work ends, and it stays in the list on the left.</p>
+      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', data.id)?.activity || []} />}
+      {data.live && (
+        <Collapse summary="Show the model's output">
+          <LiveOutput id={data.id} role={data.live.role} file={data.live.file} />
+        </Collapse>
+      )}
+    </div>
+  )
+}
+
+function LiveOutput({ id, role, file }: { id: string; role: string; file: string }) {
+  const stream = useLiveStream('research', id, file)
+  return <StreamBody stream={stream} role={role} live />
+}
+
+/** The end of a job: the style is saved, and whether write-ups follow it. */
+function Saved({ data }: { data: ResearchDetail }) {
+  const [choice, setChoice] = useState<StyleChoice | null>(null)
+  useEffect(() => { api.styles().then((result) => setChoice(result.choice), () => undefined) }, [data.saved_to])
+  const name = data.style_name
+  const followed = !choice ? ''
+    : choice.mode === 'auto' ? 'Write-ups follow it whenever it fits their material.'
+    : choice.mode === 'none' ? 'Your write-ups follow the default style for now.'
+    : choice.style === name ? 'Your write-ups follow it.'
+    : `Your write-ups follow “${choice.style}” for now.`
+  return (
+    <div className="style-done">
+      <p><strong>Saved as “{name}”.</strong> {followed}</p>
+      <p>The guide below is a model description of how you write: read it, and correct what does not sound like you
+        in the saved file.</p>
+      <p><a className="btn btn-small" href={href('style')}>Choose the style write-ups follow</a></p>
+      <p className="muted small style-done-file"><code>{data.saved_to}</code></p>
     </div>
   )
 }

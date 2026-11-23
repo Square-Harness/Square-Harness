@@ -383,8 +383,10 @@ def list_research(root, active=None):
         except (OSError, ValueError, KeyError, NotFound):
             continue
         running = state['status'] == 'running' and (path.name == active or locked(path))
+        # A style is listed under its name: its goal is a note about the articles, or a default sentence.
+        title = state.get('style_name') if state['kind'] == 'style' else None
         jobs.append({'id': state['id'], 'kind': state['kind'], 'status': state['status'],
-                     'phase': state['phase'], 'title': one_line(proof_request_text(state), 140),
+                     'phase': state['phase'], 'title': title or one_line(proof_request_text(state), 140),
                      'updated_at': state['updated_at'], 'created_at': state['created_at'],
                      'running': running, 'sources': [s['path'] for s in state['sources']],
                      'variant': state.get('variant'), 'verdict': state.get('verdict') or None,

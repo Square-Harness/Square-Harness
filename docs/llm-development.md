@@ -1168,6 +1168,16 @@ without departures stay readable and usable. The active style is
 always offered.
 
 The Writing Styles form pins each eligible upload as soon as the upload succeeds.
+It asks for the articles and a name only: it shows no effort level and starts
+every style with the High limits (`effortLimits('style', defaults, 'high')`),
+which **More options** can change. The saved styles are listed on the same page
+as one choice (`SavedStyles`), which writes `style-choice.json`. The job page
+(`StyleView`) words the running step from the saved state (`stepText`), folds
+the model's stream and the usage meters, and counts the dropped-quotation
+warnings instead of listing them: its `DROPPED` pattern and `defaultGoal` copy
+the wording of `style.py`, so change them together (a warning that no longer
+matches is simply listed with the others). `list_research` titles a style job
+with its style name.
 PDFs use the same bounded local text extraction as other research jobs. The
 style job records `source_kind: pdf_text` for these articles and checks prose
 quotations against the extraction. TeX scanning and source-level typesetting
