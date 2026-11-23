@@ -5,7 +5,7 @@
 - Conversations: a whole reference list or bibliography to check is delegated as one check of every entry (never split, never Explore); several supplied URLs are all opened; the Assistant can look up a DOI or arXiv ID's metadata directly; in an interface launched with `--offline` the Assistant no longer offers an online search.
 - Proof: a pause, shutdown or crash no longer charges the interrupted call's whole output cap (384,000 tokens on DS4). The call is charged an estimate from what it streamed (every character, reasoning included, plus 1,024 tokens), never more than its reservation; a provider failure still keeps its reservation. The research runners (Review, Literature review, Write-up, Writing style) and the Assistant's shared allowance use the same rule. Jobs saved by an earlier version are re-charged from their saved streams on resume, and the report lists each change; a proof stopped on its allowance by such charges can be resumed again.
 - Proof: "Model-reviewed proof" is now earned. A response that says the target is missing, open or out of reach, or that rests on the stated output of a program (Proof runs no code), is not accepted even when the verifier raised no objection; the job stops as uncertain and says why. A proof request with no statement ("@prove" alone) is refused before any solve. The Assistant's task brief may no longer widen the deliverable beyond a proof or refutation of the user's statement.
-- Conversations: when an explicit or routed Proof stops without a reviewed answer (budget, attempts, failure, not accepted), the Assistant reports the stop and what was saved instead of writing its own unreviewed proof. The same guard now covers the budget stops of the other explicitly selected skills.
+- Conversations: when an explicit or routed Proof stops without a reviewed answer, the Assistant never writes its own unreviewed proof. A budget or error stop ends the turn with the stop and what was saved; after an uncertain or objected result the Assistant may still delegate an independent quick review or another Proof. The same guard now covers the budget stops of the other explicitly selected skills.
 - Proof: running out of the per-call output cap before writing any text is reported as an output-limit stop, not "Attempt limit reached", and the report no longer says "the initial candidate is retained" when every candidate is empty.
 - `GET /api/proofs/<id>` reports the real `claim_outcome` (proved, refuted or unclassified).
 - A queued `POST /api/proofs` or `POST /api/research` returns the job id at once.
@@ -24,10 +24,6 @@
   after each call instead of the byte-based estimate (about ten times too high),
   so **Time and usage** and the Assistant's input limit reflect real usage. The
   pre-call estimate for tool definitions is also less extreme.
-- Smaller Assistant prompts: the rules for write-ups, reviews, reference checks,
-  literature reviews, web pages and files are sent only in calls that offer that
-  tool or worker. A question DS4 judges answerable directly now sends about half
-  the instructions it did (and can still hand a misjudged proof to Proof).
 - A request to prove that names no statement ("Prove the lemma.") gets a question
   asking for the statement instead of a Proof job. A famous open problem (such as
   the Riemann hypothesis) no longer starts a Medium or High Proof by itself: the
@@ -71,8 +67,7 @@
   with the request instead of a model-written title.
 - Offline literature reviews and checks now say that web research was off and
   only cached sources were used, instead of reporting that Crossref, zbMATH and
-  arXiv failed. A check spends no model rounds on a work with nothing cached,
-  and reports it as inconclusive rather than not found. In an interface
+  arXiv failed. In an interface
   launched with `--offline`, results say how to search (restart without
   `--offline`) or attach the paper instead of offering an online search.
 - Turning a conversation's online search off now also stops web requests of its
@@ -144,10 +139,10 @@
 - Python Lab: a run killed at the memory limit (or at the CPU limit) keeps what it printed and the files it saved; the runner runs the code in a child process. Rebuild the sandbox image (`python -m mathagent.numerics build`): the image is now labelled with a digest of its build files and an older build is refused.
 - Python Lab: failed runs keep their error, limits, stop reason, output tail and duration in the experiment view (`error`, `stop_reason`, `limits`, `stdout_tail`, `seconds`, `run_status`), also in the kept index copy.
 - Python Lab: code that does not compile is reported without starting a container or using a run; a script sent with literal "\n" escapes instead of line breaks is repaired when that makes it compile.
-- Python Lab: larger limits need a stated purpose; the approval shows the purpose and the start of the code; one request may at most double a default (four times a limit a run reached).
+- Python Lab: larger limits need a stated purpose; the approval shows the purpose and the start of the code.
 - `python -m mathagent.numerics clean` removes only stopped containers and those of a server that is gone, never another interface's live run.
 - At most two sandbox containers run at once by default (`--python-concurrency`, 1–8); further runs wait their turn.
-- @sanity_check: the verdict (exact counterexample, numerically verified candidate, no counterexample detected, inconclusive) is derived by code from the runs and stated first; a model "Verdict"/"the claim is true" no longer stands.
+- @sanity_check: the verdict (exact counterexample, numerically verified candidate, no counterexample detected, inconclusive, or unclassified when no run reported one) is derived by code from the runs and stated first, with a note that numerical runs do not prove a claim; the model's discussion below it is kept as written.
 - `--allow-python` now also offers `run_python` in the Assistant, with the same per-call approval; the tool result no longer claims the output was capped when it was not; the startup line is flushed.
 - Folder and upload API: clean messages instead of OS errors with server paths, 409 for an existing folder, control characters and hidden names (`node_modules`, `build`, …) refused for new folders, over-long upload names shortened, 404 for an unknown project on upload; `POST /api/chats/<id>/project` needs an explicit `project_id` (null removes).
 - Concurrency set under Parallel work is saved and applies after a restart unless the launch flag is given explicitly.

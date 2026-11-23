@@ -819,8 +819,8 @@ does reuse saved reasoning notes, or a labelled ending excerpt when necessary.
 
 Square Harness checks a passing review in code before calling the response a
 model-reviewed proof or refutation. A response that says the target is missing,
-open or out of reach, or that rests on the stated output of a program, is not
-accepted, even if the verifier raised no objection: Proof runs no code, so such
+open or out of reach (and the review says so too), or that rests on the stated
+output of a program, is not accepted, even if the verifier raised no objection: Proof runs no code, so such
 an output was never computed. The job then stops as uncertain and says why; check a
 computation with Python Lab. A proof request with no statement at all (only
 "@prove", with no earlier message or file) is refused before any solve. When the
@@ -919,7 +919,7 @@ Each reference gets an evidence level:
 The code lowers any level that the passages read do not support. A chapter,
 section or theorem number the model remembers stays labelled as memory. Needs
 online search; with it off, only cached sources are used, the answer says so,
-and a work with nothing cached is inconclusive rather than not found. A
+and a work with no cached evidence is inconclusive rather than not found. A
 question about the sources of a literature review shown in the conversation
 uses that review's saved records and the full texts it cached.
 
@@ -1436,8 +1436,7 @@ conversation. Install the sandbox once (see the install guide).
   nothing else starts it. Defaults: 30 s, 4 GB, 2 CPUs per
   run. It can ask for up to 300 s, 16 GB and 4 CPUs, and you approve each such
   request: the approval shows the new limits, the run's stated purpose and the
-  start of its code. One request may at most double a default; after a run
-  reaches a limit, the next request may ask for up to four times that limit.
+  start of its code.
   Code that does not compile is reported at once without starting a container
   or using a run.
 - **Sanity check** tries to falsify a claim with cheap experiments: small cases,

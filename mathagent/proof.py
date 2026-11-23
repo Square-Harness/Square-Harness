@@ -46,9 +46,7 @@ TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attem
 MAX_ADD_TOKENS, MAX_ADD_SECONDS, MAX_ADD_ROUNDS = 20_000_000, 86400, 20
 # Proof calls have no tools; solver and reviewer read this beside the task (controller text, not proof policy).
 NO_CODE_NOTE = ('No code is run in this proof job: neither the solver nor the reviewer has tools. The output of a '
-                'program that was not actually computed in the text is unverified and cannot support an essential step. '
-                'If the statement can only be settled by a large explicit computation, say so early and name the '
-                'computation instead of attempting it at length.')
+                'program that was not actually computed in the text is unverified and cannot support an essential step.')
 DELIVERABLE_NOTE = ('The deliverable is a proof or a refutation of the task. A response that declares the target missing, '
                     'open or out of reach, or that proves only a different statement, is not a completed proof or '
                     'refutation, whatever a restated task allows.')
@@ -213,10 +211,10 @@ _NON_ATTEMPT = re.compile(r"""\b(?:
 _NOT_A_PROOF = re.compile(r'\bnot\s+(?:itself\s+)?a\s+proof\s+of\b|\btarget\s+is\s+(?:open|missing)\b', re.I)
 _CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)```', re.S)
 _CODE_WORDS = re.compile(r'\b(?:def|import|print|range|while|lambda|return)\b|\bfor\s+\w+\s+in\b|\bpow\s*\(')
-_OUTPUT_CLAIM = re.compile(r"""\b(?:the\s+)?output\s+(?:is|was|will\s+be|reads)\b
-  | \b(?:it|this|the\s+(?:above\s+)?(?:program|code|script|loop|computation))\s+(?:prints?|outputs?|returns?|gives|yields
-        |confirms|shows)\b
-  | \b(?:running|executing|run)\s+(?:it|this|the\s+(?:above\s+)?(?:code|program|script|loop))\b""", re.I | re.X)
+# Only explicit claims about a run's result: "this shows", "it gives" or "returns" are ordinary proof language.
+_OUTPUT_CLAIM = re.compile(r"""\bthe\s+(?:program'?s?\s+|code'?s?\s+|script'?s?\s+)?output\s+(?:is|was|will\s+be|reads)\b
+  | \bthe\s+(?:above\s+)?(?:program|code|script)\s+(?:prints|outputs)\b
+  | \b(?:running|executing)\s+(?:this|the\s+(?:above\s+)?(?:code|program|script))\b""", re.I | re.X)
 NOT_ATTEMPTED = ('Not accepted as a reviewed proof: the response does not prove or refute the stated target (it says '
                  'the target is missing, open or out of reach), although the model review raised no objection.')
 UNRUN_PROGRAM = ('Not accepted as a reviewed proof: the response relies on the stated output of a program, but Proof '
@@ -229,8 +227,9 @@ def not_a_proof(text, review):
     dependencies = [d for d in review.get('critical_dependencies') or [] if isinstance(d, dict)]
     said = ' '.join([str(review.get('explanation') or ''), *map(str, review.get('notes') or []),
                      *(str(d.get('claim', '')) + ' ' + str(d.get('check', '')) for d in dependencies)])
-    if _NON_ATTEMPT.search(text) and (not any(d.get('provenance') == 'proved' for d in dependencies)
-                                      or _NON_ATTEMPT.search(said) or _NOT_A_PROOF.search(said)):
+    # Both the response and the reviewer's own words must say the target is missing or open: a proof that only
+    # mentions an open problem in passing ("the general case remains open; here n = 3") keeps its review.
+    if _NON_ATTEMPT.search(text) and (_NON_ATTEMPT.search(said) or _NOT_A_PROOF.search(said)):
         return NOT_ATTEMPTED
     if any(_CODE_WORDS.search(block) for block in _CODE_BLOCK.findall(text)) and _OUTPUT_CLAIM.search(text):
         return UNRUN_PROGRAM

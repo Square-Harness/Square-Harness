@@ -142,6 +142,7 @@ _VERDICT_NOTES = {
     'numerically verified candidate': 'A run reported a violation above the error level, not yet confirmed exactly.',
     'no counterexample detected': 'Only the tested cases: numerical evidence, not a proof.',
     'inconclusive': 'The runs settle nothing either way.',
+    'unclassified': 'No successful run reported one of the four classifications; read the runs and the discussion below.',
 }
 
 
@@ -167,19 +168,16 @@ def sanity_verdict(session, child, answer):
         named = [label for label in SANITY_VERDICTS if label in answer.lower()]
         if len(named) == 1:
             return named[0], 'answer'
-    return 'inconclusive', 'none'
+    return 'unclassified', 'none'
 
 
 def with_sanity_verdict(answer, verdict, source):
     """Put the code-derived verdict first; a model 'Verdict' heading or 'the claim is true' cannot stand."""
+    # The header is the code's; the model's text below is never edited (rewording it could change its meaning).
     header = f'**Numerical sanity check: {verdict}.** {_VERDICT_NOTES[verdict]}'
-    if source == 'none':
-        header += ' No successful run reported one of the four classifications.'
-    if verdict in ('no counterexample detected', 'inconclusive'):
-        header += ' Any argument below is the model\'s own reasoning; the check did not verify it.'
-        answer = re.sub(r'(?i)\b(the (?:claim|statement|inequality|identity|conjecture))\s+(?:is|holds)\s+'
-                        r'(?:true|proved|proven|correct|valid)\b', r'\1 was not contradicted by the tested cases', answer)
-    answer = re.sub(r'(?im)^(#{1,6})\s*(?:final\s+)?verdict\b.*$', r'\1 Discussion', answer)
+    if verdict in ('no counterexample detected', 'inconclusive', 'unclassified'):
+        header += (' Numerical runs do not prove a claim: any statement below that the claim is true is the '
+                   'model\'s own reasoning, which the check did not verify.')
     return header + '\n\n' + answer.strip()
 
 

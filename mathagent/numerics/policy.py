@@ -130,18 +130,13 @@ def load_policies(path=None):
             LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs', 20))}
 
 
-# One request may at most double a default; after a run ran into a limit, at most four times that limit.
-STEP = 2
-STEP_AFTER_LIMIT = 4
 PREVIEW_CODE_LINES = 12
 
 
 def step_limit(policy, key, reached=None):
-    """The largest value one escalation request may ask for, within the ceiling."""
-    allowed = getattr(policy.defaults, key) * STEP
-    if (reached or {}).get(key):
-        allowed = max(allowed, reached[key] * STEP_AFTER_LIMIT)
-    allowed = min(allowed, getattr(policy.ceiling, key))
+    """The largest value one escalation request may ask for: the ceiling. The user approves each request and
+    sees its purpose and code, so no smaller step is imposed (it only cost extra runs to reach a needed limit)."""
+    allowed = getattr(policy.ceiling, key)
     return int(allowed) if key == 'memory_mb' else allowed
 
 

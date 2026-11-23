@@ -156,7 +156,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   (`MAX_ADD_*`), refused for a proof that finished with a result, and recorded in
   `allowance_additions` and the report. A passing review is accepted as a proof or
   refutation only if `proof.not_a_proof` finds no non-attempt (target missing, open,
-  out of reach) and no reliance on an unexecuted program's output; otherwise the
+  out of reach, said by both the response and the reviewer's own words) and no
+  explicit claim about the output of a program written in the response; otherwise the
   candidate is `uncertain` with `controller_override` on the review (the model's
   response is kept as written). These are demotion-only text checks: they never
   promote a review. A job with no statement (`missing_statement`) is refused
@@ -392,8 +393,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   the same numbered selection and served by the review and bib research endpoints.
   `review_export` renders the downloads (`download.md`, `download.bib`) from the
   same state without changing `review.md`/`references.bib`, whose keys saved
-  write-ups use. When the question names an eponymous object that no pool record
-  mentions while at least two sources answered (`_unfound_subject`), the plan and
+  write-ups use. When the question names an eponymous object none of whose names any
+  pool record mentions while at least two sources answered (`_unfound_subject`), the plan and
   draft are told so and assembly titles the review "No work defining or studying
   … was found"; without checked prose the title is the request, never the
   model's planned title. Offline cache misses are not provider failures.
@@ -597,8 +598,8 @@ Version 1.1.0. The source of truth for the machine-readable version is
   containers, those of a dead server on this host, and those older than any run.
   `NumericsSession` compiles the code on the host (Python ≥ 3.12) before any approval
   or container, after undoing an all-literal-`\n` tool argument (`normalize_code`);
-  escalation needs a purpose, shows it and the start of the code, and is capped per
-  request (`policy.step_limit`).
+  escalation needs a purpose and shows it and the start of the code; one approved request
+  may go up to the ceiling (`policy.step_limit`).
 
   The image is pinned (base image by digest, wheels by hash in
   `numerics/docker/requirements.lock`, amd64 and arm64). Artifacts are served
@@ -1071,12 +1072,12 @@ review do. When a new turn replaces `assistant_state`, `store._archive_turn_reco
 appends the finished turn's routing decision and usage to `chat['turn_records']`;
 the chat view's `usage_total` sums them with the current turn.
 
-The Assistant's instructions are sections of one policy (`orchestrator.POLICY_*`).
-`Orchestrator._policy(tools)` sends the core and only the sections of the tools
-and worker modes the call offers, or that the turn already used. Add a rule to the
-section of the tool or mode it governs; a rule every answer needs goes in
-`POLICY_CORE`. On a DS4 turn routed `direct`, `ModeOrchestrator` offers `delegate`
-with mode `prove` only and refuses other modes.
+The Assistant receives the whole `orchestrator.POLICY` on every call
+(`Orchestrator._policy`); only the rules of optional tools that are offered
+(`POLICY_WRITE` for `write_file`, `POLICY_OFFLINE` in a `--offline` interface) are
+added. Never trim the policy or narrow the skills a turn may delegate to save prompt
+tokens: a small saving is not worth a rule missing from a call or a misjudged
+routing decision that cannot start the right worker.
 
 The Assistant has `write_file` only when the current user message's own words ask
 to save a file (`orchestrator.write_requested`; quotations and code are not the
