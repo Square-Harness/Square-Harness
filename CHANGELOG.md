@@ -7,6 +7,17 @@
   about 60 to 80 entries fit before, so in a paper with about a hundred references
   the later ones could not be cited. 18,000 characters cover the bibliography of
   almost any paper.
+- The sidebar shows "No model connected" instead of a model name when the
+  interface was started without `--model` or `--api-profile` and no model
+  server answers: the name was only the built-in default (`qwen3.8:27b`).
+  A model the user configured is still named, with its status below.
+- The start page no longer shows the skills as buttons: they suggested calling a
+  skill directly, and a skill called on a task beyond its specific goal can fail
+  (a `@writeup` of a whole 79-page paper stopped on a false missing
+  bibliography), while the Assistant divides such a task into jobs the skills
+  can handle. The start page now points to **About**, which lists the skills
+  with their `@` commands and warns that forcing a skill can lead to unexpected
+  errors. `@` in the text box still calls a skill.
 
 - Title a conversation from the user's own words and, for a LaTeX document
   pasted or attached, its title and abstract, instead of the first 1,400 bytes

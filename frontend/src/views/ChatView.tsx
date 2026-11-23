@@ -13,7 +13,7 @@ import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { ProjectSelector } from '../components/Projects'
 import { ImageGallery, isImagePath, PinnedImages } from '../components/ImageAttachments'
-import { callPayload, coverOf, MODE_CALLS, typedCall, validCall, type ModeCall } from '../modeCalls'
+import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -202,17 +202,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     }
   }
   const submit = (event: FormEvent) => { event.preventDefault(); send() }
-  const pickSkill = (next: RouteMode) => {
-    const currentCall = validCall(draft, selectedCall) ? selectedCall : typedCall(draft, true)
-    const message = currentCall ? (draft.slice(0, currentCall.start) + draft.slice(currentCall.end)).trimStart() : draft
-    const token = '@' + next
-    setDraft(token + ' ' + message)
-    selectCall({ mode: next, start: 0, end: token.length })
-    window.requestAnimationFrame(() => {
-      const input = composer.current?.querySelector('textarea')
-      input?.focus(); input?.setSelectionRange(token.length + 1, token.length + 1)
-    })
-  }
   const changeProject = async (project: string | null) => {
     if (sending || resuming || projectSaving || work.blocked) return
     const chatId = id || createdChat.current
@@ -263,10 +252,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
-          {!id && <Intro mode={mode} project={app.projects?.find((item) => item.id === currentProject)?.name} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
+          {!id && <Intro mode={mode} project={app.projects?.find((item) => item.id === currentProject)?.name} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
-          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} onSkill={pickSkill} />}
+          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
           {id && <Transcript items={transcript} mode={mode} chatId={id} lanes={agentLanes} plan={data?.investigation} waiting={data?.waiting_for_results} />}
           {routing && !live && (
             <div className="entry message message-model">
@@ -356,7 +345,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   )
 }
 
-function Intro({ mode, project, onPick, onSkill }: { mode: ChatMode; project?: string; onPick: (text: string) => void; onSkill: (mode: RouteMode) => void }) {
+function Intro({ mode, project, onPick }: { mode: ChatMode; project?: string; onPick: (text: string) => void }) {
   const intro = INTRO[mode]
   return (
     <div className="entry intro">
@@ -366,13 +355,7 @@ function Intro({ mode, project, onPick, onSkill }: { mode: ChatMode; project?: s
         <p className="lede">{intro.text}</p>
         {project && <p className="intro-project"><FolderIcon size={15} /><span>This conversation will belong to <strong>{project}</strong> and read its notes.</span></p>}
         {mode === 'free' && <>
-          <p className="muted intro-skill-hint">Choose a skill below, or type <code>@</code> in your message, to request one explicitly.</p>
-          <div className="intro-skills" aria-label="Available skills">{MODE_CALLS.map((skill) => <span key={skill.mode} className="intro-skill-option">
-            <button type="button" className="intro-skill" aria-describedby={`intro-skill-${skill.mode}`} onClick={() => onSkill(skill.mode)}>
-              <span className={`route-cover mode-${coverOf(skill.mode)}`} aria-hidden="true"><Glyph mode={coverOf(skill.mode)} /></span>{skill.label}
-            </button>
-            <span id={`intro-skill-${skill.mode}`} className="intro-skill-summary" role="tooltip">{skill.summary}</span>
-          </span>)}</div>
+          <p className="muted intro-about">See the <a href={href('about')}>About</a> page for the available skills.</p>
           <p className="muted small intro-feedback">Found an issue or have an idea? <button type="button" className="link-btn" onClick={() => window.dispatchEvent(new Event('square-feedback'))}>Send feedback</button>.</p>
         </>}
         {intro.examples.length > 0 && <div className="examples">

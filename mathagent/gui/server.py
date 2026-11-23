@@ -216,6 +216,7 @@ def status(h, body):
     api_profile = getattr(args, 'api_profile', 'default')
     out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
+           'model_default': bool(getattr(args, 'model_default', False)),
            # The default for new work in the interface: online unless launched --offline.
            'online': hub.online(), 'online_locked': hub.online_locked,
            'image_support': hub.image_support(),

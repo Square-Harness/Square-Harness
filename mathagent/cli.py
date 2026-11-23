@@ -279,6 +279,8 @@ def main():
     remote_profile = args.backend == 'openai' and args.api_profile == 'deepinfra'
     args.host = args.host or ('https://api.deepinfra.com/v1/openai' if remote_profile else
                               'http://localhost:11434' if args.backend == 'ollama' else 'http://localhost:8000')
+    # The interface names a model nobody configured only once it answers (see the sidebar footer).
+    args.model_default = args.model is None and not remote_profile
     args.model = args.model or ('deepseek-ai/DeepSeek-V4.1-Flash-1017' if remote_profile else
                                 'qwen3.8:27b' if args.backend == 'ollama' else 'square-qwen')
     apply_defaults(args, sys.argv[1:])

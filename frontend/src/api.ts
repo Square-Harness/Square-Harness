@@ -95,6 +95,8 @@ export type Status = {
   seq: number
   workspace: string
   model: string
+  /** The model is the built-in default: the user configured none. */
+  model_default?: boolean
   host: string
   backend: 'ollama' | 'openai' | 'llamacpp'
   image_support?: boolean
