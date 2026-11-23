@@ -121,6 +121,7 @@ PART_LINES = 110
 DIRECT_CAP = 32_768
 READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
 TYPO_BATCH = 40  # remarks checked against the paper per call
+MINOR_BATCH = 20  # minor findings without a second opinion checked against the paper per call
 
 
 _NO_CHANGE = re.compile(r'(?i)\bno (?:change|correction|repair|fix)(?:es)? (?:is |are )?(?:needed|required|necessary)\b'
@@ -301,6 +302,7 @@ class ReviewBase(ResearchRunner):
     TERMINAL = ('reviewed', 'budget_violation')
     POLICY = P.POLICY
     VARIANT = None
+    DROP_UNLOCATED = False  # the paper review leaves out a finding whose quote is not in the source
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
@@ -1354,7 +1356,8 @@ class ReviewBase(ResearchRunner):
                 cluster['kind'] = confirm['kind']
                 if 'severity' in cluster and confirm.get('severity'):
                     cluster['severity'] = confirm['severity']  # the re-check judged the consequence
-        statuses = {c['status'] for c in clusters if not (c['unlocated'] and c['status'] != 'confirmed')}
+        judged = [c for c in clusters if not (self.DROP_UNLOCATED and c['unlocated'])]
+        statuses = {c['status'] for c in judged if not (c['unlocated'] and c['status'] != 'confirmed')}
         # "Uncertain" needs a named undecided point: a pass that found no gap but answered "uncertain" does not
         # make the verdict uncertain.
         if 'confirmed' in statuses:
@@ -1362,7 +1365,7 @@ class ReviewBase(ResearchRunner):
         elif 'unconfirmed' in statuses:
             verdict = 'issues_alleged'
         elif (statuses & {'undecided', 'uncertainty'}
-              or any(c['unlocated'] and c['status'] != 'rejected' for c in clusters)
+              or any(c['unlocated'] and c['status'] != 'rejected' for c in judged)
               or any(c.get('claimed') for c in usable)
               or not self._checks_complete(unit_id)):
             verdict = 'uncertain'
@@ -2070,6 +2073,7 @@ class PaperReviewRunner(ReviewBase):
     is rewritten after every call."""
     VARIANT = 'review'
     PIPELINE = PIPELINES['review']
+    DROP_UNLOCATED = True
 
     def start(self, goal, *, review_reference=None, **kwargs):
         self._review_reference = None
@@ -2101,7 +2105,7 @@ class PaperReviewRunner(ReviewBase):
         state = {**super()._extra_state(), 'scope': None, 'plan_units': [], 'unchecked': [],
                  'presentation': [], 'write': None, 'reading': {},
                  'read_parts': [], 'citations': [], 'merged': None, 'adjudications': {}, 'typo_check': None,
-                 'packages': [], 'located': [], 'ledger': []}
+                 'packages': [], 'located': [], 'ledger': [], 'minor_checks': {}}
         reference = getattr(self, '_review_reference', None)
         if reference:
             state.update(review_reference={key: value for key, value in reference.items() if key != 'source'},
@@ -2354,6 +2358,8 @@ class PaperReviewRunner(ReviewBase):
             for comment in self.state['presentation']:  # batches of an earlier run are checked again
                 comment.pop('check_pending', None)
                 comment.pop('check_failed', None)
+            decided = {key: entry for key, entry in (self.state.get('minor_checks') or {}).items() if 'keep' in entry}
+            self.state['minor_checks'] = decided
 
         def admit(running):
             # Running calls have already reserved their output and input in the job's counters: a new call needs
@@ -2461,6 +2467,8 @@ class PaperReviewRunner(ReviewBase):
                     priority = (1 if self._deep(item['pass_index']) else 2 if item['pass_index'] == 0 else 5) if uid in chain else 6
                     jobs.append((priority, item['key'], self._audit_job(uid, item)))
         jobs += self._adjudication_jobs(chain)
+        if whole:
+            jobs += self._minor_check_jobs(7)  # after the second opinions: a finding they take is not checked twice
         if whole and effort['typos']:
             jobs += self._typo_jobs(6)
         if s.get('write') is None and scope_done and self._chain_settled(self._near_chain()):
@@ -2876,8 +2884,8 @@ class PaperReviewRunner(ReviewBase):
 
     def _adjudication_jobs(self, chain):
         """Second opinions on the findings of every proof (or sweep) whose checks are complete: a defence of the
-        paper, a judge when the defence holds or partly holds, and a check of any repair that would make a major
-        finding minor. The most serious findings and those on the main results' chain come first."""
+        paper, a judge on every finding alleged major and whenever the defence holds or partly holds, and a check of
+        any repair that would make a major finding minor. The most serious findings and those on the main results' chain come first."""
         s = self.state
         near = self._near_chain()
         ready = [uid for uid in s['plan_units'] + list(PSEUDO_UNITS) if self._checks_complete(uid)]
@@ -2911,7 +2919,7 @@ class PaperReviewRunner(ReviewBase):
             return None
         if not adjudication.get('defense'):
             return 'defend'
-        if PaperReviewRunner._contested(adjudication) and not adjudication.get('arbiter'):
+        if PaperReviewRunner._judged(adjudication) and not adjudication.get('arbiter'):
             return 'arbiter'
         if adjudication.get('repair_wanted') and not adjudication.get('repair_check'):
             return 'repair'
@@ -2922,15 +2930,19 @@ class PaperReviewRunner(ReviewBase):
         confirm = self.state['confirms'].get(cluster['key'])
         if cluster['kind'] == 'uncertainty':
             return {'valid': 'confirmed', 'rejected': 'rejected'}.get((confirm or {}).get('assessment'), 'uncertainty')
+        if confirm is None and (self._minor_check(cluster) or {}).get('keep') is False:
+            return 'rejected'  # a minor finding the check against the paper did not support
         return super()._settle(cluster)
 
     @staticmethod
-    def _contested(adjudication):
-        """A judge is needed when the defence holds the paper right, or makes the finding less serious than alleged; a
-        defence that concedes, or agrees on the effect, settles the finding."""
+    def _judged(adjudication):
+        """Whether the reasoning judge decides the finding. Always when it is alleged major (a false statement or a
+        broken proof), whatever the defence says: the defence answers without reasoning, and a concession let false
+        majors into the report. Otherwise when the defence holds the paper right or makes the finding less serious
+        than alleged; a defence that concedes, or agrees on the effect, settles a finding alleged minor."""
         defense = adjudication['defense']
-        return defense['position'] == 'defended' or (
-            defense['position'] == 'partly' and _effect_rank(defense['effect']) < _effect_rank(adjudication['effect']))
+        return (adjudication.get('effect') in P.MAJOR_EFFECTS or defense['position'] == 'defended' or (
+            defense['position'] == 'partly' and _effect_rank(defense['effect']) < _effect_rank(adjudication['effect'])))
 
     def _allegation(self, cluster):
         sid = self.state['sources'][0]['id']
@@ -2970,6 +2982,8 @@ class PaperReviewRunner(ReviewBase):
                 defense = adjudication['defense']
                 prompt += (f'\nTHE DEFENCE OF THE MANUSCRIPT ({defense["position"]}; what remains: {defense["effect"]}):\n'
                            f'{defense["argument"]}\n' + (f'Repair proposed by the defence: {defense["repair"]}\n' if defense['repair'] else ''))
+                if defense['position'] != 'defended':
+                    prompt += '\n' + P.ARBITER_UNOPPOSED_NOTE + '\n'
             elif step == 'repair':
                 prompt += f'\nTHE PROPOSED REPAIR (it would make the effect {adjudication["repair_wanted"]["effect"]}):\n{adjudication["repair_wanted"]["repair"]}\n'
             # The defence answers at once; the judge and the repair check, which decide severity, reason first.
@@ -3008,7 +3022,7 @@ class PaperReviewRunner(ReviewBase):
         alleged to break a proof or a statement is made minor only by a repair that a separate check found to work
         (models tend to give way when challenged; a downgrade must be earned)."""
         defense = adjudication['defense']
-        if not self._contested(adjudication):
+        if not self._judged(adjudication):
             verdict, effect, repair, argument = 'valid', defense['effect'], defense['repair'], defense['argument']
             said = ('The defence of the paper conceded: ' if defense['position'] == 'conceded'
                     else 'The defence of the paper agreed on the problem: ')
@@ -3017,7 +3031,8 @@ class PaperReviewRunner(ReviewBase):
             if arbiter is None:
                 return
             verdict, effect, repair, argument = arbiter['assessment'], arbiter['effect'], arbiter['repair'], arbiter['argument']
-            said = {'valid': 'Upheld against the defence: ', 'rejected': 'Rejected: ', 'undecided': 'Not settled: '}[verdict]
+            upheld = 'Upheld against the defence: ' if defense['position'] == 'defended' else 'Upheld by the judge: '
+            said = {'valid': upheld, 'rejected': 'Rejected: ', 'undecided': 'Not settled: '}[verdict]
         note = ''
         alleged = cluster['effect']
         if verdict == 'valid' and alleged in P.MAJOR_EFFECTS and effect not in P.MAJOR_EFFECTS:
@@ -3041,6 +3056,75 @@ class PaperReviewRunner(ReviewBase):
         kind = cluster['kind'] if cluster['kind'] in ('invalid_inference', 'missing_justification') else 'missing_justification'
         self.state['confirms'][cluster['key']] = {'assessment': verdict, 'kind': kind, 'severity': severity, 'effect': effect,
                                                   'argument': said + _clip(argument, 1800), 'suggestion': repair[:800]}
+
+    # -- minor findings without a second opinion ---------------------------------------------------------------
+
+    def _checks_attempted(self, uid):
+        """Every planned check of a proof (or sweep) has an answer, usable or not: its findings will not change."""
+        plan = self.state.get('check_plan', {}).get(uid) or []
+        return bool(plan) and all(item['key'] in self.state['checks'] for item in plan)
+
+    def _minor_waiting(self):
+        """The minor findings no second opinion looked at and no check against the paper has decided yet."""
+        s = self.state
+        checks = s.setdefault('minor_checks', {})
+        waiting = []
+        for uid in s['plan_units'] + list(PSEUDO_UNITS):
+            if not self._checks_attempted(uid):
+                continue
+            for cluster in self._clusters(uid):
+                if (cluster['kind'] != 'uncertainty' and not cluster['unlocated'] and cluster.get('effect') not in P.MAJOR_EFFECTS
+                        and cluster['key'] not in s['adjudications'] and cluster['key'] not in checks):
+                    waiting.append(cluster)
+        return waiting
+
+    def _minor_check_jobs(self, priority):
+        """Minor findings that got no second opinion (most come from one pass without reasoning; graded live, nearly
+        half were wrong) are checked against the paper, MINOR_BATCH per call, as soon as a batch is full or every
+        planned check has answered."""
+        s = self.state
+        if s.get('scope') is None:
+            return []  # the overview fixes the plan: before it a proof may still get another pass
+        waiting = self._minor_waiting()
+        planned = s['plan_units'] + [SWEEP_UNITS[n] for n in self.effort['sweeps']] + [CITE]
+        checks_over = all(self._checks_attempted(uid) for uid in planned)
+        jobs = []
+        while waiting and (len(waiting) >= MINOR_BATCH or checks_over):
+            batch, waiting = waiting[:MINOR_BATCH], waiting[MINOR_BATCH:]
+            for cluster in batch:
+                s['minor_checks'][cluster['key']] = {'pending': True}
+            jobs.append((priority, f'minor-check:{batch[0]["key"]}', self._minor_check_job(batch)))
+        return jobs
+
+    def _minor_check_job(self, batch):
+        def run():
+            rows = []
+            for n, c in enumerate(batch, 1):
+                rows.append(f'F{n} ({self._comment_name(c["unit"], c)}, lines {c["start_line"]}-{c["end_line"]}, '
+                            f'{c.get("effect") or c["kind"]}): "{c["quote"]}" — {c["evidence"]}'
+                            + (f' Suggested repair: {c["suggestion"]}' if c.get('suggestion') else ''))
+            self.emit('notice', f'Checking {len(rows)} minor findings against the paper')
+            result = self._judge('minor-check', self._block() + '\n\n' + P.MINOR_CHECK_POLICY + '\n\nFINDINGS:\n' + '\n'.join(rows),
+                                 cap=self._call_cap(False), schema=P.MINOR_CHECK_SCHEMA, key=f'minor-check:{batch[0]["key"]}',
+                                 reason=False)
+            value = result['value']
+            with self._mutex:
+                verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
+                for n, cluster in enumerate(batch, 1):
+                    verdict = verdicts.get(f'F{n}')
+                    if verdict is None or type(verdict.get('keep')) is not bool:
+                        # Shown unchecked; a resumed review checks it again.
+                        self.state['minor_checks'][cluster['key']] = {'failed': True}
+                        continue
+                    self.state['minor_checks'][cluster['key']] = {'keep': verdict['keep'],
+                                                                  'check': str(verdict.get('check') or '')[:700]}
+                self._save()
+        return run
+
+    def _minor_check(self, cluster):
+        """The decided check of a minor finding against the paper, or None."""
+        entry = (self.state.get('minor_checks') or {}).get(cluster['key']) or {}
+        return entry if 'keep' in entry else None
 
     # -- typos ---------------------------------------------------------------------------------------------
 
@@ -3279,7 +3363,9 @@ class PaperReviewRunner(ReviewBase):
         chain = self._main_chain()
         units = self.state['plan_units'] + list(PSEUDO_UNITS)
         major, minor, questions, rejected, verdicts = [], [], [], [], {}
-        self._loose = []
+        # Left out of the report and kept in the job: findings whose quote is not in the source, and minor findings
+        # that a check against the paper did not support.
+        self._loose, self._unsupported = [], []
         rank = ['no_issue_found', 'uncertain', 'issues_alleged', 'issues_found']
         for uid in units:
             if not any(c.get('unit') == uid for c in self.state['checks'].values()):
@@ -3288,10 +3374,13 @@ class PaperReviewRunner(ReviewBase):
             if uid not in PSEUDO_UNITS:
                 verdicts[uid] = verdict
             for cluster in clusters:
-                if cluster['unlocated'] and cluster['status'] != 'confirmed':
-                    self._loose.append(dict(cluster, unit_name=self._comment_name(uid, cluster)))
+                if cluster['unlocated']:
+                    self._loose.append(cluster['key'])
                     continue
                 confirm = self.state['confirms'].get(cluster['key'])
+                if cluster['status'] == 'rejected' and confirm is None:
+                    self._unsupported.append(cluster['key'])
+                    continue
                 if confirm and confirm['assessment'] == 'valid' and confirm.get('effect'):
                     cluster['effect'] = confirm['effect']
                 host = self._host(cluster)
@@ -3561,14 +3650,17 @@ class PaperReviewRunner(ReviewBase):
         lines = []
         where = self._where(source_id, cluster['start_line'], cluster['end_line'], unit)
         running = self.state['phase'] != 'done'
-        status = {'confirmed': 'upheld after a defence of the paper',
-                  'unconfirmed': 'second opinion pending' if running else 'not given a second opinion at this effort',
+        awaited = cluster.get('effect') in P.MAJOR_EFFECTS or cluster['key'] in self.state['adjudications']
+        unconfirmed = ('checked against the paper' if self._minor_check(cluster) else
+                       'not given a second opinion' if not running else
+                       'second opinion pending' if awaited else 'check against the paper pending')
+        status = {'confirmed': 'upheld after a defence of the paper', 'unconfirmed': unconfirmed,
                   'undecided': 'the second opinion could not decide', 'rejected': 'rejected by the second opinion',
                   'uncertainty': 'a point the checks could not decide'}.get(cluster.get('status'), '')
         coverage = self._check_coverage(cluster['unit'])
         passes = (f'; raised by {cluster["passes"]} of {coverage["started_passes"]} passes'
                   if show_passes and coverage['started_passes'] > 1 else '')
-        located = '' if cluster['located'] == 'exact' else ' (quote matched approximately)' if cluster['located'] == 'approximate' else ' (the quote was not found; location unsure)'
+        located = '' if cluster['located'] == 'exact' else ' (quote matched approximately)'
         effect = EFFECT_LABEL.get(cluster.get('effect'), KIND_LABEL[cluster['kind']])
         lines.append(f'**{effect}**, {where} — {status}{passes}{located}.')
         if cluster['quote']:
@@ -3810,7 +3902,7 @@ class PaperReviewRunner(ReviewBase):
             for a in adjudications:
                 outcome[a['final']['verdict']] = outcome.get(a['final']['verdict'], 0) + 1
             kept = sum(1 for a in adjudications if a['final'].get('note', '').startswith('Kept major'))
-            appendix += ['', f'Second opinions (a defence of the paper, then a judge when the defence held): {len(adjudications)} '
+            appendix += ['', f'Second opinions (a defence of the paper, then a judge on every finding alleged major and whenever the defence held): {len(adjudications)} '
                          'finding(s): ' + ', '.join(f'{n} {v}' for v, n in sorted(outcome.items()))
                          + (f'; {kept} kept major because the repair that would make them minor was not verified' if kept else '') + '.']
         typo = s.get('typo_check') or {}
@@ -3822,11 +3914,13 @@ class PaperReviewRunner(ReviewBase):
         scope = s.get('scope') or {}
         if scope.get('notation') and not s.get('whole'):
             appendix += ['', 'Setting and notation given to every check: ' + ', '.join(_lines_text(a, b) for a, b in scope['notation']) + '.']
-        loose = [c for c in getattr(self, '_loose', []) if c['unit'] != CITE]
-        if loose:
-            appendix += ['', '### Objections that could not be located', '',
-                         'Raised by a check without a quote found in the text, and not given a second opinion; read them with care.', '']
-            appendix += [f'- *{c["unit_name"]}*: {_clip(c["evidence"], 500)}' for c in loose]
+        minor_checks = [entry for entry in (s.get('minor_checks') or {}).values() if 'keep' in entry]
+        if minor_checks:
+            appendix += ['', f'Minor findings without a second opinion checked against the paper: {len(minor_checks)}; '
+                         f'{sum(not entry["keep"] for entry in minor_checks)} not supported by the paper and left out.']
+        if getattr(self, '_loose', []):
+            appendix += ['', f'{len(self._loose)} objection(s) whose quote was not found in the manuscript were left out '
+                         '(they stay in the saved job).']
         if rejected:
             appendix += ['', '### Objections raised and rejected by the second opinion', '']
             for cluster in rejected:

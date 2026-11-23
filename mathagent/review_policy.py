@@ -180,6 +180,11 @@ the boundary or the initial time, a uniform bound, a new lemma), beyond a textbo
 a new ingredient: the proof fails as written (breaks_proof). rejected: the manuscript is right as written; give the derivation in argument. undecided: you
 cannot decide; say in argument what would decide it."""
 
+# Every finding alleged major is judged, also when the defence gave way: the judge is then the only reasoning check.
+ARBITER_UNOPPOSED_NOTE = """The defence did not hold the manuscript right. This settles nothing: models give way when
+challenged. Check the allegation yourself, step by step, and any counterexample against every hypothesis of the
+manuscript; reject it when the manuscript is right as written."""
+
 REPAIR_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['works', 'argument'],
     'properties': {'works': {'type': 'string', 'enum': ['yes', 'no', 'unsure']},
@@ -208,6 +213,22 @@ right or the correction is wrong. Reject a remark that corrects the spelling of 
 entry of the bibliography, a remark about a symbol or macro that the manuscript or its packages define, and a matter
 of taste or an optional rephrasing. Give every id once. check comes before keep: write there first what you verified
 (the computation done in full, the definition the symbol has, the sentence as corrected), then decide."""
+
+MINOR_CHECK_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['items'],
+    'properties': {'items': {'type': 'array', 'maxItems': 30, 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
+        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+                       'keep': {'type': 'boolean'}}}}},
+}
+MINOR_CHECK_POLICY = """Below are minor findings of a referee on the manuscript above, each with an id. Each was raised
+by one reading of one proof and has not been verified. Check each one against the manuscript and keep it only when
+the problem is real as described. Reject it when the manuscript provides what the finding says is missing (a
+definition, a hypothesis, a standing assumption, an earlier result: give its line), when the finding misreads the
+text or its notation, when its computation or its counterexample is wrong, when the step follows in a line or two for
+a specialist, or when it is a matter of taste. Do not reject a finding because it is small: a real misprint or a real
+imprecision is kept. Give every id once. check comes before keep: write there first what you verified (the lines
+you read, the definition or hypothesis found, the computation done in full), then decide."""
 
 
 # Each pass reads the same proof through a different lens; disagreement between them is informative.

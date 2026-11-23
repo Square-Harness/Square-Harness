@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Review, fewer false alarms: a finding said to make a statement false or a proof fail always
+  goes to the reasoning judge, also when the defence of the paper gives way; minor findings
+  that got no second opinion are checked against the paper, twenty per call, and those the
+  paper does not support leave the report; a finding whose quoted words are not in the paper
+  is left out instead of printed with a caveat. The saved job keeps all of them.
 - One Review instead of Review and Detailed review. Low is a typo and presentation check (the
   paper read for typos, every suggested correction checked against the paper, no proof checked);
   from Medium every proof of the paper is checked, appendices included, and effort sets how

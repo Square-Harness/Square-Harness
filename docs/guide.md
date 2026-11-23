@@ -885,12 +885,18 @@ The three review kinds work on a proof you paste, or on a manuscript you attach
   reports every problem with its effect: the statement is false, the proof fails,
   a gap an expert can fill, an imprecision, or a misprint. As soon as a proof's
   checks are done, each of its findings gets a **second opinion**: a defence of the
-  paper, then, if the defence holds the paper right or makes the finding less
-  serious, an independent judge. A
+  paper, then an independent judge. A finding said to make a statement false or a
+  proof fail always goes to the judge, even when the defence gives way (the
+  defence answers at once; the judge reasons); other findings go to the judge when
+  the defence holds the paper right or makes the finding less serious. A
   finding said to make a statement false or a proof fail becomes minor only when a
   separate check finds the proposed repair to work with standard arguments: a
   repair that needs a fact the paper neither proves nor cites (a density, a
-  regularity up to the boundary, a new lemma) leaves it major (the report says so). Typo corrections are checked against the paper (a formula
+  regularity up to the boundary, a new lemma) leaves it major (the report says so).
+  Minor findings that got no second opinion are checked against the paper, twenty
+  per call: a finding the paper does not support leaves the report, and so does a
+  finding whose quoted words are not in the paper (the scope at the end of the
+  report counts both; the saved job keeps them). Typo corrections are checked against the paper (a formula
   change with its computation; names and bibliography entries are never
   "corrected").
 

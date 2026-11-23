@@ -1124,8 +1124,10 @@ severity is derived (`P.MAJOR_EFFECTS` are major). Findings are clusters of the
 passes' issues (`_clusters`, which carry the gravest effect). As soon as a unit's
 checks are complete, its eligible findings get a second opinion
 (`_adjudication_jobs`, at most `EFFORT['adjudications']`, the main chain's major
-findings first): `defend` (the paper's advocate), `arbiter` when the defence holds
-or partly holds, and `repair` when the verdict would make a major finding minor;
+findings first): `defend` (the paper's advocate), `arbiter` (`_judged`: always for a
+finding alleged `statement_false` or `breaks_proof`, whatever the defence says, with
+`P.ARBITER_UNOPPOSED_NOTE` when the defence gave way; otherwise when the defence holds
+or partly holds), and `repair` when the verdict would make a major finding minor;
 `_conclude` applies the downgrade rule (no verified repair, no downgrade) and writes
 the verdict into `state['confirms']` in the format the Quick review uses, with the
 history in `state['adjudications']`. `_comments` numbers the comments (`Major n`,
@@ -1148,8 +1150,14 @@ input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
 model-request limit). Pool admission counts only the new call: running calls have
 already reserved their output and input in the job's counters. Extra passes go to
 `_near_chain()` (the main results, and at High what they use directly:
-`EFFORT['depth']`); the judge runs only when the defence is `_contested`; the repair
-check treats a fact the paper neither proves nor cites as a new ingredient. Reading in
+`EFFORT['depth']`); the repair
+check treats a fact the paper neither proves nor cites as a new ingredient. A minor
+finding without a second opinion is checked against the paper (`_minor_check_jobs`,
+role `minor-check`, `MINOR_BATCH` per call, no hidden reasoning, once every planned
+check of its proof has answered); the verdicts are in `state['minor_checks']` by
+cluster key, and `_settle` makes an unsupported one `rejected`. `_comments` leaves
+out those and every finding whose quote is not in the source (`located == 'no'`,
+`DROP_UNLOCATED`): they stay in `state['checks']`, and the scope appendix counts them. Reading in
 whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with
 the whole paper in view; typo remarks are checked `TYPO_BATCH` per call
 (`_typo_jobs`).
