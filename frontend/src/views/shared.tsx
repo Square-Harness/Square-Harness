@@ -120,6 +120,7 @@ export const ROLES: Record<string, RoleInfo> = {
   arbiter: { active: 'Judging an objection and its defence', name: 'Judgement', structured: true },
   'repair-check': { active: 'Checking a repair that would make an objection minor', name: 'Repair check', structured: true },
   'typo-check': { active: 'Checking the typo list against the paper', name: 'Typo check', structured: true },
+  attack: { active: 'Looking for a counterexample to a main result', name: 'Attack', structured: true },
   'minor-check': { active: 'Checking minor findings against the paper', name: 'Minor findings check', structured: true },
   merge: { active: 'Grouping comments about the same problem', name: 'Merge', structured: true },
   confirm: { active: 'An independent re-check of an alleged issue', name: 'Re-check', structured: true },

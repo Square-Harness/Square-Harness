@@ -214,6 +214,50 @@ entry of the bibliography, a remark about a symbol or macro that the manuscript 
 of taste or an optional rephrasing. Give every id once. check comes before keep: write there first what you verified
 (the computation done in full, the definition the symbol has, the sentence as corrected), then decide."""
 
+# The attack on the statement of a main result: a counterexample, not a proof gap.
+ATTACK_VERDICTS = ('none', 'edge', 'minor', 'major')
+ATTACK_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'required': ['verdict', 'counterexample', 'hypothesis_check', 'quote', 'weakest'],
+    'properties': {
+        'verdict': {'type': 'string', 'enum': list(ATTACK_VERDICTS)},
+        'counterexample': {'type': 'string', 'maxLength': 2500},
+        'hypothesis_check': {'type': 'string', 'maxLength': 2500},
+        'quote': {'type': 'string', 'maxLength': 200},
+        'weakest': {'type': 'object', 'additionalProperties': False, 'required': ['start_line', 'end_line', 'step'],
+                    'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'},
+                                   'step': {'type': 'string', 'maxLength': 800}}},
+    },
+}
+ATTACK_POLICY = """The whole manuscript is above. Attack the STATEMENT of the main result given below: try to show that
+it is false as stated. Do not audit its proof here: a gap in the proof is not an answer to this task.
+Try in turn: degenerate values of the parameters (zero, one, equal, infinite, an empty set, a constant function);
+low dimension and the first indices; the boundary and limiting cases of every range in the statement; a known result
+that the statement would contradict, or improve beyond what is known to be possible (name it and state it); the
+simplest explicit example the hypotheses allow (compute what the statement says for it).
+A counterexample must be explicit, and you must check it against every hypothesis of the statement and every
+standing assumption of the manuscript, one by one: an example that violates one of them is not a counterexample, and
+a wrong counterexample discredits the whole review. When you are not sure that the example satisfies a hypothesis,
+or that it contradicts the conclusion, the verdict is none.
+verdict:
+- major: an explicit example satisfies every hypothesis and contradicts the conclusion, and it is not a degenerate
+  case that the authors can exclude in a line;
+- minor: the statement is false as written, but true after a correction that the manuscript makes clear (a constant,
+  a range, a missing word such as "nonnegative"): give the correction;
+- edge: the statement fails only in a degenerate or boundary case that the authors plainly do not intend and can
+  exclude in a line: say which;
+- none: you found no counterexample.
+counterexample: the example and the computation showing that the conclusion fails; when the verdict is none, one or
+two sentences on what you tried. hypothesis_check: each hypothesis and standing assumption, and why the example
+satisfies it (empty when the verdict is none). quote: at most twelve words copied exactly from the statement, the
+part that fails (empty when the verdict is none).
+weakest: whatever the verdict, the one step that this result depends on most and that the manuscript justifies
+least, in its own proof or in the proof of a result it uses: its first and last lines and, in step, what the step
+claims and what would have to be checked. Give 0, 0 and an empty step when every step the result rests on is
+justified in full."""
+WEAKEST_NOTE = """THE STEP TO CHECK FIRST ({lines}), named as the least justified step that {result} depends on:
+{step}"""
+
 MINOR_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
     'properties': {'items': {'type': 'array', 'maxItems': 30, 'items': {
@@ -245,6 +289,11 @@ LENSES = {
     'global': 'STRUCTURE. Check that the conclusion reached is exactly the statement (all quantifiers, all cases, '
               'how the constants depend on the data), that every case is treated and that no step announced as '
               '"see below" or "similarly" is left undone.',
+    # The paper review only: one more pass on the proof that holds the step an attack on a main statement named.
+    'weakest': 'WEAKEST STEP. A first reading of the paper named the step given after the proof as the one a main '
+               'result depends on most and that is justified least. Check that step completely: write out the '
+               'argument the manuscript omits, test it on a concrete case, and decide whether it holds under the '
+               'hypotheses in force. Then check how the rest of the proof uses it.',
 }
 LENS_ORDER = ('line', 'adversarial', 'sources', 'global', 'line')
 
@@ -569,7 +618,9 @@ controller inserts the major and minor comments itself, each with its label: ref
 exactly as given ("Major 1", "Minor 2"), never invent a new objection, never drop a confirmed one, never call a minor
 comment major or the reverse, and do not repeat them in full. Mention questions to the authors, cited results or
 search results only when the findings list some; main_results gives the status of each main result, and what you
-say about a main result must match it. summary: one paragraph for the editor and the authors:
+say about a main result must match it. Its counterexample_search is the outcome of an attempt to break the statement
+with a counterexample: report a proposed or edge-case counterexample as given there, and never present "none found"
+as evidence that the statement is true. summary: one paragraph for the editor and the authors:
 what the paper does and claims, then what this review found. significance: importance and novelty in the field,
 relying only on the manuscript and the findings: the literature was not searched, so neither claim nor deny
 novelty; say that a literature review would place the results.

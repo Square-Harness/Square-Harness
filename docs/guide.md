@@ -855,7 +855,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
 
   | | |
   | --- | --- |
-  | Passes on the main results and the results their proofs use directly / on the others | 2 / 1 |
+  | Attack on the statement of each main result (four at most) | one reasoning call each |
+  | Passes on the main results and the results their proofs use directly / on the others | 2 / 1, plus one on a proof holding a step an attack named weakest |
   | Hidden reasoning (DS4) | the second pass, the judge and the repair check reason first; the other calls answer at once |
   | Read across the whole paper | cited results, consistency, unproved claims |
   | Second opinion on | findings said to break a proof or a statement, and gaps near the main results |
@@ -883,7 +884,16 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   run over a whole section ("Proof of Theorem 1", "In this section we prove
   Theorem 1.2"), and which result uses which. A first call writes the overview,
   names the main results (those proved only in an appendix stay main) and locates
-  the proofs the map missed. Then all the calls run in one pool, the main results
+  the proofs the map missed. Then, first of all, the **statement** of each main
+  result (four at most) is attacked by a reasoning call that sees the whole
+  paper: degenerate parameters, low dimension, boundary cases, a known result the
+  statement would contradict, the simplest example the hypotheses allow. A
+  counterexample counts only when it is explicit and checked against every
+  hypothesis; it then becomes a finding that the statement is false, which gets a
+  second opinion like any other. A statement that fails only in an edge case is
+  reported under the main-results table. The same call names the step the result
+  depends on most and that the paper justifies least: the proof holding that step
+  gets one more reasoning pass aimed at it. All the calls run in one pool, the main results
   and what they use first: a check of each
   proof (a long proof line by line in parts, with the whole paper in view), and
   reads across the paper for inconsistent constants or conventions, claims never
@@ -905,7 +915,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   report counts both; the saved job keeps them).
 
   The report is **rewritten after every call**: within minutes it shows the
-  overview, the first findings and the main-results table, then a first prose
+  overview, the first findings and the main-results table (with, for each main
+  result, what the search for a counterexample gave), then a first prose
   report once the main results are checked and judged, and the final report at
   the end. It has a summary, the status of each main result (checked with no
   issue, affected by a comment and where it comes from, open, or not checked), an

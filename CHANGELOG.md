@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Review: the statement of each main result (four at most) is attacked for a counterexample
+  as soon as the overview is written, by a reasoning call that sees the whole paper
+  (degenerate parameters, low dimension, boundary cases, known results it would contradict).
+  An explicit counterexample checked against every hypothesis becomes a finding that the
+  statement is false and gets a second opinion; the step the attack names as least justified
+  gives its proof one more reasoning pass. The main-results table shows the outcome.
 - The Review has one depth and no effort to choose (the former High); Medium is removed. The
   typo check, formerly the review at Low, is its own skill: `@typo_check`, `/typo_check`, and
   "Typo Check" in the New review form. The review no longer reads the paper for typos (a sixth

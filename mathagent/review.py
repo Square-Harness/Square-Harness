@@ -120,6 +120,8 @@ TYPO_BATCH = 40  # remarks checked against the paper per call
 TYPOS_NOT_CHECKED = ('*Typos and presentation were not checked by this review. For those, run a typo check on the same '
                      'file: `@typo_check`.*')
 MINOR_BATCH = 20  # minor findings without a second opinion checked against the paper per call
+ATTACKS = 4  # main results whose statement is attacked for a counterexample, at most
+WEAK_PASS = 9  # the pass index of the extra pass on the step an attack named weakest
 
 
 _NO_CHANGE = re.compile(r'(?i)\bno (?:change|correction|repair|fix)(?:es)? (?:is |are )?(?:needed|required|necessary)\b'
@@ -2112,7 +2114,7 @@ class PaperReviewRunner(ReviewBase):
         state = {**super()._extra_state(), 'level': self.LEVEL, 'scope': None, 'plan_units': [], 'unchecked': [],
                  'presentation': [], 'write': None, 'reading': {},
                  'read_parts': [], 'citations': [], 'merged': None, 'adjudications': {}, 'typo_check': None,
-                 'packages': [], 'located': [], 'ledger': [], 'minor_checks': {}}
+                 'packages': [], 'located': [], 'ledger': [], 'minor_checks': {}, 'attacks': {}}
         reference = getattr(self, '_review_reference', None)
         if reference:
             state.update(review_reference={key: value for key, value in reference.items() if key != 'source'},
@@ -2385,6 +2387,8 @@ class PaperReviewRunner(ReviewBase):
                 comment.pop('check_failed', None)
             decided = {key: entry for key, entry in (self.state.get('minor_checks') or {}).items() if 'keep' in entry}
             self.state['minor_checks'] = decided
+            # An attack without a usable answer is made again; reviews saved before the attack existed get one.
+            self.state['attacks'] = {uid: a for uid, a in (self.state.get('attacks') or {}).items() if a.get('usable')}
 
         def admit(running):
             # Running calls have already reserved their output and input in the job's counters: a new call needs
@@ -2472,6 +2476,11 @@ class PaperReviewRunner(ReviewBase):
         jobs = []
         if not scope_done and (whole or all(f'L{a}' in s['reading'] for a, _ in reads)):
             jobs.append((0, 'scope', self._scope))
+        if whole and scope_done:
+            # The statements of the main results are attacked first: these reasoning calls are among the longest.
+            for uid in self._attack_ids():
+                if uid not in s['attacks']:
+                    jobs.append((0, f'attack:{uid}', self._attack_job(uid)))
         for a, b in reads:
             if not self._reading_usable(f'L{a}'):
                 jobs.append((1 if not whole else 4, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)))
@@ -2502,6 +2511,8 @@ class PaperReviewRunner(ReviewBase):
         """The main results and what they use are checked and their findings judged (a first report can be written)."""
         units = [uid for uid in self.state['plan_units'] if uid in chain]
         if not units or not all(self._checks_complete(uid) for uid in units):
+            return False
+        if self.state.get('whole') and any(uid not in self.state['attacks'] for uid in self._attack_ids()):
             return False
         for uid in units:
             for cluster in self._clusters(uid):
@@ -2712,7 +2723,7 @@ class PaperReviewRunner(ReviewBase):
         plans = self.state.setdefault('check_plan', {})
         plan = plans.get(uid) or []
         wanted = self._lenses(uid) if final else ['line']
-        have = sorted({item['pass_index'] for item in plan})
+        have = sorted({item['pass_index'] for item in plan if item['lens'] != 'weakest'})
         if len(have) >= len(wanted):
             return plan
         unit = self._unit(uid)
@@ -2771,7 +2782,12 @@ class PaperReviewRunner(ReviewBase):
             part = f', part {item["part"] + 1}/{item["parts"]}' if item['parts'] > 1 else ''
             self.emit('notice', f'Checking {unit["name"]}: {item["lens"]} pass{part}')
             if self.state.get('whole'):
-                prompt = self._block() + '\n\n' + P.audit_prompt(item['lens'], self._unit_text(unit, item['segment']))
+                text = self._unit_text(unit, item['segment'])
+                focus = item.get('focus')
+                if focus:
+                    text += '\n' + P.WEAKEST_NOTE.format(lines=_lines_text(focus['start_line'], focus['end_line']),
+                                                         result=self._unit(focus['for'])['name'], step=focus['step']) + '\n'
+                prompt = self._block() + '\n\n' + P.audit_prompt(item['lens'], text)
             else:
                 room = self._room(self._check_cap(), P.audit_prompt('line', ''))
                 packet, _, ranges = self._packet(unit, room, notation=self._notation(), segment=item['segment'])
@@ -2896,6 +2912,108 @@ class PaperReviewRunner(ReviewBase):
                 self._save()
         return run
 
+    # -- the attack on the main statements ---------------------------------------------------------------------
+
+    def _attack_ids(self):
+        """The main results whose statement is attacked: the overview's choice in its order, then those the map
+        flags, ATTACKS at most, each with its statement located."""
+        chosen = (self.state.get('scope') or {}).get('main') or []
+        main = self._main_ids()
+        ranked = [uid for uid in chosen if uid in main] + [uid for uid in main if uid not in chosen]
+        return [uid for uid in dict.fromkeys(ranked) if self._unit(uid).get('statement')][:ATTACKS]
+
+    def _attack_job(self, uid):
+        def run():
+            unit = self._unit(uid)
+            sid = unit['source']
+            a, b = unit['statement']
+            self.emit('notice', f'Looking for a counterexample to {unit["name"]}')
+            proof = ', '.join(_lines_text(x, y) for x, y in unit['proofs']) or 'not located in the manuscript'
+            task = (P.ATTACK_POLICY + f'\n\nTHE STATEMENT TO ATTACK: {unit["name"]}\n' + self._numbered(sid, a, b, mark=False)
+                    + f'\n\nIts proof: {proof}.\n')
+            # The manuscript first, the task after: the same cached prefix as every other call of the review.
+            result = self._judge('attack', self._block() + '\n\n' + task, cap=self._call_cap(True), schema=P.ATTACK_SCHEMA,
+                                 key=f'attack:{uid}', reason=True)
+            with self._mutex:
+                self._apply_attack(unit, result['value'])
+                self._save()
+        return run
+
+    def _apply_attack(self, unit, value):
+        """Record an attack. A counterexample (verdict minor or major) becomes a finding on the statement, alleged
+        to make it false, which gets a second opinion like any alleged major; a named weakest step gives the proof
+        that holds it one more reasoning pass aimed at that step."""
+        uid, sid = unit['id'], unit['source']
+        if not isinstance(value, dict):
+            self.state['attacks'][uid] = {'usable': False, 'verdict': 'none', 'counterexample': '', 'hypothesis_check': '',
+                                          'weakest': None}
+            self._warn(f'The search for a counterexample to {unit["name"]} gave no usable answer.')
+            return
+        verdict = value.get('verdict') if value.get('verdict') in P.ATTACK_VERDICTS else 'none'
+        counterexample = str(value.get('counterexample') or '').strip()[:2500]
+        hypotheses = str(value.get('hypothesis_check') or '').strip()[:2500]
+        note = ''
+        if verdict in ('minor', 'major') and not (counterexample and hypotheses):
+            # A counterexample must be explicit and checked against the hypotheses: without both it is no finding.
+            verdict, note = 'none', 'A counterexample was announced without the example or the check of the hypotheses; not kept.'
+        entry = {'usable': True, 'verdict': verdict, 'counterexample': counterexample, 'hypothesis_check': hypotheses,
+                 'weakest': self._weakest(value.get('weakest'), uid)}
+        if note:
+            entry['note'] = note
+        self.state['attacks'][uid] = entry
+        if verdict in ('minor', 'major'):
+            a, b = unit['statement']
+            issue = {'start_line': a, 'end_line': b, 'quote': str(value.get('quote') or '')[:200], 'kind': 'invalid_inference',
+                     'effect': 'statement_false', 'severity': 'major', 'suggestion': '',
+                     'evidence': f'Counterexample to the statement: {counterexample} Check of the hypotheses: {hypotheses}'}
+            issue['located'] = self._locate(issue, sid, set(range(a, b + 1)))
+            if issue['located'] == 'no':  # the place is the statement itself, whatever the quote
+                issue.update(start_line=a, end_line=b, quote='', located='exact')
+            self.state['checks'][f'{uid}#attack'] = {
+                'usable': True, 'verdict': 'issues_found', 'explanation': '', 'issues': [issue], 'external': [],
+                'lens': 'attack', 'unit': uid, 'pass_index': -1, 'part': 0, 'parts': 1, 'segment': None}
+        weakest = entry['weakest']
+        if weakest:
+            plan = self.state.setdefault('check_plan', {}).setdefault(weakest['unit'], [])
+            if not any(item['lens'] == 'weakest' for item in plan):  # one aimed pass per proof
+                plan.append({'key': f'{weakest["unit"]}#weak', 'lens': 'weakest', 'pass_index': WEAK_PASS, 'part': 0,
+                             'parts': 1, 'segment': None,
+                             'focus': {'start_line': weakest['start_line'], 'end_line': weakest['end_line'],
+                                       'step': weakest['step'], 'for': uid}})
+
+    def _weakest(self, value, uid):
+        """The least justified step a main result depends on, when its lines lie in the proof of the result or of
+        a result it uses; None otherwise."""
+        if not isinstance(value, dict):
+            return None
+        a, b = _int(value.get('start_line')), _int(value.get('end_line'))
+        step = re.sub(r'\s+', ' ', str(value.get('step') or '')).strip()[:800]
+        host = self._unit_id_at(a, proofs_only=True) if 1 <= a <= b else None
+        if not step or host is None or host not in self._chain(uid) or host not in self.state['plan_units']:
+            return None
+        return {'start_line': a, 'end_line': b, 'step': step, 'unit': host}
+
+    def _finding_units(self):
+        """Where findings can be: every planned proof, a main result attacked although no proof of it was found,
+        and the pseudo-units of the sweeps."""
+        s = self.state
+        return s['plan_units'] + [uid for uid in s.get('attacks') or {} if uid not in s['plan_units']] + list(PSEUDO_UNITS)
+
+    def _attack_outcome(self, uid, comments, rejected):
+        """What the search for a counterexample to a main statement gave, for the main-results table."""
+        attack = (self.state.get('attacks') or {}).get(uid)
+        if attack is None:
+            return 'pending' if uid in self._attack_ids() and self.state.get('whole') and self.state['phase'] != 'done' else 'not attacked'
+        if not attack['usable']:
+            return 'no usable answer'
+        if attack['verdict'] in ('none', 'edge'):
+            return 'none found' if attack['verdict'] == 'none' else 'only an edge case (below)'
+        mine = lambda c: c['unit'] == uid and 'attack' in (c.get('lenses') or [])
+        label = next((c['label'] for c in comments if mine(c)), None)
+        if label:
+            return f'proposed: {label}'
+        return 'proposed, rejected by the second opinion' if any(mine(c) for c in rejected) else 'proposed (see the comments)'
+
     # -- second opinions -----------------------------------------------------------------------------------
 
     def _eligible(self, cluster):
@@ -2909,10 +3027,14 @@ class PaperReviewRunner(ReviewBase):
         any repair that would make a major finding minor. The most serious findings and those on the main results' chain come first."""
         s = self.state
         near = self._near_chain()
-        ready = [uid for uid in s['plan_units'] + list(PSEUDO_UNITS) if self._checks_complete(uid)]
         candidates = []
-        for uid in ready:
+        for uid in self._finding_units():
+            complete = self._checks_complete(uid)
+            if not complete and f'{uid}#attack' not in s['checks']:
+                continue
             for cluster in self._clusters(uid):
+                if not complete and cluster['lenses'] != ['attack']:
+                    continue  # a counterexample to a statement is judged at once; the proof's findings wait for its checks
                 question = cluster['kind'] == 'uncertainty'  # an open point near a main result makes the report provisional
                 if not cluster['unlocated'] and (self._eligible(cluster) if not question else self._host(cluster) in near):
                     cluster['on_chain'] = self._host(cluster) in chain
@@ -2930,7 +3052,7 @@ class PaperReviewRunner(ReviewBase):
                     adjudication = s['adjudications'][key] = {'effect': cluster['effect'], 'unit': cluster['unit']}
             step = self._next_step(adjudication)
             if step:
-                priority = 5 if cluster['on_chain'] else 8
+                priority = 1 if cluster['lenses'] == ['attack'] else 5 if cluster['on_chain'] else 8
                 jobs.append((priority, f'{step}:{key}', self._opinion_job(step, cluster)))
         return jobs
 
@@ -3374,7 +3496,7 @@ class PaperReviewRunner(ReviewBase):
         order, numbered once. merged: one comment per root cause, as grouped by _merge (every member's content is
         kept under its lead)."""
         chain = self._main_chain()
-        units = self.state['plan_units'] + list(PSEUDO_UNITS)
+        units = self._finding_units()
         major, minor, questions, rejected, verdicts = [], [], [], [], {}
         # Left out of the report and kept in the job: findings whose quote is not in the source, and minor findings
         # that a check against the paper did not support.
@@ -3494,8 +3616,9 @@ class PaperReviewRunner(ReviewBase):
         checked = [uid for uid in self.state['plan_units'] if self._checks_complete(uid)]
         return f'{len(checked)} of {len(checkable)} proofs checked completely'
 
-    def _main_status(self, major, minor, questions, verdicts):
-        """One line per main result: checked with no issue, affected by a comment, open, or not (yet) checked."""
+    def _main_status(self, major, minor, questions, verdicts, rejected=()):
+        """One line per main result: checked with no issue, affected by a comment, open, or not (yet) checked; and
+        what the search for a counterexample to its statement gave."""
         rows = []
         for uid in self._main_ids():
             unit = self._unit(uid)
@@ -3515,7 +3638,12 @@ class PaperReviewRunner(ReviewBase):
                 status = 'no proof found in the paper'
             elif hit:
                 own = [h for h in hit if not h.startswith('relies on')]
-                status = '; '.join((['an error in its proof: ' + ', '.join(own)] if own else []) + [h for h in hit if h.startswith('relies on')])
+                false = {c['label'] for c in major if c.get('effect') == 'statement_false'}
+                status = '; '.join((['its statement is false as written: ' + ', '.join(h for h in own if h in false)]
+                                    if false & set(own) else [])
+                                   + (['an error in its proof: ' + ', '.join(h for h in own if h not in false)]
+                                      if set(own) - false else [])
+                                   + [h for h in hit if h.startswith('relies on')])
             elif alleged:
                 status = ', '.join(alleged) + (' alleged; second opinion pending' if self.state['phase'] != 'done' else ' alleged, not given a second opinion')
             elif len(done) < len(planned):
@@ -3532,8 +3660,33 @@ class PaperReviewRunner(ReviewBase):
                 where += ' (located by the overview)'
             elif unit.get('proof_from') == 'section':
                 where += ' (a whole section)'
-            rows.append({'id': uid, 'name': unit['name'], 'proof': where, 'status': status, 'uses': len(chain) - 1})
+            rows.append({'id': uid, 'name': unit['name'], 'proof': where, 'status': status, 'uses': len(chain) - 1,
+                         'attack': self._attack_outcome(uid, major + minor + questions, rejected)})
         return rows
+
+    def _attack_notes(self, rows, sid):
+        """Under the main-results table: what the last column means, each edge case found, and each step an attack
+        named as the least justified one."""
+        attacks = self.state.get('attacks') or {}
+        if not any(r['id'] in attacks for r in rows):
+            return []
+        out = ['*Counterexample to the statement:* a reasoning call tried to break each main statement (degenerate '
+               'parameters, low dimension, boundary cases, a known result it would contradict, the simplest example the '
+               'hypotheses allow). "None found" is not evidence that the statement is true.', '']
+        for row in rows:
+            attack = attacks.get(row['id']) or {}
+            if attack.get('verdict') == 'edge':
+                out.append(f'- *{row["name"]}*, edge case: {_clip(attack["counterexample"], 700)}')
+            if attack.get('note'):
+                out.append(f'- *{row["name"]}*: {attack["note"]}')
+            weakest = attack.get('weakest')
+            if weakest:
+                host = self._unit(weakest['unit'])
+                where = self._where(sid, weakest['start_line'], weakest['end_line'])
+                out.append(f'- *{row["name"]}*, the step it depends on most and that is justified least '
+                           f'({host["name"]}, {where}): {_clip(weakest["step"], 500)} '
+                           'That proof got one more reasoning pass aimed at this step.')
+        return out + [''] if len(out) > 2 else out
 
     def _closest(self):
         """The prior works the paper presents as closest (bibliography keys chosen by the overview), with their entries."""
@@ -3569,7 +3722,7 @@ class PaperReviewRunner(ReviewBase):
         """The prose parts, from the findings (they cannot add, drop or renumber a comment). draft: a first version
         written as soon as the main results are checked and judged; the final one replaces it."""
         with self._mutex:
-            major, minor, questions, _, verdicts = self._comments()
+            major, minor, questions, rejected, verdicts = self._comments()
             scope = self.state['scope'] or {}
             hidden = self._hidden_presentation()
             kinds = {}
@@ -3580,7 +3733,8 @@ class PaperReviewRunner(ReviewBase):
             floor, raised = self._recommendation_floor(major, questions, minor)
             findings = {'overview': scope.get('overview'), 'field': scope.get('field'), 'claimed_contribution': scope.get('contribution'),
                         'proofs_scope': self._proofs_scope() + ('; the review is still running, more checks will follow' if draft else ''),
-                        'main_results': [{'name': r['name'], 'status': r['status']} for r in self._main_status(major, minor, questions, verdicts)],
+                        'main_results': [{'name': r['name'], 'status': r['status'], 'counterexample_search': r['attack']}
+                                         for r in self._main_status(major, minor, questions, verdicts, rejected)],
                         'proofs_checked': [{'name': self._unit(u)['name'], 'verdict': v.replace('_', ' ')} for u, v in verdicts.items()],
                         'proofs_not_checked': [self._unit(u)['name'] for u in self.state['plan_units'] if not self._checks_complete(u)],
                         'major': [{'label': c['label'], 'where': c['unit_name'], 'effect': EFFECT_LABEL.get(c.get('effect'), ''),
@@ -3648,7 +3802,8 @@ class PaperReviewRunner(ReviewBase):
         whole = self.state.get('whole')
         return (bool(self.state.get('write')) and not self.state['write'].get('draft') and not self._unread_parts()
                 and not missing and not no_proof and not self.state.get('scope_incomplete') and not self.state.get('source_incomplete')
-                and (not whole or (self._citations_done() and all(self._checks_complete(SWEEP_UNITS[n]) for n in self.effort['sweeps'])))
+                and (not whole or (self._citations_done() and all(self._checks_complete(SWEEP_UNITS[n]) for n in self.effort['sweeps'])
+                                   and all(uid in (self.state.get('attacks') or {}) for uid in self._attack_ids())))
                 and all(self._checks_complete(uid) for uid in self.state['plan_units']))
 
     def _at_a_glance(self, major, minor, questions, presentation):
@@ -3672,7 +3827,8 @@ class PaperReviewRunner(ReviewBase):
                   'undecided': 'the second opinion could not decide', 'rejected': 'rejected by the second opinion',
                   'uncertainty': 'a point the checks could not decide'}.get(cluster.get('status'), '')
         coverage = self._check_coverage(cluster['unit'])
-        passes = (f'; raised by {cluster["passes"]} of {coverage["started_passes"]} passes'
+        passes = ('; raised by the search for a counterexample to the statement' if cluster.get('lenses') == ['attack'] else
+                  f'; raised by {cluster["passes"]} of {coverage["started_passes"]} passes'
                   if show_passes and coverage['started_passes'] > 1 else '')
         located = '' if cluster['located'] == 'exact' else ' (quote matched approximately)'
         effect = EFFECT_LABEL.get(cluster.get('effect'), KIND_LABEL[cluster['kind']])
@@ -3748,10 +3904,11 @@ class PaperReviewRunner(ReviewBase):
             if parts:
                 body += ['### Part by part', '']
                 body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] + ['']
-        status_rows = self._main_status(major, minor, questions, verdicts)
+        status_rows = self._main_status(major, minor, questions, verdicts, rejected)
         if status_rows:
-            body += ['## Main results', '', '| Result | Proof | Status |', '|---|---|---|']
-            body += [f'| {r["name"]} | {r["proof"]} | {r["status"]} |' for r in status_rows] + ['']
+            body += ['## Main results', '', '| Result | Proof | Status | Counterexample to the statement |', '|---|---|---|---|']
+            body += [f'| {r["name"]} | {r["proof"]} | {r["status"]} | {r["attack"]} |' for r in status_rows] + ['']
+            body += self._attack_notes(status_rows, sid)
         pending = '*Written when the checks are complete.*'
         body += ['## Assessment', '', '### Significance', '', write.get('significance') or pending, '',
                  '### Correctness', '', write.get('correctness') or pending, '', '### Presentation', '', write.get('presentation') or pending, '']
@@ -3893,7 +4050,8 @@ class PaperReviewRunner(ReviewBase):
         chain = self._main_chain()
         appendix += [f'Proofs checked completely: {len(checked)} of {len(checkable)} found in the manuscript. The main results '
                      f'and the {max(0, len([u for u in chain if u in units and units[u]["proofs"]]) - len(self._main_ids()))} '
-                     f'results their proofs use get {self.effort["main_passes"]} pass(es) each, the others {self.effort["other_passes"]}.', '',
+                     f'results their proofs use get {self.effort["main_passes"]} pass(es) each, the others {self.effort["other_passes"]}; '
+                     'a proof holding the step that an attack on a main statement named as least justified gets one more.', '',
                      '| Result | Proof lines | Passes | Outcome |', '|---|---|---|---|']
         main = set(self._main_ids())
         for uid in s['plan_units'] + [u['id'] for u in checkable if u['id'] not in s['plan_units']]:

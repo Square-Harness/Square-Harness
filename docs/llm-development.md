@@ -1111,7 +1111,7 @@ attaches section-long proofs (`manuscript._section_proofs`; the nested results a
 `_audit_jobs()` (under the mutex) for every call that can now run, with a priority:
 the scope call (overview, main results, and the inventory the map missed:
 `_apply_inventory` validates located proofs and results stated in prose), the
-checks of the main chain (`_main_chain`: the main results, the union of
+attacks on the main statements (below), the checks of the main chain (`_main_chain`: the main results, the union of
 the map's flags and the scope's choice restricted to provable statements, and every
 result their proofs use through `refs`), the citations comparison (`CITE`), the
 other checks, the sweeps (`SWEEP_UNITS`: consistency and completeness, pseudo-units
@@ -1130,6 +1130,24 @@ reads for typos and presentation: everything for a typo check, the parts of a
 small-context review (whose overview is written from the reading notes), nothing for
 a review with the whole paper in view, including the parts a saved review had planned.
 Such a review's report ends with `TYPOS_NOT_CHECKED`, which names `@typo_check`.
+
+The attack (`_attack_job`, role `attack`, `state['attacks']` by unit id; whole-paper
+mode only) runs as soon as the scope is known, at the pool's highest priority: one
+reasoning call per main result of `_attack_ids()` (the overview's order, `ATTACKS` at
+most), the manuscript block first and `P.ATTACK_POLICY` after it. It answers a
+`verdict` (`none`, `edge`, `minor`, `major`), the counterexample, the check of the
+hypotheses and `weakest` (a step and its lines). `_apply_attack` keeps a `minor` or
+`major` verdict only with both texts, and turns it into a `statement_false` issue on
+the statement, saved as the check `<unit>#attack` (lens `attack`, outside the check
+plan): it clusters and is reported like any finding, and `_adjudication_jobs` gives it
+its defence and judge at once, without waiting for the proof's checks. A `weakest`
+step whose lines lie in the proof of the result or of a result it uses adds one plan
+item to that proof (`<unit>#weak`, lens `weakest`, pass index `WEAK_PASS`, one per
+proof), a reasoning pass that gets `P.WEAKEST_NOTE`; `_audit_plan` counts the ordinary
+passes without it. `_attack_outcome` fills the last column of the main-results table
+and `_attack_notes` the lines under it. An attack without a usable answer is made
+again on resume; `_complete` needs every attack attempted. The benchmark
+(`review-tests/bench/score.py`, outside the repository) reads the role and the state key.
 
 Checks answer `P.AUDIT_SCHEMA`: every problem, with an `effect` (`P.EFFECTS`);
 severity is derived (`P.MAJOR_EFFECTS` are major). Findings are clusters of the
