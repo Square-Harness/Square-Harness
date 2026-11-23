@@ -1186,10 +1186,13 @@ name and reused in any folder.
 
 ### Writing styles
 
-On **Learn my writing style**, drop an article onto the page or click **Upload
-articles** to select it from your computer. The file appears under **Your articles**.
-You can also **Choose from workspace** to use papers you uploaded earlier.
-Enter a name and click **Learn the style**. One article is enough to start.
+On **Learn my writing style**, drop your articles onto the page, or click the
+drop area to select them from your computer. The files appear below it. You can
+also **Choose from workspace** to use papers you uploaded earlier. Keep the
+proposed name or type your own, and click **Learn my style**. One article is
+enough to start. **More options** holds what most people leave alone: a LaTeX
+template, a note about the articles, and the time and token limits. A style is
+always learnt with the High limits; the form has no effort level.
 
 PDFs with selectable text provide examples of phrasing and explanation. The
 local PDF reader accepts files up to 10 MB.
@@ -1232,18 +1235,30 @@ is left out and named in the job's warnings; the style is
 learnt from the others. If no article or a template file cannot be read, the
 job does not start and lists every such file.
 
+While a style is being learnt, its page says what the work is doing ("Reading
+article 2 of 3"), and you can leave it: the style is saved when the work ends.
+**Show the model's output** unfolds the raw answer being written. When the work
+ends, the page says under which name the style was saved and whether your
+write-ups follow it, then shows the style guide. **Notes**, beside it, lists
+the job's warnings; quotations the model gave that do not occur word for word
+in your articles are only counted there, as they are left out by design.
+**Usage** unfolds the token and time meters.
+
 With the DS4.1 vision profile you can also choose screenshots of articles to
 learn visible phrasing and layout. Exact macro and environment definitions
 still require their `.tex` sources; they are not reconstructed from images.
 
-At the top of the same page, **Active style** chooses the style write-ups use:
+Once a style is saved, the same page lists **Your styles**, where you choose
+the style write-ups use:
 
+- **Automatic**: a short call picks the learnt style that fits the material, or
+  the default style when none fits.
+- a learnt style; when it has several kinds of paper, **Kind of paper** keeps
+  the one that fits each write-up or fixes one of them. **Read the style guide**
+  shows what was learnt and holds the style's LaTeX template.
 - **Default style**: no rules of its own; write-ups follow the write-up
   guidelines as they are. It is always there, for instance when a learnt style
   turns out to copy habits you do not want.
-- a learnt style, or one of its domains;
-- **Automatic**: a short call picks the learnt style that fits the material, or
-  the default style when none fits.
 
 Write-ups apply an order of priority: what your request says, then your style,
 then the guidelines. A rule your active style departs from is set aside: it is

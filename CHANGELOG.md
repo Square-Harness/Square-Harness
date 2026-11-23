@@ -13,6 +13,21 @@
   Suggestions from a partial view or an attached source stay advisory through
   drafting and final checks. When a conversation write-up pauses, the Assistant
   is prompted to inspect the source passage and can retry the write-up.
+- Simplify the Writing Styles page. It now asks two things, the articles (a
+  visible drop area) and a name (proposed, and never the name of a saved style),
+  and explains the rest in one sentence, with the details under **What it
+  learns**. The effort level is gone: a style is always learnt with the High
+  limits. The LaTeX template, the note about the articles and the limits are
+  under **More options**. Saved styles are listed as **Your styles**, where one
+  click chooses the style write-ups use (this replaces the **Active style**
+  menu), and the list appears only once a style is saved.
+- Simplify the page of a style being learnt. Its title is the style's name
+  (also in the sidebar list) instead of the internal task sentence; the running
+  step is worded for the author ("Reading article 2 of 3: …") and the model's
+  raw output is folded under **Show the model's output**; the end says under
+  which name the style was saved and whether write-ups follow it. Quotations
+  left out because they do not occur in the articles are counted in one neutral
+  note instead of being listed in red, and the usage meters are folded.
 - A write-up offers the writer the keys of a bibliography the user supplies up to
   18,000 characters instead of 6,000 (a limit set for the earlier local model):
   about 60 to 80 entries fit before, so in a paper with about a hundred references
