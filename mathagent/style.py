@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Style profiles: condense an author's earlier .tex articles into a reusable style guide.
+"""Style profiles: condense an author's earlier articles into a reusable style guide.
 
 The controller extracts what can be read exactly: macro definitions and how often the
 bodies use them, the packages the articles load, theorem environments and section
@@ -335,13 +335,17 @@ def scan(tex):
             'inputs': _INPUT.findall(body)[:20], 'lines': len(tex.splitlines())}
 
 
-def excerpts(tex, room):
-    """The article's body when it fits in `room` characters, as (text, True). Otherwise representative
-    passages, as (text, False): the introduction's opening, the opening of every section, one substantial
-    proof and the start of the last section."""
-    body = re.sub(r'\n{3,}', '\n\n', document_body(tex).split('\\end{document}', 1)[0].strip())
+def excerpts(tex, room, *, pdf=False):
+    """Return the full body when it fits, otherwise sample its TeX sections or the span of a PDF."""
+    body = tex if pdf else document_body(tex).split('\\end{document}', 1)[0]
+    body = re.sub(r'\n{3,}', '\n\n', body.strip())
     if len(body) <= room:
         return '--- Full text ---\n' + body, True
+    if pdf:
+        # The extraction has no TeX section boundaries. Sample across the paper.
+        width = room // 3
+        middle = (len(body) - width) // 2
+        return '\n\n[…]\n\n'.join((body[:width], body[middle:middle + width], body[-width:])), False
     starts = [m.start() for m in re.finditer(r'\\section\*?\s*(?:\[[^\]]*\]\s*)?\{', body)]
     parts = []
     if starts:
@@ -386,11 +390,10 @@ def _letters(text):
 
 
 class Quoted:
-    """An article's LaTeX, for checking what the model quotes from it: flat (comments removed, spaces collapsed),
-    and as its letters and digits alone."""
+    """Article text for checking quotations, with spaces collapsed and LaTeX comments removed from TeX."""
 
-    def __init__(self, tex):
-        self.flat = _flat(strip_comments(tex))
+    def __init__(self, text, *, latex=True):
+        self.flat = _flat(strip_comments(text) if latex else text)
         self.letters, self.where = _letters(self.flat)
 
     def find(self, quote, least):
@@ -476,12 +479,12 @@ def clean_style(value, sources, typeset=None, rules=None):
 
     Phrasings and names are kept only when they occur in `sources`; a typesetting habit only when its
     example occurs in `typeset`, the LaTeX the author wrote (by default the sources; none for
-    screenshots). With `rules` (guideline rules), a departure is kept only for one of those rules and when
-    its example occurs in `typeset`. Examples and phrasings are kept as the article writes them. Returns the
-    style and the number of quotations not found.
+    screenshots or extracted PDFs). With `rules` (guideline rules), a departure is kept only for one of
+    those rules and when its example occurs in `typeset`. Examples and phrasings are kept as the article
+    writes them. Returns the style and the number of quotations not found.
     """
     value = value if isinstance(value, dict) else {}
-    texts = [Quoted(t) for t in sources]
+    texts = [Quoted(t, latex=typeset is None or t in typeset) for t in sources]
     latex = texts if typeset is None else [Quoted(t) for t in typeset]
 
     def found(quote, where, least):
@@ -716,7 +719,7 @@ def style_prompt(profile, domain=None, limit=REPORT_CHARS):
 # -- the job -------------------------------------------------------------------------------
 
 class StyleRunner(ResearchRunner):
-    """Builds a style profile from pinned .tex articles; saves it under <styles_root>/.mathagent/styles."""
+    """Builds a style profile from pinned articles; saves it under <styles_root>/.mathagent/styles."""
     KINDS = ('style',)
     TERMINAL = ('saved', 'partial', 'budget_exhausted', 'budget_violation')
 
@@ -729,23 +732,35 @@ class StyleRunner(ResearchRunner):
         self._template = read_template(self.agent.workspace, template_files)
         names = images.capture(self.agent, source_files)
         if not names and not getattr(self.agent, 'image_refs', None):
-            raise ValueError('Choose .tex articles or screenshots to learn the writing style from')
-        if any(source_suffix(n) != '.tex' for n in names):
-            raise ValueError('A style is learnt from TeX articles or TeX source archives only')
-        # An unreadable article is left out and named; the style is learnt from the others.
-        readable, self._skipped = [], []
-        for article in names:
-            try:
-                self.agent.workspace.text(self.agent.workspace.path(article))
-                readable.append(article)
-            except (OSError, ValueError) as exc:
-                self._skipped.append(_unreadable(article, exc))
-        if names and not readable and not getattr(self.agent, 'image_refs', None):
-            raise ValueError('None of the chosen articles could be read: ' + '; '.join(self._skipped) +
-                             '. Remove them or save them as text.')
+            raise ValueError('Choose a PDF, TeX article, TeX source archive or screenshot to learn the writing style from')
+        if any(source_suffix(n) not in ('.tex', '.pdf') for n in names):
+            raise ValueError('Writing styles accept PDFs with selectable text, TeX articles, TeX source archives and screenshots')
         self._name = name
         return super().start(goal.strip() or f'Condense my writing style "{name}" from these articles.', kind='style',
-                             source_files=readable, **budgets)
+                             source_files=names, **budgets)
+
+    def _inferred_sources(self, goal):
+        return []  # Only explicit examples are used, including in screenshot-only jobs.
+
+    def _pin(self, names, prefix):
+        # Pin each article once so one unreadable input does not discard the rest.
+        sources, self._skipped = [], []
+        for article in dict.fromkeys(names):
+            try:
+                self.agent.workspace.path(article, pdf=True)  # Require a workspace-relative path.
+                pinned = super()._pin([article], prefix)
+            except (OSError, ValueError) as exc:
+                problem = _unreadable(article, exc)
+                if source_suffix(article) == '.pdf':
+                    problem += '. Use a PDF with selectable text and no password, the TeX source, or screenshots'
+                self._skipped.append(problem)
+                continue
+            for source in pinned:
+                source['id'] = f'{prefix}{len(sources) + 1}'
+                sources.append(source)
+        if names and not sources and not getattr(self.agent, 'image_refs', None):
+            raise ValueError('None of the chosen articles could be read: ' + '; '.join(self._skipped))
+        return sources
 
     def _extra_state(self):
         return {'phase': 'scan', 'style_name': self._name, 'articles': [], 'domains': [],
@@ -768,10 +783,13 @@ class StyleRunner(ResearchRunner):
         return next(s for s in self.state['sources'] if s['id'] == source_id)
 
     def _typeset_sources(self):
-        """The sources the author typeset: screenshots show wording and layout, not their LaTeX."""
-        return [s for s in self.state['sources'] if not s.get('derived_from_images')]
+        """Only the supplied source code can establish exact LaTeX conventions."""
+        return [s for s in self.state['sources'] if not s.get('derived_from_images') and not s['path'].lower().endswith('.pdf')]
 
     def _digest(self, article):
+        if article.get('source_kind') == 'pdf_text':
+            opening = _flat(self._article(article['id'])['content'][:2000])[:1500]
+            return f'[{article["id"]}] {article["path"]}\nOpening of extracted PDF text: {opening}'
         heads = '\n'.join(article['headings'][:30]) or '(no \\section headings)'
         envs = ', '.join(f'{k} ×{v}' for k, v in article['environments'].items()) or 'none'
         return (f'[{article["id"]}] {article["path"]}\nTitle: {article["title"] or "(none)"}\n'
@@ -799,9 +817,17 @@ class StyleRunner(ResearchRunner):
         self.state['warnings'] += [f'Not used for the style: {problem}.' for problem in self.state.get('skipped', [])]
         targets = [s for s in self.state['sources'] if not s.get('source_archive')
                    or Path(s['path']).suffix.lower() in ('.tex', '.ltx', '.latex')]
-        self.state['articles'] = [{'id': s['id'], 'path': s['path'],
-                                   **({'source_archive': s['source_archive']} if s.get('source_archive') else {}),
-                                   **scan(s['content'])} for s in targets]
+        articles = []
+        for source in targets:
+            if source['path'].lower().endswith('.pdf'):
+                info = {'source_kind': 'pdf_text', 'title': '', 'abstract': '', 'headings': [],
+                        'environments': {}, 'inputs': [], 'lines': len(source['content'].splitlines())}
+            else:
+                info = scan(source['content'])
+            if source.get('source_archive'):
+                info['source_archive'] = source['source_archive']
+            articles.append({'id': source['id'], 'path': source['path'], **info})
+        self.state['articles'] = articles
         support = len(self.state['sources']) - len(targets)
         if support:
             self.state['warnings'].append(f'{support} archive bibliography/style/class support file(s) are pinned but are not classified or observed as articles.')
@@ -857,7 +883,8 @@ class StyleRunner(ResearchRunner):
         rules = guideline_rules()
         listing = '\n'.join(f'- {r["id"]} [{r["type"]}] {r["text"]}' for r in rules)
         room = max(2000, self._room(cap) - len(listing))
-        text, whole = excerpts(source['content'], room)
+        pdf = article.get('source_kind') == 'pdf_text'
+        text, whole = excerpts(source['content'], room, pdf=pdf)
         if not whole:
             self.state['warnings'].append(f'{article["path"]} is longer than one call can read here ({room:,} characters); '
                                           'its style was learnt from representative passages, not the whole text.')
@@ -887,13 +914,16 @@ class StyleRunner(ResearchRunner):
                        'copied exactly from the article\'s LaTeX source that show it). An empty list when the article '
                        'follows the rules.\n\nWRITE-UP RULES (what a write-up follows unless the author\'s style or the '
                        'request says otherwise):\n' + listing + '\n\n' + self._digest(article) +
-                       '\n\nARTICLE (LaTeX source, comments removed):\n' + text)
+                       '\n\n' + ('ARTICLE (text extracted from a PDF; mathematical notation and layout may be distorted). '
+                                  'Learn the author’s prose from legible text. Leave typesetting and departures empty. '
+                                  'The original LaTeX commands, environments and packages are unavailable.\n' if pdf else
+                                  'ARTICLE (LaTeX source, comments removed):\n') + text)
         result = self._call('observe', instruction, cap=cap, format_schema=OBSERVE_SCHEMA)
         try:
             value = json.loads(result['text'])
         except ValueError:
             value = {}
-        style, dropped = clean_style(value, [source['content']], [] if source.get('derived_from_images') else None, rules)
+        style, dropped = clean_style(value, [source['content']], [] if pdf or source.get('derived_from_images') else None, rules)
         if dropped:
             self.state['warnings'].append(f'{dropped} name(s), typesetting example(s), phrasing(s) or departure(s) quoted '
                                           f'for {article["path"]} were not found in it and were dropped.')
@@ -1079,6 +1109,7 @@ class StyleRunner(ResearchRunner):
                 'created_at': now, 'updated_at': now, 'job': self.state['id'], 'model': self.state['settings']['model'],
                 'articles': [{'path': a['path'], 'sha256': self._article(a['id'])['sha256'], 'title': a['title'],
                               'domain': domain_of.get(a['id'], ''),
+                              **({'source_kind': a['source_kind']} if a.get('source_kind') else {}),
                               **({'source_archive': a['source_archive']} if a.get('source_archive') else {})} for a in self.state['articles']],
                 'packages': sorted(loaded.values(), key=lambda p: (-len(p['articles']), p['name']))[:LIMITS['packages']],
                 'macros': macros,

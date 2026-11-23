@@ -1381,6 +1381,8 @@ class LiteratureTools:
                               'source_files': extracted['files'], 'source_warnings': extracted['warnings']}
         elif source.suffix.lower() == '.pdf':
             text, extractor = self._pdf(body)
+            if not text.strip():
+                raise LiteratureError('This PDF has no extractable text. Scanned pages need text recognition (OCR)')
         else:
             try:
                 text, encoding = decode_text(body, relative.as_posix())

@@ -5,7 +5,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, type ResearchDetail, type StyleChoice, type StyleDescription, type StyleProfile } from '../api'
 import { Collapse, ErrorNote, FilePicker, Loading, NumberField, OptionalNumberField, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
-import { PauseIcon, PlayIcon } from '../components/Icons'
+import { FileIcon, PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
 import { IMAGE_SUFFIXES, isImagePath } from '../components/ImageAttachments'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
@@ -19,6 +19,8 @@ import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, que
 
 const NAME = /^[\w][\w .-]{0,59}$/u
 const TEMPLATE = ['.tex', '.sty', '.cls', '.bib']
+const ARTICLE_FILES = ['.tex', '.pdf', '.tar.gz', '.tgz', '.tar', '.gz', ...IMAGE_SUFFIXES]
+const isArticleFile = (path: string) => ARTICLE_FILES.some((suffix) => path.toLowerCase().endsWith(suffix))
 const STEPS = ['scan', 'classify', 'observe', 'condense', 'macros', 'save'] as const
 const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', macros: 'Macros', save: 'Save', done: 'Done' }
 /** The questions a style answers about how the author explains (mathagent/style.py QUESTIONS). */
@@ -33,8 +35,9 @@ export function StyleNew() {
   const { status, snapshot } = useApp()
   const d = status?.defaults
   const filesChanged = useTick('files')
-  const [articles, setArticles] = useState<string[] | null>(null)
+  const articles = useLoad(async () => (await api.files()).files.filter((file) => isArticleFile(file.path)), [], filesChanged)
   const [selected, setSelected] = useState<string[]>([])
+  const [otherFiles, setOtherFiles] = useState<string[]>([])
   const [templateFiles, setTemplateFiles] = useState<string[]>([])
   const [saved, setSaved] = useState<StyleProfile[]>([])
   const [choice, setChoice] = useState<StyleChoice>({ mode: 'auto' })
@@ -48,10 +51,6 @@ export function StyleNew() {
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
 
-  useEffect(() => {
-    api.files().then((result) => setArticles(result.files.filter((f) => /\.(?:tex|tar\.gz|tgz|tar|gz)$/i.test(f.path) || isImagePath(f.path)).map((f) => f.path)),
-      () => setArticles([]))
-  }, [filesChanged])
   useEffect(() => { api.styles().then((result) => { setSaved(result.styles); setChoice(result.choice) }, () => undefined) }, [])
   const applyLevel = (next: EffortLevel) => {
     if (!d) return
@@ -67,8 +66,10 @@ export function StyleNew() {
   }, [d])
   const preset = d ? effortLimits('style', d, level) : null
   const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
-  const uploading = useDropTarget('Pin TeX articles, source archives or screenshots as style examples', (paths) => {
-    setSelected((items) => [...new Set([...items, ...paths.filter((path) => /\.(?:tex|tar\.gz|tgz|tar|gz)$/i.test(path) || isImagePath(path))])])
+  const uploading = useDropTarget('Use PDFs, TeX sources or screenshots as style examples', (paths) => {
+    setSelected((items) => [...new Set([...items, ...paths.filter(isArticleFile)])])
+    setOtherFiles(paths.filter((path) => !isArticleFile(path)))
+    articles.reload()
   })
 
   const running = capacityFull(snapshot, status)
@@ -103,7 +104,7 @@ export function StyleNew() {
           <div>
             <h1 className="page-title">Learn your writing style</h1>
             <p className="lede">
-              Give TeX articles, source archives or screenshots of your writing. Screenshots provide visible wording and layout; exact macros can only be learned from .tex sources. The harness sorts the articles
+              Give PDFs with selectable text, TeX sources or screenshots of your writing. PDFs provide extracted text, screenshots show wording and layout, and TeX sources provide exact macros. The harness sorts the articles
               by domain and readership (a numerics paper is not written like a geometry paper), and describes for each domain
               who your papers are written for and how you explain: how you introduce definitions, motivate the work and
               your proof strategies, organise proofs, what you leave out and how you point to the contribution. It also
@@ -123,22 +124,17 @@ export function StyleNew() {
           <span className="in-margin" />
           <div className="field">
             <span className="field-label">Your articles</span>
-            {articles === null ? <Loading>Looking for articles and screenshots…</Loading> : articles.length === 0 ? (
-              <div className="style-ask" role="status">
-                <p><strong>Add your articles or screenshots.</strong> To learn your style, the harness needs examples of your writing,
-                  ideally two or more for each kind of paper you write.</p>
-                <p className="field-hint">Drop TeX files, source archives or images anywhere on this page, paste an image, or open the folder that holds them from the
-                  folder name at the bottom of the sidebar. Files with \input parts: drop the parts too.</p>
-              </div>
-            ) : (
-              <>
-                <FilePicker selected={selected} onChange={setSelected} allowImages accept={['.tex', '.tar.gz', '.tgz', '.tar', '.gz', ...IMAGE_SUFFIXES]} label="Choose TeX articles, archives or screenshots" />
-                <span className="field-hint">
-                  {articles.length} article source{articles.length === 1 ? '' : 's'} here. Choose main .tex files, source archives or screenshots;
-                  two or more per domain give a better style. At most 20 files, including up to 8 images.
-                </span>
-              </>
-            )}
+            <div className="picker-row">
+              <button type="button" className="btn" onClick={() => window.dispatchEvent(new CustomEvent('square-attach-files', {
+                detail: ARTICLE_FILES.filter((suffix) => status?.image_support || !isImagePath(suffix)).join(','),
+              }))}><FileIcon size={16} /> Upload articles</button>
+              <FilePicker selected={selected} onChange={setSelected} allowPdf allowImages accept={ARTICLE_FILES} label="Choose from workspace" />
+            </div>
+            <span className="field-hint">Drop a PDF with selectable text or TeX sources anywhere on this page{status?.image_support && ', or paste a screenshot'}.
+              {' '}Include any files used by \input. Choose up to 20 files, including up to 8 images.</span>
+            {articles.error ? <ErrorNote>Could not list workspace files. {articles.error}</ErrorNote>
+              : articles.data && articles.data.length > 0 && <span className="field-hint">{articles.data.length} article source{articles.data.length === 1 ? '' : 's'} in this workspace.</span>}
+            {otherFiles.length > 0 && <p className="field-hint" role="status">Saved to the workspace only: {otherFiles.join(', ')}. Choose a PDF, TeX source or screenshot for the style.</p>}
           </div>
         </div>
 
@@ -200,7 +196,7 @@ export function StyleNew() {
             <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || !validName}>
               {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn the style'}
             </button>
-            {!selected.length && articles !== null && articles.length > 0 && <p className="field-hint">Choose at least one article.</p>}
+            {!selected.length && <p className="field-hint">Upload or choose at least one article.</p>}
             {selected.length > 0 && !validName && <p className="field-hint">Name the style.</p>}
           </div>
         </div>
@@ -522,7 +518,8 @@ function Articles({ data }: { data: ResearchDetail }) {
         return (
           <li key={article.id}>
             <strong>{article.title || article.path}</strong>{domainOf.has(article.id) && <span className="muted"> · {domainOf.get(article.id)}</span>}
-            <p className="muted small">{article.path}, {article.lines} lines, {article.headings.filter((h) => !h.startsWith(' ')).length} sections.
+            <p className="muted small">{article.path}, {article.lines} lines{article.source_kind === 'pdf_text'
+              ? ' of extracted PDF text.' : `, ${article.headings.filter((h) => !h.startsWith(' ')).length} sections.`}
               {article.source_archive && ' Archive member; this may be an article fragment, and includes/macros were not assembled.'}
               {article.inputs.length > 0 && ` Includes ${article.inputs.join(', ')}, which was not read.`}</p>
             {seen ? (
