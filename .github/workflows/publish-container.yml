@@ -8,7 +8,7 @@ on:
       tag_name:
         description: "Test tag (must match mathagent/__init__.py or use a matching test version)"
         required: true
-        default: "v0.1.0-test"
+        default: "v0.5.0"
 
 permissions:
   contents: read
@@ -24,12 +24,12 @@ jobs:
       - name: Check out release
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.tag_name || github.event.release.tag_name }}
 
       - name: Verify release tag matches app version
         id: version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
         run: |
           python - <<'PY'
           import os
