@@ -63,7 +63,7 @@ class Scripted(PaperReviewRunner):
 
 
 NO_ATTACK = {'verdict': 'none', 'counterexample': 'Tried $n = 1$ and constant sequences.', 'hypothesis_check': '',
-             'quote': '', 'weakest': {'start_line': 0, 'end_line': 0, 'step': ''}}
+             'quote': ''}
 DEFAULTS = {
     'attack': NO_ATTACK,
     'check': {'explanation': '', 'issues': [], 'verdict': 'no_issue_found', 'external': []},
@@ -132,12 +132,11 @@ class FewerFalseAlarmsTests(ReviewCase):
         runner, _ = self.run_review({**script, 'arbiter': {'assessment': 'undecided', 'effect': 'breaks_proof',
                                                            'argument': 'Unclear.', 'repair': ''}})
         self.assertEqual([(row['label'], row['status']) for row in runner.state['ledger']], [('Major 1', 'undecided')])
-        # The judge makes it a gap with a repair: minor only when the separate repair check finds the repair to work.
+        # The judge's verdict is final: a gap it finds makes the finding minor, with no further check.
         gap = {'assessment': 'valid', 'effect': 'gap', 'argument': 'A gap.', 'repair': 'Use $a_1=1$.'}
-        for works, label in (('no', 'Major 1'), ('yes', 'Minor 1')):
-            runner, _ = self.run_review({**script, 'arbiter': gap, 'repair-check': {'works': works, 'argument': 'Checked.'}})
-            self.assertEqual([row['label'] for row in runner.state['ledger']], [label])
-            self.assertEqual(len(self.roles('repair-check')), 1)
+        runner, _ = self.run_review({**script, 'arbiter': gap})
+        self.assertEqual([row['label'] for row in runner.state['ledger']], ['Minor 1'])
+        self.assertEqual(self.roles('repair-check'), [])
 
     def test_minor_findings_are_checked_and_unlocated_ones_dropped(self):
         found = {'lem:step': [issue(DOUBLING, 'imprecision'), issue('a phrase that the paper does not contain', 'gap')],
@@ -262,11 +261,9 @@ class AttackTests(ReviewCase):
     def line(self, text):
         return next(n for n, row in enumerate(PAPER.splitlines(), 1) if text in row)
 
-    def test_counterexample_becomes_a_judged_finding_and_the_weakest_step_gets_a_pass(self):
-        step = self.line(DOUBLING)
+    def test_counterexample_becomes_a_judged_finding(self):
         attack = {'verdict': 'major', 'counterexample': 'Take $a_n = 3^n$: then $a_1 = 3 > 2$.',
-                  'hypothesis_check': 'The statement assumes only $n \\ge 1$.', 'quote': 'we have $a_n \\le 2^n$',
-                  'weakest': {'start_line': step, 'end_line': step, 'step': 'The bound $b_n \\le a_n$ is used without proof.'}}
+                  'hypothesis_check': 'The statement assumes only $n \\ge 1$.', 'quote': 'we have $a_n \\le 2^n$'}
         judge = {'assessment': 'valid', 'effect': 'statement_false', 'argument': 'The example satisfies the hypotheses.', 'repair': ''}
         runner, result = self.run_review({'attack': attack, 'arbiter': judge, 'defend': {
             'position': 'conceded', 'argument': 'No defence.', 'effect': 'statement_false', 'repair': ''}})
@@ -281,23 +278,18 @@ class AttackTests(ReviewCase):
         self.assertEqual(runner.asked[first]['role'], 'attack')  # the first call started once the overview is known
         # The state the benchmark reads.
         saved = runner.state['attacks'][main]
-        self.assertEqual((saved['verdict'], saved['weakest']['unit']), ('major', lemma))
+        self.assertEqual(saved['verdict'], 'major')
         # The counterexample is a finding that the statement is false, judged like any alleged major.
         self.assertEqual([(row['label'], row['effect'], row['unit'], row['status']) for row in runner.state['ledger']],
                          [('Major 1', 'statement_false', main, 'confirmed')])
         self.assertEqual(len(self.roles('arbiter')), 1)
         self.assertIn('Take $a_n = 3^n$', self.roles('defend')[0]['prompt'])
-        # The proof that holds the weakest step gets one more reasoning pass, aimed at that step.
-        aimed = [call for call in self.roles('check') if call['key'] == lemma + '#weak']
-        self.assertEqual(len(aimed), 1)
-        self.assertTrue(aimed[0]['think'])
-        self.assertIn('THE STEP TO CHECK FIRST', aimed[0]['prompt'])
-        self.assertIn('used without proof', aimed[0]['prompt'])
+        # No extra pass follows an attack (the Review no longer names a weakest step).
+        self.assertEqual([call['key'] for call in self.roles('check') if call['key'] == lemma + '#weak'], [])
         # The report shows the outcome next to the main result.
         report = result['report']
         self.assertIn('| proposed: Major 1 |', report)
         self.assertIn('raised by the search for a counterexample to the statement', report)
-        self.assertIn('That proof got one more reasoning pass aimed at this step.', report)
         self.assertEqual(result['status'], 'reviewed')
 
     def test_no_hit_and_no_weak_step_keep_the_standard_depth(self):
@@ -311,15 +303,13 @@ class AttackTests(ReviewCase):
 
     def test_rejected_edge_and_unchecked_counterexamples(self):
         hit = {'verdict': 'minor', 'counterexample': 'Take $a_1 = 3$.', 'hypothesis_check': 'Only $n \\ge 1$ is assumed.',
-               'quote': 'not words of the statement', 'weakest': {'start_line': 2, 'end_line': 2, 'step': 'Outside any proof.'}}
+               'quote': 'not words of the statement'}
         rejected = {'assessment': 'rejected', 'effect': 'statement_false', 'argument': 'The sequence is doubling.', 'repair': ''}
         runner, result = self.run_review({'attack': hit, 'arbiter': rejected, 'defend': {
             'position': 'defended', 'argument': 'Doubling is assumed.', 'effect': 'statement_false', 'repair': ''}})
         main = self.unit('thm:main')
         self.assertEqual(runner.state['ledger'], [])  # a counterexample the judge rejects is no comment
         self.assertIn('| proposed, rejected by the second opinion |', result['report'])
-        self.assertIsNone(runner.state['attacks'][main]['weakest'])  # lines outside the proofs name no step
-        self.assertEqual([call['key'] for call in self.roles('check') if 'weak' in call['key']], [])
         # An edge case is shown under the table and is not a finding.
         runner, result = self.run_review({'attack': {**NO_ATTACK, 'verdict': 'edge', 'counterexample': 'For $n = 0$ the sum is empty.'}})
         self.assertEqual(runner.state['checks'].get(main + '#attack'), None)

@@ -185,20 +185,6 @@ ARBITER_UNOPPOSED_NOTE = """The defence did not hold the manuscript right. This 
 challenged. Check the allegation yourself, step by step, and any counterexample against every hypothesis of the
 manuscript; reject it when the manuscript is right as written."""
 
-REPAIR_CHECK_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['works', 'argument'],
-    'properties': {'works': {'type': 'string', 'enum': ['yes', 'no', 'unsure']},
-                   'argument': {'type': 'string', 'maxLength': 2000}},
-}
-REPAIR_CHECK_POLICY = """A referee found the problem below in the manuscript and proposes a repair that would make it
-a small issue. Your task is to find what the repair still needs. Check it step by step under the manuscript's
-hypotheses, and list every fact it uses that the manuscript neither proves nor cites (the existence of a density or a
-kernel, regularity up to the boundary or the initial time, uniform bounds, interchanges of limits, measurability).
-Such a fact is acceptable only if it is a textbook theorem whose hypotheses you can check here verbatim (name it and
-check them); otherwise the repair adds a new ingredient, and the authors would have to prove a new lemma. works: yes
-only when every step holds with standard arguments, without a new ingredient, a new hypothesis or a change of the
-statement; no when a step fails or a new ingredient is needed (name it); unsure when you cannot decide."""
-
 TYPO_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
     'properties': {'items': {'type': 'array', 'maxItems': 60, 'items': {
@@ -218,15 +204,12 @@ of taste or an optional rephrasing. Give every id once. check comes before keep:
 ATTACK_VERDICTS = ('none', 'edge', 'minor', 'major')
 ATTACK_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
-    'required': ['verdict', 'counterexample', 'hypothesis_check', 'quote', 'weakest'],
+    'required': ['verdict', 'counterexample', 'hypothesis_check', 'quote'],
     'properties': {
         'verdict': {'type': 'string', 'enum': list(ATTACK_VERDICTS)},
         'counterexample': {'type': 'string', 'maxLength': 2500},
         'hypothesis_check': {'type': 'string', 'maxLength': 2500},
         'quote': {'type': 'string', 'maxLength': 200},
-        'weakest': {'type': 'object', 'additionalProperties': False, 'required': ['start_line', 'end_line', 'step'],
-                    'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'},
-                                   'step': {'type': 'string', 'maxLength': 800}}},
     },
 }
 ATTACK_POLICY = """The whole manuscript is above. Attack the STATEMENT of the main result given below: try to show that
@@ -250,13 +233,7 @@ verdict:
 counterexample: the example and the computation showing that the conclusion fails; when the verdict is none, one or
 two sentences on what you tried. hypothesis_check: each hypothesis and standing assumption, and why the example
 satisfies it (empty when the verdict is none). quote: at most twelve words copied exactly from the statement, the
-part that fails (empty when the verdict is none).
-weakest: whatever the verdict, the one step that this result depends on most and that the manuscript justifies
-least, in its own proof or in the proof of a result it uses: its first and last lines and, in step, what the step
-claims and what would have to be checked. Give 0, 0 and an empty step when every step the result rests on is
-justified in full."""
-WEAKEST_NOTE = """THE STEP TO CHECK FIRST ({lines}), named as the least justified step that {result} depends on:
-{step}"""
+part that fails (empty when the verdict is none)."""
 
 MINOR_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
@@ -289,11 +266,6 @@ LENSES = {
     'global': 'STRUCTURE. Check that the conclusion reached is exactly the statement (all quantifiers, all cases, '
               'how the constants depend on the data), that every case is treated and that no step announced as '
               '"see below" or "similarly" is left undone.',
-    # The paper review only: one more pass on the proof that holds the step an attack on a main statement named.
-    'weakest': 'WEAKEST STEP. A first reading of the paper named the step given after the proof as the one a main '
-               'result depends on most and that is justified least. Check that step completely: write out the '
-               'argument the manuscript omits, test it on a concrete case, and decide whether it holds under the '
-               'hypotheses in force. Then check how the rest of the proof uses it.',
 }
 LENS_ORDER = ('line', 'adversarial', 'sources', 'global', 'line')
 

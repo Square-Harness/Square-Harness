@@ -116,13 +116,15 @@ PART_LINES = 110
 # An answer without hidden reasoning: the longest measured (a proofreading part, DS4) was 11k tokens. A call
 # reserves its whole cap from the job's allowance while it runs, so a thinking call's 131k cap would block others.
 DIRECT_CAP = 32_768
+# A call that reasons first: a proof check writes 15-30k tokens. Live, one call ran 13.6 minutes to a 131k cap and
+# its answer was discarded; at about 600 tokens per second this cap ends a call after about a minute.
+REASONING_CAP = 40_000
 READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
 TYPO_BATCH = 40  # remarks checked against the paper per call
 TYPOS_NOT_CHECKED = ('*Typos and presentation were not checked by this review. For those, run a typo check on the same '
                      'file: `@typo_check`.*')
 MINOR_BATCH = 20  # minor findings without a second opinion checked against the paper per call
 ATTACKS = 4  # main results whose statement is attacked for a counterexample, at most
-WEAK_PASS = 9  # the pass index of the extra pass on the step an attack named weakest
 
 
 _NO_CHANGE = re.compile(r'(?i)\bno (?:change|correction|repair|fix)(?:es)? (?:is |are )?(?:needed|required|necessary)\b'
@@ -2236,7 +2238,7 @@ class PaperReviewRunner(ReviewBase):
         """Whether a proof check reasons before it answers. Hidden reasoning is most of a review's output (15-30k
         tokens a proof check), and the provider's throughput per account, not the number of calls at once, sets how
         long a review takes: the first pass answers at once, the second pass on the main results and what they use
-        directly reasons (and so do the judge and the repair check)."""
+        directly reasons (and so do the judge and the attack on a main statement)."""
         return pass_index >= 1
 
     def _near_chain(self):
@@ -2390,6 +2392,10 @@ class PaperReviewRunner(ReviewBase):
             self.state['minor_checks'] = decided
             # An attack without a usable answer is made again; reviews saved before the attack existed get one.
             self.state['attacks'] = {uid: a for uid, a in (self.state.get('attacks') or {}).items() if a.get('usable')}
+            # Reviews saved when an attack could add a pass on a "weakest step": a finished one is kept, none is run.
+            plans = self.state.get('check_plan') or {}
+            for uid, plan in plans.items():
+                plans[uid] = [item for item in plan if item.get('lens') != 'weakest' or item['key'] in self.state['checks']]
 
         def admit(running):
             # Running calls have already reserved their output and input in the job's counters: a new call needs
@@ -2724,7 +2730,7 @@ class PaperReviewRunner(ReviewBase):
         plans = self.state.setdefault('check_plan', {})
         plan = plans.get(uid) or []
         wanted = self._lenses(uid) if final else ['line']
-        have = sorted({item['pass_index'] for item in plan if item['lens'] != 'weakest'})
+        have = sorted({item['pass_index'] for item in plan if item['lens'] != 'weakest'})  # a saved extra pass apart
         if len(have) >= len(wanted):
             return plan
         unit = self._unit(uid)
@@ -2783,12 +2789,7 @@ class PaperReviewRunner(ReviewBase):
             part = f', part {item["part"] + 1}/{item["parts"]}' if item['parts'] > 1 else ''
             self.emit('notice', f'Checking {unit["name"]}: {item["lens"]} pass{part}')
             if self.state.get('whole'):
-                text = self._unit_text(unit, item['segment'])
-                focus = item.get('focus')
-                if focus:
-                    text += '\n' + P.WEAKEST_NOTE.format(lines=_lines_text(focus['start_line'], focus['end_line']),
-                                                         result=self._unit(focus['for'])['name'], step=focus['step']) + '\n'
-                prompt = self._block() + '\n\n' + P.audit_prompt(item['lens'], text)
+                prompt = self._block() + '\n\n' + P.audit_prompt(item['lens'], self._unit_text(unit, item['segment']))
             else:
                 room = self._room(self._check_cap(), P.audit_prompt('line', ''))
                 packet, _, ranges = self._packet(unit, room, notation=self._notation(), segment=item['segment'])
@@ -2942,12 +2943,10 @@ class PaperReviewRunner(ReviewBase):
 
     def _apply_attack(self, unit, value):
         """Record an attack. A counterexample (verdict minor or major) becomes a finding on the statement, alleged
-        to make it false, which gets a second opinion like any alleged major; a named weakest step gives the proof
-        that holds it one more reasoning pass aimed at that step."""
+        to make it false, which gets a second opinion like any alleged major."""
         uid, sid = unit['id'], unit['source']
         if not isinstance(value, dict):
-            self.state['attacks'][uid] = {'usable': False, 'verdict': 'none', 'counterexample': '', 'hypothesis_check': '',
-                                          'weakest': None}
+            self.state['attacks'][uid] = {'usable': False, 'verdict': 'none', 'counterexample': '', 'hypothesis_check': ''}
             self._warn(f'The search for a counterexample to {unit["name"]} gave no usable answer.')
             return
         verdict = value.get('verdict') if value.get('verdict') in P.ATTACK_VERDICTS else 'none'
@@ -2957,8 +2956,7 @@ class PaperReviewRunner(ReviewBase):
         if verdict in ('minor', 'major') and not (counterexample and hypotheses):
             # A counterexample must be explicit and checked against the hypotheses: without both it is no finding.
             verdict, note = 'none', 'A counterexample was announced without the example or the check of the hypotheses; not kept.'
-        entry = {'usable': True, 'verdict': verdict, 'counterexample': counterexample, 'hypothesis_check': hypotheses,
-                 'weakest': self._weakest(value.get('weakest'), uid)}
+        entry = {'usable': True, 'verdict': verdict, 'counterexample': counterexample, 'hypothesis_check': hypotheses}
         if note:
             entry['note'] = note
         self.state['attacks'][uid] = entry
@@ -2973,26 +2971,6 @@ class PaperReviewRunner(ReviewBase):
             self.state['checks'][f'{uid}#attack'] = {
                 'usable': True, 'verdict': 'issues_found', 'explanation': '', 'issues': [issue], 'external': [],
                 'lens': 'attack', 'unit': uid, 'pass_index': -1, 'part': 0, 'parts': 1, 'segment': None}
-        weakest = entry['weakest']
-        if weakest:
-            plan = self.state.setdefault('check_plan', {}).setdefault(weakest['unit'], [])
-            if not any(item['lens'] == 'weakest' for item in plan):  # one aimed pass per proof
-                plan.append({'key': f'{weakest["unit"]}#weak', 'lens': 'weakest', 'pass_index': WEAK_PASS, 'part': 0,
-                             'parts': 1, 'segment': None,
-                             'focus': {'start_line': weakest['start_line'], 'end_line': weakest['end_line'],
-                                       'step': weakest['step'], 'for': uid}})
-
-    def _weakest(self, value, uid):
-        """The least justified step a main result depends on, when its lines lie in the proof of the result or of
-        a result it uses; None otherwise."""
-        if not isinstance(value, dict):
-            return None
-        a, b = _int(value.get('start_line')), _int(value.get('end_line'))
-        step = re.sub(r'\s+', ' ', str(value.get('step') or '')).strip()[:800]
-        host = self._unit_id_at(a, proofs_only=True) if 1 <= a <= b else None
-        if not step or host is None or host not in self._chain(uid) or host not in self.state['plan_units']:
-            return None
-        return {'start_line': a, 'end_line': b, 'step': step, 'unit': host}
 
     def _finding_units(self):
         """Where findings can be: every planned proof, a main result attacked although no proof of it was found,
@@ -3024,8 +3002,8 @@ class PaperReviewRunner(ReviewBase):
 
     def _adjudication_jobs(self, chain):
         """Second opinions on the findings of every proof (or sweep) whose checks are complete: a defence of the
-        paper, a judge on every finding alleged major and whenever the defence holds or partly holds, and a check of
-        any repair that would make a major finding minor. The most serious findings and those on the main results' chain come first."""
+        paper, then a judge, whose verdict is final, on every finding alleged major and whenever the defence holds
+        or partly holds. The most serious findings and those on the main results' chain come first."""
         s = self.state
         near = self._near_chain()
         candidates = []
@@ -3052,6 +3030,10 @@ class PaperReviewRunner(ReviewBase):
                 with self._mutex:
                     adjudication = s['adjudications'][key] = {'effect': cluster['effect'], 'unit': cluster['unit']}
             step = self._next_step(adjudication)
+            if step is None and not adjudication.get('final') and adjudication.get('arbiter'):
+                # A review saved while a repair check was pending (the Review no longer makes one): the judge decides.
+                with self._mutex:
+                    self._conclude(cluster, adjudication)
             if step:
                 priority = 1 if cluster['lenses'] == ['attack'] else 5 if cluster['on_chain'] else 8
                 jobs.append((priority, f'{step}:{key}', self._opinion_job(step, cluster)))
@@ -3065,8 +3047,6 @@ class PaperReviewRunner(ReviewBase):
             return 'defend'
         if PaperReviewRunner._judged(adjudication) and not adjudication.get('arbiter'):
             return 'arbiter'
-        if adjudication.get('repair_wanted') and not adjudication.get('repair_check'):
-            return 'repair'
         return None
 
     def _settle(self, cluster):
@@ -3101,16 +3081,14 @@ class PaperReviewRunner(ReviewBase):
 
     def _opinion_job(self, step, cluster):
         key = cluster['key']
-        roles = {'defend': ('defend', P.DEFENSE_POLICY, P.DEFENSE_SCHEMA), 'arbiter': ('arbiter', P.ARBITER_POLICY, P.ARBITER_SCHEMA),
-                 'repair': ('repair-check', P.REPAIR_CHECK_POLICY, P.REPAIR_CHECK_SCHEMA)}
+        roles = {'defend': ('defend', P.DEFENSE_POLICY, P.DEFENSE_SCHEMA), 'arbiter': ('arbiter', P.ARBITER_POLICY, P.ARBITER_SCHEMA)}
         role, policy, schema = roles[step]
 
         def run():
             unit = self._unit(cluster['unit'])
             if not self.state.get('whole') and cluster['unit'] in PSEUDO_UNITS:
                 unit = dict(unit, proofs=[[max(1, cluster['start_line'] - 3), cluster['end_line'] + 3]])
-            self.emit('notice', {'defend': 'Defending the paper against', 'arbiter': 'Judging',
-                                 'repair': 'Checking the repair of'}[step]
+            self.emit('notice', {'defend': 'Defending the paper against', 'arbiter': 'Judging'}[step]
                       + f' a finding in {self._comment_name(cluster["unit"], cluster)} (lines {cluster["start_line"]}-{cluster["end_line"]})')
             try:
                 context = self._context(unit, cluster)
@@ -3128,19 +3106,14 @@ class PaperReviewRunner(ReviewBase):
                            f'{defense["argument"]}\n' + (f'Repair proposed by the defence: {defense["repair"]}\n' if defense['repair'] else ''))
                 if defense['position'] != 'defended':
                     prompt += '\n' + P.ARBITER_UNOPPOSED_NOTE + '\n'
-            elif step == 'repair':
-                prompt += f'\nTHE PROPOSED REPAIR (it would make the effect {adjudication["repair_wanted"]["effect"]}):\n{adjudication["repair_wanted"]["repair"]}\n'
-            # The defence answers at once; the judge and the repair check, which decide severity, reason first.
-            think = step != 'defend'
+            # The defence answers at once; the judge, whose verdict is final, reasons first.
+            think = step == 'arbiter'
             result = self._judge(role, prompt, cap=self._call_cap(think, self._confirm_cap()), schema=schema,
                                  key=f'{step}:{key}', reason=think)
             value = result['value']
             with self._mutex:
                 if value is None:
                     adjudication.setdefault('failed', []).append(step)
-                    if step == 'repair':
-                        adjudication['repair_check'] = {'works': 'unsure', 'argument': 'The repair check gave no usable answer.'}
-                        self._conclude(cluster, adjudication)
                     self._save()
                     return
                 if step == 'defend':
@@ -3149,55 +3122,33 @@ class PaperReviewRunner(ReviewBase):
                         'argument': str(value.get('argument') or '')[:2500],
                         'effect': value.get('effect') if value.get('effect') in P.EFFECTS else cluster['effect'],
                         'repair': str(value.get('repair') or '')[:1500]}
-                elif step == 'arbiter':
+                else:
                     adjudication['arbiter'] = {
                         'assessment': value.get('assessment') if value.get('assessment') in ('valid', 'rejected', 'undecided') else 'undecided',
                         'effect': value.get('effect') if value.get('effect') in P.EFFECTS else cluster['effect'],
                         'argument': str(value.get('argument') or '')[:2500], 'repair': str(value.get('repair') or '')[:1500]}
-                else:
-                    adjudication['repair_check'] = {'works': value.get('works') if value.get('works') in ('yes', 'no', 'unsure') else 'unsure',
-                                                    'argument': str(value.get('argument') or '')[:2000]}
                 self._conclude(cluster, adjudication)
                 self._save()
         return run
 
     def _conclude(self, cluster, adjudication):
-        """The verdict on a finding once its second opinions are in. Severity follows the consequence; a finding
-        alleged to break a proof or a statement is made minor only by a repair that a separate check found to work
-        (models tend to give way when challenged; a downgrade must be earned)."""
+        """The verdict on a finding once its second opinion is in: one defence, then, for a finding alleged major
+        or a defence that holds, one reasoning judge whose verdict is final. The judge's effect decides the
+        severity; a finding it rejects leaves the report; one it cannot decide keeps what was alleged. No further
+        call follows (a repair check after the judge doubled the cost, and kept major what the judge had called a gap)."""
         defense = adjudication['defense']
         if not self._judged(adjudication):
-            verdict, effect, repair, argument = 'valid', defense['effect'], defense['repair'], defense['argument']
-            said = ('The defence of the paper conceded: ' if defense['position'] == 'conceded'
-                    else 'The defence of the paper agreed on the problem: ')
+            verdict, effect, repair, argument = 'valid', defense['effect'], defense['repair'], cluster['evidence']
         else:
             arbiter = adjudication.get('arbiter')
             if arbiter is None:
                 return
             verdict, effect, repair, argument = arbiter['assessment'], arbiter['effect'], arbiter['repair'], arbiter['argument']
-            upheld = 'Upheld against the defence: ' if defense['position'] == 'defended' else 'Upheld by the judge: '
-            said = {'valid': upheld, 'rejected': 'Rejected: ', 'undecided': 'Not settled: '}[verdict]
-        note = ''
-        alleged = cluster['effect']
-        if verdict == 'valid' and alleged in P.MAJOR_EFFECTS and effect not in P.MAJOR_EFFECTS:
-            if not repair.strip():
-                effect, note = alleged, 'Kept major: the judgement that it is minor came without a repair.'
-            else:
-                check = adjudication.get('repair_check')
-                if check is None:
-                    adjudication['repair_wanted'] = {'effect': effect, 'repair': repair}
-                    return
-                if check['works'] != 'yes':
-                    effect = alleged
-                    note = ('Kept major: the repair that would make it minor did not survive a separate check. '
-                            + _clip(check['argument'], 500))
-                else:
-                    note = 'Made minor: a separate check found the repair to work. ' + _clip(check['argument'], 400)
         severity = 'major' if effect in P.MAJOR_EFFECTS else 'minor'
-        adjudication['final'] = {'verdict': verdict, 'effect': effect, 'severity': severity, 'note': note}
+        adjudication['final'] = {'verdict': verdict, 'effect': effect, 'severity': severity}
         kind = cluster['kind'] if cluster['kind'] in ('invalid_inference', 'missing_justification') else 'missing_justification'
         self.state['confirms'][cluster['key']] = {'assessment': verdict, 'kind': kind, 'severity': severity, 'effect': effect,
-                                                  'argument': said + _clip(argument, 1800), 'suggestion': repair[:800]}
+                                                  'argument': argument[:2500], 'suggestion': repair[:800]}
 
     # -- minor findings without a second opinion ---------------------------------------------------------------
 
@@ -3366,9 +3317,9 @@ class PaperReviewRunner(ReviewBase):
         return self._call_cap(False, self._model_cap('review_read', self._analysis_cap()))
 
     def _call_cap(self, think, ceiling=None):
-        """The output cap of a call: the role's ceiling when it reasons first, else at most DIRECT_CAP."""
+        """The output cap of a call: at most REASONING_CAP when it reasons first, else at most DIRECT_CAP."""
         ceiling = self._check_cap() if ceiling is None else ceiling
-        return ceiling if think else min(ceiling, DIRECT_CAP)
+        return min(ceiling, REASONING_CAP if think else DIRECT_CAP)
 
     def _reading_usable(self, key):
         """Only a usable completed answer counts as reading; accept older summary-only entries."""
@@ -3666,8 +3617,7 @@ class PaperReviewRunner(ReviewBase):
         return rows
 
     def _attack_notes(self, rows, sid):
-        """Under the main-results table: what the last column means, each edge case found, and each step an attack
-        named as the least justified one."""
+        """Under the main-results table: what the last column means and each edge case found."""
         attacks = self.state.get('attacks') or {}
         if not any(r['id'] in attacks for r in rows):
             return []
@@ -3680,13 +3630,6 @@ class PaperReviewRunner(ReviewBase):
                 out.append(f'- *{row["name"]}*, edge case: {_clip(attack["counterexample"], 700)}')
             if attack.get('note'):
                 out.append(f'- *{row["name"]}*: {attack["note"]}')
-            weakest = attack.get('weakest')
-            if weakest:
-                host = self._unit(weakest['unit'])
-                where = self._where(sid, weakest['start_line'], weakest['end_line'])
-                out.append(f'- *{row["name"]}*, the step it depends on most and that is justified least '
-                           f'({host["name"]}, {where}): {_clip(weakest["step"], 500)} '
-                           'That proof got one more reasoning pass aimed at this step.')
         return out + [''] if len(out) > 2 else out
 
     def _closest(self):
