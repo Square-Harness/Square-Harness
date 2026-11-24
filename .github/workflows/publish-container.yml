@@ -3,13 +3,19 @@ name: Publish app container
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Test tag (must match mathagent/__init__.py or use a matching test version)"
+        required: true
+        default: "v0.1.0-test"
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    if: github.repository == 'Square-Harness/Square-Harness' && !github.event.release.prerelease
+    if: github.repository == 'Square-Harness/Square-Harness' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -76,7 +82,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: false
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha
@@ -109,7 +115,14 @@ jobs:
           (cd "$bundle" && zip -qr "$zip_path" compose.yaml deployment README.md)
           cp "$bundle/README.md" "$assets/square-harness-${APP_VERSION}-docker-README.md"
 
-          gh release upload "$RELEASE_TAG" \
-            "$zip_path" \
-            "$assets/square-harness-${APP_VERSION}-docker-README.md" \
-            --clobber
+          # gh release upload "$RELEASE_TAG" \
+          #   "$zip_path" \
+          #   "$assets/square-harness-${APP_VERSION}-docker-README.md" \
+          #   --clobber
+        
+      - name: Upload test Docker bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: square-harness-docker-test
+          path: ${{ runner.temp }}/square-harness-release-assets/*
+
