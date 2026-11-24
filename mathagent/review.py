@@ -48,6 +48,9 @@ PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v2', 'typos': 'typo-ch
 # Saved jobs of the retired split between a review (overview and typos) and a detailed review (also the proofs):
 # both are read, and resumed, as one review.
 LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
+# The Review with free referees and an independent judge (referee.RefereeRunner); it keeps 'review-v2' (the pipeline of
+# this module) when the whole paper does not fit the model's context.
+V4_PIPELINE = 'review-v4'
 SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
 TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
 MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
@@ -154,9 +157,12 @@ def level_for(rounds):
 
 
 def runner_class(variant):
-    """The runner of a review kind; 'journal' (the retired detailed review) is the review."""
-    return {'quick': QuickReviewRunner, 'review': PaperReviewRunner, 'journal': PaperReviewRunner,
-            'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
+    """The runner of a new job of a review kind; 'journal' (the retired detailed review) is the review, which starts
+    as review-v4 and keeps the v3 pipeline when the whole paper does not fit the context."""
+    if variant in ('review', 'journal'):
+        from .referee import RefereeRunner  # it extends PaperReviewRunner
+        return RefereeRunner
+    return {'quick': QuickReviewRunner, 'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
 
 
 def variant_for_state(state):
@@ -164,12 +170,16 @@ def variant_for_state(state):
     effort, when the typo check was the review's lowest effort, is a typo check."""
     variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
                    LEGACY_PIPELINES.get(state.get('pipeline')))
+    if state.get('pipeline') == V4_PIPELINE:
+        variant = 'review'
     return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
 
 def runner_for_state(state):
     """The runner that resumes a saved referee job (older jobs keep the generic research loop)."""
     variant = variant_for_state(state)
+    if variant == 'review' and state.get('pipeline') != V4_PIPELINE:
+        return PaperReviewRunner  # saved v2/v3 jobs resume with their own pipeline
     return runner_class(variant) if variant else ResearchRunner
 
 
@@ -763,7 +773,8 @@ class ReviewBase(ResearchRunner):
                 mapping['warnings'].append('External TeX inputs were not expanded: ' + ', '.join(dict.fromkeys(inputs)) + '. Their proofs are outside this review.')
                 self.state['source_incomplete'] = True
             bibliography_sources = [s for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() in ('.bib', '.bbl')]
-            names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'])
+            # biblatex's \addbibresource often stands in the paper's own package (preamble.sty), read just above.
+            names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'] + '\n' + preamble)
             for name in (n.strip() for group in names for n in group.split(',')):
                 if source.get('source_archive'):
                     continue  # Bibliography members are already pinned; never resolve an archive path on disk.
@@ -4193,6 +4204,18 @@ def export_evidence(state):
         return [{'kind': 'review', 'mode': 'quick_review', 'text': task, 'qualifiers': quals, 'links': links,
                  'status': labels.get(state.get('verdict'), 'review unfinished'),
                  'evidence': {'unit': unit.get('id'), 'source': unit.get('source'), 'proof_ranges': unit.get('proofs', [])}}]
+    if state.get('pipeline') == V4_PIPELINE:
+        issues = state.get('issues') or []
+        judged = [i for i in issues if i.get('status') == 'judged']
+        confirmed = [i for i in judged if i['judge']['verdict'] == 'confirmed']
+        major = [i for i in confirmed if i['judge']['effect'] in P.MAJOR_EFFECTS]
+        return [{'kind': 'review', 'mode': 'referee', 'status': 'referee report', 'qualifiers': quals, 'links': links,
+                 'summary': (f'{len(issues)} issue(s) reported, {len(confirmed)} confirmed by the judge ({len(major)} '
+                             f'making a statement false or a proof fail), {len(judged) - len(confirmed)} refuted or undecided'),
+                 'evidence': {'issues': [{k: i.get(k) for k in ('id', 'start_line', 'end_line', 'kind', 'status')}
+                                         | {'verdict': (i.get('judge') or {}).get('verdict'), 'effect': (i.get('judge') or {}).get('effect')}
+                                         for i in issues],
+                              'coverage': {uid: c.get('status') for uid, c in (state.get('coverage') or {}).items()}}}]
     unchecked = state.get('unchecked') or []
     ledger = state.get('ledger') or []
     if state.get('pipeline') == PIPELINES['review']:

@@ -565,6 +565,7 @@ def run_worker(host, parent, budget, action, child, save):
                       else ReviewRunner(agent, emit, concurrency=host.review_concurrency()) if mode == 'literature'
                       else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=host.review_concurrency()))
             runner.cancel = host.cancel
+            runner.sandbox = getattr(host, 'sandbox', None)  # the Review's referees compute in it (policy "review")
             extra = 0
             previous_markdown = parent.state.get('previous_markdown') if mode == 'writeup' else None
             if previous_markdown:

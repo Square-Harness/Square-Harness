@@ -185,8 +185,11 @@ def position_prompt(report, review_text, references, marks):
     """What the position call reads: the start of the report, the literature review and its numbered references."""
     listed = '\n'.join(_reference(row, None) + (' OWN' if marks.get(row['k']) else '') for row in references)
     body = review_text.split('\n## References')[0].split('\n## Provisional references')[0]
-    recommendation = re.search(r'## Recommendation\n\n(.+)', report)
-    return ('START OF THE REFEREE REPORT:\n' + report.split('\n## Major comments')[0][:7000]
+    # A v3 report has "## Recommendation" after its comments; a v4 report opens with "**Recommendation: ...**".
+    recommendation = (re.search(r'## Recommendation\n\n(.+)', report)
+                      or re.search(r'\*\*Recommendation: ([^*\n]+?)\.?\*\*', report))
+    head = re.split(r'\n## (?:Major comments|Errors)\b', report)[0]
+    return ('START OF THE REFEREE REPORT:\n' + head[:7000]
             + ('\n\nRECOMMENDATION OF THE REPORT: ' + recommendation.group(1) if recommendation else '')
             + '\n\nLITERATURE REVIEW (checked text):\n' + body[:40000] + '\n\nNUMBERED REFERENCES (verified records):\n' + listed)
 

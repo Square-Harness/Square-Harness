@@ -1277,6 +1277,8 @@ class Hub:
                 runner.emit = self._job_emit(task, runner, 'research')
                 return runner.start(goal, source_files=list(source_files), **budgets)
             runner = review_runner(variant)(agent, concurrency=self.review_concurrency())
+            runner.cancel = task.cancel
+            runner.sandbox = self.sandbox  # the Review's referees compute in it (policy "review")
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, source_files=list(source_files), target=target, **budgets)
         label = VARIANT_LABELS[variant] if variant else LABELS[kind]
@@ -1346,6 +1348,7 @@ class Hub:
             if runner_class is WriteupRunner:
                 runner.previous_markdown = store.previous_markdown_for_job(self.root, state)
             runner.cancel = task.cancel
+            runner.sandbox = self.sandbox
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id, additional_seconds=additional_seconds)
         label = (LABELS['summarize'] if state.get('variant') == 'summary' else

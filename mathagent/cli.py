@@ -519,6 +519,7 @@ def main():
                 variant = {'referee': 'review', 'detailed_review': 'review', 'typo_check': 'typos', 'quick_review': 'quick',
                            'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
+                runner.sandbox = sandbox  # the Review's referees compute in the sandbox (policy "review")
             result = runner.start(query, kind=kind,
                 source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit else
                     args.research_rounds if agent.mode not in ('literature', 'quick_review', 'explain') else 3),
@@ -626,6 +627,7 @@ def main():
                         runner = CheckRunner(agent, ui.emit)
                     elif variant:
                         runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
+                        runner.sandbox = sandbox
                     elif saved.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE):
                         # An old reading list stays readable; the runner refuses to resume it.
                         runner = ReviewRunner(agent, ui.emit, concurrency=review_concurrency())
