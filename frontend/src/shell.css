@@ -123,6 +123,7 @@
 }
 .side-menu-item:nth-child(even) { border-left: 1px solid var(--line); }
 .side-menu-item:nth-child(n + 3) { border-top: 1px solid var(--line); }
+.side-menu-item:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .side-menu-item:hover { background: var(--hover); color: var(--text); }
 .side-menu-item[aria-current='page'] { background: var(--ink-soft); color: var(--ink); font-weight: 700; }
 .side-menu-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
