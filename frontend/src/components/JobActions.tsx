@@ -3,13 +3,14 @@
 
 // Job page actions that change a saved job: resuming with an explicit extra allowance, and deletion.
 // Both are explicit user actions; the server records an addition in the job's state and report.
+// StopTurn ends the Assistant turn that is running the job.
 import { useState } from 'react'
-import { api, type AllowanceAdditions, type Budget } from '../api'
+import { api, type AllowanceAdditions, type Budget, type TaskSummary } from '../api'
 import { count, duration } from '../format'
 import { go } from '../router'
 import { refreshLists } from '../store'
 import { ErrorNote, Modal, NumberField } from './common'
-import { PlayIcon, TrashIcon } from './Icons'
+import { PlayIcon, StopIcon, TrashIcon } from './Icons'
 
 type Usage = { tokens: Budget; seconds: Budget; rounds?: Budget }
 
@@ -97,6 +98,17 @@ function ResumeMoreDialog({ kind, id, usage, tokenStep, onClose }: {
       </div>
     </form>
   </Modal>
+}
+
+/** Beside Pause on the page of a job the Assistant is running: stop the Assistant's turn for good.
+    A job started on its own page has no turn to close, so it only pauses. */
+export function StopTurn({ task, onError }: { task?: TaskSummary; onError: (message: string) => void }) {
+  if (task?.kind !== 'chat') return null
+  return <button type="button" className="btn btn-delete" disabled={!!task.killed}
+    title="Stop the Assistant's turn for good: it cannot be resumed. This job keeps its saved work."
+    onClick={() => { onError(''); api.kill(task.id).catch((reason: Error) => onError(reason.message)) }}>
+    <StopIcon size={16} /> {task.killed ? 'Stopping…' : 'Stop'}
+  </button>
 }
 
 export function DeleteProof({ id, disabled }: { id: string; disabled?: boolean }) {

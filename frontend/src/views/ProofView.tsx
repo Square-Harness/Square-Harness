@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 import { api, type Call, type Candidate, type Pending, type ProofDetail, type Review } from '../api'
 import { Collapse, ErrorNote, Loading, Meter, SourceLines, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
-import { DeleteProof, ResumeMore } from '../components/JobActions'
+import { DeleteProof, ResumeMore, StopTurn } from '../components/JobActions'
 import { Inline, Markdown } from '../components/Markdown'
 import { candidateLook, proofLook, proofResumable, Square, type Variant } from '../components/Square'
 import { ago, bytes, count, duration, plural } from '../format'
@@ -154,6 +154,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {ours && <StopTurn task={ownTask} onError={setError} />}
         {extendable && <ResumeMore kind="proof" id={data.id} disabled={queued} tokenStep={step}
           usage={{ tokens: data.budget.tokens, seconds: data.budget.seconds, rounds: data.budget.rounds }} />}
         {!data.legacy && !data.running && !queued && <DeleteProof id={data.id} />}

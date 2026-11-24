@@ -690,6 +690,29 @@ the conversation's last task ends by itself (done, error, or a pause the user di
 not request), through `_assistant_turn(task=...)` so the queued task keeps its ID.
 A turn the user paused keeps it waiting; `/api/queue/<task>/cancel` removes it.
 
+Stop ends an Assistant turn for good without touching any job's saved state.
+`POST /api/task/kill` (`Hub.kill`) cancels a running task exactly as a pause does
+and marks it (`killed` in its summary); when the turn has saved its checkpoint,
+`Hub._run` closes it with `Hub._close_turn`: the saved turn becomes `set_aside`
+(the status a new message gives a paused turn) with one notice, and an
+investigation closes through `stop_state` with its report, as **Stop and report**
+does. `POST /api/chats/<id>/assistant/stop` (`Hub.stop_assistant`) does the same
+to a turn that is already paused, and is refused with 409 while the conversation
+has running or queued work. A stopped turn counts as ended for the queued
+follow-up. The worker jobs keep their own paused state and resume from their
+pages. On a job that runs without a conversation, kill is only a pause: Stop is
+offered on Assistant turns alone, and a job's engine state has no "stopped by
+the user" status. The message box recalls sent messages with the arrow keys
+(`frontend/src/recall.ts`): from the conversation's saved user messages, with
+the `@` skill of an explicit call put back in front, or from the tab's own
+memory in a new conversation; recall stores nothing in the browser. Esc in the
+box pauses the running turn (`ChatView` `boxKeys`). Unsent drafts are kept per
+conversation in `sessionStorage` (`frontend/src/drafts.ts`: text only, this tab
+only, cleared on send, on deletion of the conversation and on sign-out or account
+change); do not move them to `localStorage` or to the server. While the tab is
+hidden, `frontend/src/attention.ts` puts ended work in the tab title from the
+`task` events and restores the title when the tab is shown again.
+
 Conversation titles run after successful work, one at a time, at the lowest
 priority: the title waits (without registering as an inference owner) until
 a model-request slot is free and no request waits (`InferencePool.free`),

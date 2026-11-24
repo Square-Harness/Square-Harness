@@ -402,6 +402,8 @@ class Task:
         # Whether this task holds one of the task slots; see Hub._hold_slot.
         self.slot = False
         self.resumed = False
+        # Set by Hub.kill: the task stops like a pause, then its Assistant turn is closed instead of awaiting Resume.
+        self.killed = False
         self.granted = threading.Event()
         self.activity = collections.deque(maxlen=200)
         self.waiting_model_calls = 0
@@ -422,6 +424,7 @@ class Task:
                 'result_status': self.result_status, 'started': self.started, 'finished': self.finished,
                 'origin_chat': self.origin_chat, 'waiting_model_calls': self.waiting_model_calls,
                 'queued_at': self.queued_at, 'slot': self.slot,
+                **({'killed': True} if self.killed else {}),
                 **({'followup': True} if self.followup is not None else {})}
 
 
@@ -714,6 +717,13 @@ class Hub:
                         self._discarded(task.target, '', AgentError(task.error))
                 except (ValueError, OSError, store.NotFound):
                     pass
+            if task.killed and task.kind == 'chat' and task.state == 'paused':
+                try:
+                    with self._lock:
+                        self._close_turn(task.target, notice=True)
+                    self.bus.publish('chat_saved', chat=task.target)
+                except (ValueError, OSError, store.NotFound):
+                    pass
             task.finished = time.time()
             task.ready.set()
             self._publish_task(task)
@@ -733,7 +743,9 @@ class Hub:
                 chat = finished.origin_chat
                 # A turn the user paused keeps its follow-up waiting: Resume runs it afterwards, or cancel it.
                 # A turn that stopped by itself (finished, failed, provider pause) lets it start.
-                ended = finished.state in ('done', 'error') or finished.state == 'paused' and not finished.cancel.is_set()
+                # A turn the user stopped for good is over too: nothing is left to resume before the follow-up.
+                ended = (finished.state in ('done', 'error') or finished.killed
+                         or finished.state == 'paused' and not finished.cancel.is_set())
                 if (chat in self.followups and ended and not self._closing
                         and chat not in self.routing
                         and not any(t.origin_chat == chat or t.target == chat for t in [*self._tasks.values(), *self.queue])):
@@ -964,6 +976,55 @@ class Hub:
             task.state = 'pausing'
         self._publish_task(task)
         return task
+
+    def kill(self, task_id):
+        """Stop a running task for good. It stops as a pause does, so its saved work is kept; an Assistant turn
+        is then closed (see _close_turn) instead of awaiting Resume. A job running on its own page stays resumable."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.state not in RUNNING:
+                raise ValueError('That task is no longer running.')
+            task.killed = True
+            task.cancel.set()
+            task.state = 'pausing'
+        self._publish_task(task)
+        return task
+
+    def _close_turn(self, chat_id, *, notice=False):
+        """End a paused Assistant turn that will not be resumed. The caller holds the hub lock.
+
+        An investigation closes with its report on the evidence saved so far; any other turn is set aside, and the
+        jobs it started keep their saved work. Returns the closed state, or None when nothing was resumable."""
+        chat = store.load_chat(self.root, chat_id)
+        if chat['mode'] != 'free':
+            return None
+        state = chat.get('assistant_state') or {}
+        closed = None
+        if state.get('status') in ('interrupted', 'running', 'incomplete'):
+            if state.get('investigation'):
+                return self._stop_investigation(chat_id, state)
+            closed = {**state, 'status': 'set_aside'}
+            store.save_assistant(self.root, chat_id, closed)
+        if closed or notice:
+            store.append_items(self.root, chat_id, [{'role': 'notice', 'discarded': True, 'time': store._now(),
+                'content': 'Not added to the conversation: you stopped this turn. Jobs it started keep their saved work.'}])
+        return closed
+
+    def stop_assistant(self, chat_id):
+        """Stop a paused Assistant turn for good: it leaves the Resume state, as a new message would make it."""
+        with self._lock:
+            if chat_id in self.routing or any(t.origin_chat == chat_id or t.target == chat_id
+                                              for t in [*self._tasks.values(), *self.queue]):
+                raise Busy('The Assistant is still working on this conversation. Stop its running turn instead.')
+            state = self._close_turn(chat_id)
+            if state is None:
+                raise ValueError('This Assistant turn is not paused.')
+            followup = None if self._closing else self.followups.pop(chat_id, None)
+        self.bus.publish('chat_saved', chat=chat_id)
+        if followup is not None:  # a message queued behind the paused turn starts now, as after any ended turn
+            self._publish_queue()
+            threading.Thread(target=self._start_followup, args=(followup,), daemon=True, name='square-followup').start()
+        return {'status': state['status']}
 
     def shutdown(self, wait=20):
         with self._lock:
@@ -1768,7 +1829,6 @@ class Hub:
 
     def stop_investigation(self, chat_id, expected_id=None):
         """Close a paused investigation using only its saved evidence."""
-        from ..investigation import save_record, stop_state
         with self._lock:
             if chat_id in self.routing or any(t.origin_chat == chat_id or t.target == chat_id
                                               for t in [*self._tasks.values(), *self.queue]):
@@ -1778,12 +1838,18 @@ class Hub:
                 raise ValueError('This conversation has no current investigation.')
             if expected_id is not None and state['investigation']['id'] != expected_id:
                 raise Busy('This investigation has been replaced. Open the current plan before stopping it.')
-            if state.get('status') != 'complete':
-                state = stop_state(self.root, state)
-            store.checkpoint_investigation(self.root, chat_id, state)
-            save_record(self.root, state, chat_id)
+            state = self._stop_investigation(chat_id, state)
         self.bus.publish('chat_saved', chat=chat_id)
         return {'status': state['status'], 'answer': state['answer']}
+
+    def _stop_investigation(self, chat_id, state):
+        # The caller holds the hub lock and has checked that no task of this conversation can still write.
+        from ..investigation import save_record, stop_state
+        if state.get('status') != 'complete':
+            state = stop_state(self.root, state)
+        store.checkpoint_investigation(self.root, chat_id, state)
+        save_record(self.root, state, chat_id)
+        return state
 
     def _review_reference(self, chat, content, files):
         # Only a conversation's own review cards can select a saved manuscript.
@@ -2076,7 +2142,8 @@ class Hub:
                     result = parent.run_routed(routed)
             except KeyboardInterrupt:
                 checkpoint()
-                store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Assistant paused. Its workers and remaining budget are saved.', 'time': store._now()}])
+                if not task.killed:  # a stopped turn gets its own notice when it is closed (Hub._run)
+                    store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Assistant paused. Its workers and remaining budget are saved.', 'time': store._now()}])
                 self.bus.publish('chat_saved', chat=chat_id)
                 raise
             except AgentError as exc:

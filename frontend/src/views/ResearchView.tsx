@@ -5,7 +5,7 @@ import { useCallback, useMemo, useState, type ReactElement } from 'react'
 import { api, LIST_PIPELINE, REVIEW_PIPELINE, type Evidence, type ResearchDetail, type ReviewCoverage } from '../api'
 import { Collapse, ErrorNote, Loading, Meter, SourceLines, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
-import { ResumeMore } from '../components/JobActions'
+import { ResumeMore, StopTurn } from '../components/JobActions'
 import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago, count, firstLine } from '../format'
@@ -148,6 +148,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : additionalSeconds ? `${busy ? 'Queue resume' : 'Resume'} (+${extensionLabel} min)` : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {ours && <StopTurn task={ownTask} onError={setError} />}
         {!ours && !data.running && (resumable || data.status === 'budget_exhausted') && data.kind !== 'style' &&
           <ResumeMore kind="research" id={data.id} disabled={queued} tokenStep={100_000} usage={{ tokens: data.budget.tokens, seconds: data.budget.seconds }} />}
         {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}

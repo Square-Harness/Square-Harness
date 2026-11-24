@@ -9,6 +9,7 @@ import {
   type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity, type TranscriptItem, type Project,
 } from './api'
 import { reduceActivity, reduceChat, reduceTask, taskById } from './concurrency'
+import { announceEnd } from './attention'
 import { chatDeleteBlocked, deletedChatDestination, withoutDeletedChat } from './chatDeletion'
 
 export type Connection = 'connecting' | 'open' | 'reconnecting'
@@ -265,6 +266,7 @@ function handle(event: ServerEvent) {
       set((s) => ({ snapshot: reduceTask(s.snapshot, event.task, event.seq) }))
       if (fresh && ['starting', 'running'].includes(event.task.state)) refreshSnapshot()
       if (['done', 'paused', 'error'].includes(event.task.state)) {
+        announceEnd(event.task)
         refreshLists(150)
         bump(event.task.target)
         if (event.task.state === 'error') refreshStatus()
