@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from mathagent import referee as R
-from mathagent.agent import Agent
+from mathagent.agent import Agent, AgentError
 from mathagent.literature import LiteratureTools
 from mathagent.numerics.policy import PolicyError, REVIEW_RUNS, resolve, review_policy
 from mathagent.numerics.session import NumericsSession, PythonSandbox
@@ -141,8 +141,10 @@ class LedgerTests(RefereeCase):
         self.assertIn('**E1**', report)
         self.assertIn('## Errors', report)
         self.assertIn('Found by lead; verified by the judge', report)
-        self.assertNotIn('halving', report)
-        self.assertIn('1 reported issue(s) were refuted', report)
+        # The refuted misprint is not a finding, but it is listed, one line, so that a wrong rejection can be caught.
+        rejected = report.split('## Raised by a referee and rejected by the judge')[1]
+        self.assertIn('Doubling should read halving. *Judge:* Checked.', rejected)
+        self.assertNotIn('halving', report.split('## Raised by a referee')[0])
         self.assertIn('`@typo_check`', report)
         self.assertLess(len(report.splitlines()), 300)
         self.assertEqual(result['status'], 'reviewed')
@@ -189,7 +191,17 @@ class LedgerTests(RefereeCase):
         report = result['report']
         self.assertIn('## Questions to the authors', report)
         self.assertIn('Not checked (no status given)', report)
-        self.assertIn('**Recommendation: Minor revision.**', report)
+        # The lead did not finish: the recommendation is provisional and the report says what was not checked.
+        self.assertIn('**Recommendation: Minor revision.** (provisional: the review is incomplete)', report)
+        self.assertIn('*The review is incomplete: the lead referee did not finish', report)
+        self.assertEqual(result['status'], 'partial')
+
+    def test_first_rounds_are_short(self):
+        lead = [[call('list_results')], [call('read_lines', start_line=1, end_line=5)], [call('list_results')], 'Done.']
+        client = ScriptClient({'lead': lead})
+        self.run_review(client, co_referees=0)
+        caps = [p['options']['num_predict'] for p in client.payloads if p.get('tools') and 'YOUR TASK (lead' in json.dumps(p['messages'][:3])]
+        self.assertEqual(caps[:3], [R.FIRST_ROUND_CAP, R.FIRST_ROUND_CAP, R.ROUND_CAP])
 
     def test_round_at_its_cap_continues_with_tools(self):
         base = line_of(BASE_CASE)
@@ -231,6 +243,191 @@ class LedgerTests(RefereeCase):
         self.assertIs(runner_for_state({'pipeline': 'review-v2'}), PaperReviewRunner)
         self.assertIs(runner_for_state({'pipeline': 'review-v4'}), R.RefereeRunner)
         self.assertEqual(variant_for_state({'pipeline': 'review-v4'}), 'review')
+
+
+class JudgeTests(RefereeCase):
+    """The judge keeps false alarms out; it never makes a real finding smaller or invisible."""
+
+    def review_with(self, judges, lead=None, co=None, **options):
+        base = line_of(BASE_CASE)
+        lead = lead or [[call('report_issue', start_line=base, end_line=base, quote=BASE_CASE, kind='proof',
+                              claim='The base case is not proved: nothing gives $a_1\\le 2$.', evidence='Read the definitions.')],
+                        'Done.']
+        client = ScriptClient({'lead': lead, 'C1': co or ['Nothing.']}, judges=judges)
+        runner, result = self.run_review(client, **options)
+        return runner, result, client
+
+    def test_a_reported_error_rated_lower_without_a_repair_stays_an_error(self):
+        runner, result, client = self.review_with({'I1': {'verdict': 'confirmed', 'effect': 'gap', 'reason': 'A step is missing.',
+                                                          'fix': 'Add it.', 'fill': '', 'new_ingredient': ''}}, co_referees=0)
+        issue = runner.state['issues'][0]
+        self.assertEqual((issue['judge']['effect'], issue['judge']['judge_effect'], issue['judge']['kept_error']),
+                         ('breaks_proof', 'gap', 'no_fill'))
+        self.assertTrue(issue['judge']['tools'])  # an error on the main chain is judged with the tool loop
+        report = result['report']
+        self.assertIn('**E1. ', report)
+        self.assertIn('*The judge rated it gap, but it gave no complete argument that repairs it: it stays an error.', report)
+        self.assertIn('**Recommendation: Major revision.**', report)
+        judge_prompt = next(p for p in client.payloads if 'THE REPORTED PROBLEM (I1' in json.dumps(p['messages']))
+        text = json.dumps(judge_prompt['messages'])
+        self.assertIn('a density, a regularity up to the boundary or the initial', text)
+        self.assertIn('new_ingredient', text)
+
+    def test_a_repair_with_a_new_ingredient_stays_an_error(self):
+        fill = ('Write $a_1=a_0+b_0$ and use $b_0\\le a_0\\le 1$; then $a_1\\le 2$ follows, and the induction starts. '
+                'This uses the bound $a_0\\le 1$.')
+        runner, result, _ = self.review_with({'I1': {'verdict': 'confirmed', 'effect': 'imprecision', 'reason': 'Minor.',
+                                                     'fix': '', 'fill': fill, 'new_ingredient': 'the bound $a_0\\le 1$'}},
+                                             co_referees=0)
+        self.assertEqual(runner.state['issues'][0]['judge']['kept_error'], 'new_ingredient')
+        self.assertIn('its repair needs the bound $a_0\\le 1$, which the manuscript neither proves nor cites', result['report'])
+
+    def test_a_complete_repair_files_it_as_a_gap_and_shows_the_disagreement(self):
+        fill = ('By definition $a_1=a_0+b_0$ with $b_0\\le a_0$, and the standing assumption $a_0=1$ of the introduction '
+                'gives $a_1\\le 2$, so the base case holds as stated.')
+        runner, result, _ = self.review_with({'I1': {'verdict': 'confirmed', 'effect': 'gap', 'reason': 'Only a step is missing.',
+                                                     'fix': '', 'fill': fill, 'new_ingredient': 'none'}}, co_referees=0)
+        self.assertTrue(runner.state['issues'][0]['judge']['lowered'])
+        report = result['report']
+        self.assertIn('**G1. ', report)
+        self.assertIn("*Reported as error in a proof by lead; the judge's argument that it is a gap:* By definition", report)
+        self.assertIn('## Errors\n\nNone confirmed.', report)
+
+    def test_refutation_against_two_referees_is_disputed(self):
+        base = line_of(BASE_CASE)
+        report = dict(start_line=base, end_line=base, quote=BASE_CASE, kind='gap', evidence='Read.')
+        lead = [[call('report_issue', claim='Why is $a_1\\le 2$?', **report)], 'Done.']
+        co = [[call('report_issue', claim='The base case $a_1\\le 2$ is not justified.', **report)], 'Done.']
+        gate = threading.Event()
+
+        class Ordered(ScriptClient):  # the judge answers once both referees have reported
+            def stream(self, payload):
+                if 'THE REPORTED PROBLEM' in json.dumps(payload['messages'][:3]):
+                    gate.wait(5)
+                elif sum(1 for m in payload['messages'] if m['role'] == 'tool' and 'I1' in m['content']) and \
+                        'C1' in json.dumps(payload['messages'][:3]):
+                    gate.set()
+                yield from super().stream(payload)
+        client = Ordered({'lead': lead, 'C1': co},
+                         judges={'I1': {'verdict': 'refuted', 'effect': 'gap', 'reason': 'Stated in the definitions.', 'fix': ''}})
+        runner, result = self.run_review(client)
+        issue = runner.state['issues'][0]
+        self.assertEqual((issue['status'], issue['disputed'], sorted(issue['reported_by'])), ('disputed', 'two_referees', ['C1', 'lead']))
+        self.assertIn('*Disputed:* the judge rejected it (Stated in the definitions.), but two referees reported it independently.',
+                      result['report'])
+        self.assertNotIn('## Raised by a referee and rejected', result['report'])
+
+    def test_an_undecided_error_on_the_main_chain_makes_the_recommendation_provisional(self):
+        doubling = line_of(DOUBLING)
+        lead = [[call('report_issue', start_line=doubling, end_line=doubling, quote=DOUBLING, kind='proof',
+                      claim='The doubling bound needs $b_n\\le a_n$ for all $n$, which is not shown.', evidence='Read.')],
+                [call('mark_result', result='thm:main', status='no_error_found', how_checked='Read it.')],
+                [call('finish', summary='Fine.', recommendation='accept')]]
+        runner, result, _ = self.review_with({'I1': {'verdict': 'undecided', 'effect': 'breaks_proof', 'reason': 'Cannot tell.',
+                                                     'fix': '', 'fill': '', 'new_ingredient': ''}}, lead=lead, co_referees=0)
+        report = result['report']
+        self.assertIn('**Recommendation: Major revision.** (raised', report)
+        self.assertIn('(provisional: a reported error is not settled)', report)
+        self.assertIn('reported as error in a proof and not settled', report)
+
+    def test_the_judge_sees_the_other_side(self):
+        runner, _, _ = self.review_with({}, lead=['Done.'], co_referees=0)
+        base = line_of(BASE_CASE)
+        uid = runner._resolve_result('thm:main')
+        runner.state['coverage'][uid] = {'status': 'no_error_found', 'how_checked': 'The base case is in the definitions.',
+                                         'counterexample': '', 'issues': [], 'by': 'C4', 'at': 1}
+        desk = R.RefereeDesk(runner, 'C1', 'co-referee')
+        desk.execute('report_issue', dict(start_line=base, end_line=base, quote=BASE_CASE, kind='gap', claim='Unproved base case.',
+                                          evidence='Read.'))
+        issue = runner.state['issues'][-1]
+        text = runner._issue_text(issue)
+        self.assertIn('C4 checked it and found no error: The base case is in the definitions.', text)
+        issue.update(status='judged', judge={'verdict': 'confirmed', 'effect': 'gap', 'reason': 'Yes.', 'fix': '', 'tools': False})
+        self.assertIn('*C4 checked Theorem (Main theorem) and found no error:*', '\n'.join(R.render(runner)))
+
+
+class WithdrawTests(RefereeCase):
+    def test_withdraw_and_non_findings(self):
+        runner, _ = self.run_review(ScriptClient({}), co_referees=0)
+        base, doubling = line_of(BASE_CASE), line_of(DOUBLING)
+        lead, co = R.RefereeDesk(runner, 'lead', 'lead'), R.RefereeDesk(runner, 'C1', 'co-referee')
+        report = dict(start_line=base, end_line=base, quote=BASE_CASE, kind='gap', evidence='Read.')
+        # A non-finding is refused at once: checks go to mark_result.
+        self.assertIn('Nothing was recorded', lead.execute('report_issue', {**report, 'claim': 'Not a misprint after all — '
+                                                                            'verified consistent (no issue).'}))
+        lead.execute('report_issue', {**report, 'claim': 'The base case is unproved.'})
+        self.assertIn('Refused', co.execute('withdraw_issue', {'issue_id': 'I1', 'reason': 'It is fine.'}))
+        self.assertIn('is withdrawn', lead.execute('withdraw_issue', {'issue_id': 'I1', 'reason': 'The definitions give it.'}))
+        issue = runner.state['issues'][0]
+        self.assertEqual((issue['status'], issue['withdrawn']['by']), ('withdrawn', 'lead'))
+        # A report merged from two referees: one withdrawal leaves the other's report as the issue.
+        lead.execute('report_issue', dict(start_line=doubling, end_line=doubling, quote=DOUBLING, kind='gap',
+                                          claim='First claim.', evidence='Read.'))
+        co.execute('report_issue', dict(start_line=doubling, end_line=doubling, quote=DOUBLING, kind='gap',
+                                        claim='Second claim.', evidence='Computed.'))
+        self.assertIn('still report', lead.execute('withdraw_issue', {'issue_id': 'I2', 'reason': 'Wrong.'}))
+        second = runner.state['issues'][1]
+        self.assertEqual((second['claim'], second['reported_by'], second['status']), ('Second claim.', ['C1'], 'pending'))
+        # Saved before this check: a non-finding in the ledger is never printed.
+        runner.state['issues'].append(dict(second, id='I3', claim='Not a misprint after all — verified consistent (no issue).',
+                                           status='unjudged', reported_by=['C1']))
+        report_text = '\n'.join(R.render(runner))
+        self.assertNotIn('The base case is unproved', report_text)
+        self.assertNotIn('after all', report_text)
+        self.assertIn('2 report(s) taken back by their own referees', report_text)
+
+
+class FailureTests(RefereeCase):
+    def test_a_refused_credential_stops_the_review_at_once(self):
+        base = line_of(BASE_CASE)
+
+        class Refusing(ScriptClient):
+            def stream(self, payload):
+                first_round = payload.get('tools') and not any(m['role'] == 'assistant' for m in payload['messages'])
+                if not (first_round and 'YOUR TASK (lead' in json.dumps(payload['messages'][:3])):
+                    with self.lock:
+                        self.payloads.append(copy.deepcopy(payload))
+                    raise AgentError('DeepInfra HTTP 403: Check the credential scopes and allowed models.')
+                yield from super().stream(payload)
+        lead = [[call('report_issue', start_line=base, end_line=base, quote=BASE_CASE, kind='gap',
+                      claim='The base case is unproved.', evidence='Read.')], 'Done.']
+        runner, result = self.run_review(Refusing({'lead': lead}), co_referees=0)
+        s = runner.state
+        self.assertEqual((s['referees']['lead']['status'], s['referees']['lead']['restarts']), ('stopped', 0))
+        self.assertIn('refused the calls', s['referees']['lead']['stop'])
+        self.assertEqual(sum('refused' in w for w in s['warnings']), 1)
+        self.assertFalse(any('started again' in w for w in s['warnings']))
+        refused = [c for c in s['calls'] if c['status'] == 'rejected']
+        self.assertTrue(refused)
+        self.assertTrue(all(c['charged_tokens'] == 0 for c in refused))
+        self.assertEqual(s['tokens_charged'], sum(c['stats']['eval_count'] for c in s['calls'] if c.get('stats')))
+        issue = s['issues'][0]
+        self.assertEqual((issue['status'], issue['unjudged_reason']), ('unjudged', 'provider'))
+        report = result['report']
+        self.assertIn('(provisional: the review is incomplete)', report)
+        self.assertIn("*Not judged (by the provider's refusal).*", report)
+        self.assertIn('*Reported by lead as gap in a proof.*', report)
+        self.assertIn('The model provider refused the calls from', report)
+        self.assertEqual(result['status'], 'partial')
+        self.assertIn('refused the calls', s['stop_reason'])
+
+
+class ReportTests(RefereeCase):
+    def test_main_results_from_coverage_and_computation_checklist(self):
+        doubling = line_of(DOUBLING)
+        co = [[call('mark_result', result='thm:main', status='no_error_found',
+                    how_checked='Checked the induction; recomputed $a_n$ for $n\\le 20$ with sympy.')],
+              [call('mark_result', result='lem:step', status='no_error_found', how_checked='Line by line.')],
+              [call('report_issue', start_line=doubling, end_line=doubling, quote=DOUBLING, kind='misprint',
+                    claim='Doubling should read halving.', evidence='Read.', fix='halving')],
+              [call('finish', summary='Checked.')]]
+        runner, result = self.run_review(ScriptClient({'lead': ['I stop.'], 'C1': co}))
+        report = result['report']
+        self.assertIn('| Theorem (Main theorem) | no error found | C1 | Checked the induction;', report)
+        checklist = report.split('## What was verified by computation')[1].split('##')[0]
+        self.assertIn('Checked by computation, no error found:', checklist)
+        self.assertIn('- Theorem (Main theorem) (C1): Checked the induction;', checklist)
+        self.assertNotIn('Line by line', checklist)
 
 
 class WorkerSlotsTests(unittest.TestCase):

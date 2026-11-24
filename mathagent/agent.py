@@ -225,7 +225,7 @@ class Agent:
             empty_after_tool = recover_empty_tool_answer and round_no > 0 and not exhausted
             note = getattr(self, 'continue_after_length', '')
             if (note and exhausted and not assistant['content'].strip() and not answer_now
-                    and round_no + 1 < self.max_rounds and continued < 3):
+                    and round_no + 1 < self.max_rounds and continued < getattr(self, 'continue_limit', 3)):
                 # A tool loop (the Review's referees) whose round used its whole allowance thinking: the loop goes on
                 # with its tools, given the end of that reasoning, instead of stopping with a final answer.
                 continued += 1
