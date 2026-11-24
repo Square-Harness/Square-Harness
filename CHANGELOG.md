@@ -19,7 +19,9 @@
   Review's referees and judges run Python without approval under a new policy, `review`
   (30 s, 2 GB, 1 CPU a run; 20 runs for the lead, 8 per co-referee, 3 per judge; no
   escalation), instead of the automatic policy's 3 runs of 5 s; `--no-numerical-checks`
-  turns it off.
+  turns it off. In a conversation, the review worker now has its own model-request slots (up to the
+  review concurrency) instead of the Assistant's `--assistant-concurrency`, so its referees and
+  judges run at once.
 - Review (v3 pipeline, kept for small contexts): the judge's verdict is final. The repair check
   after the judge and the extra pass on the step an attack named weakest are removed; reasoning
   calls are capped at 40k output tokens. Saved jobs keep what those calls found.
