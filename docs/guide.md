@@ -852,11 +852,20 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   It has one depth and no effort to choose. With DS4 (the whole paper fits the
   model's context), a **lead referee** and up to **five co-referees** work at the
   same time, each reading the whole paper and deciding itself what to check. The
-  lead checks the main statements (it tries to break each one: degenerate
-  parameters, low dimension, boundary cases, a known result it would contradict),
-  the consistency of the paper, the cited results and the numerical claims; each
-  co-referee checks the proofs of one group (the main results' proofs, then the
-  others by position in the paper) and reports anything else it notices. They
+  lead does what only a referee of the whole paper can do: it tries to break each
+  main statement (degenerate parameters, low dimension, boundary cases, a known
+  result it would contradict, with Python where a computation decides), checks
+  the numerics and examples against the hypotheses of the results they
+  illustrate, the claims of the abstract, introduction and remarks against what
+  the paper proves and what the cited works say, and the constants and
+  conventions across sections; each co-referee checks the proofs of one group
+  (the main results' proofs, then the others by position in the paper) and
+  reports anything else it notices. Beside them, from the start, **focused
+  readers** read the proofs of the main results and of what they use (up to
+  twelve proofs, a long one in parts) line by line, one reasoning call each,
+  without seeing what the referees report. A co-referee that finishes early is
+  asked once for a second look at the step of its group the main results depend
+  on most, and a referee that stops without finishing is asked once to go on. They
   have tools: they read and search the manuscript, **run Python** in the sandbox
   to recompute a constant or test a counterexample, and find and read cited
   papers to check a theorem's hypotheses (with online search on; a search query
@@ -887,8 +896,10 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   provider refuses the calls (an expired credential or no credit), the review
   stops at once and the report is written from what was recorded.
 
-  The report has, in order: the verdict (a recommendation, then one line per
-  confirmed error: a confirmed error rules out "accept" and "minor revision"),
+  The report has, in order: the verdict (a recommendation that follows the
+  judged findings by rule: a confirmed error, or an error on the main results
+  that nobody settled, means a major revision; then one line per such error and
+  a short paragraph written after the judge from the judged findings only),
   the main results with their status, how they were checked and the
   counterexamples tried, the errors (location, quote, the problem in at most four
   sentences, the fix, the results affected, how it was verified), gaps and

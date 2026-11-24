@@ -1099,7 +1099,7 @@ phase to `review-v2` and runs the v3 pipeline below (`RefereeRunner` extends
 `review-v4`). `review.runner_class('review')` returns `RefereeRunner` for new jobs;
 `runner_for_state` gives saved `review-v2` jobs `PaperReviewRunner`. Phases of v4:
 `plan` (the map, `_directions`: the proofs in at most five groups by position, the main
-results' proofs first; `_bibliography_check`; `state['referee_clock']`), `referees`
+results' proofs first; `_reader_plan`; `_bibliography_check`; `state['referee_clock']`), `referees`
 (one pool), `write` (untimed: the report). In `referees` a lead (`LEAD_TASK`, 40 tool
 rounds) and one co-referee per direction (`CO_TASK`, 15 rounds) run as `agent.Agent`
 tool loops on `RefereeDesk` (their workspace: `read_lines`, `search_manuscript`,
@@ -1107,7 +1107,14 @@ tool loops on `RefereeDesk` (their workspace: `read_lines`, `search_manuscript`,
 sandbox policy `review`, the four literature tools, `report_issue`, `mark_result`,
 `finish`), from t = 0, with the compilation (`_compile`: `writeup.compile_latex`, a
 box for a figure that is not attached, 180 s) running beside them; its summary reaches
-each referee in its next tool result. Every round goes through `MeteredClient`, which
+each referee in its next tool result. Focused readers run in the same pool (`_run_reader`, role `reader`): one
+reasoning `_ask` per proof of the main chain (`_reader_plan`: breadth first from `_main_ids()` through the map's
+references, at most `READERS` proofs and `READER_CALLS` calls, a long proof in `_blocks`), the v3 audit prompt
+(`P.audit_prompt('line', ...)` with `P.AUDIT_SCHEMA`, `ROUND_CAP`); `_parse_audit` filters the answer and each issue
+goes through `_report_issue` as `R:<unit>` (kind from `READER_EFFECT_KIND`), so it merges with a referee's on the same
+lines and counts as an independent report; the verdict stays on the reading (`state['readers']`, `_readings`). The
+scheduler starts pending readers in plan order on free slots before any judge, and none after `CLOCK['readers_by']`
+(then `skipped`). Every round goes through `MeteredClient`, which
 charges the job (reserved before dispatch, corrected by the provider's counts), saves
 the call (`role` lead / co-referee / judge, `referee`, `round`, the messages new since
 the previous round in its request artifact) and stops the loop at the clock
@@ -1115,7 +1122,9 @@ the previous round in its request artifact) and stops the loop at the clock
 miscounted line within 15), refuses unknown experiment ids, and merges a report whose
 lines overlap an earlier one of the same family (`other_reports`, `reported_by`);
 `finish` is refused while a result of the referee's direction (`_owned`: the main
-results for the lead) has no status, and raises `RefereeFinished`. Every search query
+results for the lead) has no status, and raises `RefereeFinished`; a co-referee's first `finish` more than
+`SECOND_LOOK_MARGIN` before the wrap-up answers with `_second_look` (the unit of `_key_unit`, nearest the main results),
+and a referee whose loop answers without `finish` is sent the same message once (`nudged`). Every search query
 and opened identifier that repeats `review_position.COPIED_WORDS` consecutive words
 of the manuscript is refused (`copies_manuscript`), and so is a report whose claim says it is
 not a problem (`retracted`); `withdraw_issue` takes back one's own report (status
@@ -1131,7 +1140,8 @@ refused before any output (`refused_before_output`, status `rejected`). Each pen
 of `JUDGE_ROUNDS` when the issue cites an experiment or a source or is an `ERROR_KINDS`
 issue on `_main_chain()`; `_issue_text` adds `_other_side`, another referee's
 `no_error_found` mark and other reports on the same unit; `BATCH_KINDS` go to
-`_judge_batch`, role `judge-batch`, `BATCH` per call, no reasoning); at most
+`_judge_batch`, role `judge-batch`, `BATCH` per call, no reasoning, an `effect` per item: one confirmed or undecided
+with an effect other than misprint or reference is `rerouted` to a single judge); at most
 `JUDGES_AT_ONCE` judges run while referees work. `JUDGE_POLICY` carries
 `P._EFFECT_SCALE`. `_verdict` checks the answer by code: an `ERROR_KINDS` issue rated
 below `P.MAJOR_EFFECTS` keeps its reported effect (`kept_error`) unless `fill` holds a
@@ -1145,13 +1155,18 @@ is written from the ledgers. `referee.render` builds it in ten parts (verdict, m
 results from the coverage ledger with who checked them, errors, gaps and imprecisions,
 questions (undecided, disputed, unjudged with the reason), misprints, compilation and
 bibliography, the checklist of what was verified by computation and what could not be
-checked, replacements, and the rejected issues one line each); a confirmed
-`P.MAJOR_EFFECTS` issue, or an unsettled `ERROR_KINDS` issue on the main chain, raises the
-lead's recommendation to a major revision, and `_incomplete()` (also the job's `partial`
-status) makes it provisional. Withdrawn and `retracted` issues are never printed.
+checked, replacements, and the rejected issues one line each) from `classify`; the
+recommendation follows the judged findings by rule (a confirmed `P.MAJOR_EFFECTS` issue or an unsettled
+`ERROR_KINDS` issue on the main chain: major revision; any other finding: minor; none: accept; the lead's stays in
+`referees.lead`), and `_incomplete()` (also the job's `partial` status) makes it provisional. The verdict paragraph
+is `_write_verdict` (role `verdict`, one call without reasoning after the judges, `VERDICT_POLICY`: the judged
+findings, the main results' statuses and the lead's summary without its sentences naming rejected issues);
+`_verdict_problem` rejects a paragraph naming an issue id, an unknown label, or the claim, quote or lines of a
+rejected or withdrawn issue, and the report then uses `code_verdict` (`state['verdict_text']`: `by`, `text`,
+`rejected`, `error`). Withdrawn and `retracted` issues are never printed.
 `review_position.position_prompt` reads both report shapes. Saved keys: `issues`,
 `coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
-`referee_clock`, `provider_refused`; issue statuses `judged`, `disputed`, `unjudged`,
+`referee_clock`, `provider_refused`, `readers`, `verdict_text`; issue statuses `judged`, `disputed`, `unjudged`,
 `withdrawn`; the judge's `fill`, `new_ingredient`, `judge_effect`, `kept_error`,
 `lowered`, `tool_calls`. A resumed v4 job starts new referees with the ledgers (never the old
 conversation) and judges again what was not judged; "Resume (+N min)" gives it a new

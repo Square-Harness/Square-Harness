@@ -22,6 +22,21 @@
   turns it off. In a conversation, the review worker now has its own model-request slots (up to the
   review concurrency) instead of the Assistant's `--assistant-concurrency`, so its referees and
   judges run at once.
+- Review (v4), after its first complete benchmark run: focused readers beside the referees.
+  From the start, one reasoning call per proof of the main results' chain (the main results' own
+  proofs first, then what they use; up to twelve proofs, a long proof in parts) reads it line by
+  line as the v3 audit did; its problems join the same ledger, merged by lines with the referees'
+  and counted as independent reports. The lead's task is now what only it can do: break the main
+  statements, check the numerics and examples against the hypotheses, the abstract and
+  introduction against the paper and the cited works, and conventions across sections. The
+  verdict paragraph is written after the judge from the judged findings only (code checks it
+  names no rejected or withdrawn problem; otherwise code writes it), and the recommendation
+  follows the judged findings by rule. A co-referee that finishes early is asked once for a
+  second look at the step the main results depend on most; a referee that stops without
+  finishing is asked once to go on. The misprint batch gives an effect per item, and one that is
+  more than a misprint goes to a single judge. In a conversation, a literature question that
+  copied a phrase of the manuscript is written again once instead of starting no literature
+  review.
 - Review (v4), after its first benchmark run: the judge keeps false alarms out and never makes a
   real finding smaller or invisible. Its rubric has the v3 effect scale again (a gap whose repair
   needs a fact the paper neither proves nor cites, or an unjustified limit, is a failed proof); a
