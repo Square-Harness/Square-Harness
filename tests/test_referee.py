@@ -233,6 +233,18 @@ class LedgerTests(RefereeCase):
         self.assertEqual(variant_for_state({'pipeline': 'review-v4'}), 'review')
 
 
+class WorkerSlotsTests(unittest.TestCase):
+    def test_a_review_worker_has_its_own_slots(self):
+        from mathagent.assistant_budget import BudgetClient
+        tree = BudgetClient(ScriptClient({}), max_seconds=100, concurrency=2)
+        own = threading.BoundedSemaphore(16)
+        review = tree.fork(ScriptClient({}), allowance=None, usage={'tokens': 0, 'input_tokens': 0}, slots=own)
+        other = tree.fork(ScriptClient({}), allowance=None, usage={'tokens': 0, 'input_tokens': 0})
+        self.assertIs(review.slots, own)
+        self.assertIs(other.slots, tree.pool.slots)
+        self.assertIs(review.pool, tree.pool)  # one shared budget
+
+
 class SandboxPolicyTests(unittest.TestCase):
     def test_review_policy_limits(self):
         self.assertEqual(REVIEW_RUNS, {'lead': 20, 'co-referee': 8, 'judge': 3})

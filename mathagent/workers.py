@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import re
+import threading
 import time
 import uuid
 
@@ -410,7 +411,11 @@ def run_worker(host, parent, budget, action, child, save):
                     save()
             sandbox.runs = child.get('sandbox_runs', 0)
             sandbox.on_run_change = save_runs
-    agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds,
+    # The Review runs a lead, co-referees and judges at once (review v4): its own slots, up to the review's concurrency
+    # within the interface's model-request limit, instead of the Assistant tree's few.
+    slots = (threading.BoundedSemaphore(host.review_concurrency())
+             if REVIEW_MODES.get(mode) == 'review' and hasattr(host, 'review_concurrency') else None)
+    agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds, slots=slots,
                                **({'input_allowance': limits['input_tokens']} if limits else {}))
     input_limit = budget.pool.state['max_input_tokens']
     configured_input = getattr(host.args, 'research_input_tokens', None)

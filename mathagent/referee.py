@@ -916,7 +916,7 @@ class RefereeRunner(PaperReviewRunner):
             else:
                 issue['judge'] = {'verdict': value['verdict'],
                                   'effect': value.get('effect') if value.get('effect') in EFFECTS else self._default_effect(issue),
-                                  'reason': sentences(value.get('reason'), 3)[:800], 'fix': str(value.get('fix') or '').strip()[:1200],
+                                  'reason': _clip(sentences(value.get('reason'), 3), 800), 'fix': str(value.get('fix') or '').strip()[:1200],
                                   'tools': tools, 'at': round(self._elapsed(), 1)}
                 issue['status'] = 'judged'
             self._save()
@@ -971,7 +971,7 @@ class RefereeRunner(PaperReviewRunner):
                 answer = answers.get(i['id'])
                 if answer and answer.get('verdict') in VERDICTS:
                     i['judge'] = {'verdict': answer['verdict'], 'effect': self._default_effect(i),
-                                  'reason': sentences(answer.get('reason'), 2)[:400], 'fix': '', 'tools': False, 'batch': True,
+                                  'reason': _clip(sentences(answer.get('reason'), 2), 400), 'fix': '', 'tools': False, 'batch': True,
                                   'at': round(self._elapsed(), 1)}
                     i['status'] = 'judged'
                 else:
@@ -1142,9 +1142,11 @@ def _sections(runner):
     sid = runner.state['sources'][0]['id']
     out = []
     for n, line in enumerate(runner._lines(sid), 1):
-        match = re.match(r'\s*\\(?:section|appendix)\*?\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}', line)
+        match = re.match(r'\s*\\section\*?\s*(?:\[[^\]]*\])?\s*\{(.*)\}\s*(?:\\label\{[^}]*\}\s*)?$', line)
         if match:
-            out.append((n, _clip(match.group(1), 60)))
+            title = re.sub(r'\\texorpdfstring\{((?:[^{}]|\{[^{}]*\})*)\}\{[^{}]*\}', r'\1', match.group(1))
+            title = re.sub(r'\\[a-zA-Z]+\*?\{([^{}]*)\}', r'\1', title)  # \cref{thm:x} -> thm:x
+            out.append((n, _clip(title.replace('$', ''), 70)))
     return out
 
 
@@ -1154,10 +1156,10 @@ def render(runner):
     s = runner.state
     issues = s.get('issues') or []
     judged = [i for i in issues if i['status'] == 'judged']
-    confirmed = [i for i in judged if i['judge']['verdict'] == 'confirmed' and not i['question']]
     refuted = [i for i in judged if i['judge']['verdict'] == 'refuted']
-    undecided = ([i for i in judged if i['judge']['verdict'] == 'undecided' or (i['question'] and i['judge']['verdict'] == 'confirmed')]
-                 + [i for i in issues if i['status'] == 'unjudged'])
+    # A referee's question that the judge confirmed is a confirmed problem; one it cannot decide stays a question.
+    confirmed = [i for i in judged if i['judge']['verdict'] == 'confirmed']
+    undecided = ([i for i in judged if i['judge']['verdict'] == 'undecided'] + [i for i in issues if i['status'] == 'unjudged'])
     errors = [i for i in confirmed if _effect(i) in P.MAJOR_EFFECTS]
     gaps = [i for i in confirmed if _effect(i) in ('gap', 'imprecision') and i['kind'] not in BATCH_KINDS]
     misprints = [i for i in confirmed if i not in errors and i not in gaps]
@@ -1207,6 +1209,13 @@ def render(runner):
         text = re.sub(r'\b(I\d+)\b', lambda m: labels.get(m.group(1), m.group(1)), ' '.join(kept))  # the report's labels
         out += [_clip(text, 1500), '']
 
+    def affected(i):
+        names = []
+        for name in i['results_affected']:
+            uid = runner._resolve_result(name)
+            names.append(runner._unit(uid)['name'] if uid else name)
+        return list(dict.fromkeys(names))
+
     # 2. Main results
     main = runner._main_ids()
     if main:
@@ -1214,7 +1223,7 @@ def render(runner):
         for uid in main:
             unit = runner._unit(uid)
             mark = s['coverage'].get(uid) or {}
-            hit = [labels[i['id']] for i in errors + gaps + undecided if i.get('unit') == uid or unit['name'] in ' '.join(i['results_affected'])]
+            hit = [labels[i['id']] for i in errors + gaps + undecided if i.get('unit') == uid or unit['name'] in affected(i)]
             status = ('error: ' + ', '.join(hit) if any(h.startswith('E') for h in hit) else
                       {'no_error_found': 'no error found', 'issue': 'see ' + ', '.join(hit) if hit else 'issue reported, not confirmed',
                        'not_checked': 'not checked'}.get(mark.get('status'), 'not checked'))
@@ -1223,14 +1232,18 @@ def render(runner):
         out.append('')
 
     def entry(i, fix=True):
-        lines = [f'**{labels[i["id"]]}. {where(i)}.** ' + sentences(i['claim'] + ' ' + (i['judge'] or {}).get('reason', ''), 4)]
+        # At most four sentences. A confirmed problem is the referee's claim (the judge's reason mostly restates it);
+        # a question also says why the judge could not settle it.
+        reason = '' if fix else sentences((i['judge'] or {}).get('reason', ''), 2)
+        claim = sentences(i['claim'], 2 if reason else 4)
+        lines = [f'**{labels[i["id"]]}. {where(i)}.** ' + claim + (' *Judge:* ' + reason if reason else '')]
         if i['quote']:
-            lines.append(f'> {i["quote"]}')
+            lines.append('> ' + re.sub(r'\s+', ' ', i['quote']))
         repair = (i.get('judge') or {}).get('fix') or i['fix']
         if fix and repair:
             lines.append('*Fix:* ' + sentences(repair, 3))
         if i['results_affected']:
-            lines.append('*Affects:* ' + ', '.join(i['results_affected']))
+            lines.append('*Affects:* ' + ', '.join(affected(i)))
         if i.get('judge'):
             lines.append(verified(i))
         return lines + ['']
@@ -1256,10 +1269,10 @@ def render(runner):
         for i in sorted(misprints, key=lambda i: i['start_line']):
             section = next((t for n, t in reversed(sections) if n <= i['start_line']), 'Before the first section')
             if section != current:
-                out += [f'*{section}*', '']
+                out += ([''] if current is not None else []) + [f'*{section}*', '']
                 current = section
             repair = (i.get('judge') or {}).get('fix') or i['fix']
-            out.append(f'- {labels[i["id"]]}, {_lines_text(i["start_line"], i["end_line"])}: `{i["quote"]}` — '
+            out.append(f'- {labels[i["id"]]}, {_lines_text(i["start_line"], i["end_line"])}: `{" ".join(i["quote"].split())}` — '
                        + sentences(i['claim'], 2) + (f' Correction: {sentences(repair, 2)}' if repair else ''))
         out.append('')
     else:
@@ -1329,7 +1342,7 @@ def render(runner):
     for i in misprints + gaps:
         repair = (i.get('judge') or {}).get('fix') or i['fix']
         if repair and len(repair) <= 240 and '\n' not in repair and i['quote'] and len(i['quote']) <= 200:
-            swaps.append(f'{labels[i["id"]]}, {_lines_text(i["start_line"], i["end_line"])}: replace `{i["quote"]}` — {repair}')
+            swaps.append(f'{labels[i["id"]]}, {_lines_text(i["start_line"], i["end_line"])}: replace `{" ".join(i["quote"].split())}` — {repair}')
     if swaps:
         out += ['## Replacements', '', *('- ' + x for x in swaps[:30]), '']
     return out

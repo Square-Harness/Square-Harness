@@ -94,6 +94,11 @@ class _ChatWorkerHost:
     def review_concurrency(self):
         return self.hub.review_concurrency()
 
+    @property
+    def sandbox(self):
+        """The process's Python sandbox: the Review binds its referees' sessions (policy "review") itself."""
+        return self.hub.sandbox
+
     def previous_writeup(self):
         return self.hub._previous_writeup(self.root, self.chat_id)
 

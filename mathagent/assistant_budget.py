@@ -54,7 +54,7 @@ class _Pool:
 class BudgetClient:
     def __init__(self, client, *, state=None, max_tokens=None, max_input_tokens=None,
                  max_seconds=900, checkpoint=lambda: None, concurrency=2, pool=None,
-                 allowance=None, usage=None, adaptive_limits=None, deadline=None, input_allowance=None):
+                 allowance=None, usage=None, adaptive_limits=None, deadline=None, input_allowance=None, slots=None):
         self.client = client
         self.deadline = deadline
         self._admitted = threading.local()
@@ -84,6 +84,9 @@ class BudgetClient:
         self.pool = pool or _Pool(budget, checkpoint, concurrency)
         self.allowance = allowance
         self.input_allowance = input_allowance
+        # A worker with its own inference slots (the Review's referees and judges) instead of the tree's: its calls
+        # still go through the interface's model-request pool and are charged to the shared budget.
+        self.slots = slots if slots is not None else self.pool.slots
         self.usage = usage if usage is not None else {'tokens': 0, 'input_tokens': 0}
 
     def __getattr__(self, name):
@@ -113,10 +116,10 @@ class BudgetClient:
     def timeout(self, value):
         self.client.timeout = value
 
-    def fork(self, client, *, allowance, usage, max_seconds=None, input_allowance=None):
+    def fork(self, client, *, allowance, usage, max_seconds=None, input_allowance=None, slots=None):
         deadline = None if max_seconds is None else time.monotonic() + max_seconds
         return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage, deadline=deadline,
-                            input_allowance=input_allowance)
+                            input_allowance=input_allowance, slots=slots)
 
     def adopt(self, *, tokens, input_tokens, seconds, commit=True):
         """Validate and optionally freeze absolute approved totals, including framing.
@@ -207,7 +210,7 @@ class BudgetClient:
             self.pool.admission_change(queued=1)
         acquired, active, waiting = False, False, exempt
         try:
-            while not self.pool.slots.acquire(timeout=0.05):
+            while not self.slots.acquire(timeout=0.05):
                 if cancel is not None and cancel.is_set():
                     raise KeyboardInterrupt
                 if deadline is not None and time.monotonic() >= deadline:
@@ -235,7 +238,7 @@ class BudgetClient:
                 self._admitted.waiting_since = None
             self.pool.admission_change(queued=-int(waiting), active=-int(active))
             if acquired:
-                self.pool.slots.release()
+                self.slots.release()
 
     def stream(self, payload):
         admitted = False

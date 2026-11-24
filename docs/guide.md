@@ -888,6 +888,10 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   goes on. Language typos are left to the typo check, which you can start at the
   same time on the same file.
 
+  The referees and judges run at once (up to the model-request limit in Settings:
+  set it to 16 for reviews with DS4), also when the review is started in a
+  conversation. A review of a 3,000-line paper took about 14 minutes in a test.
+
   When the whole paper does not fit the model's context (a small local model),
   the review checks the proofs one by one instead, as described under "How it
   works" below.

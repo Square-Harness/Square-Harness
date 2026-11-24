@@ -1133,7 +1133,11 @@ bibliography, computations and what could not be checked, replacements); a confi
 `coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
 `referee_clock`. A resumed v4 job starts new referees with the ledgers (never the old
 conversation) and judges again what was not judged; "Resume (+N min)" gives it a new
-clock (`_rebase_clock`).
+clock (`_rebase_clock`). In a conversation the review worker's `BudgetClient` fork gets its own inference
+slots (`workers.run_worker`: `Hub.review_concurrency()`, through `BudgetClient.fork(slots=...)`) instead of the
+Assistant tree's `--assistant-concurrency` (at most 5 for a hosted model), so the referees and judges run at once;
+its calls still pass through the interface's model-request pool and are charged to the turn's budget. The worker
+host exposes the process's sandbox (`_ChatWorkerHost.sandbox`), which the runner binds per referee.
 
 The v3 Review (`PaperReviewRunner`, pipeline `review-v2`) checks every
 proof at one depth, `review.PAPER` (passes on the main chain and elsewhere, sweeps, the
