@@ -7,7 +7,7 @@ import unittest
 from mathagent import proof_routing
 from mathagent.source_tasks import automatic_source_action
 
-FILE = ['narrow_slit.tex']
+FILE = ['manuscript.tex']
 
 
 def mode(query, files=FILE):
@@ -22,7 +22,7 @@ class TypoRequests(unittest.TestCase):
             action = automatic_source_action(query, FILE)
             self.assertEqual(action['mode'], 'typo_check', query)
             self.assertEqual((action['files'], action['effort'], action['request']), (FILE, 'low', query))
-        self.assertEqual(mode('List the typos in narrow_slit.tex', []), 'typo_check')
+        self.assertEqual(mode('List the typos in manuscript.tex', []), 'typo_check')
 
     def test_other_requests_keep_their_skill(self):
         self.assertEqual(mode('Review this manuscript'), 'referee')

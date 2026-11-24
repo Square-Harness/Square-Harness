@@ -57,8 +57,8 @@ RESTARTS = 2  # a referee whose loop broke (provider failure) starts again from 
 CLOCK = {'wrap_up': 660, 'referee_stop': 810, 'referee_abort': 900, 'judge_stop': 1080, 'abort': 1170, 'limit': 1200,
          'readers_by': 300}
 # Focused proof readers (the v3 line-by-line audit, one reasoning call per proof or part of a long proof) on the main
-# results' chain, beside the referees from t = 0: in v4b the free referees missed G1 (one co-referee read the step and
-# marked it correct), which the v3 audit of that proof raised in three runs out of three. The main results' own proofs
+# results' chain, beside the referees from t = 0: in a live test the free referees missed a broken step (one co-referee read it and
+# marked it correct) that the v3 audit of that proof had raised in three runs out of three. The main results' own proofs
 # first, then what they use directly, then the rest of the chain. A reader that cannot start by `readers_by` is skipped.
 READERS, READER_CALLS = 12, 14  # proofs, and calls (a long proof is read in parts)
 # A reader's output: DeepInfra has no reasoning budget, so the reader is asked to stop reasoning well before its cap
