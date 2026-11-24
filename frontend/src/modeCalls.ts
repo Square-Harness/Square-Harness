@@ -5,16 +5,17 @@ import type { RouteMode } from './api'
 import type { Cover } from './components/Glyph'
 import type { EffortLevel } from './effort'
 
-/** The cover a mode call is drawn with: the review kinds share the Review cover; Explain has its own. */
+/** The cover a mode call is drawn with: the Proof Check, the Review, the Typo check and Explain each have their own mark. */
 export const coverOf = (mode: RouteMode): Cover =>
-  mode === 'quick_review' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode
+  mode === 'quick_review' ? 'proof_check' : mode === 'typo_check' ? 'typo' : mode === 'detailed_review' ? 'referee'
+    : mode === 'summarize' ? 'writeup' : mode
 export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] = [
   { mode: 'prove', label: 'Prove', summary: 'Prove a statement, review the proof, and repair objections.' },
   { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },
   { mode: 'literature', label: 'Literature', summary: 'Survey a mathematical question through its main results, methods and sources.' },
-  { mode: 'quick_review', label: 'Quick Review', summary: 'Check whether a given proof is correct: verdict and located issues.' },
-  { mode: 'referee', label: 'Review', summary: 'Review a manuscript: overview of the paper, typos and presentation.' },
-  { mode: 'detailed_review', label: 'Detailed Review', summary: 'Review a manuscript and also check its proofs (more tokens and time).' },
+  { mode: 'quick_review', label: 'Proof Check', summary: 'Check whether a given proof is correct: verdict and located issues.' },
+  { mode: 'referee', label: 'Review', summary: 'Referee a manuscript: every proof checked, second opinions, a recommendation.' },
+  { mode: 'typo_check', label: 'Typo', summary: 'List the typos and presentation problems of a manuscript, each correction checked.' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
   { mode: 'writeup', label: 'Write-Up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },
   { mode: 'summarize', label: 'Summarize', summary: 'Summarize the important results obtained so far as a .tex file.' },

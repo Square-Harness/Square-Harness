@@ -23,7 +23,7 @@
 .mode-explore { background: #24684c; }
 .mode-literature { background: #8b5912; }
 .mode-check { background: #694813; }
-.mode-referee { background: #694394; }
+.mode-referee, .mode-proof_check, .mode-typo { background: #694394; }
 .mode-explain { background: #566a1c; }
 .mode-writeup { background: #255e87; }
 .mode-style { background: #85446f; }
@@ -390,6 +390,7 @@
 .segmented { display: inline-flex; margin-bottom: 18px; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
 .segmented button { padding: 6px 14px; border: 0; background: var(--sheet); color: var(--text-2); font-size: 13.5px; font-weight: 700; cursor: pointer; }
 .segmented button + button { border-left: 1px solid var(--line-strong); }
+.segmented-mark { display: inline-grid; place-items: center; width: 1.1em; margin-right: 6px; vertical-align: -0.12em; font-size: 1.05em; }
 .segmented button[aria-pressed='true'] { background: var(--ink); color: var(--on-ink); }
 
 /* Dialogs: a small notebook page. The mark sits in the margin, left of the red rule,

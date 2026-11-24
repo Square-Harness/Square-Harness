@@ -99,7 +99,7 @@ def conversation_sources(query, supplied, transcript, *, mode=None, inherit=True
                                        code='ambiguous_source', details={'sources': alternatives})
     elif re.search(_POINTER + _IMAGE + r'\b', text):
         suffixes = _IMAGES
-    elif (target or mode in ('referee', 'detailed_review')
+    elif (target or mode in ('referee', 'detailed_review', 'typo_check')
           or re.search(r'\b(?:its|son|sa|ses)\s+(?:(?:first|main|next|last|premier|premiere|principal|principale)\s+)?'
                        r'(?:theorem|lemma|proposition|corollary|result|theoreme|lemme|corollaire|resultat)\b', text)
           or re.search(_POINTER + r'(?:' + _DOCUMENT + r'|proof|result|preuve|resultat)\b', text)):

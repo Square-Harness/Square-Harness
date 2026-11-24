@@ -46,11 +46,13 @@ function proofCeilings(defaults: Defaults, tokens: number | null, preset?: { sol
   return { tokens, solve_tokens: fitted, verify_tokens: review }
 }
 
-export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLevel: EffortLevel): Limits {
+export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLevel: EffortLevel, wholeManuscript = false): Limits {
   const level = kind === 'literature' ? 'high' : requestedLevel
   const preset = defaults.effort_presets?.[level]
   const effort = preset || EFFORTS.find((item) => item.id === level) || EFFORTS[1]
-  const seconds = effort.minutes * 60
+  // Whole-manuscript reviews and typo checks read the full paper each time (gui/effort.py).
+  const ds4 = defaults.api_profile === 'deepinfra'
+  const seconds = effort.minutes * 60 * (wholeManuscript && !ds4 ? 2 : 1)
   const cap = (configured: number | null, value: number) => configured === null ? value : Math.min(configured, value)
   if (kind === 'proof') {
     const tokens = preset ? cap(defaults.proof_tokens, preset.tokens) : defaults.proof_tokens
@@ -58,7 +60,7 @@ export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLeve
       ...proofCeilings(defaults, tokens, preset) }
   }
   const base: Limits = { tokens: preset ? cap(defaults.research_tokens, preset.research_tokens) : defaults.research_tokens,
-    input_tokens: preset ? cap(defaults.research_input_tokens, preset.input) : defaults.research_input_tokens, seconds }
+    input_tokens: preset ? cap(defaults.research_input_tokens, preset.input * (wholeManuscript && ds4 ? 4 : 1)) : defaults.research_input_tokens, seconds }
   if (kind === 'writeup' || kind === 'style') return base
   const survey = kind === 'literature' ? defaults.literature_presets?.[level] : undefined
   return { ...base, rounds: effort.tries, seconds: survey?.seconds ?? seconds, requests: survey?.requests ?? effort.requests, chars: effort.chars }

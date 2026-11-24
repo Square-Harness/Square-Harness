@@ -2,6 +2,164 @@
 
 ## Unreleased
 
+- Interface names: the quick check of one proof is **Proof Check** and the typo check is **Typo**
+  (the calls stay `@quick_review` and `@typo_check`). Proof Check, Review and Typo each have their own
+  mark: a ticked end-of-proof square, the pilcrow, a letter with a wavy underline; the New review form
+  shows the mark beside each kind.
+- The Review (v4, pipeline `review-v4`) is rebuilt around free referees and an independent
+  judge. With the whole paper in the model's context (DS4), a lead referee and up to five
+  co-referees (one per group of proofs) work at once, each a tool loop on the whole paper: they
+  read and search the manuscript, run Python in the sandbox, open cited papers, report each
+  problem with a quote the code checks at its lines, and give every result of their group a
+  status before they can finish. Every reported problem is checked by an independent judge
+  (with tools when it rests on a computation or a source; misprints in batches) whose verdict is
+  final. The code compiles the TeX source (missing figures as boxes) and checks the
+  bibliography. The report is built by code, verdict first: main results, errors, gaps,
+  questions, formula misprints, compilation and bibliography, computations, what could not be
+  checked, replacements. Referees are asked to finish at 11 minutes and the report is written
+  by 20 minutes at the latest. Search queries that copy eight words of the manuscript are
+  refused. A paper that does not fit the context keeps the v3 pipeline; saved reviews resume
+  with their own pipeline. **Sandbox policy change (for review by the maintainers):** the
+  Review's referees and judges run Python without approval under a new policy, `review`
+  (30 s, 2 GB, 1 CPU a run; 20 runs for the lead, 8 per co-referee, 3 per judge; no
+  escalation), instead of the automatic policy's 3 runs of 5 s; `--no-numerical-checks`
+  turns it off. In a conversation, the review worker now has its own model-request slots (up to the
+  review concurrency) instead of the Assistant's `--assistant-concurrency`, so its referees and
+  judges run at once.
+- Review (v4), after its first complete benchmark run: focused readers beside the referees.
+  From the start, one reasoning call per proof of the main results' chain (the main results' own
+  proofs first, then what they use; up to twelve proofs, a long proof in parts) reads it line by
+  line as the v3 audit did; its problems join the same ledger, merged by lines with the referees'
+  and counted as independent reports. The lead's task is now what only it can do: break the main
+  statements, check the numerics and examples against the hypotheses, the abstract and
+  introduction against the paper and the cited works, and conventions across sections. The
+  verdict paragraph is written after the judge from the judged findings only (code checks it
+  names no rejected or withdrawn problem; otherwise code writes it), and the recommendation
+  follows the judged findings by rule. A co-referee that finishes early is asked once for a
+  second look at the step the main results depend on most; a referee that stops without
+  finishing is asked once to go on. The misprint batch gives an effect per item, and one that is
+  more than a misprint goes to a single judge. In a conversation, a literature question that
+  copied a phrase of the manuscript is written again once instead of starting no literature
+  review.
+- Review (v4): the paper's internal citations are checked. Code lists every use of one of the
+  paper's own results (a `\ref`, `\cref` or `\eqref` to a result, or "Lemma 2.4" written out),
+  with what it can see wrong (a label that points nowhere or at another kind of result, a circular
+  use). Each use is checked on two points, that the cited result states exactly what is used and
+  that its hypotheses hold there: by the focused reader of the proof it stands in, first, and by
+  the lead for the others. A failure becomes an issue the judge sees with the cited statement;
+  the report says how many uses of each result were checked.
+- Review (v4), fixes after the second benchmark (before a trial in the interface):
+  - In a conversation, the Assistant's input pool now charges each call what the provider
+    counted once the call ends (the reservation, a byte count about three times larger, holds
+    only while it runs), for the review and the literature review beside it; before, a review
+    of about 110 calls exhausted the pool and its last judges and verdict were refused. When an
+    allowance does run short, the referees and readers stop first and the judges keep their share.
+  - A focused reading has room for its answer (a 48k cap, asked to stop reasoning well before
+    it). A reading cut at the cap keeps the complete problems of its answer, or writes its answer
+    from its notes in one short call without reasoning; a reading that gives nothing is named in
+    "What could not be checked", and neither counts its proof as checked.
+  - "Position in the literature": a record is the manuscript itself only when its whole title is
+    the manuscript's and it shares an author (a survey whose title is part of the manuscript's
+    was labelled so); a record whose authors are all among the manuscript's (all but one for
+    three or more) is a work of its authors. Author lists with affiliation marks and LaTeX
+    accents are read correctly.
+  - The status of each main result is computed by code through the dependencies between the
+    results: an error in its own proof, a result it uses with a confirmed error, an unsettled
+    error, not fully checked, or no error found only when its proof and everything it uses were
+    checked. The verdict paragraph receives these as facts; code rejects one that omits a
+    confirmed error or calls a main result free of error against its status, and writes the
+    verdict itself. A main result not fully checked makes the recommendation provisional.
+  - Internal citations: "Lemma 3.3" written out is a use of the paper's own Lemma 3.3 only when
+    no citation of another work governs its sentence; a doubtful one is shown as such. A problem
+    reported at the line of a use, naming the cited result, counts as its failed check. The uses
+    outside the readers' proofs go to the co-referee whose group holds them; the lead keeps the
+    introduction, remarks outside the groups, numerics and every flagged or doubtful use.
+- Review (v4), after its first benchmark run: the judge keeps false alarms out and never makes a
+  real finding smaller or invisible. Its rubric has the v3 effect scale again (a gap whose repair
+  needs a fact the paper neither proves nor cites, or an unjustified limit, is a failed proof); a
+  reported error the judge rates lower stays an error unless the judge writes the complete repair
+  and it needs nothing new (it is then a gap, with the judge's argument printed). A rejection
+  becomes a disputed question when two referees reported the problem or it rests on a computation
+  the judge did not redo; the other rejections are listed one line each at the end of the report.
+  The judge sees another referee's "no error found" on the same result, and an error on the main
+  results' chain is always judged with tools. An unsettled error on that chain, or an incomplete
+  review, makes the recommendation provisional; problems not judged give the real reason.
+  Referees can withdraw their own reports, a report that says it is not a problem is refused, a
+  Python run needs a purpose, and a referee's first two rounds are short (8k tokens, not measured
+  live yet). An HTTP 401/402/403 from the provider stops the review at once (no restarts, one
+  warning) and the reservations of refused calls are released. The report fills "Main results"
+  from every referee's statuses and lists what was verified by computation.
+- Review (v3 pipeline, kept for small contexts): the judge's verdict is final. The repair check
+  after the judge and the extra pass on the step an attack named weakest are removed; reasoning
+  calls are capped at 40k output tokens. Saved jobs keep what those calls found.
+- The review map reads a bibliography declared in the paper's own package
+  (`\addbibresource` in `preamble.sty`).
+- A review asked in a conversation starts with a literature review beside it, at its lowest
+  breadth, each with its own card. The Assistant writes the literature question from the
+  manuscript's title, abstract and introduction in public words. When both have returned, the
+  answer is the report as it is, then "Position in the literature": for each main result, the
+  closest earlier result, what differs and whether it changes the recommendation, written only
+  from the literature review's verified records; the manuscript's own preprint is labelled and
+  never counted as prior work. A failed or unfinished literature review, online search off, or
+  a request that excludes it leaves the position marked missing, with the reason. The review's
+  own "Position in the literature" section, which only suggested `@literature`, is gone.
+- Review: the statement of each main result (four at most) is attacked for a counterexample
+  as soon as the overview is written, by a reasoning call that sees the whole paper
+  (degenerate parameters, low dimension, boundary cases, known results it would contradict).
+  An explicit counterexample checked against every hypothesis becomes a finding that the
+  statement is false and gets a second opinion; the step the attack names as least justified
+  gave its proof one more reasoning pass (removed since). The main-results table shows the outcome.
+- The Review has one depth and no effort to choose (the former High); Medium is removed. The
+  typo check, formerly the review at Low, is its own skill: `@typo_check`, `/typo_check`, and
+  "Typo Check" in the New review form. The review no longer reads the paper for typos (a sixth
+  of its output on DS4): its report ends by saying so and naming `@typo_check`. Saved reviews
+  stay readable and resumable: one saved at Low resumes as a typo check, one saved at Medium
+  or High as the review. `@detailed_review` still works as the review.
+- Review, fewer false alarms: a finding said to make a statement false or a proof fail always
+  goes to the reasoning judge, also when the defence of the paper gives way; minor findings
+  that got no second opinion are checked against the paper, twenty per call, and those the
+  paper does not support leave the report; a finding whose quoted words are not in the paper
+  is left out instead of printed with a caveat. The saved job keeps all of them.
+- One Review instead of Review and Detailed review. Low is a typo and presentation check (the
+  paper read for typos, every suggested correction checked against the paper, no proof checked);
+  from Medium every proof of the paper is checked, appendices included, and effort sets how
+  deeply (passes, second opinions, repair checks, lookups). `@detailed_review` and
+  `/detailed_review` remain as aliases of the review at High; saved reviews and detailed
+  reviews stay readable and resume as reviews. Driven by live tests on DS4 against answer keys:
+  a detailed review missed a major error of a main theorem because its proof was in an appendix
+  (never checked), filed a confirmed main-result-breaking error as minor after a re-check
+  accepted an unchecked repair, and printed 2 of the 35 known problems while its checks had
+  noted about 14 in a field the report never read.
+  - Every check reports every problem with its effect (the statement is false, the proof
+    fails, a gap, an imprecision, a misprint); severity follows from the effect.
+  - Each finding gets a second opinion as soon as its proof is checked: a defence of the paper,
+    then a judge; a finding said to break a proof or a statement becomes minor only when a
+    separate check finds the proposed repair to work.
+  - Reads across the whole paper for constants and conventions that change between sections and
+    for claims the paper never establishes; the typo list is checked against the paper (no
+    formula "corrected" into an error, no colleague's name "corrected").
+  - The main results are those the map flags and those the overview names (an appendix-only
+    proof stays main); the report gives each one a status and says which comment affects it and
+    where that comment comes from.
+  - The map reads the paper's own package (`\usepackage{preamble}`) and `.aux` for theorem
+    numbers (Quick review and Explain too: "Lemma A.4" no longer resolves to another lemma), and
+    attaches proofs that run over a whole section ("…: proof of Theorem 1", "In this section we
+    prove Theorem 1.2"); the overview locates the proofs the map still misses and results stated
+    in prose. `\input` files that are only figures no longer make a review partial.
+  - One continuous pool runs every call as soon as what it needs is done, the main results first,
+    and the report is rewritten after each one: the overview and first findings within minutes, a
+    first prose report once the main results are checked and judged. Every call opens with the
+    same text (the paper, its package, its cited bibliography), for providers that cache prompt
+    prefixes. On DS4 a review gets four times the input allowance of other workers and up to
+    16 concurrent calls (the model-request limit now goes to 16).
+  - Speed: hidden reasoning is most of a model's output and the provider caps an account's
+    throughput, so Low and Medium calls answer at once (no hidden reasoning); High reasons only
+    for the second pass on the main results and what they use directly, and for second opinions.
+    The review no longer looks up cited results or searches for novelty (slow calls of their
+    own): it names the closest works the paper cites and suggests a literature review.
+  - Quick review chooses the manuscript among a pinned `.tex`, `.bib` and `.sty`; bibliography
+    keys such as `[Savare]` are no longer reported as unknown source citations.
+
 - Conversations: a whole reference list or bibliography to check is delegated as one check of every entry (never split, never Explore); several supplied URLs are all opened; the Assistant can look up a DOI or arXiv ID's metadata directly; in an interface launched with `--offline` the Assistant no longer offers an online search.
 - Proof: a pause, shutdown or crash no longer charges the interrupted call's whole output cap (384,000 tokens on DS4). The call is charged an estimate from what it streamed (every character, reasoning included, plus 1,024 tokens), never more than its reservation; a provider failure still keeps its reservation. The research runners (Review, Literature review, Write-up, Writing style) and the Assistant's shared allowance use the same rule. Jobs saved by an earlier version are re-charged from their saved streams on resume, and the report lists each change; a proof stopped on its allowance by such charges can be resumed again.
 - Proof: "Model-reviewed proof" is now earned. A response that says the target is missing, open or out of reach, or that rests on the stated output of a program (Proof runs no code), is not accepted even when the verifier raised no objection; the job stops as uncertain and says why. A proof request with no statement ("@prove" alone) is refused before any solve. The Assistant's task brief may no longer widen the deliverable beyond a proof or refutation of the user's statement.
@@ -148,7 +306,7 @@
 - Concurrency set under Parallel work is saved and applies after a restart unless the launch flag is given explicitly.
 - Pausing during a literature lookup stops at once: rate-limit waits, waits for another job's turn at a host and open HTTP requests observe the pause (previously up to ~15 s).
 - Workers no longer comment on the absence of a conflict between the delegated task and the original request.
-- New Literature reviews always use High workflow effort. Previously the
+- User-requested Literature reviews always use High workflow effort. Previously the
   Assistant could give the same request a Low search budget. High allows up to
   500 candidates to be screened and 14 papers in the initial full-text reading
   plan. Explicit resource limits still apply, and saved reviews resume with

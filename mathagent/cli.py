@@ -112,8 +112,9 @@ HELP = '''Commands
   /explore [query]                     Explore approaches and connections
   /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
-  /referee [task]                     Review of the --research-file manuscript: overview, typos, presentation
-  /detailed_review [task]             The same review plus a check of the proofs (more tokens and time)
+  /referee [task]                     Referee report on the --research-file manuscript: every proof checked,
+                                      second opinions, a recommendation (/detailed_review is the same)
+  /typo_check [task]                  Typos and presentation of the --research-file manuscript, corrections checked
   /quick_review [statement + proof]   Is this proof correct? Verdict and located issues; or name a
                                       result of the --research-file manuscript, e.g. "Lemma 3.2"
   /explain [result + proof]           Precise step-by-step explanation of a result and its proof
@@ -209,7 +210,7 @@ def parser():
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise). Literature Review always uses High.')
+    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise). Literature Review always uses High. Review and Typo Check each have one depth.')
     p.add_argument('--research-tokens', type=int, help='Cumulative generated-token ceiling per report (default: effort-based for DS4, unlimited for local profiles)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /resume and /research-resume, recorded in the job')
@@ -242,7 +243,7 @@ def parser():
     p.add_argument('--gui-concurrency', type=int, default=2,
                    help='Maximum active interface chats/jobs (1–8; each keeps its full token budget)')
     p.add_argument('--gui-model-concurrency', type=int, default=2,
-                   help='Maximum simultaneous model requests across interface jobs and workers (1–8)')
+                   help='Maximum simultaneous model requests across interface jobs and workers (1–16)')
     p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
@@ -298,8 +299,8 @@ def main():
         p.error('Request timeout must be finite and positive')
     if not math.isfinite(args.proof_call_seconds) or args.proof_call_seconds <= 0:
         p.error('Proof call seconds must be finite and positive')
-    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 8:
-        p.error('Use gui-concurrency and gui-model-concurrency from 1 to 8')
+    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 16:
+        p.error('Use gui-concurrency from 1 to 8 and gui-model-concurrency from 1 to 16')
     assistant_limit = 5 if remote_profile else 4
     if (not 1 <= args.assistant_concurrency <= assistant_limit
             or args.assistant_tokens is not None and args.assistant_tokens < 4096
@@ -520,7 +521,7 @@ def main():
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
                                   {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
-        elif agent.mode in {'literature', 'referee', 'detailed_review', 'quick_review', 'explain'}:
+        elif agent.mode in {'literature', 'referee', 'detailed_review', 'typo_check', 'quick_review', 'explain'}:
             if args.output and workspace.path(args.output).suffix.lower() != '.md':
                 raise ValueError('--output must be a workspace-relative .md file')
             ensure_model()
@@ -529,8 +530,10 @@ def main():
             if agent.mode == 'literature':
                 runner, kind = ReviewRunner(agent, ui.emit, concurrency=review_concurrency()), 'literature'
             else:
-                variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
+                variant = {'referee': 'review', 'detailed_review': 'review', 'typo_check': 'typos', 'quick_review': 'quick',
+                           'explain': 'explain'}[agent.mode]
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
+                runner.sandbox = sandbox  # the Review's referees compute in the sandbox (policy "review")
             result = runner.start(query, kind=kind,
                 source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('quick_review', 'explain') else 3),
                 max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
@@ -600,7 +603,7 @@ def main():
                     from .terminal_investigation import command as investigation_command
                     last_job_status = investigation_command(command, rest, args, ui)
                 elif command == '/skills':
-                    for name in ('check', 'literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
+                    for name in ('check', 'literature', 'review', 'typo-check', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
                         how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore and /review, or /sanity-check'
@@ -637,6 +640,7 @@ def main():
                         runner = CheckRunner(agent, ui.emit)
                     elif variant:
                         runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
+                        runner.sandbox = sandbox
                     elif saved.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE):
                         # An old reading list stays readable; the runner refuses to resume it.
                         runner = ReviewRunner(agent, ui.emit, concurrency=review_concurrency())

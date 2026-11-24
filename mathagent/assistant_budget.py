@@ -55,7 +55,7 @@ class _Pool:
 class BudgetClient:
     def __init__(self, client, *, state=None, max_tokens=None, max_input_tokens=None,
                  max_seconds=900, checkpoint=lambda: None, concurrency=2, pool=None,
-                 allowance=None, usage=None, adaptive_limits=None, deadline=None, input_allowance=None):
+                 allowance=None, usage=None, adaptive_limits=None, deadline=None, input_allowance=None, slots=None):
         self.client = client
         self.deadline = deadline
         self._admitted = threading.local()
@@ -85,6 +85,9 @@ class BudgetClient:
         self.pool = pool or _Pool(budget, checkpoint, concurrency)
         self.allowance = allowance
         self.input_allowance = input_allowance
+        # A worker with its own inference slots (the Review's referees and judges) instead of the tree's: its calls
+        # still go through the interface's model-request pool and are charged to the shared budget.
+        self.slots = slots if slots is not None else self.pool.slots
         self.usage = usage if usage is not None else {'tokens': 0, 'input_tokens': 0}
 
     def __getattr__(self, name):
@@ -114,10 +117,10 @@ class BudgetClient:
     def timeout(self, value):
         self.client.timeout = value
 
-    def fork(self, client, *, allowance, usage, max_seconds=None, input_allowance=None):
+    def fork(self, client, *, allowance, usage, max_seconds=None, input_allowance=None, slots=None):
         deadline = None if max_seconds is None else time.monotonic() + max_seconds
         return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage, deadline=deadline,
-                            input_allowance=input_allowance)
+                            input_allowance=input_allowance, slots=slots)
 
     def adopt(self, *, tokens, input_tokens, seconds, commit=True):
         """Validate and optionally freeze absolute approved totals, including framing.
@@ -208,7 +211,7 @@ class BudgetClient:
             self.pool.admission_change(queued=1)
         acquired, active, waiting = False, False, exempt
         try:
-            while not self.pool.slots.acquire(timeout=0.05):
+            while not self.slots.acquire(timeout=0.05):
                 if cancel is not None and cancel.is_set():
                     raise KeyboardInterrupt
                 if deadline is not None and time.monotonic() >= deadline:
@@ -236,7 +239,7 @@ class BudgetClient:
                 self._admitted.waiting_since = None
             self.pool.admission_change(queued=-int(waiting), active=-int(active))
             if acquired:
-                self.pool.slots.release()
+                self.slots.release()
 
     def stream(self, payload):
         admitted = False
@@ -252,15 +255,27 @@ class BudgetClient:
                 raise AssistantBudget('Assistant inference timed out during generation.') from exc
             raise AssistantAdmissionRefused('Assistant time budget exhausted while waiting for inference.') from exc
 
-    def _settle_input(self, estimate, measured):
-        """Replace the admission estimate by the provider's prompt count, as research and review do.
+    @property
+    def remaining_input_tokens(self):
+        """Input tokens this worker may still send: the tree's input limit and the worker's own input allowance."""
+        with self.pool.lock:
+            limit = self.pool.state['max_input_tokens']
+            remaining = math.inf if limit is None else max(0, limit - self.pool.state['input_tokens'])
+            if self.input_allowance is not None:
+                remaining = min(remaining, max(0, self.input_allowance - self.usage['input_tokens']))
+            return remaining
 
-        The byte-based estimate only admits the call; the meter and later input-limit checks use what
-        the provider reports. An absent or malformed count keeps the estimate.
-        """
-        if type(measured) is int and measured >= 0:
-            self.pool.state['input_tokens'] = max(0, self.pool.state['input_tokens'] + measured - estimate)
-            self.usage['input_tokens'] = max(0, self.usage['input_tokens'] + measured - estimate)
+    def _settle_input(self, counted, reserved):
+        """Replace a call's input reservation by the provider's count once the call ends (under the pool lock).
+
+        The reservation is an upper bound (a byte count where no tokenizer answers, about three times the real
+        tokens): kept, it would exhaust the tree's input pool long before the provider's own count does. A call that
+        ends without a count keeps its reservation. Returns the amount now charged for the call."""
+        if type(counted) is not int or counted < 0:
+            return reserved
+        self.pool.state['input_tokens'] = max(0, self.pool.state['input_tokens'] + counted - reserved)
+        self.usage['input_tokens'] = max(0, self.usage['input_tokens'] + counted - reserved)
+        return counted
 
     def _settle_estimate(self, cap, streamed):
         """A call stopped here with no usage report: charge the streamed estimate, not the whole cap (call_policy)."""
@@ -329,7 +344,7 @@ class BudgetClient:
                             self.pool.state['tokens'] -= cap - used
                             self.usage['tokens'] -= cap - used
                             self.pool.state['measured_tokens'] += used
-                        self._settle_input(count, event.get('prompt_eval_count'))
+                        count = self._settle_input(event.get('prompt_eval_count'), count)
                     self.pool.checkpoint()
                 yield event
         except (AgentError, KeyboardInterrupt) as exc:
@@ -353,7 +368,7 @@ class BudgetClient:
                     self.pool.state['tokens'] += used - cap
                     self.usage['tokens'] += used - cap
                     self.pool.state['measured_tokens'] += used
-                    self._settle_input(count, exc.stats.get('prompt_eval_count'))
+                    count = self._settle_input(exc.stats.get('prompt_eval_count'), count)
                 raise
             if reserved and not charged and isinstance(exc, KeyboardInterrupt):
                 self._settle_estimate(cap, streamed)

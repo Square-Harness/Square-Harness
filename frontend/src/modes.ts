@@ -46,7 +46,7 @@ export const MODES: Record<Mode, ModeInfo> = {
   },
   referee: {
     mode: 'referee', label: 'Review', historyLabel: 'Review history', glyph: '¶', kind: 'research',
-    summary: 'Check a proof, review a manuscript, review it in detail or explain a result, with line-level citations.',
+    summary: 'Check a proof, review a manuscript, check its typos or explain a result, with line-level citations.',
     newLabel: 'New review', empty: 'No reviews yet.',
   },
   writeup: {

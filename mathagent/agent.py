@@ -126,6 +126,7 @@ class Agent:
                    (getattr(self, 'personal_context', ''), getattr(self, 'project_context', '')) if value]
         schemas = self.workspace.schemas()
         round_no, answer_now, forced_final = -1, False, False
+        continued = 0
         while True:
             round_no += 1
             tools = schemas if round_no < self.max_rounds and not answer_now else []
@@ -222,6 +223,16 @@ class Agent:
                 continue
             exhausted = self.last_stats.get('done_reason') == 'length'
             empty_after_tool = recover_empty_tool_answer and round_no > 0 and not exhausted
+            note = getattr(self, 'continue_after_length', '')
+            if (note and exhausted and not assistant['content'].strip() and not answer_now
+                    and round_no + 1 < self.max_rounds and continued < getattr(self, 'continue_limit', 3)):
+                # A tool loop (the Review's referees) whose round used its whole allowance thinking: the loop goes on
+                # with its tools, given the end of that reasoning, instead of stopping with a final answer.
+                continued += 1
+                emit('notice', 'Output limit reached while reasoning; continuing with the tools.')
+                messages.append({'role': 'user', 'content': note + '\n\nTHE END OF YOUR REASONING SO FAR (not kept '
+                                 'otherwise):\n' + thinking[-getattr(self, 'continue_tail', input_limit(self, 'recovery_note', 4000)):]})
+                continue
             if not assistant['content'].strip() and not answer_now and (exhausted or empty_after_tool):
                 # The reasoning (or an unfinished tool call) used the whole allowance, or a worker wrote
                 # nothing after its tool results: one more call, without reasoning or tools, asks for

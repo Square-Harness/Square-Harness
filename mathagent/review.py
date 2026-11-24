@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Four review workflows: a quick proof check, paper review, detailed review and explanation.
+"""Three review workflows: a quick proof check, the referee report on a paper, and an explanation.
 
 The controller does the systematic work. It maps the manuscript (manuscript.py), picks
 the proofs to check, gives each model call one proof with exactly what it needs, runs
@@ -14,6 +14,7 @@ A review is a model draft that needs human judgment, never a certificate.
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -35,17 +36,25 @@ from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
-from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
+from .typocheck import TypoLanes
 
-# 'review' reads the paper (overview, typos); 'journal' is the detailed review that also checks the proofs.
-VARIANTS = ('quick', 'review', 'journal', 'explain')
-PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v1', 'journal': 'journal-v1', 'explain': 'explain-v1'}
-SKILLS = {'quick': 'review-quick', 'review': 'review', 'journal': 'referee', 'explain': 'explain'}
-TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'journal': 'Detailed referee report', 'explain': 'Explanation'}
-MANUSCRIPT_VARIANTS = ('review', 'journal')  # they need a pinned manuscript
-LEVELS = ('low', 'medium', 'high')
+# 'review' is the referee report on a whole paper (every proof checked, one depth, no effort to choose); 'typos' is
+# the typo check, the paper read for typos and presentation only.
+VARIANTS = ('quick', 'review', 'typos', 'explain')
+PIPELINES = {'quick': 'proof-check-v1', 'review': 'review-v2', 'typos': 'typo-check-v1', 'explain': 'explain-v1'}
+# Saved jobs of the retired split between a review (overview and typos) and a detailed review (also the proofs):
+# both are read, and resumed, as one review.
+LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
+# The Review with free referees and an independent judge (referee.RefereeRunner); it keeps 'review-v2' (the pipeline of
+# this module) when the whole paper does not fit the model's context.
+V4_PIPELINE = 'review-v4'
+SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
+TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
+MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
+LEVELS = ('low', 'medium', 'high')  # of a quick check and an explanation; a review and a typo check have none
 
 
 def full_review_requested(query):
@@ -66,17 +75,17 @@ def full_review_requested(query):
                      r'\b(?:relis|relire)\s+(?:tout\s+)?(?:le\s+|cet\s+|ce\s+|l.)?(?:article|papier|manuscrit)\b', clause):
             return True
     return False
-# Per effort: verifier passes (quick), how far the detailed review goes (depth, passes on a main result and on
-# the others, re-checks), cited results looked up in their source, literature queries, and explanation extras.
-# Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
+# Per effort, for a quick check and an explanation: verifier passes and whether alleged errors are re-checked;
+# explanation extras. Jobs saved with the retired 'xhigh' and 'poincare' levels resume as 'high'.
 EFFORT = {
-    'low': dict(passes=1, confirm=False, depth=0, appendix=False, main_passes=1, other_passes=1, rechecks=0,
-                cited=0, queries=0, explain_check=False, fills=1),
-    'medium': dict(passes=2, confirm=True, depth=1, appendix=False, main_passes=2, other_passes=1, rechecks=12,
-                   cited=2, queries=2, explain_check=True, fills=1),
-    'high': dict(passes=3, confirm=True, depth=None, appendix=False, main_passes=2, other_passes=1, rechecks=24,
-                 cited=4, queries=3, explain_check=True, fills=2),
+    'low': dict(passes=1, confirm=False, explain_check=False, fills=1),
+    'medium': dict(passes=2, confirm=True, explain_check=True, fills=1),
+    'high': dict(passes=3, confirm=True, explain_check=True, fills=2),
 }
+# The one depth of a paper review (the High of the retired Low/Medium/High): passes on the main results and what
+# they use directly (depth 1) and on the other proofs, the sweeps across the paper, and how many findings get a
+# second opinion. A saved Medium or High review resumes at this depth; a saved Low review resumes as a typo check.
+PAPER = dict(main_passes=2, other_passes=1, depth=1, sweeps=('consistency', 'completeness'), adjudications=16)
 FINE_LINES = 60  # proofs up to this many lines are explained line by line
 # Explain: the part of a text a request names when it names no numbered result.
 PAGE_REQUEST = re.compile(r'\b(?:pages?|p\.|pp\.)\s*(\d{1,4})(?:\s*(?:-|–|—|to|à|and|et)\s*(\d{1,4}))?\b', re.I)
@@ -108,29 +117,79 @@ _SOURCE_REMARK = re.compile(r'\b(?:macros?|LaTeX|source code|source file|compil\
 RANK = {'invalid_inference': 2, 'missing_justification': 1, 'uncertainty': 0}
 # A presentation item whose own text concludes that there is nothing to fix (measured on DS4: about a third of
 # the typo list of a whole-paper reading ended "Correct." or "Fine.").
+# Pseudo-units of the paper review: findings that come from reading the whole paper rather than one proof.
+SWEEP_UNITS = {'consistency': 'CONSISTENCY', 'completeness': 'COMPLETENESS'}
+PSEUDO_UNITS = (CITE, 'CONSISTENCY', 'COMPLETENESS')
+PSEUDO_NAMES = {CITE: 'Results cited from the literature', 'CONSISTENCY': 'Consistency between the parts of the paper',
+                'COMPLETENESS': 'Claims the paper does not establish'}
+EFFECT_LABEL = {'statement_false': 'The statement is false', 'breaks_proof': 'The proof fails', 'gap': 'Gap',
+                'imprecision': 'Imprecision', 'misprint': 'Misprint'}
+BLOCK_LINES = 150  # a longer proof environment is checked line by line in parts, with the whole paper in view
+PART_LINES = 110
+# An answer without hidden reasoning: the longest measured (a proofreading part, DS4) was 11k tokens. A call
+# reserves its whole cap from the job's allowance while it runs, so a thinking call's 131k cap would block others.
+DIRECT_CAP = 32_768
+# A call that reasons first: a proof check writes 15-30k tokens. Live, one call ran 13.6 minutes to a 131k cap and
+# its answer was discarded; at about 600 tokens per second this cap ends a call after about a minute.
+REASONING_CAP = 40_000
+READ_FOCUS_LINES, READ_FOCUS_BYTES = 220, 40_000  # one proofreading call per part, the whole paper in view
+TYPO_BATCH = 40  # remarks checked against the paper per call
+TYPOS_NOT_CHECKED = ('*Typos and presentation were not checked by this review. For those, run a typo check on the same '
+                     'file: `@typo_check`.*')
+MINOR_BATCH = 20  # minor findings without a second opinion checked against the paper per call
+ATTACKS = 4  # main results whose statement is attacked for a counterexample, at most
+
+
+_NO_CHANGE = re.compile(r'(?i)\bno (?:change|correction|repair|fix)(?:es)? (?:is |are )?(?:needed|required|necessary)\b'
+                        r'|\bnothing to (?:fix|change)\b')
+_CORRECT_AS_IS = re.compile(r'(?i)(?<!not )(?<!n\'t )\bcorrect as (?:written|stated)\b')
+
+
+def _few(labels, shown=4):
+    """"Minor 1, Minor 2, Minor 3, Minor 4 and 11 more"."""
+    return ', '.join(labels[:shown]) + (f' and {len(labels) - shown} more' if len(labels) > shown else '')
+
+
+def _effect_rank(effect):
+    """4 for a false statement down to 0 for a misprint; -1 when unknown."""
+    return len(P.EFFECTS) - 1 - P.EFFECTS.index(effect) if effect in P.EFFECTS else -1
+
+
 _NOT_A_PROBLEM = re.compile(r'(?i)(?:(?:^|[.;:]\s*)|\b(?:is|are|looks|seems)\s+)(?:this is |the (?:text|sentence|statement|formula) is )?'
                             r'(?:correct|fine|ok|consistent|accurate)(?: as (?:written|stated))?\.?\s*$'
                             r'|\bno (?:error|issue|problem|typo)s?\b(?: here| found)?\.?\s*$')
 
 
 def level_for(rounds):
-    """The effort level for a new review (Low 1, Medium 3, High 5 or more)."""
+    """The effort level of a new quick check or explanation (Low 1, Medium 3, High 5 or more)."""
     rounds = int(rounds)
     return 'low' if rounds <= 1 else 'medium' if rounds <= 3 else 'high'
 
 
 def runner_class(variant):
-    return {'quick': QuickReviewRunner, 'review': SummaryReviewRunner, 'journal': JournalRunner, 'explain': ExplainRunner}[variant]
+    """The runner of a new job of a review kind; 'journal' (the retired detailed review) is the review, which starts
+    as review-v4 and keeps the v3 pipeline when the whole paper does not fit the context."""
+    if variant in ('review', 'journal'):
+        from .referee import RefereeRunner  # it extends PaperReviewRunner
+        return RefereeRunner
+    return {'quick': QuickReviewRunner, 'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
 
 
 def variant_for_state(state):
-    """quick, journal or explain for a saved review job; None for older referee jobs."""
-    return next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline), None)
+    """quick, review, typos or explain for a saved review job; None for older referee jobs. A review saved at Low
+    effort, when the typo check was the review's lowest effort, is a typo check."""
+    variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
+                   LEGACY_PIPELINES.get(state.get('pipeline')))
+    if state.get('pipeline') == V4_PIPELINE:
+        variant = 'review'
+    return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
 
 def runner_for_state(state):
     """The runner that resumes a saved referee job (older jobs keep the generic research loop)."""
     variant = variant_for_state(state)
+    if variant == 'review' and state.get('pipeline') != V4_PIPELINE:
+        return PaperReviewRunner  # saved v2/v3 jobs resume with their own pipeline
     return runner_class(variant) if variant else ResearchRunner
 
 
@@ -268,18 +327,6 @@ def _clip(text, limit):
     return (cut[:end].rstrip() if end else cut.rsplit(' ', 1)[0]) + ' […]'
 
 
-def _same_work(reference, entry):
-    """Whether a check's reference ("Authors, *Title* (year)") is the manuscript's cited work: an author's
-    surname and most of the title's words appear in the entry."""
-    words = lambda text: set(re.findall(r'[a-z]{4,}', _fold_text(text)))
-    who, _, title = reference.partition('*')
-    surnames = {w for w in re.findall(r'[a-z]{2,}', _fold_text(who)) if len(w) > 1} - {'and', 'unknown', 'author'}
-    cited = words(entry)
-    title_words = words(title or who) - {'with', 'from', 'that', 'this', 'their', 'into', 'over', 'under'}
-    return (bool(surnames & set(re.findall(r'[a-z]{2,}', _fold_text(entry))))
-            and len(title_words) >= 1 and len(title_words & cited) >= max(1, (2 * len(title_words) + 2) // 3))
-
-
 def _numbered_comment(report, excerpt):
     """(section, number) of the report's numbered comment that contains this excerpt, or None. A comment runs
     from its "N. " line through the indented paragraphs that follow it."""
@@ -313,25 +360,6 @@ def _shown_report(report):
     return text[:-len('---')].rstrip() if text.endswith('\n---') else text
 
 
-class _OwnTimeout:
-    """The shared model client with a timeout attribute of its own. Concurrent cited-result lookups set and
-    restore their timeout on it without changing the one other calls read; streams still obey the shared
-    client's (the review's) deadline. A wrapper, not a copy: GUI clients delegate their attributes."""
-
-    def __init__(self, client):
-        object.__setattr__(self, '_client', client)
-        object.__setattr__(self, 'timeout', getattr(client, 'timeout', None))
-
-    def __getattr__(self, name):
-        return getattr(object.__getattribute__(self, '_client'), name)
-
-    def __setattr__(self, name, value):
-        if name == 'timeout':
-            object.__setattr__(self, name, value)
-        else:
-            setattr(object.__getattribute__(self, '_client'), name, value)
-
-
 def _fold_text(text):
     import unicodedata
     return ''.join(c for c in unicodedata.normalize('NFKD', str(text).lower()) if not unicodedata.combining(c))
@@ -346,10 +374,11 @@ class ReviewBase(ResearchRunner):
     TERMINAL = ('reviewed', 'budget_violation')
     POLICY = P.POLICY
     VARIANT = None
+    DROP_UNLOCATED = False  # the paper review leaves out a finding whose quote is not in the source
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
-        concurrency_limit = 5 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        concurrency_limit = 16 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
         self.concurrency = max(1, min(concurrency_limit, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
@@ -371,28 +400,15 @@ class ReviewBase(ResearchRunner):
             if (self.state.get('review_reference') or {}).get('followup'):
                 phase = 'followup'
             elif self.VARIANT in MANUSCRIPT_VARIANTS:
-                phase = 'read' if self._unread_parts() else 'scope'
-                self.state['write'] = None
+                phase = self._resume_phase()
+                self.state.update(write=None, merged=None)
             elif self.VARIANT == 'quick':
                 phase = 'verify'
             else:
                 phase = 'explain'
             self.state.update(status='paused', phase=phase, active_checkpoint_wall=None)
             self._save()
-        self._reopen_rechecks()
         return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
-
-    def _reopen_rechecks(self):
-        """A job saved by an older version may group alleged issues differently: its re-checks are kept under
-        the old line ranges and never reused for other lines. Go back to the re-check phase for the new groups."""
-        s = self.state
-        if s.get('phase') not in ('literature', 'write') or not s.get('confirms') or not self.effort['confirm']:
-            return
-        units = list(s.get('plan_units') or []) + [CITE]
-        keys = {c['key'] for uid in units for c in self._clusters(uid) if c['kind'] != 'uncertainty'}
-        if keys - set(s['confirms']) and set(s['confirms']) - keys:
-            s.update(phase='confirm', write=None, merged=None)
-            self._save()
 
     def _check_time(self):
         super()._check_time()
@@ -644,6 +660,10 @@ class ReviewBase(ResearchRunner):
                 raise
             return result
 
+    def _admit_call(self, role, cap, input_tokens):
+        """A last check before a call is charged (under the mutex): raise to refuse it. The Review keeps a share of
+        the allowance for its judges this way."""
+
     @retry_generation_call
     def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None,
                   reference=True):
@@ -655,7 +675,7 @@ class ReviewBase(ResearchRunner):
             self._check_time()
             settings = self.state['settings']
             reserve = self._write_reserve() if is_ds4(self.agent) and self.state['phase'] in {
-                'read', 'scope', 'check', 'confirm', 'literature'} else 0
+                'audit', 'read', 'scope', 'check', 'confirm', 'literature'} else 0
             cap = int(min(self._cap(cap), self._tokens_left(reserve)))
             if cap < 128:
                 raise ResearchBudget('Generated-token budget exhausted')
@@ -674,6 +694,7 @@ class ReviewBase(ResearchRunner):
                 raise WorkerInputError(str(exc), code='context_overflow', scope='context', details=exc.details) from None
             cap = payload['options']['num_predict']
             estimated, counting_method = allocation['input_tokens'], allocation['method']
+            self._admit_call(role, cap, estimated)
             if estimated > self._input_left():
                 raise ResearchBudget('Input-token budget exhausted')
             request = self._artifact(role + '-request', json.dumps(payload, ensure_ascii=False, indent=2))
@@ -684,7 +705,7 @@ class ReviewBase(ResearchRunner):
             self.state['tokens_charged'] += cap
             self.state['input_tokens_charged'] += estimated
             self._save()
-        text, done, stats, stream = '', False, {}, None
+        text, thinking, done, stats, stream = '', '', False, {}, None
         started = self._elapsed()
         try:
             fd = os.open(self.directory / 'artifacts' / stream_name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
@@ -693,7 +714,9 @@ class ReviewBase(ResearchRunner):
                 for event in stream:
                     output.write(json.dumps(event, ensure_ascii=False) + '\n')
                     output.flush()
-                    text += event.get('message', {}).get('content', '')
+                    message = event.get('message', {})
+                    text += message.get('content', '')
+                    thinking += ''.join(message.get(k) or '' for k in ('thinking', 'reasoning', 'reasoning_content'))
                     if event.get('done'):
                         done = True
                         stats = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'done_reason') if k in event}
@@ -725,7 +748,7 @@ class ReviewBase(ResearchRunner):
         if value is not None and degenerate(text):
             self._warn(f'A {role} answer fell into a repetition loop and was discarded.')
             value = None
-        return {'text': text, 'complete': complete, 'value': value, 'output_limit': cap}
+        return {'text': text, 'complete': complete, 'value': value, 'output_limit': cap, 'thinking': thinking}
 
     def _wave(self, jobs, admit=None):
         """Run independent jobs [(key, fn)]; each fn stores its own result. Re-raise the first failure.
@@ -807,14 +830,17 @@ class ReviewBase(ResearchRunner):
             self.state['source_incomplete'] = True
             self._warn('Archive members were not assembled into a TeX document (no file with \\documentclass was found); '
                        'this review concerns the selected member and cannot confirm cross-file numbering or omitted dependencies.')
-        mapping = manuscript.build(source['content'], source['path'])
+        preamble, aux = self._packages(source)
+        mapping = manuscript.build(source['content'], source['path'], preamble=preamble, aux=aux)
         if source['path'].lower().endswith(('.tex', '.ltx', '.latex')):
-            inputs = re.findall(r'\\(?:input|include|subfile)\s*\{([^}]+)\}', source['content'])
-            if inputs and source.get('line_map') is None:  # an assembled archive reports its unresolved includes itself
+            inputs = [name for name in re.findall(r'\\(?:input|include|subfile)\s*\{([^}]+)\}', source['content'])
+                      if not self._figure_input(source, name)]
+            if inputs and source.get('line_map') is None:
                 mapping['warnings'].append('External TeX inputs were not expanded: ' + ', '.join(dict.fromkeys(inputs)) + '. Their proofs are outside this review.')
                 self.state['source_incomplete'] = True
             bibliography_sources = [s for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() in ('.bib', '.bbl')]
-            names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'])
+            # biblatex's \addbibresource often stands in the paper's own package (preamble.sty), read just above.
+            names = re.findall(r'\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'] + '\n' + preamble)
             for name in (n.strip() for group in names for n in group.split(',')):
                 if source.get('source_archive'):
                     continue  # Bibliography members are already pinned; never resolve an archive path on disk.
@@ -909,6 +935,57 @@ class ReviewBase(ResearchRunner):
         return ['', 'Line numbers of the assembled manuscript (the numbered excerpts, L…) map to the archive files as '
                 'follows: ' + '; '.join(runs) + ('; …' if len(line_map) > 40 else '') + '.']
 
+    def _workspace_text(self, name, limit=500_000):
+        """A file next to the manuscript, or None (missing, unreadable, too large, or outside the allowed folders)."""
+        try:
+            path = self.agent.workspace.path(name)
+            if not path.is_file() or path.stat().st_size > limit:
+                return None
+            return decode_text(path.read_bytes(), name)[0]
+        except (ValueError, OSError, UnicodeError):
+            return None
+
+    def _packages(self, source):
+        """The paper's own packages (\\usepackage{preamble} next to it, or a pinned .sty or .cls) and its .aux file:
+        their theorem declarations and the numbers LaTeX printed, so that "Lemma A.4" means what the paper says."""
+        if not source['path'].lower().endswith(('.tex', '.ltx', '.latex')) or source.get('source_archive'):
+            return '', ''
+        packages, aux = [], ''
+        for pinned in self.state['sources'][1:]:
+            suffix = Path(pinned['path']).suffix.lower()
+            if suffix in ('.sty', '.cls'):
+                packages.append({'path': pinned['path'], 'content': pinned['content']})
+            elif suffix == '.aux':
+                aux = pinned['content']
+        folder = Path(source['path']).parent
+        names = [n.strip() for group in re.findall(r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}', source['content'])
+                 for n in group.split(',') if n.strip()]
+        for name in [str(folder / (n + '.sty')) for n in names]:
+            if not any(Path(p['path']).name == Path(name).name for p in packages):
+                text = self._workspace_text(name)
+                if text is not None:
+                    packages.append({'path': name, 'content': text})
+        if not aux:
+            aux = self._workspace_text(str(folder / (Path(source['path']).stem + '.aux')), 5_000_000) or ''
+        preamble = '\n'.join(p['content'] for p in packages)
+        if len(preamble) > 60_000:
+            for package in packages:
+                package['content'] = ''  # its declarations are read; too large to repeat in every prompt
+        self.state['packages'] = packages
+        if packages or aux:
+            read = [Path(p['path']).name for p in packages] + (['the .aux file'] if aux else [])
+            self.emit('notice', f'Read {", ".join(read)} for the theorem numbering')
+        return preamble, aux
+
+    def _figure_input(self, source, name):
+        """An \\input file that holds no section, statement or proof (a picture, a table): nothing to review."""
+        if source.get('source_archive'):
+            return False
+        path = str(Path(source['path']).parent / (name if Path(name).suffix else name + '.tex'))
+        text = self._workspace_text(path)
+        return text is not None and not re.search(r'\\(?:section|subsection|begin\{(?:proof|theorem|lemma|proposition|corollary|'
+                                                  r'thm|lem|prop|cor)\})', text)
+
     def _whole_fits(self):
         """Whether every check and the reading see the whole manuscript: a pinned file that fits a large context.
 
@@ -959,7 +1036,8 @@ class ReviewBase(ResearchRunner):
                                   and (named(source['source_archive']) or named(Path(source['source_archive']).name))])
             matches = archives if len(archives) == 1 else []
         if not matches and self.VARIANT in ('quick', 'explain'):
-            matches = documents([source for source in sources if manuscript.resolve(
+            # A .bib, a .sty or an .aux pinned with the paper is not where a result is stated.
+            matches = documents([source for source in (manuscripts or sources) if manuscript.resolve(
                 manuscript.build(source['content'], source['path']), self.state.get('target') or request)])
         if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
             # Several manuscripts and none named: ask, never review whichever happens to come first.
@@ -1240,15 +1318,15 @@ class ReviewBase(ResearchRunner):
         wanted = self._model_cap('review_check', self.CHECK_CAP)
         return wanted if self._thinks(wanted) else self._model_cap('review_direct', 3000)
 
-    def _check_jobs(self, unit, lenses, journal=False, notation=()):
+    def _check_jobs(self, unit, lenses, notation=()):
         """Jobs still needed by a pinned plan of review strategies and proof parts."""
         cap = self._check_cap()
-        room = self._room(cap, P.check_prompt('line', '', journal))
+        room = self._room(cap, P.check_prompt('line', ''))
         plans = self.state.setdefault('check_plan', {})
         plan = plans.get(unit['id'])
         if plan is None:
-            segments = self._segments(unit, room, notation, prompt=lambda packet: P.check_prompt('line', packet, journal),
-                                      cap=cap, output_schema=P.check_schema(journal))
+            segments = self._segments(unit, room, notation, prompt=lambda packet: P.check_prompt('line', packet),
+                                      cap=cap, output_schema=P.check_schema())
             plan = []
             for index, lens in enumerate(lenses):
                 for part, (segment, _, _) in enumerate(segments):
@@ -1267,17 +1345,17 @@ class ReviewBase(ResearchRunner):
             previous = self.state['checks'].get(key)
             if previous is not None and previous.get('usable') and (segment is None or previous.get('segment') == segment):
                 continue
-            jobs.append((key, self._check_job(key, unit, item['lens'], packet, ranges, segment, journal,
+            jobs.append((key, self._check_job(key, unit, item['lens'], packet, ranges, segment,
                                               item['pass_index'], item['part'], item['parts'])))
         return jobs, max(packet_sizes, default=0) // 3 + 1500
 
-    def _check_job(self, key, unit, lens, packet, ranges, segment, journal, pass_index=0, part=0, parts=1):
+    def _check_job(self, key, unit, lens, packet, ranges, segment, pass_index=0, part=0, parts=1):
         def run():
             self.emit('notice', f'Checking {unit["name"]}: {lens} pass' + (f', part {part + 1}/{parts}' if parts > 1 else ''))
             self._mark(unit['source'], ranges)
-            result = self._judge('check', P.check_prompt(lens, packet, journal), cap=self._check_cap(),
-                                 schema=P.check_schema(journal), key=key)
-            parsed = self._parse_check(result, unit, segment, journal)
+            result = self._judge('check', P.check_prompt(lens, packet), cap=self._check_cap(),
+                                 schema=P.check_schema(), key=key)
+            parsed = self._parse_check(result, unit, segment)
             parsed.update(lens=lens, unit=unit['id'], pass_index=pass_index, part=part, parts=parts, segment=segment)
             with self._mutex:
                 self.state['checks'][key] = parsed
@@ -1328,7 +1406,7 @@ class ReviewBase(ResearchRunner):
     def _checks_complete(self, unit_id):
         return self._check_coverage(unit_id)['complete']
 
-    def _parse_check(self, result, unit, segment, journal):
+    def _parse_check(self, result, unit, segment):
         value = result['value']
         if value is None:
             return {'usable': False, 'error': 'The answer was not usable JSON' + ('' if result['complete'] else ' (cut at the output limit)'),
@@ -1342,8 +1420,6 @@ class ReviewBase(ResearchRunner):
             issue = {'start_line': _int(item.get('start_line')), 'end_line': _int(item.get('end_line')),
                      'quote': str(item.get('quote') or '')[:200], 'kind': kind,
                      'evidence': _clip(item.get('evidence'), 2500), 'suggestion': _clip(item.get('suggestion'), 1500)}
-            if journal:
-                issue['severity'] = 'major' if item.get('severity') == 'major' else 'minor'
             if issue['end_line'] < issue['start_line']:
                 issue['end_line'] = issue['start_line']
             issue['located'] = self._locate(issue, unit['source'], allowed)
@@ -1354,13 +1430,8 @@ class ReviewBase(ResearchRunner):
             verdict = 'issues_found' if concrete else 'uncertain'
         elif verdict == 'issues_found' and not concrete:
             verdict = 'uncertain'
-        parsed = {'usable': True, 'verdict': verdict, 'explanation': _clip(value.get('explanation'), 3000), 'issues': issues,
-                  'claimed': value.get('verdict') == 'issues_found' and not concrete}
-        if journal:
-            parsed['external'] = [{'key': str(e.get('key') or '')[:40], 'place': str(e.get('place') or '')[:80],
-                                   'used_for': str(e.get('used_for') or '')[:300]}
-                                  for e in value.get('external') or [] if isinstance(e, dict) and e.get('key')][:4]
-        return parsed
+        return {'usable': True, 'verdict': verdict, 'explanation': _clip(value.get('explanation'), 3000), 'issues': issues,
+                'claimed': value.get('verdict') == 'issues_found' and not concrete}
 
     def _locate(self, issue, source_id, allowed):
         """'exact' or 'approximate' when the quote is at the cited lines (moved there if it is elsewhere in the proof), else 'no'."""
@@ -1426,6 +1497,9 @@ class ReviewBase(ResearchRunner):
                      'located': best['located'], 'unlocated': bool(cluster.get('unlocated'))}
             if any('severity' in i for i in cluster['items']):
                 entry['severity'] = 'major' if any(i.get('severity') == 'major' for i in cluster['items']) else 'minor'
+                # The consequence of the gravest report; checks saved before effects existed had a severity only.
+                effects = [i.get('effect') or ('breaks_proof' if i.get('severity') == 'major' else 'gap') for i in cluster['items']]
+                entry['effect'] = max(effects, key=_effect_rank)
             entry['key'] = f'{unit_id}:L{entry["start_line"]}-L{entry["end_line"]}:{kind}'
             if entry['unlocated'] or any(e['key'] == entry['key'] for e in out):
                 entry['key'] += ':' + hashlib.sha256((entry['quote'] + entry['evidence']).encode()).hexdigest()[:12]
@@ -1486,7 +1560,8 @@ class ReviewBase(ResearchRunner):
                 cluster['kind'] = confirm['kind']
                 if 'severity' in cluster and confirm.get('severity'):
                     cluster['severity'] = confirm['severity']  # the re-check judged the consequence
-        statuses = {c['status'] for c in clusters if not (c['unlocated'] and c['status'] != 'confirmed')}
+        judged = [c for c in clusters if not (self.DROP_UNLOCATED and c['unlocated'])]
+        statuses = {c['status'] for c in judged if not (c['unlocated'] and c['status'] != 'confirmed')}
         # "Uncertain" needs a named undecided point: a pass that found no gap but answered "uncertain" does not
         # make the verdict uncertain.
         if 'confirmed' in statuses:
@@ -1494,7 +1569,7 @@ class ReviewBase(ResearchRunner):
         elif 'unconfirmed' in statuses:
             verdict = 'issues_alleged'
         elif (statuses & {'undecided', 'uncertainty'}
-              or any(c['unlocated'] and c['status'] != 'rejected' for c in clusters)
+              or any(c['unlocated'] and c['status'] != 'rejected' for c in judged)
               or any(c.get('claimed') for c in usable)
               or not self._checks_complete(unit_id)):
             verdict = 'uncertain'
@@ -1558,7 +1633,7 @@ class ReviewBase(ResearchRunner):
     def _write_report(self, body, appendix):
         s = self.state
         previous_draft = s.get('draft')
-        head = [f'# {TITLES[self.VARIANT]}', '',
+        head = [f'# {self._report_title()}', '',
                 '**Model draft — a fallible review by a language model, not a certificate.**', '']
         if s.get('stop_reason') and s['status'] != 'reviewed':
             head += [s['stop_reason'], '']
@@ -1570,12 +1645,18 @@ class ReviewBase(ResearchRunner):
         if notes:
             tail += ['## Limits of this review', ''] + ['- ' + n for n in notes] + ['']
         tail += appendix + ['', '## Usage', '',
-                            f'Status: `{s["status"]}`. Phase: `{s["phase"]}`. Effort: {s.get("level")}. Job ID: `{s["id"]}`.', '',
+                            f'Status: `{s["status"]}`. Phase: `{s["phase"]}`.{self._effort_note()} Job ID: `{s["id"]}`.', '',
                             self._usage(), '',
                             'state.json keeps the pinned source, the map, every check and re-check; artifacts/ keeps each request and streamed answer.']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(head + body + tail)))
         if s['draft'] != previous_draft:
             self._save()  # GUI detail reads state.json, including after the final report is assembled.
+
+    def _report_title(self):
+        return TITLES[self.VARIANT]
+
+    def _effort_note(self):
+        return f' Effort: {self.state.get("level")}.'
 
     def _report(self):
         with self._mutex:  # running jobs change the state; render and save one consistent snapshot
@@ -1593,8 +1674,10 @@ class ReviewBase(ResearchRunner):
     def _finish(self):
         body, appendix = self._render()
         self.state['draft'] = '\n'.join(([self._headline, ''] if getattr(self, '_headline', '') else []) + body + ['', *appendix])
+        # A bibliography key in brackets ([Savare], [S12]) is a citation of the manuscript, not a source id.
+        keys = {f'Unknown source citation: [{key}]' for key in ((self.state.get('map') or {}).get('bibliography') or {})}
         self.state['citation_issues'] = [i for i in self._citation_issues(self.state['draft'])
-                                         if not i.startswith('Report does not cite')]
+                                         if not i.startswith('Report does not cite') and i not in keys]
         complete = self._complete()
         self.state['status'] = 'reviewed' if complete else 'partial'
         self.state['stop_reason'] = ('Review finished; the output remains a model draft.' if complete else
@@ -1723,7 +1806,7 @@ class QuickReviewRunner(ReviewBase):
         body += [f'## {unit["name"].capitalize() if unit["id"] == "P" else unit["name"]}', '',
                  f'{label}: {where} of {source}{passes}. The proof was not rewritten.']
         if others:
-            body += ['', f'**Not checked:** {unchecked} Ask for each one, or use a detailed review for the whole document.']
+            body += ['', f'**Not checked:** {unchecked} Ask for each one, or use Review for the whole document.']
         if coverage['segmented'] or not coverage['complete']:
             body += ['', f'Coverage: {coverage["usable_segments"]} of {coverage["segments"]} planned proof-part checks gave usable answers; '
                      f'{count} of {coverage["passes"]} review strategies completed all their parts.']
@@ -2224,23 +2307,113 @@ class ExplainRunner(ReviewBase):
         return body, appendix
 
 
-class JournalRunner(ReviewBase):
-    """The detailed review: read the paper, then check its proofs."""
-    VARIANT = 'journal'
-    PIPELINE = PIPELINES['journal']
-    LIGHT = False  # True: the referee review, which checks the proofs of the main results only
+class PaperReviewRunner(ReviewBase):
+    """The referee report on a manuscript, at one depth: understand the paper, check every proof (appendices
+    included) with the whole paper in view, sweep the paper for what no single proof shows, give every objection a
+    second opinion (a defence of the paper, then a judge), and write the report from the findings as they come.
+    One continuous pool runs the calls: a finding is judged as soon as its proof is checked, and the report is
+    rewritten after every call. It does not read for typos: that is the typo check (TypoCheckRunner), which shares
+    this class's reading and report code. A job whose saved level is 'low' is a typo check whatever class resumes
+    it (reviews saved when Low was the review's typo-only effort)."""
+    VARIANT = 'review'
+    PIPELINE = PIPELINES['review']
+    LEVEL, ROUNDS = 'high', 5  # the rounds name the budget of that level (research.start, gui/effort.py)
+    DROP_UNLOCATED = True
 
-    def start(self, goal, **kwargs):
+    def start(self, goal, *, review_reference=None, **kwargs):
+        self._review_reference = None
+        if review_reference is not None:
+            reference = _reference_snapshot({'query': goal, 'messages': [], 'files': [],
+                                             'review': review_reference})[0]['review']
+            source = reference.get('source') or {}
+            path = Path(source.get('path', ''))
+            if (not reference.get('job_id') or not isinstance(reference.get('report'), str)
+                    or type(reference.get('followup')) is not bool or not source.get('id')
+                    or not isinstance(source.get('content'), str) or not path.name or path.is_absolute()
+                    or any(part == '..' or part.startswith('.') for part in path.parts)
+                    or hashlib.sha256(source['content'].encode()).hexdigest() != source.get('sha256')):
+                raise WorkerInputError('The previous review manuscript snapshot is invalid.', code='needs_source')
+            if kwargs.get('source_files'):
+                raise WorkerInputError('Choose either a new manuscript or the saved review manuscript.', code='ambiguous_source')
+            self._review_reference = reference
+        kwargs['max_rounds'] = self.ROUNDS  # one depth: the caller chooses no effort
         self._prepare(goal, kwargs)
         return super().start(goal, **kwargs)
 
-    def _extra_state(self):
-        return {**super()._extra_state(), 'scope': None, 'plan_units': [], 'unchecked': [], 'cited_checks': [],
-                'novelty': None, 'search_results': [], 'presentation': [], 'presentation_done': [], 'write': None,
-                'reading': {}, 'read_parts': [], 'citations': [], 'merged': None}
+    def _pin(self, names, prefix):
+        return [] if getattr(self, '_review_reference', None) else super()._pin(names, prefix)
 
-    def _notation(self):
-        return [tuple(r) for r in ((self.state.get('scope') or {}).get('notation') or [])]
+    def _extra_sources(self):
+        reference = getattr(self, '_review_reference', None)
+        return [reference['source']] if reference else super()._extra_sources()
+
+    def _extra_state(self):
+        state = {**super()._extra_state(), 'level': self.LEVEL, 'scope': None, 'plan_units': [], 'unchecked': [],
+                 'presentation': [], 'write': None, 'reading': {},
+                 'read_parts': [], 'citations': [], 'merged': None, 'adjudications': {}, 'typo_check': None,
+                 'packages': [], 'located': [], 'ledger': [], 'minor_checks': {}, 'attacks': {}}
+        reference = getattr(self, '_review_reference', None)
+        if reference:
+            state.update(review_reference={key: value for key, value in reference.items() if key != 'source'},
+                         followup_ranges=None, followup_responses=[], followup_usable=False)
+        return state
+
+    def _followup_mode(self):
+        return bool((self.state.get('review_reference') or {}).get('followup'))
+
+    @property
+    def typos_only(self):
+        return self.state.get('level') == 'low'
+
+    @property
+    def effort(self):
+        return PAPER
+
+    def _effort_note(self):
+        return ''
+
+    def _reads(self):
+        """The parts read for typos and presentation. A typo check reads the whole paper. A review does not, except
+        with a small local context, where the overview is written from the reading notes; the parts a saved review
+        had planned with the whole paper in view are no longer read."""
+        return (self.state.get('read_parts') or []) if self.typos_only or not self.state.get('whole') else []
+
+    def _progress(self):
+        s = self.state
+        if self._followup_mode():
+            return {'phase': s['phase'], 'completed': int(s.get('followup_usable', False)),
+                    'total': 1, 'unit': 'review follow-up', 'scope': s['goal'],
+                    'partial': s['status'] in ('partial', 'error', 'budget_exhausted'),
+                    'resumable': s['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
+        items = [p for parts in s.get('check_plan', {}).values() for p in parts]
+        done = sum(bool(s.get('checks', {}).get(p['key'], {}).get('usable')) for p in items)
+        reads = self._reads()
+        done += sum(self._reading_usable(f'L{a}') for a, _ in reads)
+        unit = 'reading parts' if self.typos_only else 'reading and proof checks' if reads else 'proof checks'
+        return {'phase': s['phase'], 'completed': done, 'total': len(items) + len(reads), 'unit': unit,
+                'scope': s['goal'], 'partial': s['status'] in ('partial', 'error', 'budget_exhausted'),
+                'resumable': s['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
+
+    # -- saved jobs ----------------------------------------------------------------------------
+
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
+        self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
+        state = _read_state(self.directory, job_id)
+        if state.get('pipeline') in LEGACY_PIPELINES and state.get('status') not in self.TERMINAL:
+            # A job of the retired Review / Detailed review split continues as one review: its reading, scope and
+            # checks are kept; the re-checks it made stay in its history and its findings are judged again.
+            state.update(pipeline=self.PIPELINE, variant=self.VARIANT, adjudications={}, typo_check=None, packages=[],
+                         located=[], ledger=[], legacy_confirms=state.get('confirms') or {}, confirms={}, merged=None, write=None)
+            if state.get('phase') not in ('plan', 'done', 'followup'):
+                state['phase'] = 'audit'
+            self.state = state
+            self._save()
+        return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
+
+    def _resume_phase(self):
+        return 'followup' if self._followup_mode() else 'audit'
+
+    # -- units -------------------------------------------------------------------------------------
 
     def _units(self):
         mapping = self.state['map']
@@ -2254,40 +2427,157 @@ class JournalRunner(ReviewBase):
 
     def _unit(self, uid):
         sid = self.state['sources'][0]['id']
-        if uid == CITE:
-            return {'id': CITE, 'type': 'citations', 'name': 'Results cited from the literature', 'number': '', 'label': '',
-                    'title': '', 'statement': None, 'proofs': [], 'refs': [], 'statement_refs': [], 'cites': [],
+        if uid in PSEUDO_UNITS:
+            total = len(self._lines(sid))
+            return {'id': uid, 'type': 'sweep', 'name': PSEUDO_NAMES[uid], 'number': '', 'label': '', 'title': '',
+                    'statement': None, 'proofs': [[1, total]], 'refs': [], 'statement_refs': [], 'cites': [],
                     'equations': [], 'section': None, 'appendix': False, 'main': False, 'passage': True, 'source': sid}
         unit = next((u for u in self._units() if u['id'] == uid), None)
         return dict(unit, source=sid) if unit else None
 
-    def _citation_unit(self, cluster):
-        """The lines around one use of a cited result, as a passage to re-check against the whole manuscript."""
-        total = len(self._lines(self.state['sources'][0]['id']))
-        a, b = max(1, cluster['start_line'] - 3), min(total, cluster['end_line'] + 3)
-        return dict(self._unit(CITE), name=f'the use of a cited result at lines {cluster["start_line"]}–{cluster["end_line"]}',
-                    proofs=[[a, b]])
+    def _map_view(self):
+        mapping = dict(self.state['map'])
+        mapping['units'] = self._units()
+        return mapping
 
     def _main_ids(self):
+        """The main results: those the map flags (named "main", or the theorems of the introduction) together with
+        those the overview names. A main result proved only in an appendix stays main."""
         scope = self.state.get('scope') or {}
-        return scope.get('main') or [u['id'] for u in self._units() if u['main']]
+        wanted = set(scope.get('main') or []) | {u['id'] for u in self._units() if u.get('main')}
+        return [u['id'] for u in self._units() if u['id'] in wanted and (u['type'] in manuscript.PROVABLE or u.get('prose'))][:8]
+
+    def _chain(self, uid, depth=None):
+        """A result and every result its proof (or statement) uses, through the map's references; depth 1: only
+        the results it uses directly."""
+        by_id = {u['id']: u for u in self._units()}
+        seen, frontier, level = set(), [uid], 0
+        while frontier and (depth is None or level <= depth):
+            following = []
+            for current in frontier:
+                if current in seen or current not in by_id:
+                    continue
+                seen.add(current)
+                following += by_id[current].get('refs', []) + by_id[current].get('statement_refs', [])
+            frontier, level = following, level + 1
+        return seen
+
+    def _main_chain(self, depth=None):
+        chain = set()
+        for uid in self._main_ids():
+            chain |= self._chain(uid, depth)
+        return chain
+
+    def _deep(self, pass_index=0):
+        """Whether a proof check reasons before it answers. Hidden reasoning is most of a review's output (15-30k
+        tokens a proof check), and the provider's throughput per account, not the number of calls at once, sets how
+        long a review takes: the first pass answers at once, the second pass on the main results and what they use
+        directly reasons (and so do the judge and the attack on a main statement)."""
+        return pass_index >= 1
+
+    def _near_chain(self):
+        """The results that get the extra pass: the main results and what they use directly (the whole chain of a
+        paper often covers nearly every proof)."""
+        return self._main_chain(self.effort.get('depth'))
+
+    def _host(self, cluster):
+        """The result a finding concerns: its unit, or for a sweep the result whose proof (or statement) holds it."""
+        if cluster['unit'] not in PSEUDO_UNITS:
+            return cluster['unit']
+        return self._unit_id_at(cluster['start_line'])
+
+    def _plan_units(self):
+        view = self._map_view()
+        order = manuscript.priority(view, depth=None, main_ids=self._main_ids(), appendix=True)
+        if not order:
+            order = [u['id'] for u in self._units() if u['proofs']]
+        with self._mutex:
+            self.state['plan_units'] = order
+        self.emit('notice', f'Plan: check all {len(order)} proofs, the main results and what they use first')
+
+    # -- the manuscript in every prompt ----------------------------------------------------------
+
+    def _bibliography_text(self, limit=None):
+        """The bibliography entries; for a TeX source only the works it cites (a .bib file may hold many more)."""
+        bib = self.state['map']['bibliography']
+        source = self.state['sources'][0]
+        keys = list(bib)
+        if self.state['map'].get('format') == 'tex':
+            cited = {k.strip() for *_, group in manuscript.TEX_CITE.findall(source['content']) for k in group.split(',')}
+            keys = [k for k in keys if k in cited] or keys
+        return '\n'.join(f'[{k}] {bib[k] if limit is None else bib[k][:limit]}' for k in keys)
+
+    def _block(self):
+        """The whole numbered manuscript, its own packages and its bibliography: the same text opens every call of
+        the review, so a provider that caches prompt prefixes reads it once."""
+        if getattr(self, '_block_text', None) is None:
+            sid = self.state['sources'][0]['id']
+            source = self._source(sid)
+            total = len(self._lines(sid))
+            text = f'SOURCE {sid} ({Path(source["path"]).name}). Lines are numbered; cite them as given.\n'
+            if source['path'].lower().endswith('.pdf'):
+                text += ('This text was extracted from a PDF: formulas may be garbled (accents, indices and fractions on separate '
+                         'lines, symbols split). Never guess a missing mathematical symbol or hypothesis. Flag ambiguous '
+                         'extraction explicitly and keep the assessment conditional on it.\n')
+            text += '\nTHE MANUSCRIPT:\n' + self._numbered(sid, 1, total, mark=False) + '\nEND OF THE MANUSCRIPT'
+            for package in self.state.get('packages') or []:
+                if package.get('content'):
+                    text += (f'\n\nPACKAGE OF THE MANUSCRIPT ({Path(package["path"]).name}: its own macros and theorem '
+                             'declarations; context):\n' + package['content'])
+                    pinned = next((s for s in self.state['sources'] if s['path'] == package['path']), None)
+                    if pinned:
+                        self._mark(pinned['id'], [[1, max(1, len(pinned['content'].splitlines()))]])
+            units = [u for u in self.state['map']['units'] if u.get('number')]
+            if units and self.state['map'].get('format') == 'tex':
+                # The model numbers theorems by counting environments and gets shared counters and appendices wrong.
+                text += ('\n\nTHE NUMBERED RESULTS, AS THE COMPILED PAPER NUMBERS THEM (from its theorem declarations; '
+                         'refer to results by these numbers):\n' + '\n'.join(
+                             f'{u["name"]}' + (f' [{u["label"]}]' if u.get('label') else '') + f': line {u["statement"][0]}'
+                             for u in units if u.get('statement')))
+            if self.state['map']['bibliography']:
+                text += '\n\nBIBLIOGRAPHY (key: entry):\n' + self._bibliography_text(600)
+            self._block_text = text
+            self._mark(sid, [[1, total]])
+        return self._block_text
+
+    def _context(self, unit, cluster=None, segment=None):
+        """What precedes a task: the whole manuscript, or (a small local context) the unit's packet."""
+        if self.state.get('whole'):
+            return self._block()
+        room = self._room(self._confirm_cap(), P.ARBITER_POLICY)
+        packets = self._segments(unit, room, self._notation())
+        if cluster is not None:
+            packets = [p for p in packets if p[0] is None or any(a <= cluster['start_line'] <= b for a, b in p[0])] or packets
+        _, text, ranges = packets[0]
+        self._mark(unit['source'], ranges)
+        return text
+
+    def _notation(self):
+        return [tuple(r) for r in ((self.state.get('scope') or {}).get('notation') or [])]
+
+    # -- plan ------------------------------------------------------------------------------------------
 
     def _step(self, phase):
-        shares = {'read': .45, 'scope': .6, 'check': .65, 'confirm': .78, 'literature': .88}
+        if self._followup_mode():
+            if phase == 'plan':
+                source = self.state['sources'][0]
+                self.state['map'] = manuscript.build(source['content'], source['path'])
+                self.state['phase'] = 'followup'
+            elif phase == 'followup':
+                self._followup()
+                self.state['phase'] = 'done'
+            else:
+                raise ValueError('Unknown review follow-up phase: ' + phase)
+            return
         old = self._phase_limit
-        self._phase_limit = self.state['settings']['max_seconds'] * shares[phase] if phase in shares else None
+        self._phase_limit = self.state['settings']['max_seconds'] * .9 if phase == 'audit' else None
         try:
             self._step_work(phase)
         except ResearchBudget as exc:
-            if phase not in shares or not (isinstance(exc, PhaseBudget) or self._time_left(1)):
+            if phase != 'audit' or not (isinstance(exc, PhaseBudget) or self._time_left(1)):
                 raise  # the whole working time is used: the job stops and can be resumed with more time
-            self._warn(f'{phase.capitalize()} stopped before report synthesis: {exc}')
-            if phase == 'check':
-                self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
-            self.state['phase'] = {'read': 'scope', 'scope': 'check', 'check': 'confirm', 'confirm': 'literature',
-                                   'literature': 'write'}[phase]
-            if phase == 'scope':
-                self._plan_units()
+            self._warn(f'The checks stopped before the report was written: {exc}')
+            self.state['phase'] = 'write'
         finally:
             self._phase_limit = old
 
@@ -2296,105 +2586,291 @@ class JournalRunner(ReviewBase):
             if not self.state['sources']:
                 raise WorkerInputError('Pin the manuscript to review.', code='invalid_worker_input')
             self._map()  # chooses the manuscript among the pinned files
-            # A bibliography file is read into the references (see _map); an archive's style files hold macros.
-            others = [s['path'] for s in self.state['sources'][1:] if Path(s['path']).suffix.lower() not in ('.bib', '.bbl')
+            read = {p['path'] for p in self.state.get('packages') or []}
+            others = [s['path'] for s in self.state['sources'][1:]
+                      if Path(s['path']).suffix.lower() not in ('.bib', '.bbl', '.aux') and s['path'] not in read
                       and not (s.get('source_archive') and Path(s['path']).suffix.lower() in ('.sty', '.cls', '.bst', '.def'))]
-            if others:
+            if others:  # a bibliography file is read into the references, a package into the theorem numbering
                 self._warn(f'Only {self.state["sources"][0]["path"]} is reviewed as the manuscript; '
                            f'{", ".join(others)} {"was" if len(others) == 1 else "were"} not read.')
             if not manuscript.checkable(self.state['map']):
-                self._warn('No proofs were recognised in the manuscript map. Excerpt checks cannot establish complete proof coverage.')
-                self.state['source_incomplete'] = True
-            self.state['read_parts'] = self._read_parts()
-            self.state['phase'] = 'read'
-        elif phase == 'read':
-            self._read()
-            self.state['phase'] = 'scope'
-        elif phase == 'scope':
-            jobs = []
-            if self.state.get('scope') is None:
-                jobs.append(('scope', self._scope))
-            if self.state.get('whole') and not self._citations_done():
-                jobs.append(('citations', self._citations))
-            self._wave(jobs)
-            self._plan_units()
-            self.state['phase'] = 'check'
-        elif phase == 'check':
-            self._checks()
-            self.state['phase'] = 'confirm'
-        elif phase == 'confirm':
-            self._confirms()
-            self.state['phase'] = 'literature'
-        elif phase == 'literature':
-            self._literature()
-            self.state['phase'] = 'write'
-        elif phase == 'presentation':  # jobs saved before reading came first
+                self._warn('No proofs were recognised in the manuscript map; the overview may locate them.')
+            self.state['read_parts'] = self._read_parts() if self.typos_only or not self.state.get('whole') else []
+            if not self.typos_only:
+                self._plan_units()
+            self.state['phase'] = 'audit'
+        elif phase in ('audit', 'read', 'scope', 'check', 'confirm', 'literature', 'presentation'):
+            self._audit()
+            self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
             self.state['phase'] = 'write'
         elif phase == 'write':
-            self._merge()
-            self._write()
+            if not self.typos_only:  # a typo check has no comments to merge and no referee prose
+                self._merge()
+                self._write()
             self.state['phase'] = 'done'
         else:
             raise ValueError('Unknown review phase: ' + phase)
 
-    # -- scope and plan -----------------------------------------------------------------------
+    # -- the audit: one continuous pool ------------------------------------------------------------------
 
-    def _bibliography_text(self, limit=None):
-        bib = list(self.state['map']['bibliography'].items())
-        return '\n'.join(f'[{k}] {v if limit is None else v[:limit]}' for k, v in bib)
+    def _audit(self):
+        """Run every call the review needs, each as soon as what it depends on is done (the overview, its proof's
+        other passes, the reading). The report is rewritten after every call."""
+        # What _ask will reserve for a call: without a tokenizer the provider client counts UTF-8 bytes (about three
+        # times the real tokens of a TeX paper), and a call that does not fit what is left fails.
+        estimate = (len(self._block().encode()) if self.state.get('whole') else 6000) + 20000
+        with self._mutex:
+            for comment in self.state['presentation']:  # batches of an earlier run are checked again
+                comment.pop('check_pending', None)
+                comment.pop('check_failed', None)
+            decided = {key: entry for key, entry in (self.state.get('minor_checks') or {}).items() if 'keep' in entry}
+            self.state['minor_checks'] = decided
+            # An attack without a usable answer is made again; reviews saved before the attack existed get one.
+            self.state['attacks'] = {uid: a for uid, a in (self.state.get('attacks') or {}).items() if a.get('usable')}
+            # Reviews saved when an attack could add a pass on a "weakest step": a finished one is kept, none is run.
+            plans = self.state.get('check_plan') or {}
+            for uid, plan in plans.items():
+                plans[uid] = [item for item in plan if item.get('lens') != 'weakest' or item['key'] in self.state['checks']]
+
+        def admit(running):
+            # Running calls have already reserved their output and input in the job's counters: a new call needs
+            # only its own share (counting them again stopped a 16-call pool with 1% of the budget used).
+            return (self._elapsed() < self.state['settings']['max_seconds'] * .9
+                    and self._tokens_left(self._write_reserve()) >= min(self._cap(self._check_cap()), DIRECT_CAP)
+                    and self._input_left(12000) >= estimate)
+        started, left = self._pool(self._audit_jobs, admit)
+        if left:
+            self._warn(f'{left} planned call(s) were not started: the time or token budget ran out. '
+                       'Resume the review with more budget to complete it.')
+
+    def _pool(self, generate, admit):
+        """Run the jobs generate() returns, [(priority, key, fn)], asking it again after each job: new work becomes
+        possible as results come in. Returns (started, still pending when admission stopped)."""
+        scheduled, pending, errors, started = set(), [], [], 0
+        sequence = iter(range(10 ** 9))
+
+        def refill():
+            with self._mutex:  # the generator reads and marks the state while calls finish in other threads
+                found = generate()
+            for priority, key, fn in found:
+                if key not in scheduled:
+                    scheduled.add(key)
+                    heapq.heappush(pending, (priority, next(sequence), key, fn))
+        refill()
+        with self._timeout():
+            if self.concurrency <= 1:
+                while pending:
+                    if self._phase_limit is not None and self._elapsed() >= self._phase_limit:
+                        raise PhaseBudget('The phase working-time share is used; pending checks were retained for resume.')
+                    if not admit(0):
+                        return started, len(pending)
+                    _, _, _, fn = heapq.heappop(pending)
+                    started += 1
+                    fn()
+                    self._report()
+                    refill()
+                return started, 0
+            with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix='mathagent-review') as pool:
+                running, stopped = set(), False
+                while (pending and not stopped) or running:
+                    while pending and not stopped and len(running) < self.concurrency and not errors:
+                        if self._phase_limit is not None and self._elapsed() >= self._phase_limit:
+                            errors.append(PhaseBudget('The phase working-time share is used; pending checks were retained for resume.'))
+                            break
+                        if not admit(len(running)):
+                            stopped = not running  # running calls release their reservations: try again after them
+                            break
+                        _, _, _, fn = heapq.heappop(pending)
+                        running.add(pool.submit(fn))
+                        started += 1
+                    if not running:
+                        break
+                    done, running = wait(running, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        try:
+                            future.result()
+                        except BaseException as exc:
+                            errors.append(exc)
+                    if errors:
+                        pending = []  # let the running calls finish and keep their answers
+                    else:
+                        self._report()
+                        refill()
+        if errors:
+            interrupts = [e for e in errors if isinstance(e, KeyboardInterrupt)]
+            raise interrupts[0] if interrupts else errors[0]
+        return started, len(pending)
+
+    def _audit_jobs(self):
+        """Every call that can run now, with its priority (lower first): the overview, the main results and what
+        they use, then the other proofs, the sweeps and the second opinions. A typo check only reads."""
+        s = self.state
+        whole, effort = bool(s.get('whole')), self.effort
+        reads = self._reads()
+        sid = s['sources'][0]['id']
+        pdf = self._source(sid)['path'].lower().endswith('.pdf')
+        if self.typos_only:
+            # The paper is read for typos and presentation, and the list is checked against the paper.
+            jobs = [(1, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)) for a, b in reads if not self._reading_usable(f'L{a}')]
+            return jobs + (self._typo_jobs(2) if whole else [])
+        chain = self._main_chain()
+        scope_done = s.get('scope') is not None
+        jobs = []
+        if not scope_done and (whole or all(f'L{a}' in s['reading'] for a, _ in reads)):
+            jobs.append((0, 'scope', self._scope))
+        if whole and scope_done:
+            # The statements of the main results are attacked first: these reasoning calls are among the longest.
+            for uid in self._attack_ids():
+                if uid not in s['attacks']:
+                    jobs.append((0, f'attack:{uid}', self._attack_job(uid)))
+        for a, b in reads:
+            if not self._reading_usable(f'L{a}'):
+                jobs.append((1 if not whole else 4, f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)))
+        if whole and not self._citations_done():
+            jobs.append((3, 'citations', self._citations))
+        if whole:
+            for name in effort['sweeps']:
+                if not self._checks_complete(SWEEP_UNITS[name]):
+                    jobs.append((3, 'sweep:' + name, self._sweep_job(name)))  # long calls: started early
+        if whole or scope_done:
+            for uid in s['plan_units']:
+                # With the whole paper in every call the plan does not wait for the overview: the main results the
+                # map flags get their passes at once (the overview's additions extend the plan when they arrive).
+                for item in self._audit_plan(uid, scope_done or whole):
+                    if s['checks'].get(item['key'], {}).get('usable'):
+                        continue
+                    # The thinking passes are the longest calls: they start first.
+                    priority = (1 if self._deep(item['pass_index']) else 2 if item['pass_index'] == 0 else 5) if uid in chain else 6
+                    jobs.append((priority, item['key'], self._audit_job(uid, item)))
+        jobs += self._adjudication_jobs(chain)
+        if whole:
+            jobs += self._minor_check_jobs(7)  # after the second opinions: a finding they take is not checked twice
+        if s.get('write') is None and scope_done and self._chain_settled(self._near_chain()):
+            jobs.append((2, 'write:draft', lambda: self._write(draft=True)))
+        return jobs
+
+    def _chain_settled(self, chain):
+        """The main results and what they use are checked and their findings judged (a first report can be written)."""
+        units = [uid for uid in self.state['plan_units'] if uid in chain]
+        if not units or not all(self._checks_complete(uid) for uid in units):
+            return False
+        if self.state.get('whole') and any(uid not in self.state['attacks'] for uid in self._attack_ids()):
+            return False
+        for uid in units:
+            for cluster in self._clusters(uid):
+                adjudication = self.state['adjudications'].get(cluster['key'])
+                if adjudication is not None and not adjudication.get('final'):
+                    return False
+        return True
+
+    # -- the overview (and the inventory the model completes) ---------------------------------------------
 
     def _scope(self):
         mapping, sid = self.state['map'], self.state['sources'][0]['id']
         lines = self._lines(sid)
-        cap = self._model_cap('review_scope', 8192)
-        if not self._thinks(cap):
-            cap = self._model_cap('review_direct', 3000)
+        cap = self._call_cap(False, self._model_cap('review_scope', 8192))
         self.state['scope_incomplete'] = False
-        if self.state.get('whole'):
+        whole = bool(self.state.get('whole'))
+        if whole:
             # The whole paper, its full list of statements and its bibliography: nothing is cut.
-            parts = ['REQUEST AND FOCUS OF THE REVIEW:\n' + self.state['goal'],
-                     'THE MANUSCRIPT:\n' + self._numbered(sid, 1, len(lines)),
-                     'STATEMENTS (id: name, section, lines):\n' + manuscript.outline(self._map_view(), limit=None)]
-            if mapping['bibliography']:
-                parts.append('BIBLIOGRAPHY (key: entry):\n' + self._bibliography_text())
-            prompt = P.SCOPE_WHOLE_POLICY + '\n\n' + '\n\n'.join(parts)
+            prompt = (self._block() + '\n\n' + P.SCOPE_WHOLE_POLICY + '\n\nREQUEST AND FOCUS OF THE REVIEW:\n'
+                      + self.state['goal'] + '\n\nSTATEMENTS (id: name, section, lines):\n' + manuscript.outline(self._map_view(), limit=None))
+            schema = P.SCOPE_WHOLE_SCHEMA
         else:
-            prompt = self._scope_prompt_in_parts(mapping, sid, lines, cap)
-        with self._timeout():
-            result = self._judge('scope', prompt, cap=cap, schema=P.SCOPE_SCHEMA, key='scope')
+            prompt, schema = self._scope_prompt_in_parts(mapping, sid, lines, cap), P.SCOPE_SCHEMA
+        self.emit('notice', 'Writing the overview and locating the proofs')
+        result = self._judge('scope', prompt, cap=cap, schema=schema, key='scope', reason=False)
         value = result['value'] or {}
-        ids = {u['id'] for u in self._units()}
-        main = [i for i in value.get('main') or [] if i in ids]
-        notation = []
-        for r in ([] if self.state.get('whole') else value.get('notation') or []):
-            if not isinstance(r, dict):
-                continue
-            a, b = _int(r.get('start_line')), _int(r.get('end_line'))
-            if 1 <= a <= b <= len(lines):
-                used = sum(y - x + 1 for x, y in notation)
-                stop = min(b, a + 59, a + 119 - used)
-                if stop >= a:
-                    notation.append([a, stop])
-                if stop < b:
-                    self._warn('Setting and notation ranges were bounded to 60 lines each and 120 lines overall; additional context remains in the pinned source.')
-                    self.state['scope_incomplete'] = True
-        queries = [re.sub(r'\s+', ' ', str(q)).strip()[:100] for q in value.get('queries') or [] if str(q).strip()]
-        queries = [' '.join(q.split()[:10]) for q in queries][:6]
-        # Search queries are public topic words: a query copied from the manuscript never leaves the machine.
-        text = ' '.join(_words(self.state['sources'][0]['content']))
-        copied = [q for q in queries if len(_words(q)) >= 4 and ' '.join(_words(q)) in text]
-        if copied:
-            self._warn(f'{len(copied)} search quer{"y was" if len(copied) == 1 else "ies were"} copied from the manuscript and dropped.')
-        queries = [q for q in queries if q not in copied]
-        if not value:
-            self._warn('The scoping answer was not usable; the main results were chosen from the manuscript structure.')
-        scope = {'overview': _clip(value.get('overview'), 3500), 'field': str(value.get('field') or '')[:200],
-                 'contribution': _clip(value.get('contribution'), 1500),
-                 'main': main, 'notation': notation, 'queries': queries,
-                 'closest': [str(k)[:40] for k in value.get('closest') or []][:6]}
         with self._mutex:
-            self.state['scope'] = scope
+            if whole:
+                self._apply_inventory(value, lines)
+            ids = {u['id'] for u in self._units()}
+            main = [i for i in value.get('main') or [] if i in ids]
+            notation = []
+            for r in ([] if whole else value.get('notation') or []):
+                if not isinstance(r, dict):
+                    continue
+                a, b = _int(r.get('start_line')), _int(r.get('end_line'))
+                if 1 <= a <= b <= len(lines):
+                    used = sum(y - x + 1 for x, y in notation)
+                    stop = min(b, a + 59, a + 119 - used)
+                    if stop >= a:
+                        notation.append([a, stop])
+                    if stop < b:
+                        self._warn('Setting and notation ranges were bounded to 60 lines each and 120 lines overall; additional context remains in the pinned source.')
+                        self.state['scope_incomplete'] = True
+            queries = [re.sub(r'\s+', ' ', str(q)).strip()[:100] for q in value.get('queries') or [] if str(q).strip()]
+            queries = [' '.join(q.split()[:10]) for q in queries][:6]
+            # Search queries are public topic words: a query copied from the manuscript never leaves the machine.
+            text = ' '.join(_words(self.state['sources'][0]['content']))
+            copied = [q for q in queries if len(_words(q)) >= 4 and ' '.join(_words(q)) in text]
+            if copied:
+                self._warn(f'{len(copied)} search quer{"y was" if len(copied) == 1 else "ies were"} copied from the manuscript and dropped.')
+            queries = [q for q in queries if q not in copied]
+            if not value:
+                self._warn('The overview answer was not usable; the main results were chosen from the manuscript structure.')
+            self.state['scope'] = {'overview': _clip(value.get('overview'), 3500), 'field': str(value.get('field') or '')[:200],
+                                   'contribution': _clip(value.get('contribution'), 1500),
+                                   'main': main, 'notation': notation, 'queries': queries,
+                                   'closest': [str(k)[:40] for k in value.get('closest') or []][:6]}
             self._save()
+        self._plan_units()
+        missing = [self._unit(u)['name'] for u in self._main_ids() if not self._unit(u)['proofs']]
+        if missing:
+            self._warn('No proof was found in the manuscript for: ' + ', '.join(missing) + '.')
+
+    def _apply_inventory(self, value, lines):
+        """Proofs the map missed (a section, an appendix, a proof in prose) and main results stated in prose, from
+        the overview call; the controller checks every line range before using it."""
+        units = self._units()
+        by_id = {u['id']: u for u in units}
+        total = len(lines)
+        located = {}
+        for item in value.get('proofs') or []:
+            if not isinstance(item, dict):
+                continue
+            unit = by_id.get(str(item.get('id') or '').strip())
+            a, b = _int(item.get('start_line')), _int(item.get('end_line'))
+            if (unit is None or unit['type'] not in manuscript.PROVABLE or (unit['proofs'] and unit['id'] not in located)
+                    or not 1 <= a <= b <= total or b - a > 4000
+                    or (unit.get('statement') and a <= unit['statement'][0] <= b)):
+                continue
+            located.setdefault(unit['id'], []).append([a, b])
+        for uid, spans in located.items():
+            unit = by_id[uid]
+            unit['proofs'] = spans[:3]
+            unit['proof_from'] = 'located'
+            unit['nested'] = [r for a, b in unit['proofs'] for r in manuscript.nested_spans(units, unit, a, b)]
+            unit['refs'] = [r for r in manuscript.refs_in(self.state['map'], lines, unit['proofs']) if r != uid]
+            self.state['located'].append({'unit': uid, 'name': unit['name'], 'proofs': unit['proofs']})
+        added = []
+        for item in value.get('prose_results') or []:
+            if not isinstance(item, dict):
+                continue
+            s0, s1 = _int(item.get('statement_start')), _int(item.get('statement_end'))
+            p0, p1 = _int(item.get('proof_start')), _int(item.get('proof_end'))
+            name = re.sub(r'\s+', ' ', str(item.get('name') or '')).strip()[:60]
+            if not name or not 1 <= s0 <= s1 <= total or s1 - s0 > 80 or any(
+                    u.get('statement') and u['statement'][0] <= s1 and s0 <= u['statement'][1] for u in units):
+                continue
+            uid = f'U{len(units) + len(added) + 1}'
+            while uid in by_id:
+                uid += 'x'
+            proofs = [[p0, p1]] if 1 <= p0 <= p1 <= total and not (p0 <= s0 <= p1) else []
+            unit = {'id': uid, 'type': 'theorem', 'name': name if re.match(r'(?i)the\b', name) is None else name[0].upper() + name[1:],
+                    'number': '', 'label': '', 'title': '', 'statement': [s0, s1], 'proofs': proofs, 'refs': [],
+                    'statement_refs': [], 'cites': [], 'equations': [],
+                    'section': next((sec['number'] for sec in reversed(self.state['map']['sections']) if sec['line'] <= s0), None),
+                    'appendix': False, 'main': bool(item.get('main')), 'prose': True}
+            if proofs:
+                unit['proof_from'] = 'located'
+                unit['refs'] = manuscript.refs_in(self.state['map'], lines, proofs)
+            added.append(unit)
+            self.state['located'].append({'unit': uid, 'name': name, 'proofs': proofs, 'prose': True})
+        if added:
+            self.state['map']['units'] = units + added
+        if located or added:
+            self.emit('notice', f'The overview located {len(located)} proof(s) and {len(added)} result(s) stated in prose')
 
     def _scope_prompt_in_parts(self, mapping, sid, lines, cap):
         """The scope prompt for a paper read in parts (small context): reading notes, then optional excerpts."""
@@ -2450,69 +2926,154 @@ class JournalRunner(ReviewBase):
             self._warn('The overview prioritises reading notes; optional introduction and bibliography excerpts were omitted to fit the model context.')
         return P.SCOPE_POLICY + '\n\n' + '\n\n'.join(parts)
 
-    def _map_view(self):
-        mapping = dict(self.state['map'])
-        mapping['units'] = self._units()
-        return mapping
-
-    def _plan_units(self):
-        effort, view = self.effort, self._map_view()
-        all_proofs = bool(re.search(r'\b(?:all|every|toutes?|chaque)\s+(?:the\s+|les\s+)?(?:proofs?|preuves?|demonstrations?)\b', self.state['goal'], re.I))
-        if self.LIGHT and not all_proofs:
-            # The referee review checks the proofs of the main results only, so that its recommendation never
-            # rests on proofs nobody read.
-            order = manuscript.priority(view, depth=0, main_ids=self._main_ids(), appendix=True)
-        else:
-            order = manuscript.priority(view, depth=None if all_proofs else effort['depth'], main_ids=self._main_ids(),
-                                        appendix=True if all_proofs else effort['appendix'])
-        self.state['requested_all_proofs'] = all_proofs
-        if not order:
-            order = [u['id'] for u in self._units() if u['proofs']][:3]
-        self.state['plan_units'] = order
-        main = set(self._main_ids())
-        missing = [u['name'] for u in self._units() if u['id'] in main and not u['proofs']]
-        if missing:
-            self._warn('No proof was found in the manuscript map for: ' + ', '.join(missing) + '.')
-        self.emit('notice', f'Plan: check {len(order)} of {len(manuscript.checkable(view))} proofs, main results first')
-
-    # -- checks ---------------------------------------------------------------------------------
+    # -- proof checks ---------------------------------------------------------------------------------------
 
     def _lenses(self, uid):
-        if uid == CITE:
-            return ['citations']
-        if self.LIGHT:
-            return ['line']
-        main = uid in set(self._main_ids())
+        if uid in PSEUDO_UNITS:
+            return [uid.lower()]
+        main = uid in self._near_chain()
         count = self.effort['main_passes'] if main else self.effort['other_passes']
-        return ['line', 'adversarial'][:count]
+        return ['line', 'adversarial', 'global'][:max(1, count)]
 
     def _write_reserve(self):
         wanted = self._model_cap('review_write', 5000)
         return min(wanted, (self.state['settings']['max_tokens'] or wanted * 5) // 5)
 
-    def _checks(self):
-        pending, estimate = [], 1500
-        for uid in self.state['plan_units']:
-            unit = self._unit(uid)
-            if unit:
-                try:
-                    jobs, size = self._check_jobs(unit, self._lenses(uid), journal=True, notation=self._notation())
-                except WorkerInputError as exc:
-                    if exc.code != 'context_overflow':
-                        raise
+    def _blocks(self, unit):
+        """A long proof environment in parts of about PART_LINES lines, cut at blank lines when possible; a proof
+        that is a whole section is read whole (the results nested in it are checked on their own)."""
+        lines = self._lines(unit['source'])
+        numbers = [n for a, b in unit['proofs'] for n in range(a, b + 1)]
+        if len(numbers) <= BLOCK_LINES or unit.get('proof_from') == 'section':
+            return [None]
+        parts, current = [], []
+        for n in numbers:
+            current.append(n)
+            if len(current) >= PART_LINES and (not lines[n - 1].strip() or len(current) >= PART_LINES + 30):
+                parts.append(current)
+                current = []
+        if current:
+            if parts and len(current) < PART_LINES // 3:
+                parts[-1] += current
+            else:
+                parts.append(current)
+        return [_ranges(part) for part in parts]
+
+    def _audit_plan(self, uid, final):
+        """The planned checks of one proof: one pass until the overview has fixed the main results, then as many as
+        the effort gives (the first pass line by line, in parts for a long proof; the others whole)."""
+        plans = self.state.setdefault('check_plan', {})
+        plan = plans.get(uid) or []
+        wanted = self._lenses(uid) if final else ['line']
+        have = sorted({item['pass_index'] for item in plan if item['lens'] != 'weakest'})  # a saved extra pass apart
+        if len(have) >= len(wanted):
+            return plan
+        unit = self._unit(uid)
+        if unit is None or not unit['proofs']:
+            return plan
+        if self.state.get('whole'):
+            segments = None
+        else:
+            cap = self._check_cap()
+            room = self._room(cap, P.audit_prompt('line', ''))
+            try:
+                found = self._segments(unit, room, self._notation(), prompt=lambda packet: P.audit_prompt('line', packet),
+                                       cap=cap, output_schema=P.AUDIT_SCHEMA)
+            except WorkerInputError as exc:
+                if exc.code != 'context_overflow':
+                    raise
+                if uid not in self.state.setdefault('overflow', []):
+                    self.state['overflow'].append(uid)
                     self._warn(f'{unit["name"]} remains unchecked because its complete context does not fit: {exc}')
-                    continue
-                pending += jobs
-                estimate = max(estimate, size)
-        started = self._wave(pending, lambda n: self._affordable(self._check_cap(), estimate * (n + 1), reserve_out=self._write_reserve(),
-                                                                 reserve_in=12000, share=.65, jobs=n + 1))
-        if started < len(pending):
-            self._warn(f'{len(pending) - started} proof check(s) were not started: the time or token budget ran out.')
-        self._save()
-        self.state['unchecked'] = [uid for uid in self.state['plan_units'] if not self._checks_complete(uid)]
-        if self.state['unchecked']:
-            self._warn(f'{len(self.state["unchecked"])} planned proof(s) were not checked completely: '
-                       'some proof-part checks were not run or gave no usable answer.')
+                return plan
+            segments = [segment for segment, _, _ in found]
+        for index in range(len(have), len(wanted)):
+            lens = wanted[index]
+            parts = segments if segments is not None else (self._blocks(unit) if lens == 'line' else [None])
+            for part, segment in enumerate(parts):
+                key = f'{uid}#{index}' + (f'.{part}' if len(parts) > 1 else '')
+                plan.append({'key': key, 'lens': lens, 'pass_index': index, 'part': part, 'parts': len(parts), 'segment': segment})
+        with self._mutex:
+            plans[uid] = plan
+            self._save()
+        return plan
+
+    def _unit_text(self, unit, segment=None):
+        """The result under review, after the manuscript: its statement, its proof (or the part checked) and notes."""
+        sid = unit['source']
+        text = 'THE RESULT UNDER REVIEW:\n'
+        if unit.get('statement'):
+            a, b = unit['statement']
+            title = f' ({unit["title"]})' if unit.get('title') and unit['title'] not in unit['name'] else ''
+            text += f'STATEMENT: {unit["name"]}{title}\n' + self._numbered(sid, a, b, mark=False) + '\n'
+        else:
+            text += 'STATEMENT: not identified in the source; judge the argument on its own terms.\n'
+        spans = segment or unit['proofs']
+        where = ', '.join(_lines_text(a, b) for a, b in unit['proofs'])
+        label = f'PROOF ({where})' if segment is None else f'PROOF, PART {_span(segment)} (the proof is {where})'
+        text += f'\n{label}:\n' + '\n'.join(self._numbered(sid, a, b, mark=False) for a, b in spans) + '\n'
+        if unit.get('nested'):
+            text += '\n' + P.SECTION_PROOF_NOTE.format(nested=_span(unit['nested'])) + '\n'
+        if segment is not None:
+            text += '\n' + P.BLOCK_NOTE + '\n'
+        return text
+
+    def _audit_job(self, uid, item):
+        def run():
+            unit = self._unit(uid)
+            part = f', part {item["part"] + 1}/{item["parts"]}' if item['parts'] > 1 else ''
+            self.emit('notice', f'Checking {unit["name"]}: {item["lens"]} pass{part}')
+            if self.state.get('whole'):
+                prompt = self._block() + '\n\n' + P.audit_prompt(item['lens'], self._unit_text(unit, item['segment']))
+            else:
+                room = self._room(self._check_cap(), P.audit_prompt('line', ''))
+                packet, _, ranges = self._packet(unit, room, notation=self._notation(), segment=item['segment'])
+                self._mark(unit['source'], ranges)
+                prompt = P.AUDIT_PARTS_NOTE + '\n\n' + P.audit_prompt(item['lens'], packet)
+            deep = self._deep(item['pass_index'])
+            result = self._judge('check', prompt, cap=self._call_cap(deep), schema=P.AUDIT_SCHEMA, key=item['key'], reason=deep)
+            parsed = self._parse_audit(result, unit, item['segment'])
+            parsed.update(lens=item['lens'], unit=uid, pass_index=item['pass_index'], part=item['part'],
+                          parts=item['parts'], segment=item['segment'])
+            with self._mutex:
+                self.state['checks'][item['key']] = parsed
+                self._save()
+        return run
+
+    def _parse_issue(self, item, sid, allowed):
+        kind = item.get('kind') if item.get('kind') in RANK else 'uncertainty'
+        effect = item.get('effect') if item.get('effect') in P.EFFECTS else 'gap'
+        issue = {'start_line': _int(item.get('start_line')), 'end_line': _int(item.get('end_line')),
+                 'quote': str(item.get('quote') or '')[:200], 'kind': kind, 'effect': effect,
+                 'severity': 'major' if effect in P.MAJOR_EFFECTS else 'minor',
+                 'evidence': str(item.get('evidence') or '')[:1500], 'suggestion': str(item.get('suggestion') or '')[:800]}
+        issue['end_line'] = max(issue['end_line'], issue['start_line'])
+        issue['located'] = self._locate(issue, sid, allowed)
+        return issue
+
+    def _parse_audit(self, result, unit, segment):
+        value = result['value']
+        if value is None:
+            return {'usable': False, 'error': 'The answer was not usable JSON' + ('' if result['complete'] else ' (cut at the output limit)'),
+                    'issues': [], 'verdict': 'unavailable', 'explanation': ''}
+        allowed = set(n for a, b in (segment or unit['proofs']) for n in range(a, b + 1))
+        issues = [self._parse_issue(item, unit['source'], allowed) for item in value.get('issues') or [] if isinstance(item, dict)]
+        # An issue whose own text concludes that nothing needs to change is not an objection (live: six of them).
+        issues = [i for i in issues if not (_NO_CHANGE.search(i['suggestion'] + ' ' + i['evidence'][-200:])
+                                            or (i['suggestion'].strip() and _CORRECT_AS_IS.search(i['suggestion'])))]
+        verdict = value.get('verdict') if value.get('verdict') in ('no_issue_found', 'issues_found', 'uncertain') else 'uncertain'
+        concrete = [i for i in issues if i['kind'] != 'uncertainty']
+        if verdict == 'no_issue_found' and issues:
+            verdict = 'issues_found' if concrete else 'uncertain'
+        elif verdict == 'issues_found' and not concrete:
+            verdict = 'uncertain'
+        return {'usable': True, 'verdict': verdict, 'explanation': str(value.get('explanation') or '')[:3000], 'issues': issues,
+                'claimed': value.get('verdict') == 'issues_found' and not concrete,
+                'external': [{'key': str(e.get('key') or '')[:40], 'place': str(e.get('place') or '')[:80],
+                              'used_for': str(e.get('used_for') or '')[:300]}
+                             for e in value.get('external') or [] if isinstance(e, dict) and e.get('key')][:4]}
+
+    # -- sweeps over the whole paper -----------------------------------------------------------------------
 
     def _citations_done(self):
         return bool(self.state['checks'].get(CITE + '#0', {}).get('usable'))
@@ -2521,11 +3082,9 @@ class JournalRunner(ReviewBase):
         """Compare every result the paper takes from the literature with the result as it is known."""
         sid = self.state['sources'][0]['id']
         total = len(self._lines(sid))
-        prompt = P.CITATIONS_POLICY + '\n\nTHE MANUSCRIPT:\n' + self._numbered(sid, 1, total, mark=False)
-        if self.state['map']['bibliography']:
-            prompt += '\n\nBIBLIOGRAPHY (key: entry):\n' + self._bibliography_text()
         self.emit('notice', 'Comparing the cited results with the literature')
-        result = self._judge('citations', prompt, cap=self._check_cap(), schema=P.CITATIONS_SCHEMA, key=CITE + '#0')
+        result = self._judge('citations', self._block() + '\n\n' + P.CITATIONS_POLICY, cap=self._call_cap(False),
+                             schema=P.CITATIONS_SCHEMA, key=CITE + '#0', reason=False)
         value = result['value']
         rows, issues = [], []
         for item in (value or {}).get('citations') or []:
@@ -2548,9 +3107,10 @@ class JournalRunner(ReviewBase):
                     evidence += f' As known: {row["known"]}'
                 if row['explanation']:
                     evidence += ' ' + row['explanation']
+                effect = 'breaks_proof' if row['severity'] == 'major' else 'gap' if row['assessment'] == 'misapplied' else 'imprecision'
                 issue = {'start_line': row['start_line'], 'end_line': row['end_line'], 'quote': row['quote'],
-                         'kind': 'invalid_inference', 'severity': row['severity'], 'evidence': _clip(evidence, 4000),
-                         'suggestion': '', 'source': row['source']}
+                         'kind': 'invalid_inference', 'effect': effect, 'severity': row['severity'],
+                         'evidence': _clip(evidence, 4000), 'suggestion': '', 'source': row['source']}
                 issue['located'] = self._locate(issue, sid, set(range(1, total + 1)))
                 row['located'], row['issue_line'] = issue['located'], issue['start_line']
                 issues.append(issue)
@@ -2565,201 +3125,383 @@ class JournalRunner(ReviewBase):
                 **({} if value is not None else {'error': 'The answer was not usable JSON'})}
             self._save()
 
-    def _confirms(self):
-        rechecks = min(self.effort['rechecks'], 6) if self.LIGHT else self.effort['rechecks']
-        if not self.effort['confirm'] or not rechecks:
-            return
-        main = set(self._main_ids())
-        clusters = []
-        for uid in self.state['plan_units'] + [CITE]:  # plan order, so ties are settled the same way at any concurrency
-            clusters += [c for c in self._clusters(uid) if c['kind'] != 'uncertainty']
-        clusters.sort(key=lambda c: (c.get('severity') != 'major', c['unit'] not in main, -RANK[c['kind']], c['unlocated'], -c['passes']))
-        jobs = []
-        for cluster in clusters[:rechecks]:
-            if cluster['key'] in self.state['confirms']:
-                continue
-            unit = self._citation_unit(cluster) if cluster['unit'] == CITE else self._unit(cluster['unit'])
-            jobs.append(self._confirm_job(cluster, unit, self._notation()))
-        estimate = self._whole_tokens() + 4000
-        started = self._wave(jobs, lambda n: self._affordable(self._confirm_cap(), estimate * (n + 1), reserve_out=self._write_reserve(),
-                                                              reserve_in=12000, share=.78, jobs=n + 1))
-        if started < len(jobs) or len(clusters) > rechecks:
-            self._warn('Some alleged issues were not re-checked: ' + ('the budget ran out.' if started < len(jobs) else
-                                                                      f'at most {rechecks} are re-checked at this effort.'))
+    def _sweep_job(self, name):
+        uid = SWEEP_UNITS[name]
 
-    # -- literature -------------------------------------------------------------------------------
-
-    def _literature(self):
-        online = bool(self.literature and self.literature.online)
-        if not online:
-            if self.effort['queries'] or self.effort['cited']:
-                self._warn('Online search was off: no cited result was looked up in its source and '
-                           'novelty was not compared with the literature.')
-            return
-        jobs = [(f'cited:{n}', fn) for n, fn in enumerate(self._cited_jobs())]
-        if self.state.get('novelty') is None and (self.state.get('scope') or {}).get('queries') and self.effort['queries']:
-            jobs.append(('novelty', self._novelty))
-        self._wave(jobs)
-
-    def _cited_candidates(self):
-        """Cited results to look up in their source: the misuses found first, then what the main proofs rely on."""
-        bibliography = self.state['map']['bibliography']
-        main = set(self._main_ids())
-        sid = self.state['sources'][0]['id']
-        lines = self._lines(sid)
-        concluded = [c for c in self.state['cited_checks'] if c['level'] != 'not_checked']
-        candidates, seen = [], {(c['key'], c['place']) for c in concluded}
-
-        def add(bib_key, place, used_for):
-            if bib_key in bibliography and place and used_for and (bib_key, place) not in seen:
-                seen.add((bib_key, place))
-                candidates.append({'key': bib_key, 'place': place, 'used_for': used_for, 'entry': bibliography[bib_key]})
-        for issue in (self.state['checks'].get(CITE + '#0') or {}).get('issues') or []:
-            text = '\n'.join(lines[max(0, issue['start_line'] - 1):issue['end_line']])
-            for note, keys in re.findall(r'\\cite\w*\*?\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}', text):
-                for bib_key in (k.strip() for k in keys.split(',')):
-                    add(bib_key, note.strip() or issue['source'][:80], issue['evidence'][:300])
-            for number in re.findall(r'\[(\d{1,3})(?:,[^\]]*)?\]', text):
-                add(number, issue['source'][:80], issue['evidence'][:300])
-        for key in sorted(self.state['checks'], key=lambda k: (self.state['checks'][k].get('unit') not in main, k)):
-            for item in self.state['checks'][key].get('external') or []:
-                add(item['key'].strip('[] '), item['place'], item['used_for'])
-        for unit in sorted(self._units(), key=lambda u: u['id'] not in main):
-            for citation in unit.get('cites', []):
-                add(citation['key'], citation.get('note', '').strip(),
-                    'The result cited at this place; no separate applicability claim was extracted.')
-        return candidates
-
-    def _cited_jobs(self):
-        concluded = [c for c in self.state['cited_checks'] if c['level'] != 'not_checked']
-        wanted = (min(self.effort['cited'], 1) if self.LIGHT else self.effort['cited']) - len(concluded)
-        if wanted <= 0:
-            return []
-        candidates = self._cited_candidates()
-        if len(candidates) > wanted:
-            self._warn(f'{len(candidates) - wanted} cited result(s) were not looked up in their source at this effort.')
-        share = 1 / max(1, min(wanted, len(candidates), self.concurrency))
-        return [self._cited_job(item, share) for item in candidates[:wanted]]
-
-    def _cited_job(self, item, share):
         def run():
-            from .refcheck import CheckRunner
-            from .agent import Agent
-            from .literature import LiteratureTools
-            from .tools import Workspace
-            profile = workflow_budget('low') if is_ds4(self.agent) else {'seconds': 240, 'tokens': 15000}
+            sid = self.state['sources'][0]['id']
+            total = len(self._lines(sid))
+            self.emit('notice', {'consistency': 'Checking the paper for inconsistencies between its parts',
+                                 'completeness': 'Looking for claims the paper does not establish'}[name])
+            result = self._judge(name, self._block() + '\n\n' + P.SWEEPS[name], cap=self._call_cap(False),
+                                 schema=P.SWEEP_SCHEMA, key=uid + '#0', reason=False)
+            value = result['value']
+            issues = [self._parse_issue(item, sid, set(range(1, total + 1)))
+                      for item in (value or {}).get('issues') or [] if isinstance(item, dict)]
             with self._mutex:
-                seconds = min(profile['seconds'], (self.state['settings']['max_seconds'] * .86 - self._elapsed()))
-                tokens = int(min(profile['tokens'], self._tokens_left(self._write_reserve()) * .4 * share))
-            if seconds < 30 or tokens < 4000:
-                self._warn('Some cited results were not looked up in their source: the budget ran out.')
-                return
-            question = (f'{item["entry"]} — at {item["place"]}: {item["used_for"]}. '
-                        'Check that this place of this work states this result, with these hypotheses.')
-            parent = self.literature
-            literature = LiteratureTools(self.agent.workspace.root, online=True, timeout=getattr(parent, 'timeout', 15))
-            literature.cancelled = getattr(parent, 'cancelled', literature.cancelled)
-            # Lookups run side by side: each sets the timeout of its own view of the shared client.
-            inner = Agent(_OwnTimeout(self.agent.client), Workspace(self.agent.workspace.root, literature=literature, read_types=()),
-                          self.agent.model, self.agent.ctx, self.agent.predict, False, 'check', seed=self.agent.seed)
-            inner.document_output_cap = getattr(self.agent, 'document_output_cap', None)
-            self.emit('notice', f'Looking up the cited result [{item["key"]}, {item["place"]}]')
-            checker = CheckRunner(inner, emit=lambda kind, value: self.emit('tool', '↳ ' + str(value)) if kind == 'tool' else None)
-            try:
-                checker.start(question, guesses=self._guess(item), effort='low', asker='detailed review',
-                              max_seconds=seconds, max_tokens=tokens)
-                result = json.loads(checker.result_for_agent())
-            except (ValueError, OSError, AgentError) as exc:
-                result = {'status': 'error', 'references': [], 'error': str(exc)}
-            used = checker.state or {}
-            with self._mutex:  # charged even when the lookup was paused
-                self.state['tokens_charged'] += used.get('tokens_charged', 0)
-                self.state['input_tokens_charged'] += used.get('input_tokens_charged', 0)
-            if result.get('status') == 'paused':
-                raise KeyboardInterrupt
-            refs = result.get('references') or []
-            # Only verdicts about the manuscript's own reference count: the check may also have judged
-            # other works it recalled, and their levels say nothing about this citation.
-            same = [ref for ref in refs + (result.get('not_confirmed') or []) if _same_work(ref.get('reference', ''), item['entry'])]
-            contradicted = [ref for ref in same if ref.get('level') == 'contradicted']
-            confirmed = [ref for ref in same if ref in refs]
-            best = contradicted[0] if contradicted else confirmed[0] if confirmed else same[0] if same else {}
-            stopped = result.get('status') in ('error', 'budget_exhausted', 'budget_violation')
-            with self._mutex:
-                self.state['cited_checks'] = [c for c in self.state['cited_checks'] if (c['key'], c['place']) != (item['key'], item['place'])]
-                self.state['cited_checks'].append({'key': item['key'], 'place': item['place'], 'used_for': item['used_for'],
-                                                   'entry': item['entry'], 'level': 'not_checked' if stopped else best.get('level', 'not_found'),
-                                                   'found_place': best.get('place'), 'statement_found': best.get('statement_found'),
-                                                   'check_id': result.get('check_id'), 'error': result.get('error') or (result.get('stop_reason') if stopped else None)})
+                self.state.setdefault('check_plan', {})[uid] = [
+                    {'key': uid + '#0', 'lens': name, 'pass_index': 0, 'part': 0, 'parts': 1, 'segment': None}]
+                self.state['checks'][uid + '#0'] = {
+                    'usable': value is not None, 'verdict': 'issues_found' if issues else 'no_issue_found',
+                    'explanation': str((value or {}).get('explanation') or '')[:2000], 'issues': issues, 'external': [],
+                    'lens': name, 'unit': uid, 'pass_index': 0, 'part': 0, 'parts': 1, 'segment': None,
+                    **({} if value is not None else {'error': 'The answer was not usable JSON'})}
                 self._save()
         return run
 
-    @staticmethod
-    def _guess(item):
-        entry = re.sub(r'\s+', ' ', item['entry'])
-        parts = [p.strip() for p in re.split(r'(?<=[A-Za-zÀ-ÿ\]\)]{2})\.\s+', entry) if p.strip()]
-        if len(parts) < 2:
-            # amsplain style: "A. Author and B. Author, Title, Journal 12 (2004), 1-10."
-            pieces = [p.strip() for p in entry.split(',') if p.strip()]
-            name = r'^(?:and\s+)?(?:[A-ZÀ-Ý][a-zà-ÿ]?\.\s*(?:-\s*)?)+[A-ZÀ-Ý][\w\'’-]+(?:\s+and\s+(?:[A-ZÀ-Ý]\.\s*)+[A-ZÀ-Ý][\w\'’-]+)*$'
-            count = next((i for i, piece in enumerate(pieces) if not re.match(name, piece)), len(pieces))
-            if not count or count >= len(pieces):
-                return []
-            parts = [', '.join(pieces[:count]), pieces[count]]
-        authors = [re.sub(r'^(?:and\s+)', '', a).strip() for a in re.split(r',\s*|\s+and\s+', parts[0]) if a.strip()]
-        year = re.search(r'\b(1[5-9]|20)\d\d\b', entry)
-        return [{'authors': authors[:4], 'title': parts[1][:300], 'year': year.group() if year else '',
-                 'locator': item['place'], 'why': 'cited by the manuscript at this place'}]
+    # -- the attack on the main statements ---------------------------------------------------------------------
 
-    def _novelty(self):
-        scope = self.state['scope'] or {}
-        if self.state.get('novelty') is not None or not scope.get('queries') or not self.effort['queries']:
-            return
-        with self._mutex:
-            results, seen = list(self.state['search_results']), {r['title'].lower() for r in self.state['search_results']}
-            done = {e['arguments'].get('query') for e in self.state['evidence'] if e['tool'] == 'search_papers'}
-        for query in scope['queries'][:self.effort['queries']]:
-            if query in done:
-                continue
-            if not self._time_left(.82):
-                break
-            self.emit('tool', 'search_papers ' + json.dumps({'query': query}, ensure_ascii=False))
-            raw = self.literature.execute('search_papers', {'query': query, 'limit': 5})
+    def _attack_ids(self):
+        """The main results whose statement is attacked: the overview's choice in its order, then those the map
+        flags, ATTACKS at most, each with its statement located."""
+        chosen = (self.state.get('scope') or {}).get('main') or []
+        main = self._main_ids()
+        ranked = [uid for uid in chosen if uid in main] + [uid for uid in main if uid not in chosen]
+        return [uid for uid in dict.fromkeys(ranked) if self._unit(uid).get('statement')][:ATTACKS]
+
+    def _attack_job(self, uid):
+        def run():
+            unit = self._unit(uid)
+            sid = unit['source']
+            a, b = unit['statement']
+            self.emit('notice', f'Looking for a counterexample to {unit["name"]}')
+            proof = ', '.join(_lines_text(x, y) for x, y in unit['proofs']) or 'not located in the manuscript'
+            task = (P.ATTACK_POLICY + f'\n\nTHE STATEMENT TO ATTACK: {unit["name"]}\n' + self._numbered(sid, a, b, mark=False)
+                    + f'\n\nIts proof: {proof}.\n')
+            # The manuscript first, the task after: the same cached prefix as every other call of the review.
+            result = self._judge('attack', self._block() + '\n\n' + task, cap=self._call_cap(True), schema=P.ATTACK_SCHEMA,
+                                 key=f'attack:{uid}', reason=True)
             with self._mutex:
-                evidence_id = f'E{len(self.state["evidence"]) + 1}'
-                filename = self._artifact('evidence-' + evidence_id, str(raw))
-                self.state['evidence'].append({'id': evidence_id, 'tool': 'search_papers', 'arguments': {'query': query},
-                                               'artifact': filename, 'result': str(raw), 'round': 0})
-            try:
-                hits = json.loads(raw).get('results') or []
-            except (ValueError, AttributeError):
-                hits = []
-            for hit in hits:
-                title = str(hit.get('title') or '').strip()
-                if title and title.lower() not in seen:
-                    seen.add(title.lower())
-                    results.append({'title': title[:300], 'year': str(hit.get('year') or hit.get('published') or '')[:10],
-                                    'authors': ', '.join(map(str, (hit.get('authors') or [])[:4]))[:200],
-                                    'abstract': str(hit.get('abstract') or hit.get('summary') or '')[:500],
-                                    'url': str(hit.get('url') or hit.get('source_url') or '')[:300], 'query': query})
-            with self._mutex:
-                self.state['search_results'] = results[:15]
+                self._apply_attack(unit, result['value'])
                 self._save()
-        if not results or not self._affordable(self._analysis_cap(1500), 6000, reserve_out=self._write_reserve(), share=.86):
-            return
-        listing = '\n'.join(f'{n}. {r["title"]} ({r["authors"]}, {r["year"]}). {r["abstract"][:350]}' for n, r in enumerate(results[:15], 1))
-        prompt = (P.NOVELTY_POLICY + '\n\nFIELD: ' + scope.get('field', '') + '\nCLAIMED CONTRIBUTION: ' + scope.get('contribution', '')
-                  + '\n\nSEARCH RESULTS:\n' + listing)
-        result = self._ask('novelty', prompt, cap=self._analysis_cap(1500), schema=P.NOVELTY_SCHEMA, key='novelty',
-                           reference=False)
-        value = result['value'] or {}
-        related = [{'n': _int(r.get('n')), 'relation': str(r.get('relation') or '')[:300]} for r in value.get('related') or []
-                   if isinstance(r, dict) and 1 <= _int(r.get('n')) <= len(results)]
-        with self._mutex:
-            self.state['novelty'] = {'assessment': _clip(value.get('assessment'), 2500), 'related': related}
-            self._save()
+        return run
 
-    # -- reading ------------------------------------------------------------------------------------
+    def _apply_attack(self, unit, value):
+        """Record an attack. A counterexample (verdict minor or major) becomes a finding on the statement, alleged
+        to make it false, which gets a second opinion like any alleged major."""
+        uid, sid = unit['id'], unit['source']
+        if not isinstance(value, dict):
+            self.state['attacks'][uid] = {'usable': False, 'verdict': 'none', 'counterexample': '', 'hypothesis_check': ''}
+            self._warn(f'The search for a counterexample to {unit["name"]} gave no usable answer.')
+            return
+        verdict = value.get('verdict') if value.get('verdict') in P.ATTACK_VERDICTS else 'none'
+        counterexample = str(value.get('counterexample') or '').strip()[:2500]
+        hypotheses = str(value.get('hypothesis_check') or '').strip()[:2500]
+        note = ''
+        if verdict in ('minor', 'major') and not (counterexample and hypotheses):
+            # A counterexample must be explicit and checked against the hypotheses: without both it is no finding.
+            verdict, note = 'none', 'A counterexample was announced without the example or the check of the hypotheses; not kept.'
+        entry = {'usable': True, 'verdict': verdict, 'counterexample': counterexample, 'hypothesis_check': hypotheses}
+        if note:
+            entry['note'] = note
+        self.state['attacks'][uid] = entry
+        if verdict in ('minor', 'major'):
+            a, b = unit['statement']
+            issue = {'start_line': a, 'end_line': b, 'quote': str(value.get('quote') or '')[:200], 'kind': 'invalid_inference',
+                     'effect': 'statement_false', 'severity': 'major', 'suggestion': '',
+                     'evidence': f'Counterexample to the statement: {counterexample} Check of the hypotheses: {hypotheses}'}
+            issue['located'] = self._locate(issue, sid, set(range(a, b + 1)))
+            if issue['located'] == 'no':  # the place is the statement itself, whatever the quote
+                issue.update(start_line=a, end_line=b, quote='', located='exact')
+            self.state['checks'][f'{uid}#attack'] = {
+                'usable': True, 'verdict': 'issues_found', 'explanation': '', 'issues': [issue], 'external': [],
+                'lens': 'attack', 'unit': uid, 'pass_index': -1, 'part': 0, 'parts': 1, 'segment': None}
+
+    def _finding_units(self):
+        """Where findings can be: every planned proof, a main result attacked although no proof of it was found,
+        and the pseudo-units of the sweeps."""
+        s = self.state
+        return s['plan_units'] + [uid for uid in s.get('attacks') or {} if uid not in s['plan_units']] + list(PSEUDO_UNITS)
+
+    def _attack_outcome(self, uid, comments, rejected):
+        """What the search for a counterexample to a main statement gave, for the main-results table."""
+        attack = (self.state.get('attacks') or {}).get(uid)
+        if attack is None:
+            return 'pending' if uid in self._attack_ids() and self.state.get('whole') and self.state['phase'] != 'done' else 'not attacked'
+        if not attack['usable']:
+            return 'no usable answer'
+        if attack['verdict'] in ('none', 'edge'):
+            return 'none found' if attack['verdict'] == 'none' else 'only an edge case (below)'
+        mine = lambda c: c['unit'] == uid and 'attack' in (c.get('lenses') or [])
+        label = next((c['label'] for c in comments if mine(c)), None)
+        if label:
+            return f'proposed: {label}'
+        return 'proposed, rejected by the second opinion' if any(mine(c) for c in rejected) else 'proposed (see the comments)'
+
+    # -- second opinions -----------------------------------------------------------------------------------
+
+    def _eligible(self, cluster):
+        """Findings that get a second opinion: those alleged major, and the gaps in the main results and what they
+        use directly (a checker can call a broken step a gap: the judge applies the new-ingredient rule)."""
+        return cluster['effect'] in P.MAJOR_EFFECTS or (cluster['effect'] == 'gap' and self._host(cluster) in self._near_chain())
+
+    def _adjudication_jobs(self, chain):
+        """Second opinions on the findings of every proof (or sweep) whose checks are complete: a defence of the
+        paper, then a judge, whose verdict is final, on every finding alleged major and whenever the defence holds
+        or partly holds. The most serious findings and those on the main results' chain come first."""
+        s = self.state
+        near = self._near_chain()
+        candidates = []
+        for uid in self._finding_units():
+            complete = self._checks_complete(uid)
+            if not complete and f'{uid}#attack' not in s['checks']:
+                continue
+            for cluster in self._clusters(uid):
+                if not complete and cluster['lenses'] != ['attack']:
+                    continue  # a counterexample to a statement is judged at once; the proof's findings wait for its checks
+                question = cluster['kind'] == 'uncertainty'  # an open point near a main result makes the report provisional
+                if not cluster['unlocated'] and (self._eligible(cluster) if not question else self._host(cluster) in near):
+                    cluster['on_chain'] = self._host(cluster) in chain
+                    candidates.append(cluster)
+        candidates.sort(key=lambda c: (c['severity'] != 'major', not c['on_chain'], -_effect_rank(c['effect']), -RANK[c['kind']]))
+        cap, jobs = self.effort['adjudications'], []
+        for cluster in candidates:
+            key = cluster['key']
+            adjudication = s['adjudications'].get(key)
+            if adjudication is None:
+                urgent = cluster['severity'] == 'major' and cluster['on_chain']
+                if len(s['adjudications']) >= cap + (10 if urgent else 0):
+                    continue
+                with self._mutex:
+                    adjudication = s['adjudications'][key] = {'effect': cluster['effect'], 'unit': cluster['unit']}
+            step = self._next_step(adjudication)
+            if step is None and not adjudication.get('final') and adjudication.get('arbiter'):
+                # A review saved while a repair check was pending (the Review no longer makes one): the judge decides.
+                with self._mutex:
+                    self._conclude(cluster, adjudication)
+            if step:
+                priority = 1 if cluster['lenses'] == ['attack'] else 5 if cluster['on_chain'] else 8
+                jobs.append((priority, f'{step}:{key}', self._opinion_job(step, cluster)))
+        return jobs
+
+    @staticmethod
+    def _next_step(adjudication):
+        if adjudication.get('final'):
+            return None
+        if not adjudication.get('defense'):
+            return 'defend'
+        if PaperReviewRunner._judged(adjudication) and not adjudication.get('arbiter'):
+            return 'arbiter'
+        return None
+
+    def _settle(self, cluster):
+        """An open question given a second opinion becomes a finding, is rejected, or stays a question."""
+        confirm = self.state['confirms'].get(cluster['key'])
+        if cluster['kind'] == 'uncertainty':
+            return {'valid': 'confirmed', 'rejected': 'rejected'}.get((confirm or {}).get('assessment'), 'uncertainty')
+        if confirm is None and (self._minor_check(cluster) or {}).get('keep') is False:
+            return 'rejected'  # a minor finding the check against the paper did not support
+        return super()._settle(cluster)
+
+    @staticmethod
+    def _judged(adjudication):
+        """Whether the reasoning judge decides the finding. Always when it is alleged major (a false statement or a
+        broken proof), whatever the defence says: the defence answers without reasoning, and a concession let false
+        majors into the report. Otherwise when the defence holds the paper right or makes the finding less serious
+        than alleged; a defence that concedes, or agrees on the effect, settles a finding alleged minor."""
+        defense = adjudication['defense']
+        return (adjudication.get('effect') in P.MAJOR_EFFECTS or defense['position'] == 'defended' or (
+            defense['position'] == 'partly' and _effect_rank(defense['effect']) < _effect_rank(adjudication['effect'])))
+
+    def _allegation(self, cluster):
+        sid = self.state['sources'][0]['id']
+        unit = self._unit(cluster['unit'])
+        where = self._where(sid, cluster['start_line'], cluster['end_line'], None if cluster['unit'] in PSEUDO_UNITS else unit)
+        text = (f'THE ALLEGED PROBLEM ({self._comment_name(cluster["unit"], cluster)}, {where}):\n'
+                f'Quote: {cluster["quote"]}\nKind: {cluster["kind"]}; claimed effect: {cluster["effect"]}.\n'
+                f'Allegation: {cluster["evidence"]}\n')
+        if cluster.get('suggestion'):
+            text += f'Repair suggested by the referee: {cluster["suggestion"]}\n'
+        return text
+
+    def _opinion_job(self, step, cluster):
+        key = cluster['key']
+        roles = {'defend': ('defend', P.DEFENSE_POLICY, P.DEFENSE_SCHEMA), 'arbiter': ('arbiter', P.ARBITER_POLICY, P.ARBITER_SCHEMA)}
+        role, policy, schema = roles[step]
+
+        def run():
+            unit = self._unit(cluster['unit'])
+            if not self.state.get('whole') and cluster['unit'] in PSEUDO_UNITS:
+                unit = dict(unit, proofs=[[max(1, cluster['start_line'] - 3), cluster['end_line'] + 3]])
+            self.emit('notice', {'defend': 'Defending the paper against', 'arbiter': 'Judging'}[step]
+                      + f' a finding in {self._comment_name(cluster["unit"], cluster)} (lines {cluster["start_line"]}-{cluster["end_line"]})')
+            try:
+                context = self._context(unit, cluster)
+            except WorkerInputError as exc:
+                if exc.code != 'context_overflow':
+                    raise
+                with self._mutex:
+                    self.state['adjudications'][key].update(final={'verdict': 'unavailable', 'note': str(exc)[:300]})
+                return
+            adjudication = self.state['adjudications'][key]
+            prompt = context + '\n\n' + policy + '\n\n' + self._allegation(cluster)
+            if step == 'arbiter':
+                defense = adjudication['defense']
+                prompt += (f'\nTHE DEFENCE OF THE MANUSCRIPT ({defense["position"]}; what remains: {defense["effect"]}):\n'
+                           f'{defense["argument"]}\n' + (f'Repair proposed by the defence: {defense["repair"]}\n' if defense['repair'] else ''))
+                if defense['position'] != 'defended':
+                    prompt += '\n' + P.ARBITER_UNOPPOSED_NOTE + '\n'
+            # The defence answers at once; the judge, whose verdict is final, reasons first.
+            think = step == 'arbiter'
+            result = self._judge(role, prompt, cap=self._call_cap(think, self._confirm_cap()), schema=schema,
+                                 key=f'{step}:{key}', reason=think)
+            value = result['value']
+            with self._mutex:
+                if value is None:
+                    adjudication.setdefault('failed', []).append(step)
+                    self._save()
+                    return
+                if step == 'defend':
+                    adjudication['defense'] = {
+                        'position': value.get('position') if value.get('position') in ('defended', 'partly', 'conceded') else 'partly',
+                        'argument': str(value.get('argument') or '')[:2500],
+                        'effect': value.get('effect') if value.get('effect') in P.EFFECTS else cluster['effect'],
+                        'repair': str(value.get('repair') or '')[:1500]}
+                else:
+                    adjudication['arbiter'] = {
+                        'assessment': value.get('assessment') if value.get('assessment') in ('valid', 'rejected', 'undecided') else 'undecided',
+                        'effect': value.get('effect') if value.get('effect') in P.EFFECTS else cluster['effect'],
+                        'argument': str(value.get('argument') or '')[:2500], 'repair': str(value.get('repair') or '')[:1500]}
+                self._conclude(cluster, adjudication)
+                self._save()
+        return run
+
+    def _conclude(self, cluster, adjudication):
+        """The verdict on a finding once its second opinion is in: one defence, then, for a finding alleged major
+        or a defence that holds, one reasoning judge whose verdict is final. The judge's effect decides the
+        severity; a finding it rejects leaves the report; one it cannot decide keeps what was alleged. No further
+        call follows (a repair check after the judge doubled the cost, and kept major what the judge had called a gap)."""
+        defense = adjudication['defense']
+        if not self._judged(adjudication):
+            verdict, effect, repair, argument = 'valid', defense['effect'], defense['repair'], cluster['evidence']
+        else:
+            arbiter = adjudication.get('arbiter')
+            if arbiter is None:
+                return
+            verdict, effect, repair, argument = arbiter['assessment'], arbiter['effect'], arbiter['repair'], arbiter['argument']
+        severity = 'major' if effect in P.MAJOR_EFFECTS else 'minor'
+        adjudication['final'] = {'verdict': verdict, 'effect': effect, 'severity': severity}
+        kind = cluster['kind'] if cluster['kind'] in ('invalid_inference', 'missing_justification') else 'missing_justification'
+        self.state['confirms'][cluster['key']] = {'assessment': verdict, 'kind': kind, 'severity': severity, 'effect': effect,
+                                                  'argument': argument[:2500], 'suggestion': repair[:800]}
+
+    # -- minor findings without a second opinion ---------------------------------------------------------------
+
+    def _checks_attempted(self, uid):
+        """Every planned check of a proof (or sweep) has an answer, usable or not: its findings will not change."""
+        plan = self.state.get('check_plan', {}).get(uid) or []
+        return bool(plan) and all(item['key'] in self.state['checks'] for item in plan)
+
+    def _minor_waiting(self):
+        """The minor findings no second opinion looked at and no check against the paper has decided yet."""
+        s = self.state
+        checks = s.setdefault('minor_checks', {})
+        waiting = []
+        for uid in s['plan_units'] + list(PSEUDO_UNITS):
+            if not self._checks_attempted(uid):
+                continue
+            for cluster in self._clusters(uid):
+                if (cluster['kind'] != 'uncertainty' and not cluster['unlocated'] and cluster.get('effect') not in P.MAJOR_EFFECTS
+                        and cluster['key'] not in s['adjudications'] and cluster['key'] not in checks):
+                    waiting.append(cluster)
+        return waiting
+
+    def _minor_check_jobs(self, priority):
+        """Minor findings that got no second opinion (most come from one pass without reasoning; graded live, nearly
+        half were wrong) are checked against the paper, MINOR_BATCH per call, as soon as a batch is full or every
+        planned check has answered."""
+        s = self.state
+        if s.get('scope') is None:
+            return []  # the overview fixes the plan: before it a proof may still get another pass
+        waiting = self._minor_waiting()
+        planned = s['plan_units'] + [SWEEP_UNITS[n] for n in self.effort['sweeps']] + [CITE]
+        checks_over = all(self._checks_attempted(uid) for uid in planned)
+        jobs = []
+        while waiting and (len(waiting) >= MINOR_BATCH or checks_over):
+            batch, waiting = waiting[:MINOR_BATCH], waiting[MINOR_BATCH:]
+            for cluster in batch:
+                s['minor_checks'][cluster['key']] = {'pending': True}
+            jobs.append((priority, f'minor-check:{batch[0]["key"]}', self._minor_check_job(batch)))
+        return jobs
+
+    def _minor_check_job(self, batch):
+        def run():
+            rows = []
+            for n, c in enumerate(batch, 1):
+                rows.append(f'F{n} ({self._comment_name(c["unit"], c)}, lines {c["start_line"]}-{c["end_line"]}, '
+                            f'{c.get("effect") or c["kind"]}): "{c["quote"]}" — {c["evidence"]}'
+                            + (f' Suggested repair: {c["suggestion"]}' if c.get('suggestion') else ''))
+            self.emit('notice', f'Checking {len(rows)} minor findings against the paper')
+            result = self._judge('minor-check', self._block() + '\n\n' + P.MINOR_CHECK_POLICY + '\n\nFINDINGS:\n' + '\n'.join(rows),
+                                 cap=self._call_cap(False), schema=P.MINOR_CHECK_SCHEMA, key=f'minor-check:{batch[0]["key"]}',
+                                 reason=False)
+            value = result['value']
+            with self._mutex:
+                verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
+                for n, cluster in enumerate(batch, 1):
+                    verdict = verdicts.get(f'F{n}')
+                    if verdict is None or type(verdict.get('keep')) is not bool:
+                        # Shown unchecked; a resumed review checks it again.
+                        self.state['minor_checks'][cluster['key']] = {'failed': True}
+                        continue
+                    self.state['minor_checks'][cluster['key']] = {'keep': verdict['keep'],
+                                                                  'check': str(verdict.get('check') or '')[:700]}
+                self._save()
+        return run
+
+    def _minor_check(self, cluster):
+        """The decided check of a minor finding against the paper, or None."""
+        entry = (self.state.get('minor_checks') or {}).get(cluster['key']) or {}
+        return entry if 'keep' in entry else None
+
+    # -- typos ---------------------------------------------------------------------------------------------
+
+    def _typo_jobs(self, priority):
+        """Typo and presentation remarks checked against the paper, TYPO_BATCH per call, as soon as a batch is full
+        (or the reading is over): a wrong correction (a formula "fixed" into an error, a colleague's name "corrected")
+        is worse than none."""
+        s = self.state
+        waiting = [i for i, c in enumerate(s['presentation']) if not ({'checked', 'check_pending', 'check_failed'} & set(c))]
+        reading_over = all(f'L{a}' in s['reading'] for a, _ in self._reads())
+        jobs = []
+        while waiting and (len(waiting) >= TYPO_BATCH or reading_over):
+            batch, waiting = waiting[:TYPO_BATCH], waiting[TYPO_BATCH:]
+            for i in batch:
+                s['presentation'][i]['check_pending'] = True
+            jobs.append((priority, f'typo-check:{batch[0]}', self._typo_check_job(batch)))
+        return jobs
+
+    def _typo_check_job(self, batch):
+        def run():
+            items = [(i, self.state['presentation'][i]) for i in batch]
+            rows = [f'R{n} (lines {c["start_line"]}-{c["end_line"]}, {c["kind"]}): "{c["quote"]}" — {c["comment"]}'
+                    + (f' Suggested: {c["suggestion"]}' if c.get('suggestion') else '') for n, (_, c) in enumerate(items, 1)]
+            self.emit('notice', f'Checking {len(rows)} typo and presentation remarks against the paper')
+            result = self._judge('typo-check', self._block() + '\n\n' + P.TYPO_CHECK_POLICY + '\n\nREMARKS:\n' + '\n'.join(rows),
+                                 cap=self._call_cap(False), schema=P.TYPO_CHECK_SCHEMA, key=f'typo-check:{batch[0]}',
+                                 reason=False)
+            value = result['value']
+            with self._mutex:
+                verdicts = {str(v.get('id')): v for v in (value or {}).get('items') or [] if isinstance(v, dict)}
+                for n, (_, comment) in enumerate(items, 1):
+                    comment.pop('check_pending', None)
+                    verdict = verdicts.get(f'R{n}')
+                    if verdict is None:
+                        comment['check_failed'] = True  # shown unchecked; a resumed review checks it again
+                        continue
+                    comment['checked'] = True
+                    if verdict.get('keep') is False:
+                        comment['rejected'] = str(verdict.get('check') or verdict.get('reason') or '')[:400]
+                self._typo_counts()
+                self._save()
+        return run
+
+    def _typo_counts(self):
+        items = self.state['presentation']
+        self.state['typo_check'] = {'checked': sum(bool(c.get('checked')) for c in items),
+                                    'rejected': sum(bool(c.get('rejected')) for c in items), 'listed': len(items)}
+
+    # -- reading ------------------------------------------------------------------------------------------------
 
     def _read_parts(self, whole=None):
         """The paper up to its bibliography: one part when the whole paper is read at once, else bounded
@@ -2773,13 +3515,17 @@ class JournalRunner(ReviewBase):
                 end = n - 1
                 break
         begin = next((n for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 1) if mapping['format'] == 'tex' else 1
-        if self.state.get('whole') if whole is None else whole:
-            return [[begin, end]] if any(lines[n - 1].strip() for n in range(begin, end + 1)) else []
+        focused = self.state.get('whole') if whole is None else whole
         starts = sorted({begin} | {sec['line'] for sec in mapping['sections'] if begin < sec['line'] <= end})
         parts = []
-        part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
-                         max(512, self._room(self._read_cap(), P.READ_POLICY) - 1500))
-        part_lines = input_limit(self.agent, 'review_lines', 150)
+        if focused:
+            # The whole paper is in every call; each call proofreads one part of it closely (one reading of
+            # 3,000 lines listed a dozen problems, a third of the misprints and slips a careful reader finds).
+            part_bytes, part_lines = READ_FOCUS_BYTES, READ_FOCUS_LINES
+        else:
+            part_bytes = min(input_limit(self.agent, 'review_packet', 14000),
+                             max(512, self._room(self._read_cap(), P.READ_POLICY) - 1500))
+            part_lines = input_limit(self.agent, 'review_lines', 150)
         for index, a in enumerate(starts):
             b = (starts[index + 1] - 1) if index + 1 < len(starts) else end
             while a <= b:
@@ -2790,10 +3536,25 @@ class JournalRunner(ReviewBase):
                 stop = max(stop, a + 1)
                 parts.append([a, stop - 1])
                 a = stop
-        return [r for r in parts if any(lines[n - 1].strip() for n in range(r[0], r[1] + 1))]
+        parts = [r for r in parts if any(lines[n - 1].strip() for n in range(r[0], r[1] + 1))]
+        if focused:
+            # Short sections share a call: every call reads the whole paper, so a call per short section is waste.
+            packed = []
+            for a, b in parts:
+                if packed and (b - packed[-1][0] < part_lines or b - a < part_lines // 4 or packed[-1][1] - packed[-1][0] < part_lines // 4):
+                    packed[-1][1] = b
+                else:
+                    packed.append([a, b])
+            parts = packed
+        return parts
 
     def _read_cap(self):
-        return self._model_cap('review_read', self._analysis_cap())
+        return self._call_cap(False, self._model_cap('review_read', self._analysis_cap()))
+
+    def _call_cap(self, think, ceiling=None):
+        """The output cap of a call: at most REASONING_CAP when it reasons first, else at most DIRECT_CAP."""
+        ceiling = self._check_cap() if ceiling is None else ceiling
+        return min(ceiling, REASONING_CAP if think else DIRECT_CAP)
 
     def _reading_usable(self, key):
         """Only a usable completed answer counts as reading; accept older summary-only entries."""
@@ -2802,7 +3563,7 @@ class JournalRunner(ReviewBase):
                 and entry.get('complete', True))
 
     def _unread_parts(self):
-        return [r for r in self.state.get('read_parts') or [] if not self._reading_usable(f'L{r[0]}')]
+        return [r for r in self._reads() if not self._reading_usable(f'L{r[0]}')]
 
     def _warn_reading_gaps(self):
         reading = self.state.get('reading', {})
@@ -2816,38 +3577,20 @@ class JournalRunner(ReviewBase):
             self._warn(f'{len(missing)} part(s) of the paper were not read for presentation: '
                        f'no reading answer is available ({", ".join(_lines_text(a, b) for a, b in missing)}).')
 
-    def _read(self):
-        """Read the paper first: what it does, and its typos and presentation problems. With a large context the
-        paper is read whole, and the scope and the comparison of cited results, which need only the paper, run
-        at the same time."""
-        sid = self.state['sources'][0]['id']
-        pdf = self._source(sid)['path'].lower().endswith('.pdf')
-        jobs = [(f'L{a}', self._read_job(f'L{a}', sid, a, b, pdf)) for a, b in self.state['read_parts']
-                if not self._reading_usable(f'L{a}')]
-        if self.state.get('whole'):
-            if self.state.get('scope') is None:
-                jobs.append(('scope', self._scope))
-            if not self._citations_done():
-                jobs.append(('citations', self._citations))
-        estimate = (self._whole_tokens() or 6000) + 3000
-        self._wave(jobs, lambda n: self._affordable(self._read_cap(), estimate * (n + 1), reserve_out=self._write_reserve() + 6000,
-                                                    reserve_in=20000, share=.45, jobs=n + 1))
-        self._warn_reading_gaps()
-
     def _read_job(self, key, sid, a, b, pdf):
         def run():
             whole = bool(self.state.get('whole'))
-            self.emit('notice', 'Reading the paper' if whole else f'Reading lines {a}-{b}')
-            prompt = ((P.READ_WHOLE_POLICY if whole else P.READ_POLICY) + ('\n' + P.PDF_READING if pdf else '')
-                      + ('\n\nTHE MANUSCRIPT:\n' if whole else '\n\nPART OF THE MANUSCRIPT:\n') + self._numbered(sid, a, b))
-            if whole and self.state['map']['bibliography']:
-                prompt += '\n\nBIBLIOGRAPHY (context):\n' + self._bibliography_text()
+            self.emit('notice', f'Reading lines {a}-{b}')
+            if whole:
+                prompt = self._block() + '\n\n' + P.READ_FOCUS_POLICY.format(start=a, end=b) + ('\n' + P.PDF_READING if pdf else '')
+            else:
+                prompt = P.READ_POLICY + ('\n' + P.PDF_READING if pdf else '') + '\n\nPART OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b)
             schema = P.READ_SCHEMA if whole else P.READ_PART_SCHEMA
             result = self._ask('read', prompt, cap=self._read_cap(), schema=schema, key=key)
             value = result['value'] or {}
             usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                       and isinstance(value.get('comments'), list))
-            if not usable and self._affordable(self._read_cap(), 6000, share=.45):
+            if not usable and self._affordable(self._read_cap(), 6000, share=.9):
                 self._warn(f'Reading {_lines_text(a, b)} produced an unusable answer; one fresh attempt was made on the same exact source.')
                 result = self._ask('read', prompt, cap=self._read_cap(), schema=schema, key=key + ':retry', temperature=.4)
                 value = result['value'] or {}
@@ -2884,15 +3627,18 @@ class JournalRunner(ReviewBase):
                 self._save()
         return run
 
-    # -- writing --------------------------------------------------------------------------------------
+    # -- the report --------------------------------------------------------------------------------------------
 
     def _unit_id_at(self, line, proofs_only=False):
-        """The id of the result whose proof (or, unless proofs_only, statement) holds a line."""
+        """The id of the result whose proof (or, unless proofs_only, statement) holds a line; the narrowest wins
+        (a lemma inside a section-long proof)."""
+        best = None
         for unit in self._units():
             spans = ([] if proofs_only or not unit.get('statement') else [unit['statement']]) + list(unit.get('proofs') or [])
-            if any(a <= line <= b for a, b in spans):
-                return unit['id']
-        return None
+            for a, b in spans:
+                if a <= line <= b and (best is None or b - a < best[0]):
+                    best = (b - a, unit['id'])
+        return best[1] if best else None
 
     def _unit_at(self, line):
         """The name of the result (statement or proof) or section that holds a line."""
@@ -2913,8 +3659,8 @@ class JournalRunner(ReviewBase):
         return f'{self._unit_at(a)}, {self._where(sid, a, b)}'
 
     def _comment_name(self, uid, cluster):
-        if uid == CITE:
-            return 'Cited result in ' + self._unit_at(cluster['start_line'])
+        if uid in PSEUDO_UNITS:
+            return {CITE: 'Cited result in ', 'CONSISTENCY': 'Consistency, ', 'COMPLETENESS': 'Unsupported claim in '}[uid] + self._unit_at(cluster['start_line'])
         return self._unit(uid)['name']
 
     def _source_check(self, cluster):
@@ -2922,42 +3668,60 @@ class JournalRunner(ReviewBase):
         level = {'read': 'the cited work was read and states this result', 'located': 'the result was located in the cited work',
                  'cited': 'the result is known only from works that cite it', 'contradicted': 'the cited work contradicts this use',
                  'not_found': 'the cited work could not be found', 'not_checked': 'the lookup stopped before a conclusion'}
-        for check in self.state['cited_checks']:
+        for check in self.state.get('cited_checks') or []:  # lookups made by reviews saved before November 2026
             if check['used_for'] == cluster['evidence'][:300]:
                 place = f' (found at {check["found_place"]})' if check.get('found_place') else ''
                 return level.get(check['level'], check['level'].replace('_', ' ')) + place + '.'
         return ''
 
+    def _affects(self, uid):
+        """The main results whose proof uses this result (or which it is)."""
+        return [self._unit(m)['name'] for m in self._main_ids() if uid and uid in self._chain(m)]
+
     def _comments(self, merged=True):
-        """Major and minor comments and open questions, from settled findings, in a fixed order, numbered once.
-        merged: one comment per root cause, as grouped by _merge."""
-        main = set(self._main_ids())
-        units = self.state['plan_units'] + [CITE]
+        """Major and minor comments and open questions, from the findings and their second opinions, in a fixed
+        order, numbered once. merged: one comment per root cause, as grouped by _merge (every member's content is
+        kept under its lead)."""
+        chain = self._main_chain()
+        units = self._finding_units()
         major, minor, questions, rejected, verdicts = [], [], [], [], {}
-        self._loose = []
+        # Left out of the report and kept in the job: findings whose quote is not in the source, and minor findings
+        # that a check against the paper did not support.
+        self._loose, self._unsupported = [], []
         rank = ['no_issue_found', 'uncertain', 'issues_alleged', 'issues_found']
         for uid in units:
             if not any(c.get('unit') == uid for c in self.state['checks'].values()):
                 continue
             verdict, clusters = self._unit_verdict(uid)
-            if uid != CITE:
+            if uid not in PSEUDO_UNITS:
                 verdicts[uid] = verdict
             for cluster in clusters:
-                if cluster['unlocated'] and cluster['status'] != 'confirmed':
-                    self._loose.append(dict(cluster, unit_name=self._comment_name(uid, cluster)))
+                if cluster['unlocated']:
+                    self._loose.append(cluster['key'])
                     continue
-                entry = dict(cluster, unit_name=self._comment_name(uid, cluster), main=uid in main)
+                confirm = self.state['confirms'].get(cluster['key'])
+                if cluster['status'] == 'rejected' and confirm is None:
+                    self._unsupported.append(cluster['key'])
+                    continue
+                if confirm and confirm['assessment'] == 'valid' and confirm.get('effect'):
+                    cluster['effect'] = confirm['effect']
+                host = self._host(cluster)
+                entry = dict(cluster, unit_name=self._comment_name(uid, cluster), main=host in chain, host=host,
+                             affects=self._affects(host))
                 if uid == CITE:
                     entry['source_check'] = self._source_check(cluster)
-                    # A cited result misused inside a checked proof is a finding about that proof too.
-                    host = self._unit_id_at(cluster['start_line'], proofs_only=True)
+                if uid in PSEUDO_UNITS:
+                    # A finding of a sweep inside a checked proof is a finding about that proof too.
                     found = {'confirmed': 'issues_found', 'unconfirmed': 'issues_alleged'}.get(
                         cluster['status'], 'uncertain' if cluster['status'] in ('undecided', 'uncertainty') else None)
-                    if host in verdicts and found and verdicts[host] in rank and rank.index(found) > rank.index(verdicts[host]):
-                        verdicts[host] = found
-                    entry['main'] = host in main
+                    inside = self._unit_id_at(cluster['start_line'], proofs_only=True)
+                    if inside in verdicts and found and verdicts[inside] in rank and rank.index(found) > rank.index(verdicts[inside]):
+                        verdicts[inside] = found
                 if cluster['status'] == 'rejected':
                     rejected.append(entry)
+                elif cluster['status'] == 'undecided' and cluster.get('severity') == 'major' and cluster['kind'] != 'uncertainty':
+                    major.append(entry)  # alleged major and not refuted: a downgrade must be earned (live: the
+                    # Feynman-Kac error became a question when the judge could not decide)
                 elif cluster['status'] in ('undecided', 'uncertainty'):
                     questions.append(entry)
                 elif cluster.get('severity') == 'major':
@@ -2967,6 +3731,7 @@ class JournalRunner(ReviewBase):
         if merged and self.state.get('merged'):
             entries = {c['key']: c for c in major + minor + questions}
             dropped = set()
+            sid = self.state['sources'][0]['id']
             for group in self.state['merged']:
                 members = [entries[key] for kind, key in group if kind == 'cluster' and key in entries and key not in dropped]
                 if len(members) < 2:
@@ -2976,9 +3741,13 @@ class JournalRunner(ReviewBase):
                 for other in members:
                     if other is not lead:
                         dropped.add(other['key'])
-                        lead.setdefault('also', []).append(f'{other["unit_name"]}, {self._where(self.state["sources"][0]["id"], other["start_line"], other["end_line"])}')
+                        lead.setdefault('also', []).append(
+                            f'{other["unit_name"]}, {self._where(sid, other["start_line"], other["end_line"])}: {_clip(other["evidence"], 300)}')
+                        lead['affects'] = list(dict.fromkeys(lead['affects'] + other['affects']))
+                        lead['main'] = lead['main'] or other['main']
             major, minor, questions = ([c for c in group if c['key'] not in dropped] for group in (major, minor, questions))
-        order = lambda c: (c['status'] != 'confirmed', not c['main'], -RANK[c['kind']], units.index(c['unit']), c['start_line'])
+        order = lambda c: (c['status'] != 'confirmed', not c['main'], -_effect_rank(c.get('effect')), -RANK[c['kind']],
+                           units.index(c['unit']), c['start_line'])
         major, minor, questions = sorted(major, key=order), sorted(minor, key=order), sorted(questions, key=order)
         for label, group in (('Major', major), ('Minor', minor), ('Question', questions)):
             for n, c in enumerate(group, 1):
@@ -2986,8 +3755,9 @@ class JournalRunner(ReviewBase):
         return major, minor, questions, rejected, verdicts
 
     def _hidden_presentation(self):
-        """Presentation comments shown elsewhere: merged into a proof comment, or a repeat of another one."""
-        hidden = set()
+        """Presentation comments shown elsewhere: merged into a proof comment, a repeat of another one, or rejected
+        by the check of the remarks."""
+        hidden = {i for i, c in enumerate(self.state['presentation']) if c.get('rejected')}
         for group in self.state.get('merged') or []:
             shown = [key for kind, key in group if kind == 'presentation']
             hidden |= set(shown if any(kind == 'cluster' for kind, _ in group) else shown[1:])
@@ -2998,9 +3768,9 @@ class JournalRunner(ReviewBase):
         if self.state.get('merged') is not None:
             return
         major, minor, _, _, _ = self._comments(merged=False)
-        # Every presentation item takes part: the same slip was reported as a typo and as a proof comment, or
-        # twice in the typo list. Errors first when the list is long.
-        errors = sorted(enumerate(self.state['presentation']), key=lambda e: (e[1].get('importance') != 'error', e[0]))[:80]
+        rejected = {i for i, c in enumerate(self.state['presentation']) if c.get('rejected')}
+        errors = sorted(((i, c) for i, c in enumerate(self.state['presentation']) if i not in rejected),
+                        key=lambda e: (e[1].get('importance') != 'error', e[0]))[:80]
         if len(major) + len(minor) + len(errors) < 2 or not self._time_left(.97) or self._tokens_left() < 4000:
             self.state['merged'] = []
             return
@@ -3031,113 +3801,379 @@ class JournalRunner(ReviewBase):
     def _proofs_scope(self):
         checkable = [u for u in self._units() if u['proofs']]
         checked = [uid for uid in self.state['plan_units'] if self._checks_complete(uid)]
-        what = 'the proofs of the main results only' if self.LIGHT and not self.state.get('requested_all_proofs') else 'the proofs planned at this effort'
-        return f'{len(checked)} of {len(checkable)} proofs checked completely ({what})'
+        return f'{len(checked)} of {len(checkable)} proofs checked completely'
 
-    def _write(self):
-        major, minor, questions, _, verdicts = self._comments()
-        scope = self.state['scope'] or {}
-        hidden = self._hidden_presentation()
-        kinds = {}
-        for i, c in enumerate(self.state['presentation']):
-            if i not in hidden:
-                kinds[c['kind']] = kinds.get(c['kind'], 0) + 1
-        citations = self.state.get('citations') or []
-        findings = {'overview': scope.get('overview'), 'field': scope.get('field'), 'claimed_contribution': scope.get('contribution'),
-                    'proofs_scope': self._proofs_scope(),
-                    'proofs_checked': [{'name': self._unit(u)['name'], 'main': u in set(self._main_ids()),
-                                        'verdict': v.replace('_', ' ')} for u, v in verdicts.items()],
-                    'proofs_not_checked': [self._unit(u)['name'] for u in self.state['unchecked']],
-                    'main_results_without_located_proof': self._provisional()[1],
-                    'major': [{'label': c['label'], 'where': c['unit_name'], 'kind': KIND_LABEL[c['kind']], 'status': c['status'],
-                               'issue': _clip(c['evidence'], 600)} for c in major],
-                    'minor': [{'label': c['label'], 'where': c['unit_name'], 'issue': _clip(c['evidence'], 300)} for c in minor],
-                    'questions': len(questions),
-                    'typos_and_presentation_comments': kinds,
-                    'parts_not_read': len(self._unread_parts()),
-                    'cited_results_compared_with_the_literature': {
-                        a: sum(r['assessment'] == a for r in citations) for a in ('consistent', 'misapplied', 'misstated', 'unknown')},
-                    'cited_results_looked_up': [{'reference': c['entry'][:120], 'place': c['place'], 'level': c['level']}
-                                                for c in self.state['cited_checks']],
-                    'novelty_search': (self.state.get('novelty') or {}).get('assessment') or ('not done (offline or low effort)')}
+    def _main_status(self, major, minor, questions, verdicts, rejected=()):
+        """One line per main result: checked with no issue, affected by a comment, open, or not (yet) checked; and
+        what the search for a counterexample to its statement gave."""
+        rows = []
+        for uid in self._main_ids():
+            unit = self._unit(uid)
+            chain = self._chain(uid)
+            def labels(group, named=False):
+                out = []
+                for c in group:
+                    host = c.get('host') or c['unit']
+                    if host in chain:
+                        out.append(c['label'] if host == uid or not named else f'relies on {self._unit(host)["name"]} ({c["label"]})')
+                return out
+            hit, small, open_ = labels([c for c in major if c['status'] == 'confirmed'], True), labels(minor), labels(questions)
+            alleged = labels([c for c in major if c['status'] != 'confirmed'], True)
+            planned = [u for u in self.state['plan_units'] if u in chain]
+            done = [u for u in planned if self._checks_complete(u)]
+            if not unit['proofs']:
+                status = 'no proof found in the paper'
+            elif hit:
+                own = [h for h in hit if not h.startswith('relies on')]
+                false = {c['label'] for c in major if c.get('effect') == 'statement_false'}
+                status = '; '.join((['its statement is false as written: ' + ', '.join(h for h in own if h in false)]
+                                    if false & set(own) else [])
+                                   + (['an error in its proof: ' + ', '.join(h for h in own if h not in false)]
+                                      if set(own) - false else [])
+                                   + [h for h in hit if h.startswith('relies on')])
+            elif alleged:
+                status = ', '.join(alleged) + (' alleged; second opinion pending' if self.state['phase'] != 'done' else ' alleged, not given a second opinion')
+            elif len(done) < len(planned):
+                status = (f'being checked ({len(done)} of {len(planned)} proofs it uses checked)' if self.state['phase'] != 'done'
+                          else f'not checked completely ({len(done)} of {len(planned)} proofs it uses)')
+            elif open_:
+                status = 'no error found; open: ' + _few(open_)
+            elif small:
+                status = 'no major issue; ' + _few(small)
+            else:
+                status = 'checked, no issue found' if verdicts.get(uid) == 'no_issue_found' else 'checked, ' + verdicts.get(uid, 'not checked').replace('_', ' ')
+            where = ', '.join(_lines_text(a, b) for a, b in unit['proofs']) if unit['proofs'] else '—'
+            if unit.get('proof_from') == 'located':
+                where += ' (located by the overview)'
+            elif unit.get('proof_from') == 'section':
+                where += ' (a whole section)'
+            rows.append({'id': uid, 'name': unit['name'], 'proof': where, 'status': status, 'uses': len(chain) - 1,
+                         'attack': self._attack_outcome(uid, major + minor + questions, rejected)})
+        return rows
+
+    def _attack_notes(self, rows, sid):
+        """Under the main-results table: what the last column means and each edge case found."""
+        attacks = self.state.get('attacks') or {}
+        if not any(r['id'] in attacks for r in rows):
+            return []
+        out = ['*Counterexample to the statement:* a reasoning call tried to break each main statement (degenerate '
+               'parameters, low dimension, boundary cases, a known result it would contradict, the simplest example the '
+               'hypotheses allow). "None found" is not evidence that the statement is true.', '']
+        for row in rows:
+            attack = attacks.get(row['id']) or {}
+            if attack.get('verdict') == 'edge':
+                out.append(f'- *{row["name"]}*, edge case: {_clip(attack["counterexample"], 700)}')
+            if attack.get('note'):
+                out.append(f'- *{row["name"]}*: {attack["note"]}')
+        return out + [''] if len(out) > 2 else out
+
+    def _closest(self):
+        """The prior works the paper presents as closest (bibliography keys chosen by the overview), with their entries."""
+        bibliography = self.state['map'].get('bibliography') or {}
+        keys = [k.strip('[] ') for k in ((self.state.get('scope') or {}).get('closest') or [])]
+        return [f'[{k}] {_clip(bibliography[k], 200)}' for k in keys if k in bibliography][:6]
+
+    def _recommendation_floor(self, major, questions, minor=()):
+        """The mildest recommendation the findings allow: a major comment upheld after a defence of the paper rules
+        out acceptance as it stands."""
+        confirmed = [c['label'] for c in major if c['status'] in ('confirmed', 'undecided')]
+        if confirmed:
+            return 'major_revision', confirmed
+        # Comments to address rule out acceptance as it stands (live: "accept" with 45 minor comments).
+        return ('minor_revision', ['the comments of this report']) if major or minor or questions else ('accept', [])
+
+    def _write(self, draft=False):
+        """The prose parts, from the findings (they cannot add, drop or renumber a comment). draft: a first version
+        written as soon as the main results are checked and judged; the final one replaces it."""
+        with self._mutex:
+            major, minor, questions, rejected, verdicts = self._comments()
+            scope = self.state['scope'] or {}
+            hidden = self._hidden_presentation()
+            kinds = {}
+            for i, c in enumerate(self.state['presentation']):
+                if i not in hidden:
+                    kinds[c['kind']] = kinds.get(c['kind'], 0) + 1
+            citations = self.state.get('citations') or []
+            floor, raised = self._recommendation_floor(major, questions, minor)
+            findings = {'overview': scope.get('overview'), 'field': scope.get('field'), 'claimed_contribution': scope.get('contribution'),
+                        'proofs_scope': self._proofs_scope() + ('; the review is still running, more checks will follow' if draft else ''),
+                        'main_results': [{'name': r['name'], 'status': r['status'], 'counterexample_search': r['attack']}
+                                         for r in self._main_status(major, minor, questions, verdicts, rejected)],
+                        'proofs_checked': [{'name': self._unit(u)['name'], 'verdict': v.replace('_', ' ')} for u, v in verdicts.items()],
+                        'proofs_not_checked': [self._unit(u)['name'] for u in self.state['plan_units'] if not self._checks_complete(u)],
+                        'major': [{'label': c['label'], 'where': c['unit_name'], 'effect': EFFECT_LABEL.get(c.get('effect'), ''),
+                                   'status': c['status'], 'issue': _clip(c['evidence'], 600)} for c in major],
+                        'minor': [{'label': c['label'], 'where': c['unit_name'], 'issue': _clip(c['evidence'], 300)} for c in minor],
+                        'questions_to_the_authors': len(questions),
+                        'typos_and_presentation_comments': kinds if self._reads() or kinds else
+                        'not checked by this review: a separate typo check does that',
+                        'parts_not_read': len(self._unread_parts()),
+                        'cited_results_compared_with_the_literature': {
+                            a: sum(r['assessment'] == a for r in citations) for a in ('consistent', 'misapplied', 'misstated', 'unknown')},
+                        'literature': 'not searched by this review; a literature review made beside it places the results, after this report',
+                        'closest_works_cited_by_the_paper': self._closest(),
+                        'recommendation_at_least': floor}
+            labels = {c['label'] for c in major + minor}
         prompt = P.WRITE_POLICY + '\n\nFINDINGS:\n' + json.dumps(findings, ensure_ascii=False, indent=1)
         if self._tokens_left() < 800 or not self._time_left(.98):
             self._warn('No budget was left to write the prose parts; the report lists the findings only.')
             return
         try:
             with self._timeout():
-                result = self._ask('write', prompt, cap=self._model_cap('review_write', 4000), schema=P.WRITE_SCHEMA, key='write')
+                result = self._ask('write', prompt, cap=self._model_cap('review_write', 4000), schema=P.WRITE_SCHEMA,
+                                   key='write:draft' if draft else 'write')
         except ResearchBudget as exc:
             self._warn(f'The prose parts were not written: {exc}')
             return
         value = result['value']
         if value is None:
-            self._warn('The prose answer was not usable JSON; the report lists the findings only.')
+            if not draft:
+                self._warn('The prose answer was not usable JSON; the report lists the findings only.')
             return
-        labels = {c['label'] for c in major + minor}
 
         def labelled(text):
             # A label the controller did not give (the model renumbered) becomes a plain reference.
             return re.sub(r'\b(Major|Minor)(\s+comments?)?\s+(\d+)\b',
                           lambda m: m.group(0) if f'{m.group(1)} {m.group(3)}' in labels else f'a {m.group(1).lower()} comment', text)
-        self.state['write'] = {k: labelled(_clip(value.get(k), 6000)) for k in P.WRITE_SCHEMA['properties']}
-        write = self.state['write']
+        write = {k: labelled(_clip(value.get(k), 6000)) for k in P.WRITE_SCHEMA['properties']}
         if write['recommendation'] not in P.RECOMMENDATIONS:
             write['recommendation'] = 'no_recommendation'
-        confirmed = [c['label'] for c in major if c['status'] == 'confirmed']
-        if confirmed and write['recommendation'] in ('accept', 'minor_revision'):
-            # A confirmed major error is never compatible with acceptance as it stands.
-            write['recommendation'] = 'major_revision'
-            write['raised'] = ', '.join(confirmed)
+        order = ['accept', 'minor_revision', 'major_revision', 'reject']
+        if write['recommendation'] in order and order.index(write['recommendation']) < order.index(floor):
+            # A major error upheld after a defence of the paper is never compatible with acceptance as it stands.
+            write['recommendation'] = floor
+            write['raised'] = ', '.join(raised)
+        write['draft'] = draft
+        with self._mutex:
+            if draft and self.state.get('write') and not self.state['write'].get('draft'):
+                return  # the final prose came first
+            self.state['write'] = write
+            self._save()
 
     def _provisional(self):
-        main = set(self._main_ids())
-        missing = [self._unit(u)['name'] for u in main
-                   if self._unit(u) and self._unit(u)['proofs'] and not self._checks_complete(u)]
-        no_proof = [self._unit(u)['name'] for u in main if self._unit(u) and not self._unit(u)['proofs']]
+        chain = self._main_chain()
+        missing = [self._unit(u)['name'] for u in self.state['plan_units'] if u in chain and not self._checks_complete(u)]
+        no_proof = [self._unit(u)['name'] for u in self._main_ids() if not self._unit(u)['proofs']]
         return missing, no_proof
 
     def _complete(self):
+        if self._followup_mode():
+            return self.state.get('followup_usable', False)
         self._warn_reading_gaps()
+        if self.typos_only:
+            return not self._unread_parts() and (not self.state.get('whole') or all(c.get('checked') for c in self.state['presentation']))
         missing, no_proof = self._provisional()
-        return (bool(self.state.get('write')) and not self._unread_parts() and not missing
-                and not no_proof and not self.state.get('scope_incomplete') and not self.state.get('source_incomplete')
-                and (not self.state.get('whole') or self._citations_done())
+        whole = self.state.get('whole')
+        return (bool(self.state.get('write')) and not self.state['write'].get('draft') and not self._unread_parts()
+                and not missing and not no_proof and not self.state.get('scope_incomplete') and not self.state.get('source_incomplete')
+                and (not whole or (self._citations_done() and all(self._checks_complete(SWEEP_UNITS[n]) for n in self.effort['sweeps'])
+                                   and all(uid in (self.state.get('attacks') or {}) for uid in self._attack_ids())))
                 and all(self._checks_complete(uid) for uid in self.state['plan_units']))
 
-    def _at_a_glance(self, major, minor, questions, presentation, verdicts):
+    def _at_a_glance(self, major, minor, questions, presentation):
         """The controller's own summary line: what was checked and what was found (no model prose)."""
-        s = self.state
-        main = [uid for uid in self._main_ids() if self._unit(uid)]
-        words = {'no_issue_found': 'no issue found', 'issues_found': 'an error confirmed by a re-check',
-                 'issues_alleged': 'issues alleged, not re-checked', 'uncertain': 'not settled', 'unavailable': 'no usable check'}
-        lines = ['**' + self._proofs_scope()[0].upper() + self._proofs_scope()[1:] + '.**']
-        if main:
-            lines.append('Main results: ' + '; '.join(
-                f'{self._unit(uid)["name"]} — ' + (words.get(verdicts.get(uid), 'not checked') if self._unit(uid)['proofs']
-                                                    else 'no proof found in the paper') for uid in main) + '.')
+        lines = ['**' + self._proofs_scope() + '.**']
         confirmed = sum(c['status'] == 'confirmed' for c in major)
-        lines.append(f'Major comments: {len(major)}' + (f' ({confirmed} confirmed by an independent re-check)' if major else '')
+        lines.append(f'Major comments: {len(major)}' + (f' ({confirmed} upheld after a defence of the paper)' if major else '')
                      + f'. Minor comments: {len(minor)}.' + (f' Questions to the authors: {len(questions)}.' if questions else '')
-                     + f' Typos and presentation: {len(presentation)}.')
-        citations = s.get('citations') or []
-        if citations:
-            shown = sum(c['unit'] == CITE for c in major + minor + questions)
-            rejected = sum(c['status'] == 'rejected' for c in self._unit_verdict(CITE)[1]) if CITE + '#0' in s['checks'] else 0
-            text = f'Cited results compared with the literature: {len(citations)}'
-            if len(citations) >= P.CITATIONS_LIMIT:
-                text += ' (the comparison may be incomplete)'
-            text += (f'; {shown} misuse{"s" if shown != 1 else ""} reported in the comments' if shown else '; no misuse reported')
-            if rejected:
-                text += f' ({rejected} alleged misuse{"s" if rejected != 1 else ""} rejected by a re-check)'
-            lines.append(text + '.')
+                     + (f' Typos and presentation: {len(presentation)}.' if presentation or self._reads() else ''))
         return ' '.join(lines)
 
-    def _presentation_section(self, items, sid, unread, read_any):
-        """Typos and presentation comments grouped by kind, errors first; long lists of small remarks are capped."""
+    def _issue_lines(self, cluster, source_id, show_passes=True, unit=None):
+        lines = []
+        where = self._where(source_id, cluster['start_line'], cluster['end_line'], unit)
+        running = self.state['phase'] != 'done'
+        awaited = cluster.get('effect') in P.MAJOR_EFFECTS or cluster['key'] in self.state['adjudications']
+        unconfirmed = ('checked against the paper' if self._minor_check(cluster) else
+                       'not given a second opinion' if not running else
+                       'second opinion pending' if awaited else 'check against the paper pending')
+        status = {'confirmed': 'upheld after a defence of the paper', 'unconfirmed': unconfirmed,
+                  'undecided': 'the second opinion could not decide', 'rejected': 'rejected by the second opinion',
+                  'uncertainty': 'a point the checks could not decide'}.get(cluster.get('status'), '')
+        coverage = self._check_coverage(cluster['unit'])
+        passes = ('; raised by the search for a counterexample to the statement' if cluster.get('lenses') == ['attack'] else
+                  f'; raised by {cluster["passes"]} of {coverage["started_passes"]} passes'
+                  if show_passes and coverage['started_passes'] > 1 else '')
+        located = '' if cluster['located'] == 'exact' else ' (quote matched approximately)'
+        effect = EFFECT_LABEL.get(cluster.get('effect'), KIND_LABEL[cluster['kind']])
+        lines.append(f'**{effect}**, {where} — {status}{passes}{located}.')
+        if cluster['quote']:
+            lines.append(f'> {cluster["quote"]}')
+        lines.append(cluster['evidence'] or '(no explanation given)')
+        adjudication = self.state['adjudications'].get(cluster['key']) or {}
+        defense = adjudication.get('defense')
+        if defense:
+            lines.append(f'*Defence of the paper ({defense["position"]}):* {_clip(defense["argument"], 700)}')
+        if adjudication.get('arbiter'):
+            arbiter = adjudication['arbiter']
+            lines.append(f'*Judgement ({arbiter["assessment"]}):* {_clip(arbiter["argument"], 700)}')
+        if (adjudication.get('final') or {}).get('note'):
+            lines.append('*' + adjudication['final']['note'] + '*')
+        legacy = (self.state.get('legacy_confirms') or {}).get(cluster['key'])
+        if legacy and legacy.get('argument') and not defense:
+            lines.append(f'*Earlier re-check ({legacy.get("assessment")}):* {_clip(legacy["argument"], 600)}')
+        if cluster.get('source_check'):
+            lines.append(f'*Looked up in the cited work:* {cluster["source_check"]}')
+        confirm = self.state['confirms'].get(cluster['key']) or {}
+        suggestion = confirm.get('suggestion') or cluster['suggestion']
+        if suggestion and cluster.get('status') != 'rejected':
+            lines.append(f'*Suggested repair:* {suggestion}')
+        if cluster.get('affects'):
+            lines.append('*Main results affected:* ' + ', '.join(cluster['affects']) + '.')
+        if cluster.get('also'):
+            lines.append('*The same problem is also reported at:* ' + '; '.join(cluster['also']))
+        return lines
+
+    def _ledger_rows(self, major, minor, questions):
+        """The numbered findings as saved with the job (for the Assistant and the notebook)."""
+        rows = []
+        for c in major + minor + questions:
+            rows.append({'label': c['label'], 'key': c['key'], 'unit': c['unit'], 'where': c['unit_name'],
+                         'lines': [c['start_line'], c['end_line']], 'effect': c.get('effect'), 'severity': c.get('severity'),
+                         'status': c['status'], 'quote': c['quote'], 'summary': _clip(c['evidence'], 400),
+                         'affects': c.get('affects', [])})
+        return rows
+
+    def _render(self):
+        if self._followup_mode():
+            return self._render_followup()
+        s = self.state
+        if not s.get('map'):
+            return ['*The manuscript is not mapped yet.*'], []
+        if self.typos_only:
+            return self._render_typos()
+        sid = s['sources'][0]['id']
+        write = s.get('write') or {}
+        major, minor, questions, rejected, verdicts = self._comments()
+        s['ledger'] = self._ledger_rows(major, minor, questions)
+        missing, no_proof = self._provisional()
+        scope = s.get('scope') or {}
+        unread = self._unread_parts()
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
+        hidden = self._hidden_presentation()
+        presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
+        self._headline = self._at_a_glance(major, minor, questions, presentation)
+        body = []
+        if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
+            progress = self._progress()
+            pending = sum(1 for a in s['adjudications'].values() if not a.get('final'))
+            body += [f'*Draft in progress: {progress["completed"]} of {progress["total"]} {progress["unit"]} done'
+                     + (f', {pending} finding(s) awaiting a second opinion' if pending else '')
+                     + '. This report is rewritten as each check finishes.*', '']
+        body += ['## Summary', '', write.get('summary') or scope.get('overview') or scope.get('contribution') or '*Written once the paper is read.*', '']
+        if not s.get('whole') and read:
+            parts = [s['reading'][f'L{a}'] for a, b in read if s['reading'][f'L{a}'].get('summary')]
+            if scope.get('overview') and write.get('summary') and _fold(write['summary'])[:150] != _fold(scope['overview'])[:150]:
+                body += ['## The paper in brief', '', scope['overview'], '']
+            if parts:
+                body += ['### Part by part', '']
+                body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] + ['']
+        status_rows = self._main_status(major, minor, questions, verdicts, rejected)
+        if status_rows:
+            body += ['## Main results', '', '| Result | Proof | Status | Counterexample to the statement |', '|---|---|---|---|']
+            body += [f'| {r["name"]} | {r["proof"]} | {r["status"]} | {r["attack"]} |' for r in status_rows] + ['']
+            body += self._attack_notes(status_rows, sid)
+        pending = '*Written when the checks are complete.*'
+        body += ['## Assessment', '', '### Significance', '', write.get('significance') or pending, '',
+                 '### Correctness', '', write.get('correctness') or pending, '', '### Presentation', '', write.get('presentation') or pending, '']
+        for title, group, empty in (('Major comments', major, 'None.' if verdicts else 'No proof checked yet.'),
+                                    ('Minor comments', minor, 'None in the proofs checked.'),
+                                    ('Questions to the authors', questions, None)):
+            if not group and empty is None:
+                continue
+            body += [f'## {title}', '']
+            for c in group:
+                unit = None if c['unit'] in PSEUDO_UNITS else self._unit(c['unit'])
+                body += _item(f'{c["label"].split()[-1]}. *{c["unit_name"]}.* ',
+                              self._issue_lines(c, sid, show_passes=title != 'Questions to the authors', unit=unit), '   ')
+            if not group:
+                body += [empty, '']
+        if presentation or self._reads():
+            # A review with a small local context reads the paper in parts and lists what the reading noticed; a
+            # review saved when it still read for typos keeps its list.
+            body += ['## Typos and presentation', '']
+            body += self._presentation_section(presentation, sid, unread, bool(read))
+            if self._source(sid)['path'].lower().endswith('.pdf'):
+                dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
+                body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
+                         f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
+                         'Review the TeX source for typos in formulas and notation.', '']
+        recommendation = P.RECOMMENDATIONS.get(write.get('recommendation'), 'No recommendation yet' if s['phase'] != 'done' else 'No recommendation')
+        gaps = []
+        if missing:
+            gaps.append('the proofs of ' + ', '.join(missing[:6]) + (' and others' if len(missing) > 6 else '') + ' were not checked completely')
+        if no_proof:
+            gaps.append('no proof was located for ' + ', '.join(no_proof))
+        if s.get('scope_incomplete') or s.get('source_incomplete'):
+            gaps.append('the manuscript setting or external source coverage is incomplete')
+        if unread:
+            gaps.append(f'{len(unread)} part(s) were not read for presentation')
+        open_main = [c['label'] for c in major + questions if c['main'] and c['status'] in ('unconfirmed', 'undecided', 'uncertainty')]
+        if open_main:
+            gaps.append('the main results depend on points not settled (' + ', '.join(open_main) + ')')
+        body += ['## Recommendation', '', f'**{recommendation}**' + (' (provisional)' if (gaps or write.get('draft')) and write else '')]
+        if write.get('raised') == 'the comments of this report':
+            body += ['', 'Raised to minor revision by the review itself: the comments of this report are to be addressed.']
+        elif write.get('raised'):
+            body += ['', f'Raised to major revision by the review itself: {write["raised"]} '
+                         f'{"was" if "," not in write["raised"] else "were"} upheld after a defence of the paper, or not refuted by it.']
+        if write.get('draft'):
+            body += ['', 'Written when the main results were checked; the other proofs are still being checked.']
+        if gaps:
+            body += ['', 'Provisional: ' + '; '.join(gaps) + '; see the scope below.']
+        body += ['', write.get('reasons') or '']
+        body += ['', '## Confidential comments to the editor', '', write.get('confidential') or '—']
+        body += self._injection_note(sid)
+        appendix = self._scope_appendix(verdicts, rejected, no_proof)
+        if not self._reads():
+            appendix += ['', TYPOS_NOT_CHECKED]  # the last line of the report as shown
+        return body, appendix
+
+    def _report_title(self):
+        return TITLES['typos'] if self.typos_only and not self._followup_mode() else TITLES['review']
+
+    def _render_typos(self):
+        """The typo check's report: the paper part by part, then its typos and presentation problems."""
+        s = self.state
+        sid = s['sources'][0]['id']
+        unread = self._unread_parts()
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
+        hidden = self._hidden_presentation()
+        presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
+        typo = s.get('typo_check') or {}
+        removed = f'; {typo["rejected"]} wrong or unnecessary correction(s) removed by a check against the paper' if typo.get('rejected') else ''
+        self._headline = (f'**Typo check: {len(presentation)} remark(s){removed}. '
+                          'The proofs were not checked.**')
+        body = []
+        if s['phase'] != 'done' and s['status'] in ('running', 'paused', 'budget_exhausted', 'partial'):
+            body += ['*Reading in progress; this list is rewritten as each step finishes.*', '']
+        parts = [s['reading'][f'L{a}'] for a, _ in read if s['reading'][f'L{a}'].get('summary')]
+        body += ['## The paper part by part', '']
+        body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] or ['*Written once the paper is read.*']
+        body += ['']
+        body += ['## Typos and presentation', '']
+        body += self._presentation_section(presentation, sid, unread, bool(read), capped=False)
+        if self._source(sid)['path'].lower().endswith('.pdf'):
+            dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
+            body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
+                     f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
+                     'Review the TeX source for typos in formulas and notation.', '']
+        body += ['## What was checked', '', 'A typo check reads the paper for typos and presentation only: '
+                 'its proofs were not checked, and it gives no recommendation. Ask for a review (`@referee`) for a '
+                 'referee report that checks every proof.']
+        total = sum(b - a + 1 for a, b in self._reads())
+        appendix = ['## Scope of this review', '', f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines '
+                    'before the bibliography.' + (' Every remark was then checked against the whole paper.' if typo.get('checked') else '')]
+        if s.get('packages'):
+            appendix += ['', 'Packages read for the theorem numbering and the macros: ' + ', '.join(Path(p['path']).name for p in s['packages']) + '.']
+        return body, appendix
+
+    def _presentation_section(self, items, sid, unread, read_any, capped=True):
+        """Typos and presentation comments grouped by kind, errors first; in a referee report, long lists of small
+        remarks are capped (a typo check lists everything)."""
         if not items:
             return [('None found in the parts read.' if unread else 'None found.') if read_any else
-                    'The paper was not read for presentation.', '']
+                    'The paper has not been read for presentation yet.', '']
         groups = [('Errors in formulas and statements', lambda c: c.get('importance') == 'error', None),
                   ('Typos and language', lambda c: c['kind'] in ('typo', 'grammar'), 40),
                   ('Notation, definitions and references', lambda c: c['kind'] in ('notation', 'definition', 'cross_reference', 'reference'), 25),
@@ -3150,6 +4186,10 @@ class JournalRunner(ReviewBase):
             if not chosen:
                 continue
             out += [f'### {title}', '']
+            if not capped:
+                cap = None
+            if title.startswith('Errors'):
+                out += ['*Each correction was checked against the paper; check it again before changing a formula.*', '']
             for c in chosen[:cap]:
                 text = f'- {self._place(sid, c["start_line"], c["end_line"])}: ' + (f'"{c["quote"]}" — ' if c['quote'] else '') + c['comment']
                 out.append(text + (f' *Suggested:* {c["suggestion"]}' if c.get('suggestion') else ''))
@@ -3157,75 +4197,6 @@ class JournalRunner(ReviewBase):
                 out.append(f'- {len(chosen) - cap} more remarks of this kind are not listed.')
             out.append('')
         return out
-
-    def _render(self):
-        s = self.state
-        if not s.get('map'):
-            return ['*The manuscript is not mapped yet.*'], []
-        sid = s['sources'][0]['id']
-        write = s.get('write') or {}
-        major, minor, questions, rejected, verdicts = self._comments()
-        missing, no_proof = self._provisional()
-        scope = s.get('scope') or {}
-        unread = self._unread_parts()
-        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
-        hidden = self._hidden_presentation()
-        presentation = [c for i, c in enumerate(s['presentation']) if i not in hidden]
-        self._headline = self._at_a_glance(major, minor, questions, presentation, verdicts)
-        body = ['## Summary', '', write.get('summary') or scope.get('overview') or scope.get('contribution') or '*Not written yet.*', '']
-        if not s.get('whole') and read:
-            # A paper read in parts: what each part does, for the reader of a review made with a small context.
-            parts = [s['reading'][f'L{a}'] for a, b in read if s['reading'][f'L{a}'].get('summary')]
-            if scope.get('overview') and write.get('summary') and _fold(write['summary'])[:150] != _fold(scope['overview'])[:150]:
-                body += ['## The paper in brief', '', scope['overview'], '']
-            if parts:
-                body += ['### Part by part', '']
-                body += [f'- {_lines_text(r["start_line"], r["end_line"]).capitalize()}: {r["summary"]}' for r in parts] + ['']
-        body += ['## Assessment', '', '### Significance and novelty', '', write.get('significance') or '—', '',
-                 '### Correctness', '', write.get('correctness') or '—', '', '### Presentation', '', write.get('presentation') or '—', '']
-        for title, group, empty in (('Major comments', major, 'None.' if verdicts else 'No proof was checked.'),
-                                    ('Minor comments', minor, 'None in the proofs checked.'),
-                                    ('Questions to the authors', questions, None)):
-            if not group and empty is None:
-                continue
-            body += [f'## {title}', '']
-            for c in group:
-                unit = None if c['unit'] == CITE else self._unit(c['unit'])
-                body += _item(f'{c["label"].split()[-1]}. *{c["unit_name"]}.* ',
-                              self._issue_lines(c, sid, show_passes=title != 'Questions to the authors', unit=unit), '   ')
-            if not group:
-                body += [empty, '']
-        body += ['## Typos and presentation', '']
-        body += self._presentation_section(presentation, sid, unread, bool(read))
-        if self._source(sid)['path'].lower().endswith('.pdf'):
-            dropped = sum(r.get('dropped', 0) for r in s.get('reading', {}).values())
-            body += [f'The manuscript text comes from a PDF extraction, whose formulas are garbled: only comments on words and '
-                     f'sentences are kept{f" ({dropped} on symbols or formulas were left out)" if dropped else ""}. '
-                     'Review the TeX source for typos in formulas and notation.', '']
-        recommendation = P.RECOMMENDATIONS.get(write.get('recommendation'), 'No recommendation')
-        context_gap = s.get('scope_incomplete') or s.get('source_incomplete')
-        gaps = []
-        if missing or s['unchecked']:
-            gaps.append('the proofs of ' + ', '.join(missing) + ' were not checked' if missing else
-                        f'{len(s["unchecked"])} planned proof(s) were not checked')
-        if no_proof:
-            gaps.append('no proof was located for ' + ', '.join(no_proof))
-        if context_gap:
-            gaps.append('the manuscript setting or external source coverage is incomplete')
-        if unread:
-            gaps.append(f'{len(unread)} part(s) were not read for presentation')
-        body += ['## Recommendation', '', f'**{recommendation}**' + (' (provisional)' if gaps and write else '')]
-        if write.get('raised'):
-            body += ['', f'Raised to major revision by the review itself: {write["raised"]} '
-                         f'{"was" if "," not in write["raised"] else "were"} confirmed by an independent re-check.']
-        if self.LIGHT and not s.get('requested_all_proofs'):
-            body += ['', 'Only the proofs of the main results were checked; a detailed review checks the others.']
-        if gaps:
-            body += ['', 'Provisional: ' + '; '.join(gaps) + '; see the scope below.']
-        body += ['', write.get('reasons') or '']
-        body += ['', '## Confidential comments to the editor', '', write.get('confidential') or '—']
-        body += self._injection_note(sid)
-        return body, self._scope_appendix(verdicts, rejected, no_proof)
 
     def _injection_note(self, sid):
         """A note to the editor when the manuscript addresses its reviewer or an AI. The text was never followed."""
@@ -3257,17 +4228,22 @@ class JournalRunner(ReviewBase):
         """What was and was not examined."""
         s = self.state
         sid = s['sources'][0]['id']
-        appendix = ['## Scope of this review', '']
+        appendix = ['## Scope of this review', '', 'This review did not search the literature and does not judge novelty. In a '
+                    'conversation, the Assistant starts a literature review beside it and adds the position of the results '
+                    'after this report.', '']
         units = {u['id']: u for u in self._units()}
         checkable = [u for u in self._units() if u['proofs']]
         checked = [u for u in checkable if self._checks_complete(u['id'])]
-        read = [r for r in s.get('read_parts') or [] if self._reading_usable(f'L{r[0]}')]
-        total = sum(b - a + 1 for a, b in s.get('read_parts') or [])
-        appendix += [('The whole paper was read at once, and every proof check saw the whole manuscript. ' if s.get('whole') else '')
-                     + f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines before the bibliography'
-                     + ('' if s.get('whole') else f' ({len(read)} parts)') + '.', '']
-        appendix += [f'Proofs checked completely: {len(checked)} of {len(checkable)} found in the manuscript '
-                     f'({len(s["plan_units"])} planned at this effort).', '',
+        read = [r for r in self._reads() if self._reading_usable(f'L{r[0]}')]
+        total = sum(b - a + 1 for a, b in self._reads())
+        appendix += ['Every check saw the whole manuscript. The paper was not read for typos and presentation.' if s.get('whole') else
+                     f'Read for presentation: {sum(b - a + 1 for a, b in read)} of {total} lines before the bibliography '
+                     f'({len(read)} parts).', '']
+        chain = self._main_chain()
+        appendix += [f'Proofs checked completely: {len(checked)} of {len(checkable)} found in the manuscript. The main results '
+                     f'and the {max(0, len([u for u in chain if u in units and units[u]["proofs"]]) - len(self._main_ids()))} '
+                     f'results their proofs use get {self.effort["main_passes"]} pass(es) each, the others {self.effort["other_passes"]}; '
+                     'a proof holding the step that an attack on a main statement named as least justified gets one more.', '',
                      '| Result | Proof lines | Passes | Outcome |', '|---|---|---|---|']
         main = set(self._main_ids())
         for uid in s['plan_units'] + [u['id'] for u in checkable if u['id'] not in s['plan_units']]:
@@ -3275,28 +4251,50 @@ class JournalRunner(ReviewBase):
             if not u:
                 continue
             coverage = self._check_coverage(uid)
-            passes = self._passes_on(uid)
+            passes = f'{coverage["full_passes"]}/{coverage["passes"]}' if coverage['passes'] else '0'
             if coverage['segmented']:
-                passes = f'{passes}/{coverage["passes"]} strategies ({coverage["usable_segments"]}/{coverage["segments"]} part checks)'
+                passes += f' ({coverage["usable_segments"]}/{coverage["segments"]} part checks)'
             outcome = verdicts.get(uid, 'not checked').replace('_', ' ')
             if uid in verdicts and not coverage['complete']:
                 outcome += '; incomplete coverage'
             spans = ', '.join(self._member_place(sid, a, b) or _lines_text(a, b) for a, b in u['proofs'])
-            appendix.append(f'| {u["name"]}{" (main)" if uid in main else ""} | {spans} | {passes} | {outcome} |')
+            origin = {'located': ' (located by the overview)', 'section': ' (a whole section)'}.get(u.get('proof_from'), '')
+            appendix.append(f'| {u["name"]}{" (main)" if uid in main else " (used by a main result)" if uid in chain else ""} '
+                            f'| {spans}{origin} | {passes} | {outcome} |')
         if any(self._check_coverage(uid)['segmented'] for uid in s['plan_units']):
             appendix += ['', 'Segmented proofs were checked in parts. Strategy counts require every planned part to be usable; no whole-proof pass was performed.']
+        sweeps = [PSEUDO_NAMES[u] for u in PSEUDO_UNITS if self._checks_complete(u)]
+        if sweeps:
+            appendix += ['', 'Read across the whole paper: ' + '; '.join(sweeps).lower() + '.']
+        if s.get('packages'):
+            appendix += ['', 'Packages read for the theorem numbering: ' + ', '.join(Path(p['path']).name for p in s['packages']) + '.']
+        adjudications = [a for a in s['adjudications'].values() if a.get('final')]
+        if adjudications:
+            outcome = {}
+            for a in adjudications:
+                outcome[a['final']['verdict']] = outcome.get(a['final']['verdict'], 0) + 1
+            kept = sum(1 for a in adjudications if a['final'].get('note', '').startswith('Kept major'))
+            appendix += ['', f'Second opinions (a defence of the paper, then a judge on every finding alleged major and whenever the defence held): {len(adjudications)} '
+                         'finding(s): ' + ', '.join(f'{n} {v}' for v, n in sorted(outcome.items()))
+                         + (f'; {kept} kept major because the repair that would make them minor was not verified' if kept else '') + '.']
+        typo = s.get('typo_check') or {}
+        if typo.get('checked'):
+            appendix += ['', f'Typo and presentation remarks checked against the paper: {typo["checked"]}; '
+                         f'{typo["rejected"]} wrong or unnecessary correction(s) removed.']
         if no_proof:
-            appendix += ['', 'Main results without a proof in the map (possibly proved elsewhere or missed by the map): ' + ', '.join(no_proof) + '.']
+            appendix += ['', 'Main results without a proof in the paper (possibly cited, or missed by the map): ' + ', '.join(no_proof) + '.']
         scope = s.get('scope') or {}
         if scope.get('notation') and not s.get('whole'):
             appendix += ['', 'Setting and notation given to every check: ' + ', '.join(_lines_text(a, b) for a, b in scope['notation']) + '.']
-        loose = [c for c in getattr(self, '_loose', []) if c['unit'] != CITE]
-        if loose:
-            appendix += ['', '### Objections that could not be located', '',
-                         'Raised by a check without a quote found in the text, and not re-checked; read them with care.', '']
-            appendix += [f'- *{c["unit_name"]}*: {_clip(c["evidence"], 500)}' for c in loose]
+        minor_checks = [entry for entry in (s.get('minor_checks') or {}).values() if 'keep' in entry]
+        if minor_checks:
+            appendix += ['', f'Minor findings without a second opinion checked against the paper: {len(minor_checks)}; '
+                         f'{sum(not entry["keep"] for entry in minor_checks)} not supported by the paper and left out.']
+        if getattr(self, '_loose', []):
+            appendix += ['', f'{len(self._loose)} objection(s) whose quote was not found in the manuscript were left out '
+                         '(they stay in the saved job).']
         if rejected:
-            appendix += ['', '### Objections raised and rejected by a re-check', '']
+            appendix += ['', '### Objections raised and rejected by the second opinion', '']
             for cluster in rejected:
                 confirm = s['confirms'].get(cluster['key'], {})
                 appendix += [f'- *{cluster["unit_name"]}*, {self._where(sid, cluster["start_line"], cluster["end_line"])}: '
@@ -3308,8 +4306,8 @@ class JournalRunner(ReviewBase):
             names = {'consistent': 'used as known', 'misapplied': 'applied outside its hypotheses', 'misstated': 'misstated',
                      'unknown': 'not recalled precisely; not judged'}
             settled = self._unit_verdict(CITE)[1] if CITE + '#0' in s['checks'] else []
-            outcome = {'confirmed': 'confirmed by a re-check', 'unconfirmed': 'not re-checked', 'rejected': 'rejected by a re-check',
-                       'undecided': 'the re-check could not decide'}
+            outcome = {'confirmed': 'upheld after a defence', 'unconfirmed': 'not given a second opinion', 'rejected': 'rejected by the second opinion',
+                       'undecided': 'the second opinion could not decide'}
             for r in citations:
                 note = ''
                 if r['assessment'] in ('misapplied', 'misstated'):
@@ -3319,7 +4317,7 @@ class JournalRunner(ReviewBase):
                             ' (the passage could not be located; not reported as a comment)')
                 appendix.append(f'- {r["source"] or "A cited result"} ({self._place(sid, r["start_line"], r["end_line"])}): '
                                 f'{names[r["assessment"]]}{note}.')
-        if s['cited_checks']:
+        if s.get('cited_checks'):
             appendix += ['', '### Cited results looked up in their source', '']
             for c in s['cited_checks']:
                 found = f' (found at {c["found_place"]})' if c.get('found_place') and c['found_place'] != c['place'] else ''
@@ -3327,11 +4325,15 @@ class JournalRunner(ReviewBase):
                              f'Used for: {_clip(c["used_for"], 300)}']
                 if c.get('error'):
                     appendix += ['  The lookup stopped: ' + _clip(str(c['error']), 300)]
-        if s.get('novelty') is not None or s['search_results']:
+        if s.get('novelty') is not None or s.get('search_results'):
             appendix += ['', '### Literature searched (titles and abstracts only)', '']
             appendix += ['Queries: ' + '; '.join(f'"{q}"' for q in dict.fromkeys(r['query'] for r in s['search_results']))]
             for n, r in enumerate(s['search_results'], 1):
                 relation = next((x['relation'] for x in (s.get('novelty') or {}).get('related', []) if x['n'] == n), '')
+                if r.get('own'):
+                    relation = 'the manuscript itself (a preprint)'
+                elif r.get('same_authors'):
+                    relation = 'by the same authors' + (f'; {relation}' if relation else '')
                 link = f'[{r["title"]}]({r["url"]})' if r['url'].startswith('http') else r['title']
                 appendix += [f'{n}. {link} ({r["authors"]}, {r["year"]})' + (f' — {relation}' if relation else '')]
             if (s.get('novelty') or {}).get('assessment'):
@@ -3339,65 +4341,7 @@ class JournalRunner(ReviewBase):
             appendix += ['', 'Search hits do not establish or refute novelty.']
         return appendix + self._assembly_note(s['sources'][0]['id'])
 
-
-class SummaryReviewRunner(JournalRunner):
-    """The referee review: understand the paper, check the proofs of its main results, list its typos and
-    presentation problems, and compare the results it cites with the literature."""
-    VARIANT = 'review'
-    PIPELINE = PIPELINES['review']
-    LIGHT = True
-
-    def start(self, goal, *, review_reference=None, **kwargs):
-        self._review_reference = None
-        if review_reference is not None:
-            reference = _reference_snapshot({'query': goal, 'messages': [], 'files': [],
-                                             'review': review_reference})[0]['review']
-            source = reference.get('source') or {}
-            path = Path(source.get('path', ''))
-            if (not reference.get('job_id') or not isinstance(reference.get('report'), str)
-                    or type(reference.get('followup')) is not bool or not source.get('id')
-                    or not isinstance(source.get('content'), str) or not path.name or path.is_absolute()
-                    or any(part == '..' or part.startswith('.') for part in path.parts)
-                    or hashlib.sha256(source['content'].encode()).hexdigest() != source.get('sha256')):
-                raise WorkerInputError('The previous review manuscript snapshot is invalid.', code='needs_source')
-            if kwargs.get('source_files'):
-                raise WorkerInputError('Choose either a new manuscript or the saved review manuscript.', code='ambiguous_source')
-            self._review_reference = reference
-        return super().start(goal, **kwargs)
-
-    def _pin(self, names, prefix):
-        return [] if self._review_reference else super()._pin(names, prefix)
-
-    def _extra_sources(self):
-        return [self._review_reference['source']] if self._review_reference else super()._extra_sources()
-
-    def _extra_state(self):
-        state = super()._extra_state()
-        if self._review_reference:
-            state.update(review_reference={key: value for key, value in self._review_reference.items() if key != 'source'},
-                         followup_ranges=None, followup_responses=[], followup_usable=False)
-        return state
-
-    def _progress(self):
-        if (self.state.get('review_reference') or {}).get('followup'):
-            return {'phase': self.state['phase'], 'completed': int(self.state.get('followup_usable', False)),
-                    'total': 1, 'unit': 'review follow-up', 'scope': self.state['goal'],
-                    'partial': self.state['status'] in ('partial', 'error', 'budget_exhausted'),
-                    'resumable': self.state['status'] in ('running', 'paused', 'partial', 'budget_exhausted')}
-        return super()._progress()
-
-    def _step(self, phase):
-        if not (self.state.get('review_reference') or {}).get('followup'):
-            return super()._step(phase)
-        if phase == 'plan':
-            source = self.state['sources'][0]
-            self.state['map'] = manuscript.build(source['content'], source['path'])
-            self.state['phase'] = 'followup'
-        elif phase == 'followup':
-            self._followup()
-            self.state['phase'] = 'done'
-        else:
-            raise ValueError('Unknown review follow-up phase: ' + phase)
+    # -- a reply to a previous review ----------------------------------------------------------------------
 
     def _followup(self):
         s = self.state
@@ -3431,6 +4375,7 @@ class SummaryReviewRunner(JournalRunner):
             return
         allowed = {n for a, b in s['followup_ranges'] for n in range(a, b + 1)}
         responses, usable = [], len(value['responses']) <= 12
+
         def excerpt_in(quote, text):
             return bool(quote.strip()) and ' '.join(quote.split()) in ' '.join(text.split())
         for item in value['responses'][:12]:
@@ -3454,18 +4399,12 @@ class SummaryReviewRunner(JournalRunner):
             responses.append(row)
         s.update(followup_responses=responses, followup_usable=bool(responses) and usable)
 
-    def _complete(self):
-        if (self.state.get('review_reference') or {}).get('followup'):
-            return self.state.get('followup_usable', False)
-        return super()._complete()
-
-    def _render(self):
-        if not (self.state.get('review_reference') or {}).get('followup'):
-            return super()._render()
+    def _render_followup(self):
         s = self.state
         source = s['sources'][0]
         body = ['## Response to the previous review', '',
-                'This follow-up addresses understanding and presentation. The proofs were not checked.', '',
+                'This follow-up addresses the points raised in reply to the previous report, from the passages reread. '
+                'The proofs were not checked again.', '',
                 f'Manuscript: {Path(source["path"]).name} (the saved version used for the previous review).', '']
         decisions = {'maintain': 'Maintained', 'revise': 'Revised', 'withdraw': 'Withdrawn', 'unresolved': 'Unresolved'}
         for n, row in enumerate(s.get('followup_responses', []), 1):
@@ -3481,10 +4420,25 @@ class SummaryReviewRunner(JournalRunner):
         return body, ['## Scope', '', 'Only the selected passages were reread for this reply. '
                       'The original report is unchanged; no new full review or proof verification is claimed.']
 
+
+class TypoCheckRunner(TypoLanes, PaperReviewRunner):
+    """The typo check: the paper proofread part by part (each call with the whole paper in view when it fits), and
+    every remark checked against the paper. No proof is checked and no recommendation is given."""
+    VARIANT = 'typos'
+    PIPELINE = PIPELINES['typos']
+    LEVEL, ROUNDS = 'low', 1
+
+    def start(self, goal, *, review_reference=None, **kwargs):
+        if review_reference is not None:
+            raise WorkerInputError('A reply to a previous review is a review, not a typo check.', code='invalid_worker_input')
+        return super().start(goal, **kwargs)
+
+
 def export_evidence(state):
-    """Save what the review checked. Neither a step check nor a referee report determines proof direction."""
+    """Save what the review checked. Neither a step check nor a referee report determines proof direction. A typo
+    check checks no mathematics and saves nothing here."""
     variant = variant_for_state(state)
-    if variant not in ('quick', 'journal'):
+    if variant not in ('quick', 'review') or state.get('pipeline') == 'review-v1':
         return []
     quals = [] if state.get('status') in ('reviewed', 'budget_violation') else ['unfinished']
     links = [('checks', item['check_id']) for item in state.get('cited_checks', []) if item.get('check_id')]
@@ -3503,8 +4457,29 @@ def export_evidence(state):
         return [{'kind': 'review', 'mode': 'quick_review', 'text': task, 'qualifiers': quals, 'links': links,
                  'status': labels.get(state.get('verdict'), 'review unfinished'),
                  'evidence': {'unit': unit.get('id'), 'source': unit.get('source'), 'proof_ranges': unit.get('proofs', [])}}]
-    valid = [key for key, item in (state.get('confirms') or {}).items() if item.get('assessment') == 'valid']
+    if state.get('pipeline') == V4_PIPELINE:
+        issues = state.get('issues') or []
+        judged = [i for i in issues if i.get('status') == 'judged']
+        confirmed = [i for i in judged if i['judge']['verdict'] == 'confirmed']
+        major = [i for i in confirmed if i['judge']['effect'] in P.MAJOR_EFFECTS]
+        return [{'kind': 'review', 'mode': 'referee', 'status': 'referee report', 'qualifiers': quals, 'links': links,
+                 'summary': (f'{len(issues)} issue(s) reported, {len(confirmed)} confirmed by the judge ({len(major)} '
+                             f'making a statement false or a proof fail), {len(judged) - len(confirmed)} refuted or undecided'),
+                 'evidence': {'issues': [{k: i.get(k) for k in ('id', 'start_line', 'end_line', 'kind', 'status')}
+                                         | {'verdict': (i.get('judge') or {}).get('verdict'), 'effect': (i.get('judge') or {}).get('effect')}
+                                         for i in issues],
+                              'coverage': {uid: c.get('status') for uid, c in (state.get('coverage') or {}).items()}}}]
     unchecked = state.get('unchecked') or []
+    ledger = state.get('ledger') or []
+    if state.get('pipeline') == PIPELINES['review']:
+        upheld = [row['label'] for row in ledger if row.get('status') == 'confirmed']
+        return [{'kind': 'review', 'mode': 'referee', 'status': 'referee report', 'qualifiers': quals, 'links': links,
+                 'summary': (f'{sum(row["label"].startswith("Major") for row in ledger)} major and '
+                             f'{sum(row["label"].startswith("Minor") for row in ledger)} minor comment(s), '
+                             f'{len(upheld)} upheld after a defence of the paper; {len(unchecked)} proof(s) not checked completely'),
+                 'evidence': {'comments': [{k: row[k] for k in ('label', 'where', 'lines', 'effect', 'status')} for row in ledger],
+                              'unchecked': unchecked}}]
+    valid = [key for key, item in (state.get('confirms') or {}).items() if item.get('assessment') == 'valid']
     return [{'kind': 'review', 'mode': 'detailed_review', 'status': 'detailed review', 'qualifiers': quals, 'links': links,
              'summary': f'{len(valid)} re-check(s) judged valid; {len(unchecked)} unchecked unit(s)',
              'evidence': {'valid_rechecks': valid, 'unchecked': unchecked}}]

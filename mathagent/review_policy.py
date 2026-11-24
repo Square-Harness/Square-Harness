@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Prompts and JSON schemas of the four review kinds: quick check, paper review, detailed review, explanation.
+"""Prompts and JSON schemas of the three review kinds: quick check, paper review and explanation.
 
 Kept apart from proof_policy.py on purpose: that file's hash is part of every saved
 proof's provenance, so it is imported here, never edited for the review.
@@ -27,8 +27,12 @@ ISSUE = {
         'suggestion': {'type': 'string', 'maxLength': 800},
     },
 }
-JOURNAL_ISSUE = {**ISSUE, 'required': ISSUE['required'] + ['severity'],
-                 'properties': {**ISSUE['properties'], 'severity': {'type': 'string', 'enum': ['major', 'minor']}}}
+# The paper review reports every problem with its consequence; severity follows from the effect (major: the
+# statement is false or the proof cannot be completed without a new idea).
+EFFECTS = ['statement_false', 'breaks_proof', 'gap', 'imprecision', 'misprint']
+MAJOR_EFFECTS = ('statement_false', 'breaks_proof')
+AUDIT_ISSUE = {**ISSUE, 'required': ISSUE['required'][:4] + ['effect'] + ISSUE['required'][4:],
+               'properties': {**ISSUE['properties'], 'effect': {'type': 'string', 'enum': EFFECTS}}}
 EXTERNAL = {
     'type': 'object', 'additionalProperties': False, 'required': ['key', 'place', 'used_for'],
     'properties': {'key': {'type': 'string', 'maxLength': 40}, 'place': {'type': 'string', 'maxLength': 80},
@@ -36,15 +40,216 @@ EXTERNAL = {
 }
 
 
-def check_schema(journal=False):
+def check_schema():
     properties = {
         'explanation': {'type': 'string', 'maxLength': 3000},
-        'issues': {'type': 'array', 'maxItems': 6, 'items': JOURNAL_ISSUE if journal else ISSUE},
+        'issues': {'type': 'array', 'maxItems': 6, 'items': ISSUE},
         'verdict': {'type': 'string', 'enum': ['no_issue_found', 'issues_found', 'uncertain']},
     }
-    if journal:
-        properties['external'] = {'type': 'array', 'maxItems': 4, 'items': EXTERNAL}
     return {'type': 'object', 'additionalProperties': False, 'required': list(properties), 'properties': properties}
+
+
+AUDIT_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['explanation', 'issues', 'verdict', 'external'],
+    'properties': {
+        'explanation': {'type': 'string', 'maxLength': 3000},
+        'issues': {'type': 'array', 'maxItems': 10, 'items': AUDIT_ISSUE},
+        'verdict': {'type': 'string', 'enum': ['no_issue_found', 'issues_found', 'uncertain']},
+        'external': {'type': 'array', 'maxItems': 4, 'items': EXTERNAL},
+    },
+}
+SWEEP_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['explanation', 'issues'],
+    'properties': {'explanation': {'type': 'string', 'maxLength': 2000},
+                   'issues': {'type': 'array', 'maxItems': 20, 'items': AUDIT_ISSUE}},
+}
+_EFFECT_SCALE = """- statement_false: the result as stated is false (a counterexample satisfying every hypothesis, or a calculation);
+- breaks_proof: a step fails and the proof cannot be completed without a new idea, an extra hypothesis or a
+  different argument;
+- gap: a step is unjustified or incomplete, but an expert can fill it with standard arguments (say how); when filling
+  it needs a fact the manuscript neither proves nor cites (a density, a regularity up to the boundary or the initial
+  time, a uniform bound, a new lemma), the proof fails as written: breaks_proof;
+- imprecision: a wrong constant, a missing case, a quantifier or a dependence stated loosely, where the intended
+  statement is clear and true;
+- misprint: a misprinted formula, sign, index or reference whose correct form is clear from the context (give it)."""
+_ISSUE_FIELDS = """For each issue: start_line and end_line, a quote of at most twelve words copied exactly from those lines,
+kind (invalid_inference: a failed implication, calculation or counterexample is given; missing_justification: an
+unmet obligation is named; uncertainty: an essential point you could not decide, saying what would decide it), the
+effect, the evidence, and in suggestion what would repair it (the missing argument, a needed hypothesis, the
+corrected formula), without rewriting the proof. Before giving a counterexample, check that it satisfies every
+hypothesis: a wrong counterexample discredits a correct objection."""
+AUDIT_POLICY = """You audit one proof of the manuscript as a referee for a mathematics journal. Its definitions,
+standing assumptions, notation and earlier results are in force: do not object that something is undefined or
+unverified when the manuscript provides it; do object when the proof uses more than the manuscript provides.
+Report every problem a careful referee would ask the authors to fix in the lines under review, the small ones too:
+there is no separate list of notes. A step that a specialist fills in a line or two is not a gap, a notation the
+reader cannot misread is not an imprecision, and another way to write the same argument is not a problem: report
+none of these. Give each problem its effect, the consequence for the result:
+""" + _EFFECT_SCALE + """
+Method: follow the logical chain to the conclusion and check that it reaches exactly the statement (all quantifiers,
+all cases, how the constants depend on the data). Spend your effort on nonstandard implications, the hypotheses of
+every result applied (from the manuscript or from the literature), domains, limits and interchanges of limits, sums
+and integrals, directions of inequalities and edge cases. Check routine computations once and accept standard
+deductions. Challenge the weakest essential step with one concrete test (a small example, a limiting case, a direct
+calculation) and say in the explanation what it gave. Do not invent a problem in a correct proof, and do not report
+exposition or matters of taste.
+Results from the literature: for every result the proof cites or names, recall its standard statement and check that
+its hypotheses hold where it is used and that it gives what is claimed; a misapplied or misstated result is an issue.
+In external, list the results from the bibliography the proof relies on: key as written, place where it is cited
+(e.g. "Theorem 9.26"), and used_for, the result used, in public mathematical words (no notation of this manuscript).
+""" + _ISSUE_FIELDS + """ Report issues only inside the lines under review.
+verdict: no_issue_found when you found no problem at all, issues_found when you report at least one issue that is
+not an uncertainty, uncertain when an essential point stays undecided. explanation: how the proof works and what
+you checked, in a few sentences."""
+AUDIT_PARTS_NOTE = """The manuscript is longer than this model's context: below are its setting, the statements this proof
+uses, the equations it cites and the proof itself. Where the instructions say "the manuscript", read this material;
+do not object that a notion is undefined or a fact unproved when the manuscript may provide it outside these lines."""
+SECTION_PROOF_NOTE = """This proof runs over a whole section. The lines {nested} hold the statements and proofs of other
+results, which are checked on their own: here check how those results are put together to prove the statement, and
+every argument of the section that is not part of another result's proof."""
+BLOCK_NOTE = """This proof is long and is audited in parts; this pass audits the lines of the part below in detail. The
+whole proof is in the manuscript above: use its other parts as context, and report only issues inside this part."""
+
+
+def audit_prompt(lens, unit_text):
+    """The task after the manuscript: the same long prefix comes first in every call of a review."""
+    return AUDIT_POLICY + '\n\nLENS FOR THIS PASS: ' + LENSES[lens] + '\n\n' + unit_text
+
+
+# Cross-cutting sweeps over the whole manuscript: problems that no single proof shows.
+SWEEPS = {
+    'consistency': """Read the manuscript above for inconsistencies between its parts, which a check of one proof at a
+time does not see: a constant, normalisation or scaling used with different values (a factor 2, a diffusion
+coefficient, the normalisation of a measure or of an eigenfunction); sign and orientation conventions; a symbol or
+notion defined twice or used with two meanings; a result stated differently in the abstract, the introduction and the
+body; hypotheses that change between the statement of a result and its later uses; a numerical claim that does not
+match the formula it comes from; numerical experiments run in a setting the results they illustrate do not cover (an
+initial distribution, a regularity of the domain or a range of parameters outside the hypotheses), without a word
+on it. Report each inconsistency where it makes a statement or a proof wrong, with the
+other place in the evidence. Give each its effect:
+""" + _EFFECT_SCALE + """
+""" + _ISSUE_FIELDS + """ Report nothing when the manuscript is consistent; never report a choice the
+authors may legitimately make.""",
+    'completeness': """Read the manuscript above for claims it does not establish, which a check of the proofs does not see:
+results stated as standard, easy, well known or left to the reader that are none of these; claims in remarks, in the
+abstract or in the introduction that no result of the manuscript proves and no citation supports; a result announced
+but never stated or never proved; a proof deferred to a place that does not contain it; placeholders and unfinished
+passages; a main result whose hypotheses are not all checked where it is applied. Report each with the line of the
+claim. Give each its effect:
+""" + _EFFECT_SCALE + """
+For an unproved claim the effect is gap when it is true and standard arguments prove it, statement_false when you can
+show it is false, breaks_proof when a main result depends on it and it needs a new argument.
+""" + _ISSUE_FIELDS + """ Do not report results the manuscript proves, results it cites, or routine steps.""",
+}
+
+DEFENSE_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['position', 'argument', 'effect', 'repair'],
+    'properties': {'position': {'type': 'string', 'enum': ['defended', 'partly', 'conceded']},
+                   'argument': {'type': 'string', 'maxLength': 2500},
+                   'effect': {'type': 'string', 'enum': EFFECTS},
+                   'repair': {'type': 'string', 'maxLength': 1500}},
+}
+DEFENSE_POLICY = """A referee alleges the problem below in the manuscript. You are the authors' advocate: find the
+strongest correct argument that the manuscript is right as written, from its hypotheses, definitions and results and
+from standard facts. Check every step of your defence; never defend with an argument you cannot complete, and never
+assume what is to be shown. If the allegation gives a counterexample, check it against every hypothesis.
+position: defended when the step is correct as written or follows from what the manuscript provides (give the
+derivation in argument); partly when the allegation overstates the problem (the step is right but needs a small
+argument the manuscript omits, or the error is real but harmless): say what remains; conceded when you cannot defend
+it. effect: the consequence of what remains, on this scale:
+""" + _EFFECT_SCALE + """
+(when defended, the effect the allegation claimed). repair: when what remains is less serious than alleged, the
+complete argument that fixes it under the manuscript's hypotheses; otherwise empty."""
+
+ARBITER_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['assessment', 'effect', 'argument', 'repair'],
+    'properties': {'assessment': {'type': 'string', 'enum': ['valid', 'rejected', 'undecided']},
+                   'effect': {'type': 'string', 'enum': EFFECTS},
+                   'argument': {'type': 'string', 'maxLength': 2500},
+                   'repair': {'type': 'string', 'maxLength': 1500}},
+}
+ARBITER_POLICY = """Two referees disagree about the problem below: an allegation, and a defence of the manuscript.
+Decide independently, from the manuscript. Check both arguments step by step: a defence that assumes what is to
+be shown, skips a hypothesis or ends in "clearly" fails; an allegation whose counterexample violates a hypothesis
+fails. valid: the problem is real; effect: its consequence for the result, on this scale:
+""" + _EFFECT_SCALE + """
+When you judge it less serious than the allegation claims (for instance a gap instead of a broken proof), give in
+repair the complete argument that fixes it under the manuscript's hypotheses: without a repair the claimed
+consequence stands. A repair that needs a fact the manuscript neither proves nor cites (a density, a regularity up to
+the boundary or the initial time, a uniform bound, a new lemma), beyond a textbook theorem that applies verbatim, is
+a new ingredient: the proof fails as written (breaks_proof). rejected: the manuscript is right as written; give the derivation in argument. undecided: you
+cannot decide; say in argument what would decide it."""
+
+# Every finding alleged major is judged, also when the defence gave way: the judge is then the only reasoning check.
+ARBITER_UNOPPOSED_NOTE = """The defence did not hold the manuscript right. This settles nothing: models give way when
+challenged. Check the allegation yourself, step by step, and any counterexample against every hypothesis of the
+manuscript; reject it when the manuscript is right as written."""
+
+TYPO_CHECK_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['items'],
+    'properties': {'items': {'type': 'array', 'maxItems': 60, 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
+        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+                       'keep': {'type': 'boolean'}}}}},
+}
+TYPO_CHECK_POLICY = """Below are remarks on the writing of the manuscript above, each with an id. Check each one against
+the manuscript and keep it only when the problem is real and the suggested correction is right. For a remark that
+changes a formula, a constant, an exponent, an index or a sign, do the computation, and reject it when the original is
+right or the correction is wrong. Reject a remark that corrects the spelling of a person's or a place's name or an
+entry of the bibliography, a remark about a symbol or macro that the manuscript or its packages define, and a matter
+of taste or an optional rephrasing. Give every id once. check comes before keep: write there first what you verified
+(the computation done in full, the definition the symbol has, the sentence as corrected), then decide."""
+
+# The attack on the statement of a main result: a counterexample, not a proof gap.
+ATTACK_VERDICTS = ('none', 'edge', 'minor', 'major')
+ATTACK_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'required': ['verdict', 'counterexample', 'hypothesis_check', 'quote'],
+    'properties': {
+        'verdict': {'type': 'string', 'enum': list(ATTACK_VERDICTS)},
+        'counterexample': {'type': 'string', 'maxLength': 2500},
+        'hypothesis_check': {'type': 'string', 'maxLength': 2500},
+        'quote': {'type': 'string', 'maxLength': 200},
+    },
+}
+ATTACK_POLICY = """The whole manuscript is above. Attack the STATEMENT of the main result given below: try to show that
+it is false as stated. Do not audit its proof here: a gap in the proof is not an answer to this task.
+Try in turn: degenerate values of the parameters (zero, one, equal, infinite, an empty set, a constant function);
+low dimension and the first indices; the boundary and limiting cases of every range in the statement; a known result
+that the statement would contradict, or improve beyond what is known to be possible (name it and state it); the
+simplest explicit example the hypotheses allow (compute what the statement says for it).
+A counterexample must be explicit, and you must check it against every hypothesis of the statement and every
+standing assumption of the manuscript, one by one: an example that violates one of them is not a counterexample, and
+a wrong counterexample discredits the whole review. When you are not sure that the example satisfies a hypothesis,
+or that it contradicts the conclusion, the verdict is none.
+verdict:
+- major: an explicit example satisfies every hypothesis and contradicts the conclusion, and it is not a degenerate
+  case that the authors can exclude in a line;
+- minor: the statement is false as written, but true after a correction that the manuscript makes clear (a constant,
+  a range, a missing word such as "nonnegative"): give the correction;
+- edge: the statement fails only in a degenerate or boundary case that the authors plainly do not intend and can
+  exclude in a line: say which;
+- none: you found no counterexample.
+counterexample: the example and the computation showing that the conclusion fails; when the verdict is none, one or
+two sentences on what you tried. hypothesis_check: each hypothesis and standing assumption, and why the example
+satisfies it (empty when the verdict is none). quote: at most twelve words copied exactly from the statement, the
+part that fails (empty when the verdict is none)."""
+
+MINOR_CHECK_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['items'],
+    'properties': {'items': {'type': 'array', 'maxItems': 30, 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
+        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+                       'keep': {'type': 'boolean'}}}}},
+}
+MINOR_CHECK_POLICY = """Below are minor findings of a referee on the manuscript above, each with an id. Each was raised
+by one reading of one proof and has not been verified. Check each one against the manuscript and keep it only when
+the problem is real as described. Reject it when the manuscript provides what the finding says is missing (a
+definition, a hypothesis, a standing assumption, an earlier result: give its line), when the finding misreads the
+text or its notation, when its computation or its counterexample is wrong, when the step follows in a line or two for
+a specialist, or when it is a matter of taste. Do not reject a finding because it is small: a real misprint or a real
+imprecision is kept. Give every id once. check comes before keep: write there first what you verified (the lines
+you read, the definition or hypothesis found, the computation done in full), then decide."""
 
 
 # Each pass reads the same proof through a different lens; disagreement between them is informative.
@@ -72,24 +277,10 @@ missing_justification only when the step is not standard. Before giving a counte
 every hypothesis (boundedness in the right norm, regularity, boundary conditions); a wrong counterexample discredits
 a correct objection."""
 
-JOURNAL_ADDENDUM = """Severity follows the consequence for the paper, not the kind of issue: major = the result as stated
-is false, or its proof fails at a step that needs a new idea or an extra hypothesis to repair; minor = a local gap that
-an expert can fill, an imprecision, or a misprint whose intended meaning is clear from the context (say what was
-meant). Results from the literature: for every result the proof cites or names (a theorem of the bibliography, a named
-theorem or inequality), recall its standard statement and check that its hypotheses hold where it is used and that it
-gives what is claimed; a misapplied or misstated result is an issue. In external, list the results from the
-bibliography the proof relies on: key is the bibliography key as written, place where it is cited (e.g. "Theorem 9.26"),
-and used_for describes the result used in public mathematical words (no notation private to this manuscript)."""
 
-WHOLE_CONTEXT = """The whole manuscript is shown first, with numbered lines, as context: its definitions, standing
-assumptions, notation and earlier results are in force. Do not object that a notion is undefined or a hypothesis
-unverified when the manuscript provides it; do object when the proof uses more than the manuscript provides. Report
-only issues inside the lines of the result under review, which are repeated after the manuscript."""
-
-
-def check_prompt(lens, packet, journal=False):
-    return (VERIFIER_POLICY + '\n\n' + CHECK_ADDENDUM + ('\n' + JOURNAL_ADDENDUM if journal else '') +
-            '\n\nLENS FOR THIS PASS: ' + LENSES[lens] + '\n\n' + packet)
+def check_prompt(lens, packet):
+    """The quick check of one proof (Prove's verifier, without solving)."""
+    return VERIFIER_POLICY + '\n\n' + CHECK_ADDENDUM + '\n\nLENS FOR THIS PASS: ' + LENSES[lens] + '\n\n' + packet
 
 
 CONFIRM_SCHEMA = {
@@ -263,24 +454,34 @@ _READ_COMMENTS = """- comments: what a careful referee asks the authors to fix i
   grammar, a sentence that cannot be understood, a missing or wrong bibliographic reference. Each item, in this
   order: its line range; a quote of at most twelve words copied exactly from those lines; check: one or two
   sentences saying what you verified (the definition the symbol needs, the statement the reference points to, the
-  computation); is_problem: true only when that check found a real problem, false otherwise (an item with false is
+  computation, done in full for a formula); is_problem: true only when that check found a real problem, false otherwise (an item with false is
   discarded, so never list something to say it is correct); then the kind, the importance (error: a misprint or
   inconsistency that changes the mathematics as written; typo: spelling, grammar or a small slip; suggestion: an
   optional improvement of clarity), comment: the problem in one or two finished sentences, without your working,
   and suggestion: the corrected text, which you have checked. Do not judge the validity of proofs here.
   Do not comment on the LaTeX source (macro names, \\ref or \\label usage, spacing commands), on stylistic
-  preferences, or on choices the authors may legitimately make. Report each problem once, where it first occurs.
+  preferences, or on choices the authors may legitimately make; never correct the spelling of a person's or a
+  place's name or an entry of the bibliography. Report each problem once, where it first occurs.
   An empty list is fine."""
 READ_POLICY = """Read this part of a manuscript as a referee for a mathematics journal. Return JSON:
 - summary: what this part does, in the paper's own terms: the objects it introduces, the results it states (with
   their numbers), the method, and how it serves the paper's main goal. Three to eight precise sentences.
 """ + _READ_COMMENTS + """ You see only this part: never claim that a symbol is undefined or a reference wrong unless
   this part shows it. At most ten comments, the most important first."""
-READ_WHOLE_POLICY = """Read this whole manuscript as a referee for a mathematics journal. Return JSON:
+READ_WHOLE_POLICY = """Read the whole manuscript above as a referee for a mathematics journal. Return JSON:
 - summary: what the paper does, in its own terms: the question, the main results (with their numbers), the method,
   and how the sections fit together. Four to ten precise sentences.
 """ + _READ_COMMENTS + """ You see the whole paper: check each cross-reference against what it points to and each
   symbol against its definition."""
+READ_FOCUS_POLICY = """The whole manuscript is above. Read its lines {start}-{end} slowly, as a referee and a careful
+proofreader: sentence by sentence and formula by formula. Return JSON:
+- summary: what these lines do, in the paper's own terms (the objects, the results stated with their numbers, the
+  steps of the arguments), in two to five sentences.
+""" + _READ_COMMENTS + """ Report every problem inside lines {start}-{end}, the small ones too: each misspelling,
+  each grammar slip, each misprinted index, sign, exponent or constant (check every displayed formula against the
+  definitions and the lines before it), each wrong cross-reference. Use the rest of the manuscript to check
+  definitions, notation and references, but report nothing outside these lines. At most forty comments."""
+
 PDF_READING = """This text was extracted from a PDF: formulas are broken across lines, symbols and accents are split,
 words are hyphenated at line ends, and page headers are mixed in. You cannot see the real formulas, so comment only
 on words and sentences (spelling, grammar, repeated or missing words, unclear phrasing, wrong cross-references in
@@ -302,14 +503,32 @@ SCOPE_SCHEMA = {
         'queries': {'type': 'array', 'maxItems': 6, 'items': {'type': 'string', 'maxLength': 100}},
     },
 }
-SCOPE_WHOLE_POLICY = """You referee the whole manuscript below (numbered lines) for a mathematics journal, with the list of
-its statements and its bibliography. Return JSON: overview (your understanding of the paper as a referee, two to four
+SCOPE_WHOLE_SCHEMA = {**SCOPE_SCHEMA, 'required': SCOPE_SCHEMA['required'] + ['proofs', 'prose_results'], 'properties': {
+    **SCOPE_SCHEMA['properties'],
+    'proofs': {'type': 'array', 'maxItems': 12, 'items': {
+        'type': 'object', 'additionalProperties': False, 'required': ['id', 'start_line', 'end_line'],
+        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'start_line': {'type': 'integer'},
+                       'end_line': {'type': 'integer'}}}},
+    'prose_results': {'type': 'array', 'maxItems': 4, 'items': {
+        'type': 'object', 'additionalProperties': False,
+        'required': ['name', 'statement_start', 'statement_end', 'proof_start', 'proof_end', 'main'],
+        'properties': {'name': {'type': 'string', 'maxLength': 60}, 'statement_start': {'type': 'integer'},
+                       'statement_end': {'type': 'integer'}, 'proof_start': {'type': 'integer'},
+                       'proof_end': {'type': 'integer'}, 'main': {'type': 'boolean'}}}},
+}}
+SCOPE_WHOLE_POLICY = """You referee the whole manuscript above for a mathematics journal; the list of its statements found
+by the controller follows. Return JSON: overview (your understanding of the paper as a referee, two to four
 paragraphs: the question it answers, its main results in words, the strategy of the proofs, how the sections fit
 together, and the assumptions that matter); field (the area, e.g. spectral theory of elliptic operators);
 contribution (what the paper claims to prove that is new, in its own terms); main (the ids, such as U4, of the main
-results); notation (an empty list: every check sees the whole paper); closest (bibliography keys of the prior works
-the paper presents as closest); queries (three to six short public search queries on the topic, in general
-mathematical words, never copied manuscript text)."""
+results: those the abstract and the introduction announce, including results proved only in an appendix); notation
+(an empty list: every check sees the whole paper); closest (bibliography keys of the prior works the paper presents
+as closest); queries (three to six short public search queries on the topic, in general mathematical words, never
+copied manuscript text); proofs: for each statement of the list marked "no proof here" that the manuscript proves
+somewhere else (later in the text, across a section, in an appendix), the id and the first and last lines of its
+proof, one entry per separate piece; leave out results cited from the literature or left unproved; prose_results:
+main results stated in prose, without a theorem heading, that are missing from the list, with the lines of the
+statement and of the proof (0 and 0 when the manuscript does not prove it), and main true for a main result."""
 
 SCOPE_POLICY = """You referee the manuscript below for a mathematics journal. You have read it part by part (the summaries
 below, in order), with its abstract, the start of its introduction and the list of its statements. Return JSON:
@@ -338,7 +557,7 @@ CITATION = {
 CITATIONS_LIMIT = 60
 CITATIONS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['citations'],
                     'properties': {'citations': {'type': 'array', 'maxItems': CITATIONS_LIMIT, 'items': CITATION}}}
-CITATIONS_POLICY = """List every place where the manuscript below invokes a result from the literature, cited by
+CITATIONS_POLICY = """List every place where the manuscript above invokes a result from the literature, cited by
 reference or by name (a named theorem, inequality or lemma), and compare its use with the result as it is known.
 For each: the line range and a quote of at most twelve words copied exactly from those lines; source (the cited work
 or the name of the result, e.g. "[12, Theorem 3]" or "Mercer's theorem"); used (the result as the manuscript uses it
@@ -352,21 +571,6 @@ use you judge misapplied or misstated (those in the proofs of the main results f
 precisely, then the consistent ones briefly (used, known and explanation in one short sentence each, or empty).
 Never leave out a misuse to make room for consistent uses. Do not list results that the manuscript proves itself, and do not list a result of the manuscript (a lemma or theorem it states) as a
 cited result."""
-
-NOVELTY_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['assessment', 'related'],
-    'properties': {
-        'assessment': {'type': 'string', 'maxLength': 2000},
-        'related': {'type': 'array', 'maxItems': 6, 'items': {
-            'type': 'object', 'additionalProperties': False, 'required': ['n', 'relation'],
-            'properties': {'n': {'type': 'integer'}, 'relation': {'type': 'string', 'maxLength': 300}}}},
-    },
-}
-NOVELTY_POLICY = """Compare the claimed contribution with the search results below (titles and abstracts only, not read in
-full). Say which results look closest and how they relate (earlier special case, same method, competing result,
-background). Search hits do not establish or refute novelty; say what a referee should still check. Refer to
-results by their number n. The manuscript itself is not part of this task: the field and claimed contribution
-stand for it, and other calls review it, so do not comment on its absence."""
 
 WRITE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
@@ -384,14 +588,18 @@ WRITE_SCHEMA = {
 WRITE_POLICY = """Write the prose parts of a referee report for a mathematics journal from the findings below. The
 controller inserts the major and minor comments itself, each with its label: refer to them only by these labels,
 exactly as given ("Major 1", "Minor 2"), never invent a new objection, never drop a confirmed one, never call a minor
-comment major or the reverse, and do not repeat them in full. summary: one paragraph for the editor and the authors:
+comment major or the reverse, and do not repeat them in full. Mention questions to the authors, cited results or
+search results only when the findings list some; main_results gives the status of each main result, and what you
+say about a main result must match it. Its counterexample_search is the outcome of an attempt to break the statement
+with a counterexample: report a proposed or edge-case counterexample as given there, and never present "none found"
+as evidence that the statement is true. summary: one paragraph for the editor and the authors:
 what the paper does and claims, then what this review found. significance: importance and novelty in the field,
-relying only on the findings and the literature evidence listed (say when novelty could not be assessed).
+relying only on the manuscript and the findings: this review did not search the literature, so neither claim nor
+deny novelty, and say that the position of the results in the literature is given separately, after this report.
 correctness: an overall assessment that matches the checks actually done (proofs_scope) and states what was not
 checked. presentation: overall quality of writing, in a few sentences. recommendation and reasons: accept,
-minor_revision, major_revision or reject, justified by the comments; a main result shown false or unproved by a
-confirmed major comment calls for major_revision or reject; use no_recommendation when the review covered too little
-to decide. confidential: a short note to the editor only (e.g. confidence of this review, parts not examined,
+minor_revision, major_revision or reject, justified by the comments, and never milder than
+recommendation_at_least; use no_recommendation when the review covered too little to decide. confidential: a short note to the editor only (e.g. confidence of this review, parts not examined,
 possible conflicts with the literature). A recommendation must be provisional when
 main_results_without_located_proof is nonempty; explicitly identify these unchecked main results. Write full
 sentences; never end a field in the middle of a sentence."""
@@ -406,8 +614,9 @@ MERGE_SCHEMA = {
 MERGE_POLICY = """Below are the comments of a referee report on one manuscript, each with an id. Group the comments
 that describe the same underlying problem: the same wrong formula or misprint seen from two places, the same missing
 hypothesis reported in a lemma and in a theorem that uses it, a typo comment and a proof comment about the same slip.
-Comments about different problems stay apart, even in the same proof. Return only groups of two or more ids, with a
-short reason; an empty list when every comment is about a different problem."""
+Comments about different problems stay apart, even in the same proof, and so do similar-sounding problems at
+different places: group two comments only when fixing one fixes the other. When unsure, keep them apart. Return only
+groups of two or more ids, with a short reason; an empty list when every comment is about a different problem."""
 
 RECOMMENDATIONS = {'accept': 'Accept', 'minor_revision': 'Minor revision', 'major_revision': 'Major revision',
                    'reject': 'Reject', 'no_recommendation': 'No recommendation'}

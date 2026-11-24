@@ -367,9 +367,9 @@ def pause(h, body):
 @route('POST', '/api/concurrency')
 def concurrency(h, body):
     if not body or set(body) - {'chats', 'requests'}:
-        raise ValueError('Give chats or requests as integers from 1 to 8.')
+        raise ValueError('Give chats or requests as whole numbers.')
     if any(type(value) is not int for value in body.values()):
-        raise ValueError('Concurrency limits must be integers from 1 to 8.')
+        raise ValueError('Concurrency limits must be whole numbers.')
     return {'concurrency': h.server.hub.set_concurrency(**body)}
 
 
@@ -534,8 +534,8 @@ def researches(h, body):
 @route('POST', '/api/research')
 def research_start(h, body):
     variant = body.get('variant')
-    if variant is not None and variant not in ('quick', 'review', 'journal', 'explain'):
-        raise ValueError('variant must be quick, review, journal (the detailed review) or explain')
+    if variant is not None and variant not in ('quick', 'review', 'journal', 'typos', 'explain'):
+        raise ValueError('variant must be quick, review, typos or explain (journal, the former detailed review, is the review)')
     target = body.get('target') or ''
     if not isinstance(target, str) or len(target) > 200:
         raise ValueError('target is a short text, at most 200 characters')

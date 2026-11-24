@@ -12,6 +12,7 @@ from unittest.mock import patch
 from mathagent.agent import Agent
 from mathagent.assistant_budget import BudgetClient
 from mathagent.backends import MeasuredStreamCancellation
+from mathagent.call_policy import count_input
 from mathagent.deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
 from mathagent.literature import LiteratureTools
 from mathagent.litreview import ReviewRunner, _cutoff_supported
@@ -195,7 +196,8 @@ class LiteratureReviewTests(unittest.TestCase):
             self.assertEqual((rejected['charged_tokens'], rejected['charged_input_tokens']), (0, 0))
             self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (20, 100))
             self.assertEqual(budget.snapshot()['tokens'], 20)
-            # The provider's prompt count replaces the admission estimate (as in the runner's own meter).
+            # The pool charges the provider's input count once a call ends, as the job does (not the reservation).
+            self.assertLess(100, count_input(transport, transport.requests[0])[0])
             self.assertEqual(budget.snapshot()['input_tokens'], 100)
             self.assertTrue((runner.directory / 'review.md').is_file())
             resumed = runner.resume(paused['id'])

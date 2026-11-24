@@ -556,7 +556,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   - `--allow-python` (unsandboxed) requires `--online` and per-call approval;
   - the sandbox policy is bound by the controller: the user's command or a
     routed run request (next item) binds python-lab, and automatic contexts
-    bind the strict sanity policy;
+    bind the strict sanity policy; the Review binds the policy `review`
+    (`PythonSandbox.review_session`, `numerics.policy.review_policy`) for each
+    referee and judge: the sanity-check skill, 30 s, 2 GB and 1 CPU a run, no
+    escalation, `REVIEW_RUNS` runs (lead 20, co-referee 8, judge 3), at most
+    two runs at once in the process (`referee.PYTHON_SLOTS`); it is off with
+    `--no-numerical-checks`;
   - tool arguments can only lower limits;
   - Python Lab starts in two cases only: the user selects `@python_lab`, or, in
     a DS4 turn, the **current user message** itself asks for a computation,
@@ -785,8 +790,8 @@ documented together when releasing these features.
    ┌───────────── controllers ("runners"), one per skill ─────────────────────────┐
    │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (literature review)
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
-   │ agent.Agent (Explore and ordinary chat)      ├ review.QuickReviewRunner / SummaryReviewRunner (Review)
-   │ numerics.session (sandbox skills)             │   / JournalRunner (Detailed review) / ExplainRunner
+   │ agent.Agent (Explore, chat, referees)        ├ review.QuickReviewRunner / referee.RefereeRunner (Review)
+   │ numerics.session (sandbox skills)             │   / ExplainRunner
    │                                               ├ writeup.WriteupRunner (write-up, summary)
    │                                               └ style.StyleRunner (writing styles)
    └───────────────┬─────────────────────────────────────────┬───────────────────┘
@@ -812,13 +817,14 @@ documented together when releasing these features.
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
-| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
+| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `referee.py` (the Review v4: referees, judge, report), `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
 | | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; retries and the provider breaker (`down`); a wider CA-bundle fallback for TLS |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
 | | `tools.py` | `Workspace`: `list_files`, `search_text`, `read_file`, `write_file` (approval), `run_python` (approval, unsandboxed), `check_reference` |
 | Assistant | `orchestrator.py` | Owns the conversation, delegates to `router.JOB_MODES`, persists each child before running it and its result before returning it |
 | | `assistant_budget.py`, `mode_calls.py`, `router.py`, `source_tasks.py`, `conversation_sources.py`, `worker_errors.py`, `reporting.py` | Shared accounting; explicit `@mode` calls; mode list and task schema; source selection; permanent-failure errors; report footers |
+| | `review_position.py` | The literature review started beside a review: its question, the own-preprint marks and the "Position in the literature" part of the reply |
 | Sandbox | `numerics/` (`executor`, `policy`, `session`, `artifacts`, `docker/`), `skill_catalog.py` | Docker runs, limits bound by code, model tools, experiment records, pinned image; SKILL.md frontmatter |
 | Web app | `gui/server.py` | Standard-library HTTP server, `@route` table, token, CSP, static files |
 | | `gui/hub.py` | Tasks, queue and threads; `EventBus`; approvals; engine wiring; interruptible clients |
@@ -1241,26 +1247,264 @@ at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus fram
 streamed characters plus 256), so retries do not drain allowances with
 full-context reservations. Proof gives every replacement a fresh dispatch key.
 
-Review and Detailed review (`JournalRunner`; `SummaryReviewRunner` sets `LIGHT`
-and checks only the proofs of the main results) decide at mapping time whether the
-whole manuscript fits `model_limits.INPUTS['review_whole']` (DS4 only; `state['whole']`).
-Whole mode reads the paper in one call and runs the reading, the scope and the
-citations comparison side by side in one `_wave`; every check and re-check packet
-starts with the whole numbered manuscript (`P.WHOLE_CONTEXT`), the same prefix for
-every call. Without whole mode (small local contexts) the paper is read in
-section-following parts and a check sees its proof with the statements and equations
-it cites. Misuses of cited results are issues of the pseudo-unit `review.CITE`, so
-they are re-checked, merged and numbered like proof issues; `_cited_candidates`
-sends the ones at stake to `refcheck.CheckRunner` lookups, which run concurrently
-with the novelty search. Before the prose call, `_merge` asks one small call which
-comments share a root cause; `_comments` then reports each root cause once and
-labels comments `Major n` / `Minor n`, the labels `_write` accepts in the prose.
-Severity comes from the check and, after a valid re-check, from the re-check; a
-confirmed major comment never leaves an `accept` or `minor_revision`
-recommendation. `_wave` is a continuous pool (`admit(running)` is asked before each
-start); provider failures are replaced by the shared DeepInfra policy above. Every review call carries
-the delegation context except the novelty comparison (`_ask(reference=False)`),
-which sees only the field, the claimed contribution and the search hits.
+The Review (mode `referee`) is `referee.RefereeRunner`, pipeline `review-v4`, when
+the whole manuscript fits the model's context with room for tool loops
+(`RefereeRunner._route`: `state['whole']`, which needs DS4's `review_whole` input
+limit, and about 160k tokens to spare); otherwise the same job switches in its `plan`
+phase to `review-v2` and runs the v3 pipeline below (`RefereeRunner` extends
+`PaperReviewRunner` and delegates every method when `state['pipeline']` is not
+`review-v4`). `review.runner_class('review')` returns `RefereeRunner` for new jobs;
+`runner_for_state` gives saved `review-v2` jobs `PaperReviewRunner`. Phases of v4:
+`plan` (the map, `_directions`: the proofs in at most five groups by position, the main
+results' proofs first; `_reader_plan`; `_bibliography_check`; `state['referee_clock']`), `referees`
+(one pool), `write` (untimed: the report). In `referees` a lead (`LEAD_TASK`, 40 tool
+rounds) and one co-referee per direction (`CO_TASK`, 15 rounds) run as `agent.Agent`
+tool loops on `RefereeDesk` (their workspace: `read_lines`, `search_manuscript`,
+`list_results`, `python` and `read_experiment` on a `NumericsSession` bound with the
+sandbox policy `review`, the four literature tools, `report_issue`, `mark_result`,
+`finish`), from t = 0, with the compilation (`_compile`: `writeup.compile_latex`, a
+box for a figure that is not attached, 180 s) running beside them; its summary reaches
+each referee in its next tool result. Focused readers run in the same pool (`_run_reader`, role `reader`): one
+reasoning `_ask` per proof of the main chain (`_reader_plan`: breadth first from `_main_ids()` through the map's
+references, at most `READERS` proofs and `READER_CALLS` calls, a long proof in `_blocks`), the v3 audit prompt
+(`P.audit_prompt('line', ...)` with `READER_SCHEMA`, issues first) with `READER_BOUND` and the cap `READER_CAP` (DeepInfra has
+no reasoning budget: the reader is asked to stop reasoning well before the cap, which leaves room for the answer). A
+reading cut at the cap keeps the complete issues and uses of its JSON (`salvage_answer`, `recovered: partial`), or,
+when it was cut while reasoning, gets one call without reasoning (`_reader_answer_now`, `READER_ANSWER_NOW`,
+`READER_ANSWER_CAP`) that writes the answer from its notes (`_ask` returns the reasoning as `thinking`;
+`recovered: answer_now`); a recovered reading's `no_issue_found` becomes `uncertain`, and a recovered or unusable
+reading never counts its proof as checked; `_parse_audit` filters the answer and each issue
+goes through `_report_issue` as `R:<unit>` (kind from `READER_EFFECT_KIND`), so it merges with a referee's on the same
+lines and counts as an independent report; the verdict stays on the reading (`state['readers']`, `_readings`). The
+scheduler starts pending readers in plan order on free slots before any judge, and none after `CLOCK['readers_by']`
+(then `skipped`). `_internal_uses` (in `plan`, `state['internal_uses']`) lists every use of one of the paper's own
+results: a `TEX_REF` to a result's label or to an equation of its statement, or "Lemma 2.4" written out (not inside
+a `\cite`), one row per line and cited result, with `in` (proof, statement, text), `forward`, and `problem`
+(`unresolved`, `kind_mismatch`, `circular`: the cited result's proof refers to the citing one, unless the sentence only
+borrows notation, `NOTATION_ONLY`). A written-out name is the paper's own only when no citation of another work governs
+its sentence (`_sentence_at`; `GOVERNS_AFTER`: "Lemma 3.3 of [..]", "Theorem 1 and Lemma 2 of [..]";
+`GOVERNS_BEFORE`: "[..], Lemma 3.3", "in [..] ... Lemma 3.3") and its number is a result of the paper; a citation
+elsewhere in the sentence, or a number that is a result of another kind, makes the row `uncertain` (shown as such,
+never a `kind_mismatch`; the verdict `not_internal` takes it out of the counts). Rows inside a reader's lines get
+`reader`; every row gets an `owner` (`_use_owner`): its reader (`R:<unit>`), else the co-referee whose direction holds
+the citing result or line, else, and for every flagged or uncertain row, the lead. The reader's prompt lists its rows
+with the cited statements (`USES_NOTE`, `READER_SCHEMA` adds `uses`), each referee's first message its own rows
+(`LEAD_USES` at most; job (e) of `LEAD_TASK`, `CO_TASK`, tool `check_uses`), and a co-referee's second look the rows
+it has not checked. `_use_check` records `check` on a row and turns a `not_exact` or `hypotheses_fail` verdict into
+an issue tagged `internal_uses` unless one is there (a later pass does not undo a failure: `other_checks`); an issue
+reported at the line of a use that names the cited result (or its label) checks the row as failed and gets the tag
+(`_uses_from_issue`, from `_report_issue`). The judge of such an issue gets the citing lines and the cited statement. The report counts checked uses per result (`_use_counts`,
+`state['use_coverage']`). Every round goes through `MeteredClient`, which
+charges the job (reserved before dispatch, corrected by the provider's counts), saves
+the call (`role` lead / co-referee / judge, `referee`, `round`, the messages new since
+the previous round in its request artifact) and stops the loop at the clock
+(`RefereeStop`). `report_issue` checks the quote at its lines (`_locate`, moving a
+miscounted line within 15), refuses unknown experiment ids, and merges a report whose
+lines overlap an earlier one of the same family (`other_reports`, `reported_by`);
+`finish` is refused while a result of the referee's direction (`_owned`: the main
+results for the lead) has no status, and raises `RefereeFinished`; a co-referee's first `finish` more than
+`SECOND_LOOK_MARGIN` before the wrap-up answers with `_second_look` (the unit of `_key_unit`, nearest the main results),
+and a referee whose loop answers without `finish` is sent the same message once (`nudged`). Every search query
+and opened identifier that repeats `review_position.COPIED_WORDS` consecutive words
+of the manuscript is refused (`copies_manuscript`), and so is a report whose claim says it is
+not a problem (`retracted`); `withdraw_issue` takes back one's own report (status
+`withdrawn`, or the next reporter's text when another referee reported it too). A
+referee's first `FIRST_ROUNDS` rounds are capped at `FIRST_ROUND_CAP` (`MeteredClient`),
+then `ROUND_CAP`; a round at its cap continues with the tools (`Agent.continue_limit`).
+A referee whose loop breaks restarts from the ledgers (`RESTARTS`), except on a
+provider refusal (`provider_refused`: HTTP 401/402/403, DeepInfra `auth`/`quota`):
+`_refused` stops the whole review at once (one warning, `provider_refused` in the
+state, no new judges), and `_interrupt_call` releases the reservation of a call
+refused before any output (`refused_before_output`, status `rejected`). Each pending issue is judged in the same pool
+(`_judge_issue`, role `judge`: one reasoning `_ask` with `JUDGE_SCHEMA`, or a tool loop
+of `JUDGE_ROUNDS` when the issue cites an experiment or a source or is an `ERROR_KINDS`
+issue on `_main_chain()`; `_issue_text` adds `_other_side`, another referee's
+`no_error_found` mark and other reports on the same unit; `BATCH_KINDS` go to
+`_judge_batch`, role `judge-batch`, `BATCH` per call, no reasoning, an `effect` per item: one confirmed or undecided
+with an effect other than misprint or reference is `rerouted` to a single judge); at most
+`JUDGES_AT_ONCE` judges run while referees work. `JUDGE_POLICY` carries
+`P._EFFECT_SCALE`. `_verdict` checks the answer by code: an `ERROR_KINDS` issue rated
+below `P.MAJOR_EFFECTS` keeps its reported effect (`kept_error`) unless `fill` holds a
+repair of `MIN_FILL` characters and `new_ingredient` is empty (`lowered`, filed as a
+gap); a refutation is `disputed` when two referees reported the issue or it cites an
+`ok` experiment and the judge made no tool call. An issue not judged keeps
+`unjudged_reason` (`UNJUDGED`). The clock
+(`CLOCK`, scaled to a shorter job): finish requested at 11 min, no referee round after
+13.5, referees stopped at 15, no judge after 18, everything stopped at 19.5; the report
+is written from the ledgers. `referee.render` builds it in ten parts (verdict, main
+results from the coverage ledger with who checked them, errors, gaps and imprecisions,
+questions (undecided, disputed, unjudged with the reason), misprints, compilation and
+bibliography, the checklist of what was verified by computation and what could not be
+checked, replacements, and the rejected issues one line each) from `classify`; the
+recommendation follows the judged findings by rule (a confirmed `P.MAJOR_EFFECTS` issue or an unsettled
+`ERROR_KINDS` issue on the main chain: major revision; any other finding: minor; none: accept; the lead's stays in
+`referees.lead`), and `_incomplete()` (also the job's `partial` status) makes it provisional. The verdict paragraph
+is `_write_verdict` (role `verdict`, one call without reasoning after the judges, `VERDICT_POLICY`: the judged
+findings, the main results' statuses and the lead's summary without its sentences naming rejected issues);
+`_verdict_problem` rejects a paragraph naming an issue id, an unknown label, or the claim, quote or lines of a
+rejected or withdrawn issue, a paragraph that omits a confirmed error, or one that calls a main result free of error
+against its computed status (`clean_claim`), and the report then uses `code_verdict` (`state['verdict_text']`: `by`,
+`text`, `rejected`, `error`). The status of each main result is computed by code (`main_statuses`, in `classify` as
+`mains`) through `_chain` (the map's references, transitively): `error` (a confirmed error attached to it: its unit or
+`results_affected`), `relies_on_error` (attached to a result it uses), `unsettled` (an unsettled `ERROR_KINDS` issue on
+it or on what it uses), `not_checked` (a proof of its chain without a referee's mark or a reader's verdict, or with a
+reading that ended without a complete answer: `_proof_checked`), else `no_error_found`. The main-results table, the
+code verdict and the verdict call print these texts; the recommendation follows them, and a `not_checked` main result
+makes it provisional. Referees and readers stop first when the allowance runs short: `_admit_call` (called by
+`MeteredClient.stream` and by `PaperReviewRunner._ask` before a call is charged) refuses a `REFEREE_ROLES` call that
+would leave the review's allowance, or the enclosing Assistant pool (`BudgetClient.remaining_input_tokens`,
+`remaining_tokens`), less than the judges' and the verdict's share (`_judging_share`: one judge call's output plus
+`JUDGE_SHARE` per issue still to judge and two more); the job then has `referees_stopped_for_judges`. Withdrawn and `retracted` issues are never printed.
+`review_position.position_prompt` reads both report shapes. Saved keys: `issues`,
+`coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
+`referee_clock`, `provider_refused`, `readers` (with `recovered`), `verdict_text`, `internal_uses` (with `owner`,
+`uncertain`, `check.issue`, `other_checks`), `use_coverage`, `referees_stopped_for_judges`; issue statuses `judged`, `disputed`, `unjudged`,
+`withdrawn`; the judge's `fill`, `new_ingredient`, `judge_effect`, `kept_error`,
+`lowered`, `tool_calls`. A resumed v4 job starts new referees with the ledgers (never the old
+conversation) and judges again what was not judged; "Resume (+N min)" gives it a new
+clock (`_rebase_clock`). In a conversation the review worker's `BudgetClient` fork gets its own inference
+slots (`workers.run_worker`: `Hub.review_concurrency()`, through `BudgetClient.fork(slots=...)`) instead of the
+Assistant tree's `--assistant-concurrency` (at most 5 for a hosted model), so the referees and judges run at once;
+its calls still pass through the interface's model-request pool and are charged to the turn's budget. A call's input
+reservation (a byte count where the provider's tokenizer does not answer, about three times the real tokens) holds
+only while it runs: `BudgetClient._settle_input` replaces it by the provider's `prompt_eval_count` once the call ends
+(a call that ends without a count keeps it), for the review and the literature worker alike, so a review's referees
+no longer exhaust the Assistant's input pool before its judges. The worker
+host exposes the process's sandbox (`_ChatWorkerHost.sandbox`), which the runner binds per referee.
+
+The v3 Review (`PaperReviewRunner`, pipeline `review-v2`) checks every
+proof at one depth, `review.PAPER` (passes on the main chain and elsewhere, sweeps, the
+number of second opinions): there is no effort to choose. The Typo check
+(`TypoCheckRunner`, a subclass; pipeline `typo-check-v1`, mode `typo_check`, skill
+`typo-check`) only reads the paper and checks its remarks (`_render_typos`). The saved
+`level` tells them apart, `high` or `low`, whatever class resumes the job
+(`typos_only`): a `review-v2` job saved at `low`, when the typo check was the review's
+lowest effort, resumes as a typo check (`variant_for_state` returns `typos`, and so
+does `store._variant` for the interface), one saved at `medium` or `high` as the
+review. `router.FIXED_EFFORT` (`effort_for`) gives both modes their level wherever an
+effort is read (the router's tasks, `_validate_delegate`, `gui/effort.py`,
+`frontend/src/review.ts`), and `PaperReviewRunner.start` sets `max_rounds` itself,
+since the rounds name the DS4 budget. Saved
+`review-v1` and `journal-v1` jobs (the retired Review / Detailed review split) are read
+as reviews (`LEGACY_PIPELINES`); resuming one migrates it (`resume`: earlier re-checks
+move to `legacy_confirms`, the phase becomes `audit`). `@detailed_review` and
+`/detailed_review` are aliases of `referee` (`router.OFFERED_MODES` leaves it
+out of the schemas; `workers.REVIEW_MODES` maps it to the review).
+
+Phases: `plan` (map, reading parts, plan of all proofs), `audit`, `write`. The map
+reads the paper's own packages and `.aux` (`ReviewBase._packages`: theorem numbers),
+attaches section-long proofs (`manuscript._section_proofs`; the nested results are
+`nested` spans) and does not count `\input` figure files as missing source.
+`audit` is one continuous pool (`_pool`): after every finished call it asks
+`_audit_jobs()` (under the mutex) for every call that can now run, with a priority:
+the scope call (overview, main results, and the inventory the map missed:
+`_apply_inventory` validates located proofs and results stated in prose), the
+attacks on the main statements (below), the checks of the main chain (`_main_chain`: the main results, the union of
+the map's flags and the scope's choice restricted to provable statements, and every
+result their proofs use through `refs`), the citations comparison (`CITE`), the
+other checks, the sweeps (`SWEEP_UNITS`: consistency and completeness, pseudo-units
+like `CITE`), and a first prose report
+(`write:draft`) once the main chain is checked and judged. A check plan is pinned per
+unit (`_audit_plan`): one pass before the scope is known, then `PAPER`'s passes;
+a proof longer than `BLOCK_LINES` is checked line by line in parts (`_blocks`) and
+whole by the other lenses; a section-long proof is read whole with a note naming its
+nested results. With a large context (DS4, `state['whole']`) every call starts with
+the same text, `_block()` (the numbered manuscript, its packages and the cited
+bibliography), so a provider that caches prompt prefixes reads it once; without it
+(small local contexts) the paper is read in section-following parts, the scope waits
+for the reading and the checks for the scope, and a check sees its proof with the
+statements and equations it cites (`P.AUDIT_PARTS_NOTE`). `_reads()` is what a job
+reads for typos and presentation: everything for a typo check, the parts of a
+small-context review (whose overview is written from the reading notes), nothing for
+a review with the whole paper in view, including the parts a saved review had planned.
+Such a review's report ends with `TYPOS_NOT_CHECKED`, which names `@typo_check`.
+
+The attack (`_attack_job`, role `attack`, `state['attacks']` by unit id; whole-paper
+mode only) runs as soon as the scope is known, at the pool's highest priority: one
+reasoning call per main result of `_attack_ids()` (the overview's order, `ATTACKS` at
+most), the manuscript block first and `P.ATTACK_POLICY` after it. It answers a
+`verdict` (`none`, `edge`, `minor`, `major`), the counterexample, the check of the
+hypotheses. `_apply_attack` keeps a `minor` or
+`major` verdict only with both texts, and turns it into a `statement_false` issue on
+the statement, saved as the check `<unit>#attack` (lens `attack`, outside the check
+plan): it clusters and is reported like any finding, and `_adjudication_jobs` gives it
+its defence and judge at once, without waiting for the proof's checks. (Saved jobs
+may hold a finished pass on a "weakest step", `<unit>#weak`: it is kept; an unfinished
+one is dropped.) `_attack_outcome` fills the last column of the main-results table
+and `_attack_notes` the lines under it. An attack without a usable answer is made
+again on resume; `_complete` needs every attack attempted. The benchmark
+(`review-tests/bench/score.py`, outside the repository) reads the role and the state key.
+
+Checks answer `P.AUDIT_SCHEMA`: every problem, with an `effect` (`P.EFFECTS`);
+severity is derived (`P.MAJOR_EFFECTS` are major). Findings are clusters of the
+passes' issues (`_clusters`, which carry the gravest effect). As soon as a unit's
+checks are complete, its eligible findings get a second opinion
+(`_adjudication_jobs`, at most `PAPER['adjudications']`, the main chain's major
+findings first): `defend` (the paper's advocate), `arbiter` (`_judged`: always for a
+finding alleged `statement_false` or `breaks_proof`, whatever the defence says, with
+`P.ARBITER_UNOPPOSED_NOTE` when the defence gave way; otherwise when the defence holds
+or partly holds). The judge's verdict is final: `_conclude` takes its effect (a saved job
+waiting for the retired repair check is concluded from its judge) and writes
+the verdict into `state['confirms']` in the format the Quick review uses, with the
+history in `state['adjudications']`. `_comments` numbers the comments (`Major n`,
+`Minor n`, `Question n`), keeps every merged member's content under its lead, and
+names the main results each one affects (`_affects`); `_main_status` gives each
+main result one status; `state['ledger']` saves the numbered findings with the job.
+`_recommendation_floor` keeps a major comment upheld after a defence out of an
+`accept` or `minor_revision` recommendation. The report is rewritten after every
+call of the pool (`_report`), with a progress line while the job runs. The review
+does not search the literature and nests no other job: the Assistant starts a
+literature review beside it (next paragraph). Every review
+call carries the delegation context. Hidden reasoning is off for every call except
+the second pass on the near chain (`_deep`), the judge and the attack, each capped at
+`REASONING_CAP` (40k) output tokens: DS4 on
+DeepInfra generates about 550 tokens per second per account and a
+thinking proof check writes 15–30k tokens, so reasoning, not concurrency, sets the
+duration (a live review with reasoning everywhere took 40–64 minutes; the
+"low" reasoning level made checks think longer, not shorter). On DS4 a review gets four times the
+input allowance of other workers (`gui/effort.py` `REVIEW_INPUT`) and up to
+`inference.MAX_CAPACITY` (16) concurrent calls (`Hub.review_concurrency`, within the
+model-request limit). Pool admission counts only the new call: running calls have
+already reserved their output and input in the job's counters. Extra passes go to
+`_near_chain()` (the main results and what they use directly:
+`PAPER['depth']`). A minor
+finding without a second opinion is checked against the paper (`_minor_check_jobs`,
+role `minor-check`, `MINOR_BATCH` per call, no hidden reasoning, once every planned
+check of its proof has answered); the verdicts are in `state['minor_checks']` by
+cluster key, and `_settle` makes an unsupported one `rejected`. `_comments` leaves
+out those and every finding whose quote is not in the source (`located == 'no'`,
+`DROP_UNLOCATED`): they stay in `state['checks']`, and the scope appendix counts them. A typo check's reading in
+whole mode is one proofreading call per part of about `READ_FOCUS_LINES` lines with
+the whole paper in view; typo remarks are checked `TYPO_BATCH` per call
+(`_typo_jobs`).
+
+A review in a conversation runs beside a literature review (the fixed fan-out,
+`mode_calls.ModeOrchestrator` and `review_position.py`). `_plan_pending`, called at the
+start of every `_complete_pending`, finds a pending `referee` delegation, whoever chose
+it (`@referee`, the router, the Assistant), and inserts a `literature` delegation at
+effort `low` right after it, in the same batch and in the assistant message that holds
+the call. Its request is `literature_goal`: one bounded call (`bounded_json`,
+`BRIEF_POLICY`) restates the manuscript's title, abstract and introduction
+(`manuscript_head`) as a question, the main results and the works named as closest, and
+an item that repeats `COPIED_WORDS` consecutive manuscript words is dropped. The
+child is marked `companion`, gets no file (`_worker_files`) and a context whose query
+is that request (the literature review would otherwise take the request to review as
+its question). No fan-out for a reply to an earlier report, when a literature
+delegation is already in the batch, when online search is off or the request excludes
+it (`_NO_SEARCH`, `excludes_external_sources`), or when no public question could be
+written: `state['review_fanout']` records `started` (with the call and request) or
+`none` with the reason, once per turn. `Orchestrator._required_worker` makes the
+answer final only when every call of the selected worker's batch has returned.
+`_review_reply` then gives the report as written, followed by `_position`: one bounded
+call (`POSITION_POLICY`) reads the start of the report, the literature review's draft
+and its `state['references']`; `own_marks` marks the records with the manuscript's
+title (`manuscript`) or by its authors (`authors`), `render_position` removes a
+citation of a number that is not a record and prints the references itself. Without a
+finished (`complete` or `partial`) literature review with records, the part is
+`missing_position(reason)`; the section is saved in `review_fanout['section']`, so a
+resumed turn shows the same text. The companion is left out of `_reviews()` (it is not
+shown verbatim). When the review is one of several works of the turn, the parent
+writes the answer and `_payload` adds `POSITION_NOTE` (or `NO_POSITION_NOTE`).
 
 The manuscript map (`manuscript.build`) finds numbered statements, proofs and headings. In
 text extracted from a PDF, "Appendix A. Title" (or "APPENDIX A") is a heading: it ends a
@@ -1277,10 +1521,10 @@ have is refused without a model call, with the real sections and results
 (`review._contents`). Quick review (`ReviewBase._pick_unit`) never picks one proof for a
 request about the whole document (`ALL_UNITS_REQUEST`, `WHOLE_DOCUMENT_REQUEST`, or a `pick`
 answer naming none) when the source has several: it fails `one_result_only`, listing the
-proofs and suggesting a detailed review. A finished quick review records `coverage` (the
+proofs and suggesting a whole-paper Review. A finished quick review records `coverage` (the
 proof checked, the proofs not checked); the worker result carries its summary and the
 Assistant's synthesis gets a `CONTROLLER COVERAGE` note, so one checked proof is never
-reported as a verdict on the document. Review and detailed review ask which manuscript
+reported as a verdict on the document. Review asks which manuscript
 (`ambiguous_source`) when several are pinned and none is named; an assembled archive counts
 once. Referee reports quote manuscript lines addressed to a reviewer or an AI
 (`review.reviewer_instructions`, conservative patterns, plus remarks of the checks) in a

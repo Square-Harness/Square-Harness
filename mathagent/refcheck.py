@@ -1521,7 +1521,7 @@ def export_evidence(state):
                 continue
         qualifiers = []
         asker = state['check'].get('asker')
-        if asker in ('nested checker', 'detailed review'):
+        if asker in ('nested checker', 'detailed review', 'review'):
             qualifiers.append('worded by ' + asker)
         elif 'asker' not in state['check'] and not state.get('reference_context'):
             # Saved before checks recorded who worded the question. A check the user typed needs no qualifier.

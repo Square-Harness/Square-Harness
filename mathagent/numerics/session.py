@@ -19,7 +19,7 @@ from .. import skill_catalog
 from ..tools import schema
 from .artifacts import ExperimentStore
 from .executor import DEFAULT_CONCURRENCY, IMAGE, DockerExecutor, SandboxUnavailable
-from .policy import LAB, SANITY, PolicyError, load_policies, resolve
+from .policy import LAB, REVIEW, SANITY, PolicyError, load_policies, resolve, review_policy
 
 TOOL_NAMES = ('execute_python', 'read_experiment', 'read_skill_reference')
 RESULT_CHARS = 5600
@@ -30,6 +30,9 @@ NOTES = {
     SANITY: ('Numerical evidence only. Passing cases never prove a universal claim; a violation is a candidate '
              'counterexample until admissibility, conditioning and precision are checked (SymPy, mpmath).'),
     LAB: 'Report only what this output shows. The code, output and files are saved under experiment_id.',
+    REVIEW: ('Numerical evidence only. Passing cases never prove a universal claim; a violation is a candidate '
+             'counterexample until admissibility, conditioning and precision are checked. Cite the experiment_id '
+             'when a report rests on this run.'),
     'failed': ('This run did not complete (status {status}): it verified nothing. Do not cite it as evidence; '
                'fix the code and rerun, or say the check is inconclusive.'),
     'memory': (' It reached the {memory_mb} MB memory limit: estimate array sizes first (n x m x 8 bytes), '
@@ -326,6 +329,21 @@ class PythonSandbox:
             raise SandboxUnavailable(reason)
         return NumericsSession(self.executor, ExperimentStore(workspace_root), self.policies[skill.name], skill,
                                explicit=bool(explicit), routed=routed, approve=approve if skill.name == LAB else None, cancel=cancel)
+
+    def review_session(self, workspace_root, role, cancel=None):
+        """The binding of one referee or judge of a paper review (policy "review": its own run count, 30 s a run),
+        or None when the sandbox is off, automatic checks are off (--no-numerical-checks) or Docker is unavailable.
+        The review's controller binds it; the model cannot choose another skill or policy."""
+        if not (self.enabled and self.automatic):
+            return None
+        try:
+            if self.unavailable():
+                return None
+            skill = skill_catalog.load(SANITY)
+        except (SandboxUnavailable, OSError, ValueError):
+            return None
+        return NumericsSession(self.executor, ExperimentStore(workspace_root), review_policy(role), skill,
+                               explicit=False, cancel=cancel)
 
     def automatic_session(self, workspace_root, cancel=None, ctx=None):
         """The sanity-check binding for ordinary chat, or None when off, unavailable or the context is small."""

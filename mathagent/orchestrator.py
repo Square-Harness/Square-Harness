@@ -26,7 +26,7 @@ from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
-from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, worker_effort
+from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .tools import schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4
@@ -61,7 +61,7 @@ Do not describe a model's review as a formal proof certificate.
 You can delegate a precise objective to an existing worker when sustained proof
 search, independent proof review, exploration, a precise reference, a literature review,
 manuscript review or a write-up will help. The available modes are prove,
-explore, check, literature, referee, detailed_review, quick_review, explain, writeup and summarize.
+explore, check, literature, referee, typo_check, quick_review, explain, writeup and summarize.
 Delegation is required for nontrivial proof search and otherwise optional. Prefer the
 least effort suitable for the objective: low, medium or high. Every literature review runs at high effort.
 High is the maximum effort. State the complete objective and its hypotheses. Children cannot
@@ -93,8 +93,10 @@ Recorded sandbox code and figures are supplied automatically to write-up workers
 do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks one given proof (verdict, located issues), never a whole document; explain explains a result and
-its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, typos), detailed_review also checks its
-proofs and is only for an explicit request. For a numbered result of an attached file, delegate at
+its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, every
+proof checked, recommendation; it has one depth, whatever effort you give; the controller starts a literature
+review beside it and adds the position of the results after the report, so do not delegate one for that); typo_check lists the typos and
+presentation problems of a manuscript, with checked corrections, and checks no proof. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore
 with the source file; explain is for one specified result and its proof, or one specified page, section
@@ -1005,7 +1007,7 @@ class Orchestrator:
             if not isinstance(arguments, dict):
                 raise AgentError('Main-agent tool arguments must be an object')
             if function['name'] == 'delegate' and arguments.get('effort') in EFFORTS:
-                arguments = {**arguments, 'effort': worker_effort(arguments.get('mode'), arguments['effort'])}
+                arguments = {**arguments, 'effort': effort_for(arguments.get('mode'), arguments['effort'])}
             function['arguments'] = arguments
             call_id = call.get('id') or f'{self.state["id"]}_{self.state["main_calls"]}_{index}'
             if not isinstance(call_id, str) or call_id in previous_ids:
@@ -1032,6 +1034,7 @@ class Orchestrator:
                 args['effort'] in LEGACY_EFFORTS and args['effort'] == saved_effort
                 and self.state.get('resumed_checkpoint')):
             raise ValueError('Unknown worker effort; choose low, medium or high')
+        args['effort'] = effort_for(args['mode'], args['effort'])
         for key, maximum in (('request', 8000), ('reason', 400)):
             if not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > maximum:
                 raise ValueError(f'{key} must be nonempty text of at most {maximum} characters; no text was truncated')
@@ -1078,7 +1081,7 @@ class Orchestrator:
                 workspace._readable(path)
                 if not path.is_file():
                     raise ValueError(filename + ' is not a file in this folder')
-                if args['mode'] in ('referee', 'detailed_review', 'quick_review', 'explain', 'writeup'):
+                if args['mode'] in ('referee', 'detailed_review', 'typo_check', 'quick_review', 'explain', 'writeup'):
                     human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
                     if filename not in self.state['files'] and not any(filename in text for text in human):
                         raise ValueError('Use only attached files or files named by the user: ' + filename)
@@ -1383,7 +1386,11 @@ class Orchestrator:
             if pending['status'] != 'complete':
                 self._append_result(pending, results[index])
 
+    def _plan_pending(self):
+        """A subclass may add calls to the pending batch before it runs (the literature review beside a review)."""
+
     def _complete_pending(self, allow_tools=True):
+        self._plan_pending()
         offset = 0
         while offset < len(self.state['pending_calls']):
             pending = self.state['pending_calls'][offset]
@@ -1450,14 +1457,13 @@ class Orchestrator:
                 and error.get('scope') == 'execution'):
             self.state['force_final'] = True
             self._warning('The selected operation cannot continue with unchanged inputs. Reporting saved findings and the concrete blocker.')
-        if (self.state.get('required_mode') in ('explain', 'quick_review', 'referee', 'detailed_review', 'literature', 'writeup',
-                                                'summarize', 'python_lab', 'sanity_check')
-                and result.get('mode') == self.state['required_mode'] and isinstance(value, dict) and not handed_back):
+        required = self._required_worker(pending)
+        if required is not None and not handed_back:
             # An explicit document request has one durable reading/checking plan.
             # Synthesize its saved result, including pending coverage, instead
             # of starting another whole-manuscript scan in the parent.
             self.state['force_final'] = True
-            if value.get('status') in ('failed', 'error', 'incomplete') + BUDGET_STOPS or value.get('error'):
+            if required.get('status') in ('failed', 'error', 'incomplete') + BUDGET_STOPS or required.get('error'):
                 self.state['required_failed'] = self.state['required_mode']
         if result.get('mode') == 'prove' and isinstance(value, dict) and not value.get('error') \
                 and value.get('status') == 'candidate_complete':
@@ -1497,6 +1503,25 @@ class Orchestrator:
         self._save()
         self.emit('result', message['content'])
 
+    def _required_worker(self, pending):
+        """The result of the worker the user selected, once every call of its batch has returned; None before.
+
+        The answer is final when the selected worker has returned, and with it the calls started in the same batch
+        (a review runs beside its literature review: the reply needs both)."""
+        required = self.state.get('required_mode')
+        if required not in ('explain', 'quick_review', 'referee', 'detailed_review', 'typo_check', 'literature', 'writeup',
+                            'summarize', 'python_lab', 'sanity_check'):
+            return None
+        batch = [p for p in self.state['pending_calls']
+                 if p is pending or (pending.get('batch_id') and p.get('batch_id') == pending['batch_id'])]
+        if any(p['status'] != 'complete' for p in batch):
+            return None
+        selected = next((p for p in batch if p['call']['function']['name'] == 'delegate'
+                         and isinstance(p['call']['function']['arguments'], dict)
+                         and p['call']['function']['arguments'].get('mode') == required), None)
+        child = selected and next((c for c in self.state['children'] if c['id'] == selected.get('child_id')), None)
+        return child['result'] if child and child['status'] == 'complete' and isinstance(child.get('result'), dict) else None
+
     def _reference_only_request(self):
         from .source_tasks import _instruction_text
         query = self.state['query']
@@ -1535,6 +1560,7 @@ class Orchestrator:
         """This turn's finished literature reviews, as (child, review), in delegation order."""
         return [(child, child['result']['answer']) for child in self.state['children']
                 if child['action']['mode'] == 'literature' and child['status'] == 'complete'
+                and not child.get('companion')  # the one beside a review feeds the reply; its card holds it
                 and isinstance(child.get('result'), dict) and child['result'].get('status') in ('complete', 'partial')
                 and isinstance(child['result'].get('answer'), str) and child['result']['answer'].strip()]
 

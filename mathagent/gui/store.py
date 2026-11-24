@@ -32,20 +32,22 @@ from ..literature import LiteratureTools
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import _job_directory, _read_state as _read_research
+from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
                      rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
+from .inference import MAX_CAPACITY
 from . import agent_views, personalization, projects
 
 CHAT_MODES = ('explore', 'free')
 SAVED_CHAT_MODES = (*CHAT_MODES, 'critic')
 # How the interface names a suggestion in chat previews, including saved suggestions.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature review',
-               'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
-               'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
+               'referee': 'Review', 'detailed_review': 'Review', 'typo_check': 'Typo', 'quick_review': 'Proof check',
+               'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary', 'clarify': 'Question', 'python_lab': 'Python Lab',
                'sanity_check': 'Numerical sanity check'}
 _EXPERIMENT = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
 _ARTIFACT_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
@@ -405,6 +407,11 @@ def research_state(root, job_id, *, verify=True):
     return _read_research(_job_directory(root, job_id), job_id, verify=verify)
 
 
+def _variant(state):
+    """The kind of a saved job as the interface shows it: a review saved at Low effort was a typo check."""
+    return 'typos' if variant_for_state(state) == 'typos' else state.get('variant')
+
+
 def list_research(root, active=None):
     root = Path(root)
     base = root / '.mathagent' / 'research'
@@ -425,7 +432,7 @@ def list_research(root, active=None):
                      'phase': state['phase'], 'title': title or one_line(proof_request_text(state), 140),
                      'updated_at': state['updated_at'], 'created_at': state['created_at'],
                      'running': running, 'sources': [s['path'] for s in state['sources']],
-                     'variant': state.get('variant'), 'verdict': state.get('verdict') or None,
+                     'variant': _variant(state), 'verdict': state.get('verdict') or None,
                      'tokens': job_output_budget(state, running)})
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
@@ -457,7 +464,7 @@ def research_detail(root, job_id, active=None):
         'sources': [{'id': src['id'], 'path': src['path'], 'sha256': src['sha256'],
                      'lines': len(src['content'].splitlines())} for src in s['sources']],
         'plan': s['plan'], 'notes': s['notes'], 'evidence': s['evidence'], 'draft': s['draft'],
-        'pipeline': s.get('pipeline'), 'variant': s.get('variant'), 'verdict': s.get('verdict') or None,
+        'pipeline': s.get('pipeline'), 'variant': _variant(s), 'verdict': s.get('verdict') or None,
         'level': s.get('level'), 'unit': (s.get('unit') or {}).get('name'),
         'review': s['review'], 'draft_complete': s.get('draft_complete'),
         'review_complete': s.get('review_complete'), 'warnings': s.get('warnings', []),
@@ -1584,11 +1591,12 @@ def remember_folder(root, relative):
 
 
 def saved_concurrency(root):
-    """Concurrency limits last set in the interface ({'chats': n, 'requests': n}, each 1–8)."""
+    """Concurrency limits last set in the interface for conversations and model requests."""
     state = _private_json(Path(root) / '.mathagent' / 'gui-state.json') or {}
     saved = state.get('concurrency') if isinstance(state.get('concurrency'), dict) else {}
+    maxima = {'chats': 8, 'requests': MAX_CAPACITY}
     return {key: value for key, value in saved.items()
-            if key in ('chats', 'requests') and type(value) is int and 1 <= value <= 8}
+            if key in maxima and type(value) is int and 1 <= value <= maxima[key]}
 
 
 def save_concurrency(root, limits):
@@ -1774,8 +1782,8 @@ def delete_style(root, name):
 
 
 _RESULT_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'check': 'Literature check',
-                 'literature': 'Literature review', 'referee': 'Review', 'detailed_review': 'Detailed review',
-                 'quick_review': 'Quick review', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
+                 'literature': 'Literature review', 'referee': 'Review', 'detailed_review': 'Review', 'typo_check': 'Typo',
+                 'quick_review': 'Proof check', 'explain': 'Explanation', 'writeup': 'Write-up', 'summarize': 'Summary'}
 _PROOF_STATUS = {'candidate_complete': 'response reviewed; it may be a proof or counterexample', 'uncertain': 'the model review is uncertain',
                  'review_unavailable': 'not reviewed'}
 

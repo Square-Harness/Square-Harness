@@ -968,6 +968,7 @@ class ReviewRunner(ResearchRunner):
         limit = 5 if is_ds4(agent) else 4
         self.concurrency = max(1, min(limit, int(concurrency or 1)))
         self._keys, self._indexed, self._title_words, self._counts = {}, 0, {}, {}
+        self._companion = False
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
         self._generation_failure_streak, self._provider_pause = 0, None
         self._side, self._lane, self._repository_down, self._unavailable = None, [], False, False
@@ -988,18 +989,33 @@ class ReviewRunner(ResearchRunner):
             raise ValueError('The literature-review pipeline writes literature reviews only')
         if type(max_rounds) is not int or not 1 <= max_rounds <= 100:
             raise ValueError('Invalid research budget: max_rounds')
-        # Older callers send their selected breadth as a round count. Only resume uses the saved breadth.
-        level = breadth(HIGH_ROUNDS)
+        # Older callers send their selected breadth as a round count. New standalone reviews always use High.
+        return self._start_review(goal, source_files, HIGH_ROUNDS, budgets)
+
+    def start_companion(self, goal, *, kind='literature', source_files=(), max_rounds=1, **budgets):
+        """The review controller's Low-breadth survey, from its public question alone."""
+        if kind != 'literature' or source_files or type(max_rounds) is not int or max_rounds != 1:
+            raise ValueError('A review companion takes a literature question, no source files and one round')
+        return self._start_review(goal, (), 1, budgets)
+
+    def _start_review(self, goal, source_files, rounds, budgets):
+        self._companion = rounds == 1
+        level = breadth(rounds)
         if budgets.get('max_requests') is None:
             budgets['max_requests'] = level['requests']
         if budgets.get('max_seconds') is None:
-            budgets['max_seconds'] = workflow_budget('high')['seconds'] if is_ds4(self.agent) else level['seconds']
+            effort = 'low' if self._companion else 'high'
+            budgets['max_seconds'] = workflow_budget(effort)['seconds'] if is_ds4(self.agent) else level['seconds']
         # A delegated worker also shares the enclosing Assistant's deadline.
         deadline = getattr(self.agent.client, 'deadline', None)
         if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
             budgets['max_seconds'] = min(budgets['max_seconds'], max(.1, deadline - time.monotonic()))
         self._earlier = self._earlier_review(goal)
-        return super().start(goal, kind='literature', source_files=source_files, max_rounds=HIGH_ROUNDS, **budgets)
+        return super().start(goal, kind='literature', source_files=source_files, max_rounds=rounds, **budgets)
+
+    def _inferred_sources(self, goal):
+        # A filename in the generated literature question cannot grant access to the manuscript.
+        return [] if self._companion else super()._inferred_sources(goal)
 
     def _earlier_review(self, goal):
         """The most recent finished review of the same request in this workspace (its job ID), else None."""

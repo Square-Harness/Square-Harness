@@ -24,6 +24,10 @@ class _Waiter:
     deadline: float | None = None
 
 
+# A hosted provider (DeepInfra) serves many requests at once: a review of a whole paper runs some 60 calls.
+MAX_CAPACITY = 16
+
+
 class InferencePool:
     """Share a bounded number of streams between registered task owners.
 
@@ -46,8 +50,8 @@ class InferencePool:
 
     @staticmethod
     def _validate_capacity(capacity: int) -> None:
-        if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 8:
-            raise ValueError('Inference concurrency must be an integer between 1 and 8.')
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= MAX_CAPACITY:
+            raise ValueError(f'Inference concurrency must be an integer between 1 and {MAX_CAPACITY}.')
 
     @property
     def capacity(self) -> int:

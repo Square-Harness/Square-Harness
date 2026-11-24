@@ -111,13 +111,23 @@ export const ROLES: Record<string, RoleInfo> = {
   verdict: { active: 'Assessing the reference evidence', name: 'Verdict', structured: true },
   discover: { active: 'Discovering references', name: 'Discover', structured: true },
   reference_select: { active: 'Selecting relevant references', name: 'Selection', structured: true },
-  // The four manuscript review variants use structured calls.
+  // The manuscript review variants use structured calls.
   check: { active: 'A fresh verifier is checking one proof', name: 'Check', structured: true },
+  citations: { active: 'Comparing the cited results with the literature', name: 'Citations', structured: true },
+  consistency: { active: 'Reading the paper for inconsistencies between its parts', name: 'Consistency', structured: true },
+  completeness: { active: 'Looking for claims the paper does not establish', name: 'Unproved claims', structured: true },
+  defend: { active: 'Defending the paper against an objection', name: 'Defence', structured: true },
+  arbiter: { active: 'Judging an objection and its defence', name: 'Judgement', structured: true },
+  'repair-check': { active: 'Checking a repair that would make an objection minor', name: 'Repair check', structured: true },
+  'typo-check': { active: 'Checking the typo list against the paper', name: 'Typo check', structured: true },
+  attack: { active: 'Looking for a counterexample to a main result', name: 'Attack', structured: true },
+  'minor-check': { active: 'Checking minor findings against the paper', name: 'Minor findings check', structured: true },
+  merge: { active: 'Grouping comments about the same problem', name: 'Merge', structured: true },
   confirm: { active: 'An independent re-check of an alleged issue', name: 'Re-check', structured: true },
   extract: { active: 'Finding the statement and the proof', name: 'Extract', structured: true },
   pick: { active: 'Finding the result the request names', name: 'Pick', structured: true },
   read: { active: 'Reading a part of the paper: what it does, typos and presentation', name: 'Reading', structured: true },
-  scope: { active: 'Writing an overview of the paper from the reading notes', name: 'Overview', structured: true },
+  scope: { active: 'Writing an overview of the paper and locating its proofs', name: 'Overview', structured: true },
   novelty: { active: 'Comparing the contribution with the search results', name: 'Novelty', structured: true },
   presentation: { active: 'Reading for presentation', name: 'Presentation', structured: true },
   write: { active: 'Writing the prose of the report', name: 'Write', structured: true },
@@ -147,9 +157,18 @@ const REVIEW_ROLES: Record<string, RoleInfo> = {
   condense_revision: { active: 'Shortening a revised section', name: 'Shortened revision' },
 }
 
+const REFEREE_ROLES: Record<string, RoleInfo> = {
+  lead: { active: 'The lead referee is checking the main results', name: 'Lead referee' },
+  'co-referee': { active: 'A co-referee is checking assigned results', name: 'Co-referee' },
+  reader: { active: 'A reader is checking a proof line by line', name: 'Proof reader', structured: true },
+  judge: { active: 'The judge is checking a reported issue', name: 'Judge' },
+  'judge-batch': { active: 'The judge is checking reported issues', name: 'Judge', structured: true },
+  verdict: { active: 'Writing the verdict from the judged findings', name: 'Verdict', structured: true },
+}
+
 /** How a model call is labelled and shown, for the job's pipeline. */
 export const roleInfo = (role: string, pipeline?: string | null): RoleInfo | undefined =>
-  (pipeline === REVIEW_PIPELINE ? REVIEW_ROLES[role] : undefined) || ROLES[role]
+  (pipeline === REVIEW_PIPELINE ? REVIEW_ROLES[role] : pipeline === 'review-v4' ? REFEREE_ROLES[role] : undefined) || ROLES[role]
 
 export type LiveText = { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; loaded: boolean }
 

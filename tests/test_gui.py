@@ -526,9 +526,10 @@ class DeepInfraWorkflowTests(GuiCase):
                          'summarize', 'explore', 'check', 'style', 'python_lab'):
                 with self.subTest(mode=mode, effort=name):
                     worker = effort.level(mode, name, defaults)
-                    worker_passes = 5 if mode == 'literature' else passes
-                    self.assertEqual(worker['tokens'], worker_passes * 3 * 384_000)
-                    self.assertEqual(worker['minutes'], worker_passes * 3 * 180)
+                    fixed = 5 if mode in ('referee', 'detailed_review', 'literature') else passes
+                    self.assertEqual(worker['tokens'], fixed * 3 * 384_000)
+                    self.assertEqual(worker['minutes'], fixed * 3 * 180)
+            self.assertEqual(effort.level('typo_check', name, defaults)['tokens'], 3 * 384_000)
         started = self.ok('POST', '/api/proofs', {
             'goal': 'Prove that x = x for every real x.', 'rounds': 1,
             'tokens': 12000, 'seconds': 120})

@@ -14,6 +14,7 @@ from pathlib import Path
 
 LAB = 'python-lab'
 SANITY = 'numerical-sanity-check'
+REVIEW = 'review'  # the paper review's referees and judges: the sanity-check skill with more runs of 30 s
 
 
 class PolicyError(ValueError):
@@ -52,6 +53,12 @@ LAB_DEFAULTS = Limits(timeout_seconds=30, memory_mb=4096, cpus=2, pids=128, tmpf
                       output_bytes=200_000, artifact_bytes=8_000_000)
 LAB_CEILING = Limits(timeout_seconds=300, memory_mb=16384, cpus=4, pids=256, tmpfs_mb=512,
                      output_bytes=1_000_000, artifact_bytes=16_000_000)
+
+# The Review (v4): its referees recompute constants and test counterexamples, so they get more and longer runs
+# than an automatic check, never more memory or CPU and never an escalation. Runs per referee or judge (one review).
+REVIEW_DEFAULTS = Limits(timeout_seconds=30, memory_mb=2048, cpus=1, pids=64, tmpfs_mb=64,
+                         output_bytes=20_000, artifact_bytes=2_000_000)
+REVIEW_RUNS = {'lead': 20, 'co-referee': 8, 'judge': 3}
 
 # The only resource fields a model may mention in a tool call.
 REQUESTABLE = ('timeout_seconds', 'memory_mb', 'cpus')
@@ -97,6 +104,15 @@ def sanity_policy(overrides=None, max_runs=3):
         raise ValueError(f'sanity.max_runs must be an integer from 1 to {MAX_SANITY_RUNS}')
     limits = _limits(SANITY_DEFAULTS, overrides, SANITY_BOUNDS, 'sanity')
     return Policy(SANITY, limits, limits, max_runs, escalation=False)
+
+
+def review_policy(role):
+    """The policy of one referee or judge of a paper review: REVIEW_RUNS[role] runs of at most 30 s, no escalation,
+    within the bounds of the automatic checks."""
+    if role not in REVIEW_RUNS:
+        raise ValueError('review role must be one of ' + ', '.join(REVIEW_RUNS))
+    limits = _bounded(REVIEW_DEFAULTS, SANITY_BOUNDS, 'review')
+    return Policy(REVIEW, limits, limits, REVIEW_RUNS[role], escalation=False)
 
 
 def lab_policy(defaults=None, ceiling=None, max_runs=20):

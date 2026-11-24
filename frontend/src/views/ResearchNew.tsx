@@ -11,7 +11,7 @@ import { go } from '../router'
 import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 import { capacityFull } from '../concurrency'
-import { VARIANT_EFFORT, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
+import { FIXED_VARIANTS, VARIANT_COVERS, VARIANT_EFFORT, VARIANT_NAMES, VARIANTS } from '../review'
 import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
@@ -36,17 +36,22 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The harness reads the whole paper to understand it and to list typos and presentation problems, and drafts a referee report: an overview of the paper, the typos with corrections, an assessment, a recommendation and a note to the editor. The proofs are not checked: use the detailed review for that.',
-    placeholder: 'Optional focus, e.g. pay attention to the introduction and how the results are presented.',
-    pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
+    lede: 'Pin the manuscript. The referees examine the main results and the proofs they depend on. An independent judge checks reported issues. The report links findings to the manuscript and records which results still need checking. For language and presentation, choose Typo.',
+    placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
+    pinHint: 'Pin the manuscript (a TeX source gives the best results; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
   },
+  typos: {
+    title: 'Check the typos of a manuscript',
+    lede: 'Pin the manuscript. The harness proofreads the whole paper part by part for typos, misprinted formulas, undefined symbols, wrong cross-references and unclear sentences, then checks every suggested correction against the paper. No proof is checked: ask for a Review for that.',
+    placeholder: 'Optional focus, e.g. only Sections 3 and 4.',
+    pinHint: 'Pin the manuscript (a TeX source gives the best typo check; PDF, Markdown and text work too).',
+    field: 'Focus of the typo check (optional)', files: 'Manuscript', noun: 'typo check',
+  },
   journal: {
-    title: 'Detailed Review',
-    lede: 'Everything the review does, then the proofs are checked one at a time, main results first, with each alleged error re-checked. The report identifies the checks completed and any work still pending. It allows twice the working time of a review at the same effort.',
-    placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
-    pinHint: 'Pin the manuscript (TeX, Markdown, text or PDF). Its snapshot stays fixed for the whole job.',
-    field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'detailed review',
+    title: 'Review a manuscript',
+    lede: 'The former detailed review, now the review.',
+    placeholder: '', pinHint: '', field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
   },
   explain: {
     title: 'Explain a result',
@@ -74,7 +79,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [variant, setVariant] = useState<ReviewVariant>(savedVariant)
   const review = kind === 'referee'
   const copy = review ? REVIEW[variant] : LITERATURE
-  const manuscript = review && (variant === 'review' || variant === 'journal')
+  const manuscript = review && FIXED_VARIANTS.includes(variant)
   const pasted = review && !manuscript
   const [goal, setGoal] = useState('')
   const [target, setTarget] = useState('')
@@ -88,20 +93,17 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
-  const [online, setOnline] = useState(true)
+  const [online, setOnline] = useState(false)
   const [level, setLevel] = useState<EffortLevel>(review ? VARIANT_EFFORT[savedVariant()] : 'high')
 
   const uploading = useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
 
-  const scaled = (next: EffortLevel, kind: ReviewVariant = variant) => {
-    const limits = effortLimits(review ? 'research' : 'literature', d!, next)
-    const scale = review && d?.api_profile !== 'deepinfra' ? VARIANT_SCALE[kind] : 1
-    return { ...limits, seconds: limits.seconds * scale }
-  }
+  const limitsFor = (next: EffortLevel, kind: ReviewVariant = variant) =>
+    effortLimits(review ? 'research' : 'literature', d!, next, review && FIXED_VARIANTS.includes(kind))
   const applyLevel = (next: EffortLevel, kind: ReviewVariant = variant) => {
     if (!d) return
-    const limits = scaled(next, kind)
+    const limits = limitsFor(next, kind)
     setRounds(limits.rounds!)
     setTokens(limits.tokens)
     setMinutes(limits.seconds / 60)
@@ -115,10 +117,10 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     // Only when the launch defaults arrive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d])
-  // Online search is on unless the interface was launched with --offline.
-  useEffect(() => { setOnline(!!status?.online) }, [status?.online])
+  // Literature uses the launch setting. Cited-paper lookup in a standalone manuscript review is opt-in.
+  useEffect(() => { setOnline(!review && !!status?.online) }, [review, status?.online])
 
-  const preset = d ? scaled(level) : null
+  const preset = d ? limitsFor(level) : null
   const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== preset.seconds / 60
     || inputTokens !== preset.input_tokens || requests !== preset.requests || chars !== preset.chars)
   const chooseLevel = (next: EffortLevel) => {
@@ -132,22 +134,24 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     setError('')
     try { window.localStorage.setItem(VARIANT_KEY, next) } catch { /* a convenience only */ }
   }
-  // Quick checks and explanations never search: they read the proof and what it cites.
-  const searching = online && !status?.online_locked && !pasted
+  const paperReview = manuscript && variant !== 'typos'
+  const offline = review && !paperReview
+  const searching = online && !status?.online_locked && !offline
 
   const running = capacityFull(snapshot, status)
   const noun = copy.noun
   const fileNamed = /\.(tex|md|txt|pdf)\b/.test(goal)
-  const ready = !review ? !!d && !!goal.trim()
+  const ready = !!d && (!review ? !!goal.trim()
     : manuscript ? files.length > 0 || fileNamed
-      : files.length ? !!(goal.trim() || target.trim()) : !!goal.trim()
+      : files.length ? !!(goal.trim() || target.trim()) : !!goal.trim())
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (uploading) return
     setBusy(true)
     setError('')
     setQueuedNote('')
-    const request = goal.trim() || (manuscript ? 'Referee this manuscript for a mathematics journal.'
+    const request = goal.trim() || (variant === 'typos' && review ? 'Check the typos and the presentation of this manuscript.'
+      : manuscript ? 'Referee this manuscript for a mathematics journal.'
       : `${variant === 'quick' ? 'Check the proof of' : 'Explain'} ${target.trim()}.`)
     try {
       const result = await api.startResearch({
@@ -174,13 +178,13 @@ export function ResearchNew({ kind }: { kind: Kind }) {
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
         <div className="entry"><span className="in-margin" /><WorkspaceSwitch /></div>
         <div className="entry">
-          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={review && variant === 'explain' ? 'explain' : kind} /></span>
+          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={review ? VARIANT_COVERS[variant] : kind} /></span>
           <div>
             {review && (
               <div className="segmented" role="group" aria-label="Kind of review">
                 {VARIANTS.map((item) => (
                   <button key={item} type="button" aria-pressed={variant === item} onClick={() => chooseVariant(item)}>
-                    {VARIANT_NAMES[item]}
+                    <span className="segmented-mark" aria-hidden="true"><Glyph mode={VARIANT_COVERS[item]} /></span>{VARIANT_NAMES[item]}
                   </button>
                 ))}
               </div>
@@ -188,7 +192,14 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             <h1 className="page-title">{copy.title}</h1>
             <p className="lede">{copy.lede}</p>
             {pasted ? (
-              <p className="network-note">Works on this computer only: the {noun} reads the text and the statements it cites, and searches nothing online.</p>
+              <p className="network-note">The {noun} reads the pinned text and the statements it cites. Web search is off.</p>
+            ) : offline ? (
+              <p className="network-note">The typo check uses the pinned manuscript. Web search is off.</p>
+            ) : paperReview ? (
+              <p className={'network-note' + (searching ? ' network-online' : '')}>
+                {searching ? 'Cited-paper lookup is on. Public search services receive bibliographic queries, and the referees can open papers to check the results the manuscript cites.'
+                  : 'Cited-paper lookup is off. The referees can use the manuscript and papers already cached in the workspace.'}
+              </p>
             ) : (
               <p className={'network-note' + (searching ? ' network-online' : '')}>
                 {searching
@@ -228,24 +239,24 @@ export function ResearchNew({ kind }: { kind: Kind }) {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {d && (review ? <EffortSlider kind="research" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />
-              : <div className="effort">
-                <span className="field-label">High effort</span>
-                <p className="field-hint effort-summary">{describeLimits('literature', { seconds: minutes * 60, requests, tokens })}.</p>
-              </div>)}
-            {review && VARIANT_SCALE[variant] > 1 && <p className="field-hint">A detailed review allows twice this working time for proof checks.</p>}
-            {!pasted && (
-              <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
-                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.' : 'Checks cited results and compares the contribution with arXiv, Semantic Scholar and zbMATH.')} />
+            {d && pasted && <EffortSlider kind="research" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
+            {d && !review && <div className="effort">
+              <span className="field-label">High effort</span>
+              <p className="field-hint effort-summary">{describeLimits('literature', { seconds: minutes * 60, requests, tokens })}.</p>
+            </div>}
+            {manuscript && <p className="field-hint">{variant === 'typos' ? 'A typo check' : 'A review'} has a fixed checking depth.</p>}
+            {!offline && (
+              <Toggle label={paperReview ? "Look up cited papers online" : "Search online"} checked={searching} onChange={setOnline} disabled={status?.online_locked}
+                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : paperReview ? 'Allow the referees to search for and open cited papers.' : 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.'} />
             )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
-                {review && <NumberField label="Tries (sets passes and depth)" value={rounds} onChange={setRounds} min={1} max={100} />}
+                {pasted && <NumberField label="Tries (sets passes and depth)" value={rounds} onChange={setRounds} min={1} max={100} />}
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />
-                {!pasted && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
-                {review && !pasted && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
+                {paperReview && <NumberField label="Evidence characters" value={chars} onChange={setChars} min={1000} max={1000000} step={1000} hint="Returned by literature tools" />}
+                {!offline && <NumberField label="Web requests" value={requests} onChange={setRequests} min={0} max={1000} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
               </div>
             </Collapse>
           </div>

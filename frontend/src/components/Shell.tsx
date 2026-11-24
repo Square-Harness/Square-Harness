@@ -39,7 +39,7 @@ export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
-    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Writing style') ? 'style' : /^(Write-up|Summary)/.test(task.label) ? 'writeup' : 'literature'
+    return job ? job.kind : /^(Review|Proof check|Typo)\b/.test(task.label) ? 'referee' : task.label.startsWith('Writing style') ? 'style' : /^(Write-up|Summary)/.test(task.label) ? 'writeup' : 'literature'
   }
   const chat = app.chats?.find((item) => item.id === task.target)
   return chat ? chat.kind : null
@@ -635,7 +635,7 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const active = activeTasks(app.snapshot)
   const queue = app.snapshot.queue
-  const valid = [chats, requests].every((value) => Number.isInteger(value) && value >= 1 && value <= 8)
+  const valid = Number.isInteger(chats) && chats >= 1 && chats <= 8 && Number.isInteger(requests) && requests >= 1 && requests <= 16
   const save = async () => {
     if (!valid || saving) return
     setSaving(true)
@@ -662,7 +662,7 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
       <div className="field-grid">
         <CellScale label="Conversations and jobs at once" value={chats} onChange={setChats} min={1} max={8}
           hint="One turn at a time in each conversation." />
-        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={8}
+        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={16}
           hint="Shared by all active conversations and their workers." />
       </div>
       <p className="muted small">Active requests share the model's throughput, so their speed depends on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>

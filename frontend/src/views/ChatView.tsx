@@ -21,6 +21,7 @@ import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { literalUnderscores } from '../mathtext'
 import { ago, count, displayPath, duration } from '../format'
 import { MODES } from '../modes'
+import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
@@ -59,7 +60,7 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
 
 // How a card names what the model started. Explore and saved Critique are both answers here;
 // a literature check also answers here, with its evidence.
-type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
+type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'typo_check' | 'quick_review' | 'explain' | 'writeup' | 'summarize'
   | 'python_lab' | 'sanity_check'
 // `cover` names the mark (components/Glyph.tsx) and its colour class.
 const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
@@ -68,8 +69,9 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
   literature: { noun: 'a literature review', label: 'Literature Review', cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
-  detailed_review: { noun: 'a detailed review', label: 'Detailed Review', cover: 'referee' },
-  quick_review: { noun: 'a quick review', label: 'Quick Review', cover: 'referee' },
+  detailed_review: { noun: 'a review', label: 'Review', cover: 'referee' },
+  typo_check: { noun: 'a typo check', label: 'Typo', cover: 'typo' },
+  quick_review: { noun: 'a proof check', label: 'Proof Check', cover: 'proof_check' },
   explain: { noun: 'an explanation', label: 'Explanation', cover: 'explain' },
   writeup: { noun: 'a write-up', label: 'Write-Up', cover: 'writeup' },
   summarize: { noun: 'a summary', label: 'Summary', cover: 'writeup' },
@@ -78,13 +80,15 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
 }
 const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' || mode === 'investigate' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
-  mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
+  mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'typo_check', 'quick_review', 'explain'].includes(mode) ? 'research' : null
+// A review and a typo check have one depth: their level names a budget and is never chosen or shown.
+const levelOf = (mode: RouteMode, effort?: string): EffortLevel => FIXED_EFFORT[mode] ?? (isLevel(effort) ? effort : 'medium')
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'investigate' | 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
   mode !== 'critic' && mode !== 'free' && mode !== 'investigate' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
-const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
+const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' || mode === 'typo_check' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
@@ -355,7 +359,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
-            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
+            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !FIXED_EFFORT[selectedCall.mode] && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
             onSend={() => { send() }} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -652,7 +656,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
     : item.orchestrated && mode === 'explore'
       ? { noun: 'an exploration', label: 'Exploration', cover: 'explore' as const }
       : KINDS[kind]
-  const effort = kind === 'answer' ? '' : `${effortLabel(item.effort)} effort`
+  const effort = kind === 'answer' || FIXED_EFFORT[mode as RouteMode] ? '' : `${effortLabel(item.effort)} effort`
   const act = async (action: () => Promise<unknown>) => {
     setActing(true)
     setError('')
@@ -662,7 +666,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   // cancelled before running, can be started (again) as the model chose them.
   const start = (activeMode: RouteMode) => act(() => {
     const effort = effortKind(activeMode)
-    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, isLevel(item.effort) ? item.effort : 'medium') : undefined
+    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, levelOf(activeMode, item.effort), !!FIXED_EFFORT[activeMode]) : undefined
     return api.startRoute(chatId, index, { mode: activeMode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
   })
 

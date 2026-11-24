@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import re
+import threading
 import time
 import uuid
 
@@ -26,7 +27,7 @@ from .orchestrator import CUT_MARK, FINAL_PREDICT, PROOF_OUTCOMES
 from .proof import ProofRunner
 from .refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from .research import _read_state, _job_directory
-from .review import runner_class as review_runner
+from .review import ReviewBase, runner_class as review_runner, runner_for_state
 from .source_tasks import automatic_source_action, requests_workspace_search, source_overview
 from .worker_errors import WorkerInputError
 from .writeup import WriteupRunner
@@ -43,7 +44,10 @@ REPAIR_REQUEST = re.compile(r"\A(?=.{0,300}\Z)(?=.*\b(?:fix|repair|correct|corri
                             r"(?!.*\b(?:proof|preuve|d[ée]monstration|lemma|lemme|theorem|th[ée]or[èe]me|argument)\b)",
                             re.I | re.S)
 
-REVIEW_MODES = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}
+# detailed_review, the former name of the review, runs the review; typo_check is the typo check. A saved child of
+# a review started at Low effort resumes as a typo check (the runner reads the saved level).
+REVIEW_MODES = {'referee': 'review', 'detailed_review': 'review', 'typo_check': 'typos', 'quick_review': 'quick',
+                'explain': 'explain'}
 
 def worker_limits(mode, level_name, args):
     """Concrete native reservations for a bounded investigation task."""
@@ -257,7 +261,8 @@ def run_worker(host, parent, budget, action, child, save):
     with state_lock:
         pending = [c for c in parent.state['children'] if c.get('status') != 'complete' and 'allocation' not in c]
         if pending:
-            levels = [effort.level(c['action']['mode'], c['action']['effort'], host.args) for c in pending]
+            levels = [effort.level(c['action']['mode'], c['action']['effort'], host.args,
+                                   review_companion=c.get('companion') == 'review') for c in pending]
             worker_seconds = max(l['minutes'] * 60 for l in levels)
             # Time already used in this turn plus the new workers' time (capped by the turn's ceiling):
             # an absolute ceiling left a second worker after a long first one with almost nothing.
@@ -279,7 +284,8 @@ def run_worker(host, parent, budget, action, child, save):
                 if cap is not None:
                     allocation = cap if allocation is None else min(allocation, cap)
                 if getattr(host.args, 'api_profile', None) == 'deepinfra':
-                    preset = effort.limits(candidate['action']['mode'], candidate['action']['effort'], host.args)
+                    preset = effort.limits(candidate['action']['mode'], candidate['action']['effort'], host.args,
+                                           review_companion=candidate.get('companion') == 'review')
                     preset_cap = preset.get('tokens', level['tokens'])
                     if preset_cap is not None:
                         allocation = preset_cap if allocation is None else min(allocation, preset_cap)
@@ -423,7 +429,8 @@ def run_worker(host, parent, budget, action, child, save):
                      + '. The harness states the verdict from these; do not write your own verdict heading.')
         if action['effort'] == 'low':
             agent.think = False
-    level = effort.level(mode, action['effort'], host.args)
+    review_companion = mode == 'literature' and child.get('companion') == 'review'
+    level = effort.level(mode, action['effort'], host.args, review_companion=review_companion)
     if mode in ('prove', 'literature') and child.get('job_id'):
         saved = (ProofStore.load(root, child['job_id']).state if mode == 'prove'
                  else _read_state(_job_directory(root, child['job_id']), child['job_id']))
@@ -462,7 +469,11 @@ def run_worker(host, parent, budget, action, child, save):
                     save()
             sandbox.runs = child.get('sandbox_runs', 0)
             sandbox.on_run_change = save_runs
-    agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds,
+    # The Review runs a lead, co-referees and judges at once (review v4): its own slots, up to the review's concurrency
+    # within the interface's model-request limit, instead of the Assistant tree's few.
+    slots = (threading.BoundedSemaphore(host.review_concurrency())
+             if REVIEW_MODES.get(mode) == 'review' and hasattr(host, 'review_concurrency') else None)
+    agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'], max_seconds=seconds, slots=slots,
                                **({'input_allowance': limits['input_tokens']} if limits else {}))
     input_limit = budget.pool.state['max_input_tokens']
     configured_input = getattr(host.args, 'research_input_tokens', None)
@@ -621,10 +632,20 @@ def run_worker(host, parent, budget, action, child, save):
         elif mode in ('literature', 'writeup', 'summarize') or mode in REVIEW_MODES:
             # Literature writes a review from verified records; the exact conversation sets its scope.
             # Independent review calls use the same bounded global inference pool.
-            runner = (WriteupRunner(agent, emit, styles_root=host.base) if mode in ('writeup', 'summarize')
-                      else ReviewRunner(agent, emit, concurrency=host.review_concurrency()) if mode == 'literature'
-                      else review_runner(REVIEW_MODES[mode])(agent, emit, concurrency=host.review_concurrency()))
+            if mode in ('writeup', 'summarize'):
+                runner = WriteupRunner(agent, emit, styles_root=host.base)
+            elif mode == 'literature':
+                runner = ReviewRunner(agent, emit, concurrency=host.review_concurrency())
+            else:
+                if child.get('job_id'):
+                    saved = _read_state(_job_directory(root, child['job_id']), child['job_id'])
+                    review_type = runner_for_state(saved)
+                else:
+                    review_type = review_runner(REVIEW_MODES[mode])
+                runner = (review_type(agent, emit, concurrency=host.review_concurrency())
+                          if issubclass(review_type, ReviewBase) else review_type(agent, emit))
             runner.cancel = host.cancel
+            runner.sandbox = getattr(host, 'sandbox', None)  # the Review's referees compute in it (policy "review")
             extra = 0
             previous_markdown = parent.state.get('previous_markdown') if mode == 'writeup' else None
             if previous_markdown:
@@ -674,7 +695,8 @@ def run_worker(host, parent, budget, action, child, save):
                         'images': copy.deepcopy(context.get('images', [])),
                         **({key: copy.deepcopy(context[key]) for key in ('project_snapshot', 'project_note_status')}
                            if context.get('project_snapshot') is not None else {})}
-                result = runner.start(native_request, job_id=native, **kwargs)
+                start = runner.start_companion if review_companion else runner.start
+                result = start(native_request, job_id=native, **kwargs)
             verdict = (runner.state or {}).get('verdict')
             outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
                        + '; see the saved report.')

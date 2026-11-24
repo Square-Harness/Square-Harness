@@ -5,6 +5,7 @@
 import copy
 import json
 import re
+from pathlib import Path
 
 from .agent import AgentError
 from .call_policy import CallContextError
@@ -12,8 +13,13 @@ from .backends import MeasuredStreamCancellation
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
-from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, worker_effort
-from .source_tasks import access_check_source, automatic_source_action, _instruction_text
+from .research import _job_directory, _read_state
+from .review_position import (BRIEF_OUTPUT, BRIEF_POLICY, BRIEF_SCHEMA, POSITION_OUTPUT, POSITION_POLICY, POSITION_SCHEMA,
+                              bounded_json, copied_phrases, literature_goal, manuscript_head, missing_position, own_marks,
+                              position_prompt, render_position)
+from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, effort_for
+from .source_tasks import (access_check_source, automatic_source_action, excludes_external_sources, _instruction_text,
+                           _source_lines)
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
 
@@ -27,6 +33,17 @@ _SEARCH_ALLOWED = re.compile(
     r'(?:use|enable|allow) (?:online|web) search|you (?:can|may) (?:search|browse)|'
     r'cherche(?:z)? (?:en ligne|sur internet))\b')
 
+
+# A review is started with a literature review beside it (the fixed fan-out); the reply joins the two.
+REVIEW_MODES = ('referee', 'detailed_review')
+POSITION_NOTE = ('CONTROLLER REVIEW AND LITERATURE: a literature review was started beside the referee report to place its '
+                 'results. Give the report as it is, then a part "Position in the literature" written only from that '
+                 'literature review (its text and its references): for each main result, the closest earlier result, '
+                 'what differs, and whether it changes the recommendation. A work with the manuscript\'s title or '
+                 'authors is the authors\' own preprint: label it so and never count it as prior work. If that '
+                 'literature review failed or did not finish, say that the position is missing; never write one from memory.')
+NO_POSITION_NOTE = ('CONTROLLER REVIEW AND LITERATURE: no literature review was started beside the referee report ({reason}). '
+                    'Say that the position of the results in the literature is missing, and why; never write one from memory.')
 
 # Sandbox modes stay out of general delegation. A scoped, routed execution can also start Python Lab.
 USER_MODES = ('python_lab', 'sanity_check')
@@ -335,7 +352,7 @@ class ModeOrchestrator(Orchestrator):
                 raise ValueError(f'The selected Proof effort is {chosen}; preparation cannot change it')
         selected = (self.required_mode or (self.state or {}).get('required_mode') or
                     ('prove' if (self.state or {}).get('proof_routing_required') else None))
-        if selected and mode and mode != selected:
+        if selected and mode and mode != selected and not self._companion_call(args):
             ran = [child for child in (self.state or {}).get('children', [])
                    if (child.get('action') or {}).get('mode') == selected]
             if ran and not any(child.get('status') == 'complete' and isinstance(child.get('result'), dict)
@@ -350,7 +367,10 @@ class ModeOrchestrator(Orchestrator):
                     and not routed_python_task(self.state, args)):
                 raise ValueError('Unknown worker mode')
             return super()._validate_delegate({**args, 'mode': 'explore'})
-        return super()._validate_delegate(args)
+        super()._validate_delegate(args)
+        if self._companion_call(args):
+            # Only the controller-created call can start the review's Low-breadth companion.
+            args['effort'] = 'low'
 
     def _worker_files(self, args):
         # New independent assignments already carry their specific source set.
@@ -364,7 +384,154 @@ class ModeOrchestrator(Orchestrator):
             # The files of a request for a proof belong to its statement. Proof pins a PDF as
             # extracted text for its solver and its reviewer, whether or not the model listed it.
             return list(dict.fromkeys([*self.state['files'], *args.get('files', [])]))
+        if self._companion_call(args):
+            return []  # its question is written in public words: the manuscript is not handed to the search
         return super()._worker_files(args)
+
+    # -- a review and the literature review beside it -----------------------------------------------------------
+
+    def _companion_call(self, args):
+        fan = (self.state or {}).get('review_fanout') or {}
+        return (isinstance(args, dict) and fan.get('status') == 'started' and args.get('mode') == 'literature'
+                and args.get('request') == fan.get('request')
+                and any(p['call']['id'] == fan.get('call') and p['call']['function']['arguments'] is args
+                        for p in self.state['pending_calls']))
+
+    def _plan_pending(self):
+        """The fixed fan-out of a review: a literature review at its lowest breadth joins the batch of a review
+        that is about to start, whoever chose the review (the user's @referee, the router, the Assistant). Its
+        question is written from the manuscript's title, abstract and introduction, in public words. Without
+        online search, or when the request excludes it, the review starts alone and the reply says why no
+        position follows. Decided once per turn, before the review starts: an interruption decides again."""
+        state = self.state
+        delegates = [p for p in state['pending_calls'] if p['call']['function']['name'] == 'delegate'
+                     and isinstance(p['call']['function']['arguments'], dict)]
+        pending = next((p for p in delegates if p['status'] == 'pending'
+                        and p['call']['function']['arguments'].get('mode') in REVIEW_MODES), None)
+        if (pending is None or state.get('review_fanout') is not None or (state.get('review_reference') or {}).get('followup')
+                or any(p['call']['function']['arguments'].get('mode') == 'literature' for p in delegates)
+                or any(c['action']['mode'] == 'literature' for c in state['children'])):
+            return  # no new review, a reply to an earlier report, or a literature review asked for in its own right
+        library = getattr(getattr(self.agent, 'workspace', None), 'literature', None)
+        goal = None
+        if not (library and library.online):
+            reason = 'online search is off, so no literature review was started beside the report'
+        elif _NO_SEARCH.search(_instruction_text(state['query'])) or excludes_external_sources(state['query']):
+            reason = 'the request excludes online search, so no literature review was started beside the report'
+        else:
+            goal, reason = self._literature_goal(pending['call']['function']['arguments'])
+        if goal is None:
+            state['review_fanout'] = {'status': 'none', 'reason': reason}
+            self._save()
+            return
+        call = {'id': pending['call']['id'] + '_literature', 'type': 'function', 'function': {'name': 'delegate', 'arguments': {
+            'mode': 'literature', 'request': goal, 'files': [], 'effort': 'low',
+            'reason': 'Place the main results of the reviewed manuscript in the literature, beside its review.'}}}
+        state['pending_calls'].insert(state['pending_calls'].index(pending) + 1, {
+            'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None, 'batch_id': pending.get('batch_id')})
+        for message in reversed(state['messages']):
+            calls = message.get('tool_calls') or []
+            position = next((i for i, c in enumerate(calls) if c.get('id') == pending['call']['id']), None)
+            if position is not None:
+                calls.insert(position + 1, call)  # the native transcript keeps each result next to its call
+                break
+        state['review_fanout'] = {'status': 'started', 'call': call['id'], 'request': goal}
+        self._save()
+
+    def _literature_goal(self, args):
+        """(goal, None), or (None, why no literature question could be written)."""
+        try:
+            reference = (self.state.get('review_reference') or {}).get('source') or {}
+            if isinstance(reference.get('content'), str):
+                text = reference['content']
+            else:
+                names = [f for f in self._worker_files(args)
+                         if Path(f).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')]
+                text = '\n'.join(_source_lines(self.agent.workspace, names[0])[0])
+            head = manuscript_head(text)
+            self.emit('progress', 'Writing the question of the literature review…')
+            user = 'TITLE, ABSTRACT AND INTRODUCTION OF THE MANUSCRIPT:\n' + head
+            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user, BRIEF_SCHEMA, BRIEF_OUTPUT)
+            goal = literature_goal(value, head)
+            copied = copied_phrases(value, head) if goal is None else []
+            if copied:
+                # One more try: a brief that repeats a phrase of the manuscript word for word is dropped whole (its
+                # text would reach a search engine), and the model often keeps one long technical phrase verbatim.
+                value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user
+                                     + '\n\nYOUR PREVIOUS ANSWER COPIED THESE PHRASES OF THE MANUSCRIPT WORD FOR WORD; restate '
+                                     'every sentence in your own words:\n' + '\n'.join('- ' + c for c in copied[:8]),
+                                     BRIEF_SCHEMA, BRIEF_OUTPUT)
+                goal = literature_goal(value, head)
+        except (AgentError, CallContextError, ValueError, TypeError, OSError, IndexError, UnicodeError) as exc:
+            return None, ('the question of the literature review could not be written from the manuscript '
+                          f'({str(exc)[:160] or type(exc).__name__})')
+        finally:
+            self.emit('progress', '')
+        return (goal, None) if goal else (None, 'the question of the literature review could not be written in public '
+                                                'words from the manuscript')
+
+    def _review_reply(self):
+        """A review that is the whole work of the turn: its report as written (a later dispute cites its comment
+        numbers), then the position of its results in the literature. None when the parent must write the answer
+        (other workers, a review that saved nothing)."""
+        state = self.state
+        fan = state.get('review_fanout')
+        review = next((c for c in reversed(state['children']) if c['action']['mode'] in REVIEW_MODES), None)
+        if fan is None or review is None or review['status'] != 'complete':
+            return None
+        companion = next((c for c in state['children'] if c.get('companion')), None)
+        decision = state.get('proof_routing') or {}
+        whole_turn = (state.get('required_mode') in REVIEW_MODES or state.get('automatic_source_mode') in REVIEW_MODES
+                      or (decision.get('route') == 'workers' and len(decision.get('tasks') or []) == 1
+                          and not any(decision.get(key) for key in ('later', 'question', 'assignment_recovery'))))
+        report = (review.get('result') or {}).get('answer')
+        if (not whole_turn or any(c is not review and c is not companion for c in state['children'])
+                or not isinstance(report, str) or not report.strip()
+                or (companion is not None and companion['status'] != 'complete')):
+            return None
+        if 'section' not in fan:
+            fan['section'] = self._position(report, review, companion, fan)
+            self._save()  # written once: a resumed turn shows the same text
+        return self._worker_reply(review, report.rstrip() + '\n\n' + fan['section'])
+
+    def _position(self, report, review, companion, fan):
+        """The part added after the report: the position written from the literature review's records, or the
+        statement that it is missing and why. Nothing is ever written without a finished literature review."""
+        if fan.get('status') != 'started':
+            return missing_position(fan.get('reason') or 'no literature review was started beside the report')
+        result = (companion or {}).get('result') or {}
+        references, text, manuscript = [], '', ''
+        root = self.agent.workspace.root
+        if companion is not None and result.get('status') in ('complete', 'partial') and companion.get('job_id'):
+            try:
+                saved = _read_state(_job_directory(root, companion['job_id']), companion['job_id'])
+                references = [row for row in saved.get('references') or [] if isinstance(row, dict) and type(row.get('k')) is int]
+                text = saved.get('draft') or ''
+            except (OSError, ValueError, KeyError, TypeError):
+                references = []
+        if not references or not text.strip():
+            error = result.get('error')
+            detail = (error.get('message') if isinstance(error, dict) else error) or result.get('status') or 'it was not started'
+            return missing_position('the literature review started beside the report did not finish with verified '
+                                    f'records ({str(detail)[:200]}); its card keeps what it found')
+        try:
+            saved = _read_state(_job_directory(root, review['job_id']), review['job_id'])
+            manuscript = saved['sources'][0]['content']
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            manuscript = ''  # without the manuscript no record can be recognised as its own preprint by code
+        marks = own_marks(references, manuscript)
+        try:
+            self.emit('progress', 'Placing the results in the literature…')
+            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, POSITION_POLICY,
+                                 position_prompt(report, text, references, marks), POSITION_SCHEMA, POSITION_OUTPUT)
+        except (AgentError, CallContextError) as exc:
+            return missing_position('the position could not be written from the literature review '
+                                    f'({str(exc)[:160] or type(exc).__name__}); that review is on its own card')
+        finally:
+            self.emit('progress', '')
+        return (render_position(value, references, marks, partial=result.get('status') == 'partial')
+                or missing_position('the literature review started beside the report reports no earlier result to compare '
+                                    'the main results with; that review is on its own card'))
 
     def _proof_pending(self):
         state = self.state or {}
@@ -410,6 +577,14 @@ class ModeOrchestrator(Orchestrator):
         target = (_recap_proof_target(self.state, args, self.required_mode or self.state.get('required_mode'))
                   if args['mode'] == 'prove' and not pending.get('child_id') else None)
         child = super()._child(pending, args, shared_proof_objective=target)
+        fan = self.state.get('review_fanout') or {}
+        if pending['call']['id'] == fan.get('call') and not child.get('companion') and not pending.get('cached'):
+            # The literature review beside a review answers the question written for it, not the request to review.
+            child['companion'] = 'review'
+            child['context'] = {'query': args['request'], 'history': [], 'files': [], 'messages': [],
+                                'messages_scope': 'current_turn', 'images': []}
+            fan['child_id'] = child['id']
+            self._save()
         if args['mode'] == 'referee' and self.state.get('review_reference'):
             child['context']['review_reference'] = copy.deepcopy(self.state['review_reference'])
         if args['mode'] == 'prove' and self.state.get('proof_preparation', {}).get('status') == 'fallback':
@@ -435,6 +610,16 @@ class ModeOrchestrator(Orchestrator):
             return super()._payload([], instruction=STATEMENT_QUESTION)
         if self.state.get('open_problem_suggestion'):
             return super()._payload([], instruction=OPEN_PROBLEM_NOTE)
+        payload = self._mode_payload(tools)
+        fan = self.state.get('review_fanout')
+        if fan and 'messages' in payload and any(c['action']['mode'] in REVIEW_MODES and c['status'] == 'complete'
+                                                 and (c.get('result') or {}).get('answer') for c in self.state['children']):
+            # The parent writes the answer itself (the review was one of several works): the same rules as _position.
+            payload['messages'].append({'role': 'user', 'content': POSITION_NOTE if fan.get('status') == 'started'
+                                        else NO_POSITION_NOTE.format(reason=fan.get('reason'))})
+        return payload
+
+    def _mode_payload(self, tools):
         if not self._proof_pending():
             decision = self.state.get('proof_routing', {})
             recap = ('Give the requested recap in the conversation, consulting its history and project findings as needed. '
@@ -609,9 +794,8 @@ class ModeOrchestrator(Orchestrator):
         if self.required_mode == 'referee' and getattr(self.agent, 'review_reference', None):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         if self.required_mode is not None:
-            chosen = self.required_effort or ('high' if self.required_mode == 'detailed_review' else 'medium')
             action = {'mode': self.required_mode, 'request': query, 'files': list(files),
-                      'effort': worker_effort(self.required_mode, chosen),
+                      'effort': effort_for(self.required_mode, self.required_effort or 'medium'),
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
         elif compile_job:
             action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'low',
@@ -660,8 +844,11 @@ class ModeOrchestrator(Orchestrator):
     def _document_answer(self):
         # An explicitly selected review is shown as written, so its comment numbers are those of
         # the saved report that a later dispute refers to.
+        reply = self._review_reply()
+        if reply is not None:
+            return reply
         mode = self.state.get('required_mode')
-        if mode in ('referee', 'detailed_review'):
+        if mode in ('referee', 'detailed_review', 'typo_check'):
             child = next((c for c in reversed(self.state['children']) if c['action']['mode'] == mode), None)
             if child is not None and child['status'] == 'complete':
                 answer = (child.get('result') or {}).get('answer')

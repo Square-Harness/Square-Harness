@@ -8,7 +8,7 @@ DS4 presets come from model_limits and are sent to the interface by the server.
 """
 from ..litreview import breadth
 from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget
-from ..router import worker_effort
+from ..router import effort_for
 
 # Token estimates remain for older integrations. New jobs have no cumulative
 # token ceiling unless one was explicitly supplied at launch or in the form.
@@ -22,13 +22,20 @@ LEGACY_EFFORTS = {
     'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=160, chars=150_000),
 }
 LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
+# A review reads the whole paper in each call, many calls at once: some 50 calls of 80k input tokens for a
+# 3,000-line paper at Medium, each reserving about three times that while it runs (no DS4 tokenizer: UTF-8 bytes).
+# Four times the input allowance of other DS4 workers. ('detailed_review' is the former name of the review; a typo
+# check reads the whole paper in each call too.) A review and a typo check run at one fixed level (router.FIXED_EFFORT).
+REVIEW_MODES = ('referee', 'detailed_review', 'typo_check')
+REVIEW_INPUT = 4
 
 
-def level(mode, name, args=None):
-    """Legacy workload estimates; detailed reviews allow twice the working time, literature uses its own search and writing budget."""
-    name = worker_effort(mode, name)
+def level(mode, name, args=None, *, review_companion=False):
+    """Legacy workload estimates; a review (which checks every proof) allows twice the working time on a local model and
+    four times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
+    name = 'low' if review_companion and mode == 'literature' else effort_for(mode, name)
     value = dict(table.get(name, legacy.get(name, table['medium'])))
     if table is DS4_EFFORTS:
         if mode == 'prove':
@@ -47,8 +54,11 @@ def level(mode, name, args=None):
         cap = getattr(args, 'research_requests', None)
         if cap is not None:
             value['requests'] = min(cap, value['requests'])
-    if mode == 'detailed_review' and table is not DS4_EFFORTS:
-        value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
+    if mode in REVIEW_MODES:
+        if table is DS4_EFFORTS:
+            value.update(input=REVIEW_INPUT * value['input'])
+        else:
+            value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
     return value
 
 
@@ -66,12 +76,12 @@ def _proof_ceilings(args, tokens, effort=None):
     return tokens, fitted, review
 
 
-def limits(mode, level, args):
+def limits(mode, level, args, *, review_companion=False):
     """Budget keyword arguments for Hub.start_route; answers in the conversation have none."""
-    level = worker_effort(mode, level)
     ds4 = getattr(args, 'api_profile', None) == 'deepinfra'
     table = DS4_EFFORTS if ds4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if ds4 else LEGACY_EFFORTS
+    level = 'low' if review_companion and mode == 'literature' else effort_for(mode, level)
     effort = table.get(level, legacy.get(level, table['medium']))
     seconds = effort['minutes'] * 60
     def ceiling(name, value):
@@ -92,8 +102,10 @@ def limits(mode, level, args):
     if mode == 'check':
         # A literature check has its own small budgets (refcheck.EFFORTS), chosen by level.
         return dict(effort=level if level in EFFORTS else 'medium')
-    if mode == 'detailed_review':
-        # More checking time, without silently increasing an explicit token cap.
+    if mode in REVIEW_MODES:
+        # More checking time and input, without silently increasing an explicit token cap.
+        if ds4:
+            input_tokens = ceiling('research_input_tokens', REVIEW_INPUT * effort['input'])
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds if ds4 else 2 * seconds,
                     requests=effort['requests'], chars=effort['chars'])
@@ -103,7 +115,7 @@ def limits(mode, level, args):
             seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
         return dict(rounds=effort['tries'], tokens=output, input_tokens=input_tokens, seconds=seconds,
                     requests=ceiling('research_requests', review['requests']), chars=effort['chars'])
-    if mode in ('referee', 'quick_review', 'explain'):
+    if mode in ('quick_review', 'explain'):
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds,
                     requests=effort['requests'], chars=effort['chars'])

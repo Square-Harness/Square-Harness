@@ -62,4 +62,8 @@ export const InfoIcon = (p: IconProps) => <Icon {...p}><rect x="4" y="4" width="
 export const NotesIcon = (p: IconProps) => <Icon {...p}><rect x="5" y="3.5" width="14" height="17" rx="2" /><path d="M9 8.5h6M9 12h6M9 15.5h3.5" /></Icon>
 export const CommentIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 5.5h15a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H12l-4.5 3.5v-3.5h-3a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z" /></Icon>
 // A lightbulb: the Explain skill's mark.
+/** Proof Check: the end-of-proof square, ticked. */
+export const ProofCheckIcon = (p: IconProps) => <Icon {...p}><rect x="4" y="4" width="16" height="16" rx="1.5" /><path d="M8 12.5l3 3 5.2-6.5" /></Icon>
+/** Typo: a letter with the proofreader's wavy underline. */
+export const TypoIcon = (p: IconProps) => <Icon {...p}><path d="M6.5 15L11.5 3.5h1L17.5 15M8.6 11h6.8" /><path d="M4 20c1.3-1.6 2.7-1.6 4 0s2.7 1.6 4 0 2.7-1.6 4 0 2.7 1.6 4 0" /></Icon>
 export const BulbIcon = (p: IconProps) => <Icon {...p}><path d="M9.2 17.5h5.6M10.2 20.5h3.6" /><path d="M12 3.5a6 6 0 0 0-3.9 10.6c.7.6 1.1 1.4 1.1 2.4v1h5.6v-1c0-1 .4-1.8 1.1-2.4A6 6 0 0 0 12 3.5z" /></Icon>
