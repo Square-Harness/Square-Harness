@@ -3,19 +3,16 @@ name: Publish app container
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "Test tag (must match mathagent/__init__.py or use a matching test version)"
-        required: true
-        default: "v0.5.0"
+  push:
+    branches:
+     - make-api-default-option 
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    if: github.repository == 'Square-Harness/Square-Harness' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    if: github.repository == 'Square-Harness/Square-Harness' && (github.event_name == 'push' || !github.event.release.prerelease)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -24,12 +21,12 @@ jobs:
       - name: Check out release
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag_name || github.event.release.tag_name }}
+          ref: ${{ github.sha|| github.event.release.tag_name }}
 
       - name: Verify release tag matches app version
         id: version
         env:
-          RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
+          RELEASE_TAG: ${{ 'v0.5.0'|| github.event.release.tag_name }}
         run: |
           python - <<'PY'
           import os
@@ -81,7 +78,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: false
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
@@ -93,7 +90,7 @@ jobs:
       - name: Assemble source-free Docker download
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || 'v0.5.0' }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
