@@ -22,6 +22,21 @@
   turns it off. In a conversation, the review worker now has its own model-request slots (up to the
   review concurrency) instead of the Assistant's `--assistant-concurrency`, so its referees and
   judges run at once.
+- Review (v4), after its first benchmark run: the judge keeps false alarms out and never makes a
+  real finding smaller or invisible. Its rubric has the v3 effect scale again (a gap whose repair
+  needs a fact the paper neither proves nor cites, or an unjustified limit, is a failed proof); a
+  reported error the judge rates lower stays an error unless the judge writes the complete repair
+  and it needs nothing new (it is then a gap, with the judge's argument printed). A rejection
+  becomes a disputed question when two referees reported the problem or it rests on a computation
+  the judge did not redo; the other rejections are listed one line each at the end of the report.
+  The judge sees another referee's "no error found" on the same result, and an error on the main
+  results' chain is always judged with tools. An unsettled error on that chain, or an incomplete
+  review, makes the recommendation provisional; problems not judged give the real reason.
+  Referees can withdraw their own reports, a report that says it is not a problem is refused, a
+  Python run needs a purpose, and a referee's first two rounds are short (8k tokens, not measured
+  live yet). An HTTP 401/402/403 from the provider stops the review at once (no restarts, one
+  warning) and the reservations of refused calls are released. The report fills "Main results"
+  from every referee's statuses and lists what was verified by computation.
 - Review (v3 pipeline, kept for small contexts): the judge's verdict is final. The repair check
   after the judge and the extra pass on the step an attack named weakest are removed; reasoning
   calls are capped at 40k output tokens. Saved jobs keep what those calls found.

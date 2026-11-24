@@ -1117,21 +1117,43 @@ lines overlap an earlier one of the same family (`other_reports`, `reported_by`)
 `finish` is refused while a result of the referee's direction (`_owned`: the main
 results for the lead) has no status, and raises `RefereeFinished`. Every search query
 and opened identifier that repeats `review_position.COPIED_WORDS` consecutive words
-of the manuscript is refused (`copies_manuscript`). A referee whose loop breaks
-restarts from the ledgers (`RESTARTS`). Each pending issue is judged in the same pool
+of the manuscript is refused (`copies_manuscript`), and so is a report whose claim says it is
+not a problem (`retracted`); `withdraw_issue` takes back one's own report (status
+`withdrawn`, or the next reporter's text when another referee reported it too). A
+referee's first `FIRST_ROUNDS` rounds are capped at `FIRST_ROUND_CAP` (`MeteredClient`),
+then `ROUND_CAP`; a round at its cap continues with the tools (`Agent.continue_limit`).
+A referee whose loop breaks restarts from the ledgers (`RESTARTS`), except on a
+provider refusal (`provider_refused`: HTTP 401/402/403, DeepInfra `auth`/`quota`):
+`_refused` stops the whole review at once (one warning, `provider_refused` in the
+state, no new judges), and `_interrupt_call` releases the reservation of a call
+refused before any output (`refused_before_output`, status `rejected`). Each pending issue is judged in the same pool
 (`_judge_issue`, role `judge`: one reasoning `_ask` with `JUDGE_SCHEMA`, or a tool loop
-of `JUDGE_ROUNDS` when the issue cites an experiment or a source; `BATCH_KINDS` go to
+of `JUDGE_ROUNDS` when the issue cites an experiment or a source or is an `ERROR_KINDS`
+issue on `_main_chain()`; `_issue_text` adds `_other_side`, another referee's
+`no_error_found` mark and other reports on the same unit; `BATCH_KINDS` go to
 `_judge_batch`, role `judge-batch`, `BATCH` per call, no reasoning); at most
-`JUDGES_AT_ONCE` judges run while referees work. The verdict is final. The clock
+`JUDGES_AT_ONCE` judges run while referees work. `JUDGE_POLICY` carries
+`P._EFFECT_SCALE`. `_verdict` checks the answer by code: an `ERROR_KINDS` issue rated
+below `P.MAJOR_EFFECTS` keeps its reported effect (`kept_error`) unless `fill` holds a
+repair of `MIN_FILL` characters and `new_ingredient` is empty (`lowered`, filed as a
+gap); a refutation is `disputed` when two referees reported the issue or it cites an
+`ok` experiment and the judge made no tool call. An issue not judged keeps
+`unjudged_reason` (`UNJUDGED`). The clock
 (`CLOCK`, scaled to a shorter job): finish requested at 11 min, no referee round after
 13.5, referees stopped at 15, no judge after 18, everything stopped at 19.5; the report
-is written from the ledgers. `referee.render` builds it in nine parts (verdict, main
-results, errors, gaps and imprecisions, questions, misprints, compilation and
-bibliography, computations and what could not be checked, replacements); a confirmed
-`P.MAJOR_EFFECTS` issue raises the lead's recommendation to a major revision.
+is written from the ledgers. `referee.render` builds it in ten parts (verdict, main
+results from the coverage ledger with who checked them, errors, gaps and imprecisions,
+questions (undecided, disputed, unjudged with the reason), misprints, compilation and
+bibliography, the checklist of what was verified by computation and what could not be
+checked, replacements, and the rejected issues one line each); a confirmed
+`P.MAJOR_EFFECTS` issue, or an unsettled `ERROR_KINDS` issue on the main chain, raises the
+lead's recommendation to a major revision, and `_incomplete()` (also the job's `partial`
+status) makes it provisional. Withdrawn and `retracted` issues are never printed.
 `review_position.position_prompt` reads both report shapes. Saved keys: `issues`,
 `coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
-`referee_clock`. A resumed v4 job starts new referees with the ledgers (never the old
+`referee_clock`, `provider_refused`; issue statuses `judged`, `disputed`, `unjudged`,
+`withdrawn`; the judge's `fill`, `new_ingredient`, `judge_effect`, `kept_error`,
+`lowered`, `tool_calls`. A resumed v4 job starts new referees with the ledgers (never the old
 conversation) and judges again what was not judged; "Resume (+N min)" gives it a new
 clock (`_rebase_clock`). In a conversation the review worker's `BudgetClient` fork gets its own inference
 slots (`workers.run_worker`: `Hub.review_concurrency()`, through `BudgetClient.fork(slots=...)`) instead of the

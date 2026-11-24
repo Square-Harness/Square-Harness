@@ -864,16 +864,28 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   sent to a search engine). Each problem is reported as soon as it is found, with
   its lines and an exact quote that the code checks, and every result of a
   referee's group must get a status (no error found, issue, not checked) before
-  it can finish. Every reported problem then goes to an **independent judge**,
+  it can finish. A referee's first two rounds are short, so it starts with its
+  tools instead of thinking for minutes; a referee can take back a report of
+  its own that turns out not to be a problem. Every reported problem then goes
+  to an **independent judge**,
   which sees the paper and the report but not the referee's reasoning, checks it
-  (with Python or the cited paper when the claim rests on them) and decides:
-  confirmed, refuted or undecided, with its effect (the statement is false, the
-  proof fails, a gap an expert can fill, an imprecision, a misprint). The
-  judge's verdict is final; refuted problems leave the report and stay in the
-  job. Meanwhile the code compiles the TeX source (a figure that is not attached
-  becomes a box) and checks the bibliography. The referees are asked to finish
-  after about 11 minutes; the report is written from what was found and judged
-  by 20 minutes at the latest.
+  (with Python or the cited paper when the claim rests on them, and always with
+  tools for an error reported on a main result or on what a main result uses)
+  and decides: confirmed, refuted or undecided, with its effect (the statement
+  is false, the proof fails, a gap an expert can fill, an imprecision, a
+  misprint). When another referee checked the same result and found no error,
+  the judge sees both sides. The judge is there to keep false alarms out, never
+  to make a real finding smaller: a gap whose repair needs a fact the paper
+  neither proves nor cites (a density, regularity up to the boundary or the
+  initial time, a limit, a uniform bound, a new lemma) is a failed proof, and a
+  reported error the judge rates lower stays an error unless the judge writes
+  the complete repair and it needs nothing new (then it is filed as a gap, with
+  the judge's argument shown). Meanwhile the code compiles the TeX source (a
+  figure that is not attached becomes a box) and checks the bibliography. The
+  referees are asked to finish after about 11 minutes; the report is written
+  from what was found and judged by 20 minutes at the latest. If the model
+  provider refuses the calls (an expired credential or no credit), the review
+  stops at once and the report is written from what was recorded.
 
   The report has, in order: the verdict (a recommendation, then one line per
   confirmed error: a confirmed error rules out "accept" and "minor revision"),
@@ -881,11 +893,17 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   counterexamples tried, the errors (location, quote, the problem in at most four
   sentences, the fix, the results affected, how it was verified), gaps and
   imprecisions, questions to the authors (problems the judge could not decide,
-  marked as not settled), formula misprints and wrong references by section,
-  compilation and bibliography, what was checked by computation (with the
-  experiment ids, which `python -m mathagent.numerics show` opens) and what
-  could not be checked, then text replacements. It is rewritten as the review
-  goes on. Language typos are left to the typo check, which you can start at the
+  a rejection that two referees or an unrepeated computation dispute, and
+  problems not judged, with the reason), formula misprints and wrong references
+  by section, compilation and bibliography, what was verified by computation (a
+  checklist, with the experiment ids, which `python -m mathagent.numerics show`
+  opens) and what could not be checked, text replacements, and last, one line
+  each, the problems a referee raised and the judge rejected, so that a wrong
+  rejection can be caught. Whenever a referee and the judge disagree the report
+  says so. An unfinished review (a referee stopped, problems not judged) and an
+  error on the main results that nobody settled make the recommendation
+  provisional; the verdict then says what was not checked. It is rewritten as
+  the review goes on. Language typos are left to the typo check, which you can start at the
   same time on the same file.
 
   The referees and judges run at once (up to the model-request limit in Settings:
