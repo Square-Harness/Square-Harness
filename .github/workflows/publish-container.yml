@@ -3,16 +3,13 @@ name: Publish app container
 on:
   release:
     types: [published]
-  push:
-    branches:
-     - make-api-default-option 
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    if: github.repository == 'Square-Harness/Square-Harness' && (github.event_name == 'push' || !github.event.release.prerelease)
+    if: github.repository == 'Square-Harness/Square-Harness' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -21,12 +18,12 @@ jobs:
       - name: Check out release
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha|| github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Verify release tag matches app version
         id: version
         env:
-          RELEASE_TAG: ${{ 'v1.1.0'|| github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           python - <<'PY'
           import os
@@ -69,17 +66,17 @@ jobs:
         with:
           images: ghcr.io/square-harness/square-harness
           tags: |
-            type=semver,pattern={{version}},value=${{ github.event.release.tag_name || 'v1.1.0'  }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name || 'v1.1.0'  }}
-            type=semver,pattern={{major}},value=${{ github.event.release.tag_name || 'v1.1.0'  }}
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }}
             type=raw,value=latest
 
       - name: Build and publish multi-platform image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
-          push: false
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha
@@ -90,8 +87,7 @@ jobs:
       - name: Assemble source-free Docker download
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || 'v1.1.0' }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           bundle="$RUNNER_TEMP/square-harness-docker"
@@ -112,14 +108,7 @@ jobs:
           (cd "$bundle" && zip -qr "$zip_path" compose.yaml deployment README.md)
           cp "$bundle/README.md" "$assets/square-harness-${APP_VERSION}-docker-README.md"
 
-          # gh release upload "$RELEASE_TAG" \
-          #   "$zip_path" \
-          #   "$assets/square-harness-${APP_VERSION}-docker-README.md" \
-          #   --clobber
-        
-      - name: Upload test Docker bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: square-harness-docker-test
-          path: ${{ runner.temp }}/square-harness-release-assets/*
-
+          gh release upload "$RELEASE_TAG" \
+            "$zip_path" \
+            "$assets/square-harness-${APP_VERSION}-docker-README.md" \
+            --clobber
