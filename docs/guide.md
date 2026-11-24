@@ -858,7 +858,14 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   the numerics and examples against the hypotheses of the results they
   illustrate, the claims of the abstract, introduction and remarks against what
   the paper proves and what the cited works say, and the constants and
-  conventions across sections; each co-referee checks the proofs of one group
+  conventions across sections, and the paper's own citations: every place where
+  it invokes one of its results ("by Lemma 2.4", a `\ref` or `\eqref` to a
+  result) is listed by code, and each use is checked on two points, whether the
+  cited result states exactly what is used there and whether its hypotheses
+  hold there (a label that points nowhere, at another kind of result, or a
+  circular use is flagged); the uses inside the proofs the focused readers read
+  go to those readers, who check them first, the others to the lead. Each
+  co-referee checks the proofs of one group
   (the main results' proofs, then the others by position in the paper) and
   reports anything else it notices. Beside them, from the start, **focused
   readers** read the proofs of the main results and of what they use (up to

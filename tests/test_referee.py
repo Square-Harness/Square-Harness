@@ -71,7 +71,7 @@ class ScriptClient:
         elif payload.get('format') == R.VERDICT_SCHEMA:
             self.verdict_prompts.append(messages[-1]['content'])
             text = json.dumps({'paragraph': self.verdict})
-        elif payload.get('format') == P.AUDIT_SCHEMA:
+        elif payload.get("format") == R.READER_SCHEMA:
             unit = re.search(r'STATEMENT: ([^\n]+)', messages[-1]['content']).group(1)
             text = json.dumps(self.readers.get(unit, {'explanation': 'Read line by line.', 'issues': [],
                                                       'verdict': 'no_issue_found', 'external': []}))
@@ -466,7 +466,7 @@ class ReaderTests(RefereeCase):
         self.assertLessEqual(readers[0]['started'], readers[1]['started'])
         calls = [c for c in runner.state['calls'] if c['role'] == 'reader']
         self.assertEqual(len(calls), 2)
-        prompt = next(p for p in client.payloads if p.get('format') == P.AUDIT_SCHEMA)
+        prompt = next(p for p in client.payloads if p.get('format') == R.READER_SCHEMA)
         self.assertTrue(prompt['think'])
         self.assertIn('LINE BY LINE', prompt['messages'][-1]['content'])
         with unittest.mock.patch.object(R, 'READERS', 1):
@@ -551,6 +551,87 @@ class VerdictTests(RefereeCase):
         self.assertIn('**G1. ', result['report'])
         judge = next(p for p in client.payloads if 'THE REPORTED PROBLEM (I1' in json.dumps(p['messages']))
         self.assertIn('MORE THAN A MISPRINT (imprecision)', json.dumps(judge['messages']))
+
+
+CITING = r"""\documentclass{article}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{remark}[theorem]{Remark}
+\begin{document}
+\section{Introduction}
+\begin{theorem}[Main theorem]\label{thm:a}
+For every integer $n\ge 1$ we have $a_n\le 2^n$.
+\end{theorem}
+\begin{proof}
+By Lemma~\ref{lem:b} applied to $n-1$, the bound follows by induction.
+\end{proof}
+\begin{lemma}\label{lem:b}
+For every integer $n\ge 1$ we have $a_{n+1}\le 2a_n$.
+\end{lemma}
+\begin{proof}
+By Theorem~\ref{thm:a} we have $a_n\le 2^n$, and the step follows.
+\end{proof}
+\begin{remark}
+Lemma~\ref{lem:none} gives more, and Theorem~\ref{lem:b} is sharp.
+As Theorem 1 shows, the growth is at most exponential; Theorem 8.20 of \cite{GT} is not used.
+\end{remark}
+\end{document}
+"""
+
+
+class InternalUseTests(RefereeCase):
+    def setUp(self):
+        super().setUp()
+        (self.root / 'paper.tex').write_text(CITING)
+
+    def line(self, text):
+        return next(n for n, row in enumerate(CITING.splitlines(), 1) if text in row)
+
+    def test_the_table_of_internal_uses(self):
+        runner, _ = self.run_review(ScriptClient({}), co_referees=0)
+        rows = {(r['line'], r['label']): r for r in runner.state['internal_uses']}
+        in_proof = rows[(self.line('By Lemma~'), 'lem:b')]
+        self.assertEqual((in_proof['in'], in_proof['cited_name'], in_proof['forward']), ('proof', 'Lemma 2', True))
+        self.assertEqual(in_proof['problem'], 'circular')  # the lemma's proof uses the theorem it serves
+        self.assertEqual(rows[(self.line('By Theorem~'), 'thm:a')]['problem'], 'circular')
+        self.assertEqual(rows[(self.line('Lemma~\\ref{lem:none}'), 'lem:none')]['problem'], 'unresolved')
+        mismatch = rows[(self.line('Lemma~\\ref{lem:none}'), 'lem:b')]
+        self.assertEqual((mismatch['in'], mismatch['problem'], mismatch['named']), ('statement', 'kind_mismatch', 'Theorem'))
+        written = rows[(self.line('As Theorem 1'), 'Theorem 1')]
+        self.assertEqual((written['cited_name'], written['in'], written['problem']), ('Theorem 1', 'statement', None))
+        self.assertNotIn((self.line('As Theorem 1'), 'Theorem 8.20'), rows)  # a cited work's theorem is not ours
+        # The reader of the theorem's proof gets its row; the lead gets the rest and every flagged row.
+        reader_rows = [r['id'] for r in runner.state['internal_uses'] if r.get('reader')]
+        self.assertIn(in_proof['id'], reader_rows)
+        lead = runner._first_message('lead')
+        self.assertIn('INTERNAL CITATIONS FOR YOU', lead)
+        self.assertIn('label lem:none resolves to no result', lead)
+        self.assertIn('[code: the sentence says Theorem, the label is a lemma]', lead)
+        self.assertIn(written['id'] + ',', lead)
+
+    def test_reader_and_lead_checks_reach_the_judge_and_the_report(self):
+        step = self.line('By Lemma~')
+        reader = {'explanation': 'Read.', 'verdict': 'no_issue_found', 'external': [], 'issues': [],
+                  'uses': [{'use': 'X1', 'verdict': 'hypotheses_fail', 'note': 'Lemma 2 needs $n\\ge 1$; it is applied at $n-1=0$.'}]}
+        client = ScriptClient({'lead': [[call('check_uses', items=[{'use': 'X3', 'verdict': 'exact', 'note': 'Fine.'}])], 'Done.']},
+                              readers={'Theorem 1 (Main theorem)': reader})
+        runner, result = self.run_review(client, co_referees=0)
+        rows = {r['id']: r for r in runner.state['internal_uses']}
+        self.assertEqual(rows['X1']['line'], step)
+        self.assertEqual(rows['X1']['check']['verdict'], 'hypotheses_fail')
+        self.assertEqual(rows['X3']['check']['by'], 'lead')
+        issue = next(i for i in runner.state['issues'] if 'X1' in i.get('internal_uses', []))
+        self.assertEqual((issue['kind'], issue['start_line']), ('proof', step))
+        judge = next(p for p in client.payloads if f'THE REPORTED PROBLEM ({issue["id"]}' in json.dumps(p['messages']))
+        text = json.dumps(judge['messages'])
+        self.assertIn('THE CITED RESULT AS STATED (Lemma 2', text)
+        self.assertIn('THE CITING LINES (X1', text)
+        prompt = next(p for p in client.payloads if p.get('format') == R.READER_SCHEMA)['messages'][-1]['content']
+        self.assertIn('USES OF THE PAPER\'S OWN RESULTS IN THESE LINES', prompt)
+        self.assertIn('L' + str(self.line('For every integer $n\\ge 1$ we have $a_{n+1}')), prompt)  # the cited statement
+        self.assertIn("Uses of the paper's own results: ", result['report'])
+        self.assertIn('Lemma 2 (1 of 2)', result['report'])  # the remark's use of Lemma 2 was not checked
+        self.assertEqual(runner.state['use_coverage'][runner._resolve_result('lem:b')]['failed'], 1)
 
 
 class WorkerSlotsTests(unittest.TestCase):

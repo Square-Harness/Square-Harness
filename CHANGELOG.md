@@ -37,6 +37,13 @@
   more than a misprint goes to a single judge. In a conversation, a literature question that
   copied a phrase of the manuscript is written again once instead of starting no literature
   review.
+- Review (v4): the paper's internal citations are checked. Code lists every use of one of the
+  paper's own results (a `\ref`, `\cref` or `\eqref` to a result, or "Lemma 2.4" written out),
+  with what it can see wrong (a label that points nowhere or at another kind of result, a circular
+  use). Each use is checked on two points, that the cited result states exactly what is used and
+  that its hypotheses hold there: by the focused reader of the proof it stands in, first, and by
+  the lead for the others. A failure becomes an issue the judge sees with the cited statement;
+  the report says how many uses of each result were checked.
 - Review (v4), after its first benchmark run: the judge keeps false alarms out and never makes a
   real finding smaller or invisible. Its rubric has the v3 effect scale again (a gap whose repair
   needs a fact the paper neither proves nor cites, or an unjustified limit, is a failed proof); a

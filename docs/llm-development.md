@@ -1114,7 +1114,16 @@ references, at most `READERS` proofs and `READER_CALLS` calls, a long proof in `
 goes through `_report_issue` as `R:<unit>` (kind from `READER_EFFECT_KIND`), so it merges with a referee's on the same
 lines and counts as an independent report; the verdict stays on the reading (`state['readers']`, `_readings`). The
 scheduler starts pending readers in plan order on free slots before any judge, and none after `CLOCK['readers_by']`
-(then `skipped`). Every round goes through `MeteredClient`, which
+(then `skipped`). `_internal_uses` (in `plan`, `state['internal_uses']`) lists every use of one of the paper's own
+results: a `TEX_REF` to a result's label or to an equation of its statement, or "Lemma 2.4" written out (not inside
+a `\cite`), one row per line and cited result, with `in` (proof, statement, text), `forward`, and `problem`
+(`unresolved`, `kind_mismatch`, `circular`: the cited result's proof refers to the citing one, unless the sentence only
+borrows notation, `NOTATION_ONLY`). Rows inside a reader's lines get `reader`; the reader's prompt lists them with the
+cited statements (`USES_NOTE`, `READER_SCHEMA` adds `uses`), the lead's first message the others and every flagged row
+(`LEAD_USES`, job (e) of `LEAD_TASK`, tool `check_uses`). `_use_check` records `check` on a row and turns a
+`not_exact` or `hypotheses_fail` verdict into an issue tagged `internal_uses` unless one is there; the judge of such an
+issue gets the citing lines and the cited statement. The report counts checked uses per result (`_use_counts`,
+`state['use_coverage']`). Every round goes through `MeteredClient`, which
 charges the job (reserved before dispatch, corrected by the provider's counts), saves
 the call (`role` lead / co-referee / judge, `referee`, `round`, the messages new since
 the previous round in its request artifact) and stops the loop at the clock
@@ -1166,7 +1175,7 @@ rejected or withdrawn issue, and the report then uses `code_verdict` (`state['ve
 `rejected`, `error`). Withdrawn and `retracted` issues are never printed.
 `review_position.position_prompt` reads both report shapes. Saved keys: `issues`,
 `coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
-`referee_clock`, `provider_refused`, `readers`, `verdict_text`; issue statuses `judged`, `disputed`, `unjudged`,
+`referee_clock`, `provider_refused`, `readers`, `verdict_text`, `internal_uses`, `use_coverage`; issue statuses `judged`, `disputed`, `unjudged`,
 `withdrawn`; the judge's `fill`, `new_ingredient`, `judge_effect`, `kept_error`,
 `lowered`, `tool_calls`. A resumed v4 job starts new referees with the ledgers (never the old
 conversation) and judges again what was not judged; "Resume (+N min)" gives it a new
