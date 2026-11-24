@@ -509,7 +509,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Referee report: every proof checked, second opinions, a recommendation | `@referee`, New review | `/referee` |
+| Review | Referee report: referees with tools (Python, cited papers), an independent judge on every reported problem, a recommendation | `@referee`, New review | `/referee` |
 | Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
@@ -848,26 +848,51 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review** (`@referee`): a referee report on the whole paper. It has one
-  depth and no effort to choose (it is the former High; Medium, a faster screen
-  without reasoning, found about half as much with more false alarms and was
-  removed). Every proof is checked, appendices included:
+- **Review** (`@referee`): a referee report on the whole paper, verdict first.
+  It has one depth and no effort to choose. With DS4 (the whole paper fits the
+  model's context), a **lead referee** and up to **five co-referees** work at the
+  same time, each reading the whole paper and deciding itself what to check. The
+  lead checks the main statements (it tries to break each one: degenerate
+  parameters, low dimension, boundary cases, a known result it would contradict),
+  the consistency of the paper, the cited results and the numerical claims; each
+  co-referee checks the proofs of one group (the main results' proofs, then the
+  others by position in the paper) and reports anything else it notices. They
+  have tools: they read and search the manuscript, **run Python** in the sandbox
+  to recompute a constant or test a counterexample, and find and read cited
+  papers to check a theorem's hypotheses (with online search on; a search query
+  that copies eight words of your manuscript is refused, so its text is never
+  sent to a search engine). Each problem is reported as soon as it is found, with
+  its lines and an exact quote that the code checks, and every result of a
+  referee's group must get a status (no error found, issue, not checked) before
+  it can finish. Every reported problem then goes to an **independent judge**,
+  which sees the paper and the report but not the referee's reasoning, checks it
+  (with Python or the cited paper when the claim rests on them) and decides:
+  confirmed, refuted or undecided, with its effect (the statement is false, the
+  proof fails, a gap an expert can fill, an imprecision, a misprint). The
+  judge's verdict is final; refuted problems leave the report and stay in the
+  job. Meanwhile the code compiles the TeX source (a figure that is not attached
+  becomes a box) and checks the bibliography. The referees are asked to finish
+  after about 11 minutes; the report is written from what was found and judged
+  by 20 minutes at the latest.
 
-  | | |
-  | --- | --- |
-  | Attack on the statement of each main result (four at most) | one reasoning call each |
-  | Passes on the main results and the results their proofs use directly / on the others | 2 / 1, plus one on a proof holding a step an attack named weakest |
-  | Hidden reasoning (DS4) | the second pass, the judge and the repair check reason first; the other calls answer at once |
-  | Read across the whole paper | cited results, consistency, unproved claims |
-  | Second opinion on | findings said to break a proof or a statement, and gaps near the main results |
-  | Repairs that would make a major finding minor are checked | yes |
+  The report has, in order: the verdict (a recommendation, then one line per
+  confirmed error: a confirmed error rules out "accept" and "minor revision"),
+  the main results with their status, how they were checked and the
+  counterexamples tried, the errors (location, quote, the problem in at most four
+  sentences, the fix, the results affected, how it was verified), gaps and
+  imprecisions, questions to the authors (problems the judge could not decide,
+  marked as not settled), formula misprints and wrong references by section,
+  compilation and bibliography, what was checked by computation (with the
+  experiment ids, which `python -m mathagent.numerics show` opens) and what
+  could not be checked, then text replacements. It is rewritten as the review
+  goes on. Language typos are left to the typo check, which you can start at the
+  same time on the same file.
 
-  Hidden reasoning is most of what a model writes (15–30k tokens for one proof
-  check) and the provider limits how much an account generates per second, so it,
-  not the number of calls, sets how long a review takes: about a quarter of an
-  hour with DS4 for a 3,100-line paper. The review does not list typos: its
-  report ends by saying so and naming the typo check, which you can start at the
-  same time on the same file. The review itself does not search the literature.
+  When the whole paper does not fit the model's context (a small local model),
+  the review checks the proofs one by one instead, as described under "How it
+  works" below.
+
+  The review itself does not search the literature.
   In a conversation, the Assistant starts **two jobs at once** when you ask for a
   review: the review, and a literature review at its lowest breadth, each with its
   own card and page. The question of that literature review is written by the
@@ -896,7 +921,7 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   proof is checked and there is no recommendation. About 16 calls and 2.5
   minutes with DS4 for a 3,000-line paper.
 
-  How it works. The code maps the paper: its statements and proofs (theorem
+  How the Review works without the whole paper in context. The code maps the paper: its statements and proofs (theorem
   numbers come from your `.sty` and, when present, the `.aux` file), proofs that
   run over a whole section ("Proof of Theorem 1", "In this section we prove
   Theorem 1.2"), and which result uses which. A first call writes the overview,
@@ -908,9 +933,7 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   counterexample counts only when it is explicit and checked against every
   hypothesis; it then becomes a finding that the statement is false, which gets a
   second opinion like any other. A statement that fails only in an edge case is
-  reported under the main-results table. The same call names the step the result
-  depends on most and that the paper justifies least: the proof holding that step
-  gets one more reasoning pass aimed at it. All the calls run in one pool, the main results
+  reported under the main-results table. All the calls run in one pool, the main results
   and what they use first: a check of each
   proof (a long proof line by line in parts, with the whole paper in view), and
   reads across the paper for inconsistent constants or conventions, claims never
@@ -921,12 +944,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   paper, then an independent judge. A finding said to make a statement false or a
   proof fail always goes to the judge, even when the defence gives way (the
   defence answers at once; the judge reasons); other findings go to the judge when
-  the defence holds the paper right or makes the finding less serious. A
-  finding said to make a statement false or a proof fail becomes minor only when a
-  separate check finds the proposed repair to work with standard arguments: a
-  repair that needs a fact the paper neither proves nor cites (a density, a
-  regularity up to the boundary, a new lemma) leaves it major (the report says so).
-  Minor findings that got no second opinion are checked against the paper, twenty
+  the defence holds the paper right or makes the finding less serious. The
+  judge's verdict is final. Minor findings that got no second opinion are checked against the paper, twenty
   per call: a finding the paper does not support leaves the report, and so does a
   finding whose quoted words are not in the paper (the scope at the end of the
   report counts both; the saved job keeps them).
@@ -959,7 +978,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   or say "explain this page" for a short attachment. When the text states a result
   in prose or proves it elsewhere, the model locates the lines first.
 
-Saved reviews stay readable whatever their age. Resuming one saved at Low effort
+Saved reviews stay readable whatever their age. A review saved before the
+referees and the judge existed resumes with its own pipeline. Resuming one saved at Low effort
 continues it as a typo check; one saved at Medium or High, or before the review
 and the detailed review became one, continues as the review (it no longer reads
 for typos, and keeps the remarks it had).
@@ -1338,6 +1358,11 @@ conversation. Install the sandbox once (see the install guide).
   per turn; `--no-numerical-checks` turns this off). The result is exactly one of *exact
   counterexample*, *numerically verified candidate*, *no counterexample detected*
   or *inconclusive*. Passing tests never count as a proof.
+- **The Review** binds the sanity-check skill with its own policy, *review*:
+  30 s, 2 GB and 1 CPU a run; 20 runs for the lead referee, 8 for each
+  co-referee and 3 for each judge of one review; two runs at a time; no
+  escalation. `--no-numerical-checks` turns it off too: the referees then compute
+  by hand and the report says that no computation was run.
 
 Change the limits with `--python-limits limits.json`. Values are bounded by
 built-in maxima: for automatic checks 30 s, 4 GB, 2 CPUs and 10 runs; for anything

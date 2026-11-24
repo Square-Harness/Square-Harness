@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- The Review (v4, pipeline `review-v4`) is rebuilt around free referees and an independent
+  judge. With the whole paper in the model's context (DS4), a lead referee and up to five
+  co-referees (one per group of proofs) work at once, each a tool loop on the whole paper: they
+  read and search the manuscript, run Python in the sandbox, open cited papers, report each
+  problem with a quote the code checks at its lines, and give every result of their group a
+  status before they can finish. Every reported problem is checked by an independent judge
+  (with tools when it rests on a computation or a source; misprints in batches) whose verdict is
+  final. The code compiles the TeX source (missing figures as boxes) and checks the
+  bibliography. The report is built by code, verdict first: main results, errors, gaps,
+  questions, formula misprints, compilation and bibliography, computations, what could not be
+  checked, replacements. Referees are asked to finish at 11 minutes and the report is written
+  by 20 minutes at the latest. Search queries that copy eight words of the manuscript are
+  refused. A paper that does not fit the context keeps the v3 pipeline; saved reviews resume
+  with their own pipeline. **Sandbox policy change (for review by the maintainers):** the
+  Review's referees and judges run Python without approval under a new policy, `review`
+  (30 s, 2 GB, 1 CPU a run; 20 runs for the lead, 8 per co-referee, 3 per judge; no
+  escalation), instead of the automatic policy's 3 runs of 5 s; `--no-numerical-checks`
+  turns it off.
+- Review (v3 pipeline, kept for small contexts): the judge's verdict is final. The repair check
+  after the judge and the extra pass on the step an attack named weakest are removed; reasoning
+  calls are capped at 40k output tokens. Saved jobs keep what those calls found.
+- The review map reads a bibliography declared in the paper's own package
+  (`\addbibresource` in `preamble.sty`).
 - A review asked in a conversation starts with a literature review beside it, at its lowest
   breadth, each with its own card. The Assistant writes the literature question from the
   manuscript's title, abstract and introduction in public words. When both have returned, the
@@ -16,7 +39,7 @@
   (degenerate parameters, low dimension, boundary cases, known results it would contradict).
   An explicit counterexample checked against every hypothesis becomes a finding that the
   statement is false and gets a second opinion; the step the attack names as least justified
-  gives its proof one more reasoning pass. The main-results table shows the outcome.
+  gave its proof one more reasoning pass (removed since). The main-results table shows the outcome.
 - The Review has one depth and no effort to choose (the former High); Medium is removed. The
   typo check, formerly the review at Low, is its own skill: `@typo_check`, `/typo_check`, and
   "Typo Check" in the New review form. The review no longer reads the paper for typos (a sixth
