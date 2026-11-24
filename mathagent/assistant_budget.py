@@ -254,6 +254,28 @@ class BudgetClient:
                 raise AssistantBudget('Assistant inference timed out during generation.') from exc
             raise AssistantAdmissionRefused('Assistant time budget exhausted while waiting for inference.') from exc
 
+    @property
+    def remaining_input_tokens(self):
+        """Input tokens this worker may still send: the tree's input limit and the worker's own input allowance."""
+        with self.pool.lock:
+            limit = self.pool.state['max_input_tokens']
+            remaining = math.inf if limit is None else max(0, limit - self.pool.state['input_tokens'])
+            if self.input_allowance is not None:
+                remaining = min(remaining, max(0, self.input_allowance - self.usage['input_tokens']))
+            return remaining
+
+    def _settle_input(self, counted, reserved):
+        """Replace a call's input reservation by the provider's count once the call ends (under the pool lock).
+
+        The reservation is an upper bound (a byte count where no tokenizer answers, about three times the real
+        tokens): kept, it would exhaust the tree's input pool long before the provider's own count does. A call that
+        ends without a count keeps its reservation. Returns the amount now charged for the call."""
+        if type(counted) is not int or counted < 0:
+            return reserved
+        self.pool.state['input_tokens'] = max(0, self.pool.state['input_tokens'] + counted - reserved)
+        self.usage['input_tokens'] = max(0, self.usage['input_tokens'] + counted - reserved)
+        return counted
+
     def _stream(self, payload):
         cap = payload.get('options', {}).get('num_predict')
         if type(cap) is not int or cap <= 0:
@@ -309,6 +331,7 @@ class BudgetClient:
                             self.pool.state['tokens'] -= cap - used
                             self.usage['tokens'] -= cap - used
                             self.pool.state['measured_tokens'] += used
+                        count = self._settle_input(event.get('prompt_eval_count'), count)
                     self.pool.checkpoint()
                 yield event
         except (AgentError, KeyboardInterrupt) as exc:
@@ -332,6 +355,7 @@ class BudgetClient:
                     self.pool.state['tokens'] += used - cap
                     self.usage['tokens'] += used - cap
                     self.pool.state['measured_tokens'] += used
+                    count = self._settle_input(exc.stats.get('prompt_eval_count'), count)
                 raise
             if isinstance(exc, AgentError) and not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
                 raise AssistantBudget('Assistant time budget exhausted during generation.') from exc

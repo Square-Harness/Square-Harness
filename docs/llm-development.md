@@ -1110,7 +1110,13 @@ box for a figure that is not attached, 180 s) running beside them; its summary r
 each referee in its next tool result. Focused readers run in the same pool (`_run_reader`, role `reader`): one
 reasoning `_ask` per proof of the main chain (`_reader_plan`: breadth first from `_main_ids()` through the map's
 references, at most `READERS` proofs and `READER_CALLS` calls, a long proof in `_blocks`), the v3 audit prompt
-(`P.audit_prompt('line', ...)` with `P.AUDIT_SCHEMA`, `ROUND_CAP`); `_parse_audit` filters the answer and each issue
+(`P.audit_prompt('line', ...)` with `READER_SCHEMA`, issues first) with `READER_BOUND` and the cap `READER_CAP` (DeepInfra has
+no reasoning budget: the reader is asked to stop reasoning well before the cap, which leaves room for the answer). A
+reading cut at the cap keeps the complete issues and uses of its JSON (`salvage_answer`, `recovered: partial`), or,
+when it was cut while reasoning, gets one call without reasoning (`_reader_answer_now`, `READER_ANSWER_NOW`,
+`READER_ANSWER_CAP`) that writes the answer from its notes (`_ask` returns the reasoning as `thinking`;
+`recovered: answer_now`); a recovered reading's `no_issue_found` becomes `uncertain`, and a recovered or unusable
+reading never counts its proof as checked; `_parse_audit` filters the answer and each issue
 goes through `_report_issue` as `R:<unit>` (kind from `READER_EFFECT_KIND`), so it merges with a referee's on the same
 lines and counts as an independent report; the verdict stays on the reading (`state['readers']`, `_readings`). The
 scheduler starts pending readers in plan order on free slots before any judge, and none after `CLOCK['readers_by']`
@@ -1118,11 +1124,19 @@ scheduler starts pending readers in plan order on free slots before any judge, a
 results: a `TEX_REF` to a result's label or to an equation of its statement, or "Lemma 2.4" written out (not inside
 a `\cite`), one row per line and cited result, with `in` (proof, statement, text), `forward`, and `problem`
 (`unresolved`, `kind_mismatch`, `circular`: the cited result's proof refers to the citing one, unless the sentence only
-borrows notation, `NOTATION_ONLY`). Rows inside a reader's lines get `reader`; the reader's prompt lists them with the
-cited statements (`USES_NOTE`, `READER_SCHEMA` adds `uses`), the lead's first message the others and every flagged row
-(`LEAD_USES`, job (e) of `LEAD_TASK`, tool `check_uses`). `_use_check` records `check` on a row and turns a
-`not_exact` or `hypotheses_fail` verdict into an issue tagged `internal_uses` unless one is there; the judge of such an
-issue gets the citing lines and the cited statement. The report counts checked uses per result (`_use_counts`,
+borrows notation, `NOTATION_ONLY`). A written-out name is the paper's own only when no citation of another work governs
+its sentence (`_sentence_at`; `GOVERNS_AFTER`: "Lemma 3.3 of [..]", "Theorem 1 and Lemma 2 of [..]";
+`GOVERNS_BEFORE`: "[..], Lemma 3.3", "in [..] ... Lemma 3.3") and its number is a result of the paper; a citation
+elsewhere in the sentence, or a number that is a result of another kind, makes the row `uncertain` (shown as such,
+never a `kind_mismatch`; the verdict `not_internal` takes it out of the counts). Rows inside a reader's lines get
+`reader`; every row gets an `owner` (`_use_owner`): its reader (`R:<unit>`), else the co-referee whose direction holds
+the citing result or line, else, and for every flagged or uncertain row, the lead. The reader's prompt lists its rows
+with the cited statements (`USES_NOTE`, `READER_SCHEMA` adds `uses`), each referee's first message its own rows
+(`LEAD_USES` at most; job (e) of `LEAD_TASK`, `CO_TASK`, tool `check_uses`), and a co-referee's second look the rows
+it has not checked. `_use_check` records `check` on a row and turns a `not_exact` or `hypotheses_fail` verdict into
+an issue tagged `internal_uses` unless one is there (a later pass does not undo a failure: `other_checks`); an issue
+reported at the line of a use that names the cited result (or its label) checks the row as failed and gets the tag
+(`_uses_from_issue`, from `_report_issue`). The judge of such an issue gets the citing lines and the cited statement. The report counts checked uses per result (`_use_counts`,
 `state['use_coverage']`). Every round goes through `MeteredClient`, which
 charges the job (reserved before dispatch, corrected by the provider's counts), saves
 the call (`role` lead / co-referee / judge, `referee`, `round`, the messages new since
@@ -1171,18 +1185,34 @@ recommendation follows the judged findings by rule (a confirmed `P.MAJOR_EFFECTS
 is `_write_verdict` (role `verdict`, one call without reasoning after the judges, `VERDICT_POLICY`: the judged
 findings, the main results' statuses and the lead's summary without its sentences naming rejected issues);
 `_verdict_problem` rejects a paragraph naming an issue id, an unknown label, or the claim, quote or lines of a
-rejected or withdrawn issue, and the report then uses `code_verdict` (`state['verdict_text']`: `by`, `text`,
-`rejected`, `error`). Withdrawn and `retracted` issues are never printed.
+rejected or withdrawn issue, a paragraph that omits a confirmed error, or one that calls a main result free of error
+against its computed status (`clean_claim`), and the report then uses `code_verdict` (`state['verdict_text']`: `by`,
+`text`, `rejected`, `error`). The status of each main result is computed by code (`main_statuses`, in `classify` as
+`mains`) through `_chain` (the map's references, transitively): `error` (a confirmed error attached to it: its unit or
+`results_affected`), `relies_on_error` (attached to a result it uses), `unsettled` (an unsettled `ERROR_KINDS` issue on
+it or on what it uses), `not_checked` (a proof of its chain without a referee's mark or a reader's verdict, or with a
+reading that ended without a complete answer: `_proof_checked`), else `no_error_found`. The main-results table, the
+code verdict and the verdict call print these texts; the recommendation follows them, and a `not_checked` main result
+makes it provisional. Referees and readers stop first when the allowance runs short: `_admit_call` (called by
+`MeteredClient.stream` and by `PaperReviewRunner._ask` before a call is charged) refuses a `REFEREE_ROLES` call that
+would leave the review's allowance, or the enclosing Assistant pool (`BudgetClient.remaining_input_tokens`,
+`remaining_tokens`), less than the judges' and the verdict's share (`_judging_share`: one judge call's output plus
+`JUDGE_SHARE` per issue still to judge and two more); the job then has `referees_stopped_for_judges`. Withdrawn and `retracted` issues are never printed.
 `review_position.position_prompt` reads both report shapes. Saved keys: `issues`,
 `coverage`, `referees`, `directions`, `experiments`, `compile`, `bibliography_check`,
-`referee_clock`, `provider_refused`, `readers`, `verdict_text`, `internal_uses`, `use_coverage`; issue statuses `judged`, `disputed`, `unjudged`,
+`referee_clock`, `provider_refused`, `readers` (with `recovered`), `verdict_text`, `internal_uses` (with `owner`,
+`uncertain`, `check.issue`, `other_checks`), `use_coverage`, `referees_stopped_for_judges`; issue statuses `judged`, `disputed`, `unjudged`,
 `withdrawn`; the judge's `fill`, `new_ingredient`, `judge_effect`, `kept_error`,
 `lowered`, `tool_calls`. A resumed v4 job starts new referees with the ledgers (never the old
 conversation) and judges again what was not judged; "Resume (+N min)" gives it a new
 clock (`_rebase_clock`). In a conversation the review worker's `BudgetClient` fork gets its own inference
 slots (`workers.run_worker`: `Hub.review_concurrency()`, through `BudgetClient.fork(slots=...)`) instead of the
 Assistant tree's `--assistant-concurrency` (at most 5 for a hosted model), so the referees and judges run at once;
-its calls still pass through the interface's model-request pool and are charged to the turn's budget. The worker
+its calls still pass through the interface's model-request pool and are charged to the turn's budget. A call's input
+reservation (a byte count where the provider's tokenizer does not answer, about three times the real tokens) holds
+only while it runs: `BudgetClient._settle_input` replaces it by the provider's `prompt_eval_count` once the call ends
+(a call that ends without a count keeps it), for the review and the literature worker alike, so a review's referees
+no longer exhaust the Assistant's input pool before its judges. The worker
 host exposes the process's sandbox (`_ChatWorkerHost.sandbox`), which the runner binds per referee.
 
 The v3 Review (`PaperReviewRunner`, pipeline `review-v2`) checks every

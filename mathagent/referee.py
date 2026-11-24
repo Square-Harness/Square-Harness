@@ -61,19 +61,47 @@ CLOCK = {'wrap_up': 660, 'referee_stop': 810, 'referee_abort': 900, 'judge_stop'
 # marked it correct), which the v3 audit of that proof raised in three runs out of three. The main results' own proofs
 # first, then what they use directly, then the rest of the chain. A reader that cannot start by `readers_by` is skipped.
 READERS, READER_CALLS = 12, 14  # proofs, and calls (a long proof is read in parts)
+# A reader's output: DeepInfra has no reasoning budget, so the reader is asked to stop reasoning well before its cap
+# and the cap leaves room for the answer. A reading still cut at the cap keeps the complete issues of its answer, or
+# gets one short call without reasoning that writes the answer from its notes (as Agent.run's ANSWER_NOW).
+READER_CAP, READER_ANSWER_CAP, READER_NOTES = 48_000, 8_000, 120_000
+READER_BOUND = ('Reason for at most about 28,000 tokens, then write the answer, issues first: an answer cut at the '
+                'output limit is lost. If the proof is long, give the problems you have found rather than reason on.')
+READER_ANSWER_NOW = ('YOU REACHED YOUR OUTPUT LIMIT BEFORE GIVING YOUR ANSWER. Give it now, in the format, from your '
+                     'notes above, with no further reasoning: every problem the notes establish (lines, quote copied '
+                     'exactly, effect, evidence, suggestion), the uses you checked, and the verdict uncertain unless '
+                     'the notes reached the end of the lines under review.')
 READER_EFFECT_KIND = {'statement_false': 'statement', 'breaks_proof': 'proof', 'gap': 'gap', 'imprecision': 'imprecision',
                       'misprint': 'misprint'}
 SECOND_LOOK_MARGIN = 90  # seconds before the wrap-up: a co-referee finishing earlier is asked for a second look once
 VERDICT_CAP = 2_500
+# What a referee's or reader's call must leave for the judges and the verdict: one judge call's output plus a
+# judgment's worth (output, input) per issue still to judge and two more. When the review's allowance or the
+# Assistant's pool runs short, the referees stop first.
+JUDGE_SHARE = (12_000, 120_000)
+REFEREE_ROLES = ('lead', 'co-referee', 'reader')
+ROOM_NOTE = ('The allowance left is kept for the judges and the verdict: no more referee rounds. Call finish with '
+             'your summary if you can; your reported issues are already in the ledger.')
 # Internal citations: every use of one of the paper's own results (a \ref, \cref or \eqref to a theorem, lemma,
 # proposition, corollary or to an equation of its statement, and "Lemma 2.4" written out) is a row of
 # state['internal_uses']. Readers check the rows of their proof first; the lead the others and every row code flagged.
 USE_WORD = re.compile(r'(Theorem|Lemma|Proposition|Corollary|Definition|Remark|Claim)s?\s*(?:~|\\ )?\s*$', re.I)
 USE_NAMED = re.compile(r'\b(Theorem|Lemma|Proposition|Corollary)\s*(?:~|\\ )?\s*(\d+(?:\.\d+)*)\b')
 NOTATION_ONLY = re.compile(r'(?:introduced|defined|given|denoted|notation[s]?|as)\s+(?:in|by|of)\s*(?:~|\\ )?\s*$', re.I)
-USE_VERDICTS = ('exact', 'not_exact', 'hypotheses_fail', 'unsure')
+# A written-out "Lemma 3.3" in a sentence that cites another work: governed by that citation (not a use of the
+# paper's own Lemma 3.3) when the citation is attached to it ("Lemma 3.3 of [..]", "[..], Lemma 3.3", "in [..] ...
+# Lemma 3.3"); a citation elsewhere in the sentence leaves the row uncertain.
+GOVERNS_AFTER = re.compile(r'^\s*(?:\)\s*)?(?:(?:,|\band\b|\bor\b)\s*(?:(?:Theorem|Lemma|Proposition|Corollary|Section|'
+                           r'Remark|Definition|Equation|Eq\.)s?\s*(?:~|\\ )?\s*)?\(?\d+(?:\.\d+)*\)?\s*)*'
+                           r'(?:of|in|from)\b[^.;]{0,30}?\\cite')
+GOVERNS_BEFORE = re.compile(r'(?:\b(?:in|of|from|see|by)\s+(?:~|\\ )?\\cite\w*\*?\s*(?:\[[^\]]*\]\s*)*\{[^}]*\}'
+                            r'|\\cite\w*\*?\s*(?:\[[^\]]*\]\s*)*\{[^}]*\}[\s,;:(]*(?:see\s+)?(?:also\s+)?'
+                            r'(?:in particular\s+)?$)', re.I)
+USE_VERDICTS = ('exact', 'not_exact', 'hypotheses_fail', 'unsure', 'not_internal')
 USE_FAILURES = ('not_exact', 'hypotheses_fail')
 LEAD_USES = 80  # rows shown in the lead's first message (flagged rows first)
+READING_STATUS = {'skipped': 'not started in time', 'stopped': 'stopped by the clock or the allowance',
+                  'failed': 'the call failed', 'unusable': 'no usable answer'}
 USES_NOTE = """Before anything else in this proof, check each use of the paper's own results listed below on two points:
 (1) the cited result states exactly what is used here (the same objects, quantifiers, range of parameters, constants);
 (2) its hypotheses hold at this point. Give every listed use a verdict in uses (exact, not_exact, hypotheses_fail,
@@ -137,8 +165,9 @@ below leads you. Your four jobs, in this order:
 (c) The claims of the abstract, the introduction and the remarks against what the paper actually proves (the
     statements as written, with their hypotheses) and against what the cited works say.
 (d) Constants, normalisations and conventions across sections: one constant or convention used two ways.
-(e) The paper's own citations listed below under INTERNAL CITATIONS (the uses of its results outside the proofs the
-    readers check, and every use code flagged): for each, does the cited result state exactly what is used there (the
+(e) The paper's own citations listed below under INTERNAL CITATIONS (the uses of its results outside the readers'
+    proofs and the co-referees' directions: the introduction, remarks, numerics; and every use code flagged or found
+    uncertain; for an uncertain one, first decide whether it is a result of this paper or of a cited work): for each, does the cited result state exactly what is used there (the
     same objects, quantifiers, range of parameters, constants), and do its hypotheses hold at that point? A label that
     resolves to nothing, a sentence that names another kind of result, and a circular use (the cited result's proof
     uses the result being proved) are problems. Record your checks with check_uses, several at once.
@@ -149,7 +178,9 @@ CONTINUE_NOTE = """Your last round reached its output limit while you were still
 Record now what you have established (report_issue, mark_result), then go on in shorter steps: after each check,
 call a tool or report."""
 CO_TASK = """YOUR TASK (co-referee {rid}): your direction is {title}. Check its proofs line by line, the results they
-use and their computations. Report anything else you notice too. Other referees cover the rest of the paper."""
+use and their computations, and the uses of the paper's own results in your direction listed below under INTERNAL
+CITATIONS (record them with check_uses). Report anything else you notice too. Other referees cover the rest of the
+paper."""
 
 JUDGE_POLICY = """You are an independent judge. A referee reported the problem below in the manuscript above. Decide
 whether it is real by checking it yourself: read the lines and what they use, redo the computation, check the cited
@@ -188,9 +219,12 @@ VERDICT_POLICY = """You write the verdict paragraph of a referee report, after e
 independent judge. Below are the judged findings, each with its label (E: confirmed error, G: confirmed gap or
 imprecision, Q: question not settled, M: misprint), the status of the main results, and the lead referee's own
 summary as background. Write in at most six sentences: what the paper proves, the status of its main results, and the
-findings that decide the recommendation, citing them by label. Use only the findings listed: the lead's summary was
-written before the judge and may name problems the judge rejected; never mention a problem that is not listed. Do not
-state a recommendation (it follows from the findings by rule). Return only the JSON object."""
+findings that decide the recommendation, citing them by label. Name every confirmed error (E). The status of each
+main result is computed from the findings and the dependencies between the results: state it as given, and never call
+a result free of error when its status says it has or relies on an error, or was not fully checked. Use only the
+findings listed: the lead's summary was written before the judge and may name problems the judge rejected; never
+mention a problem that is not listed. Do not state a recommendation (it follows from the findings by rule). Return only
+the JSON object."""
 VERDICT_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['paragraph'],
                   'properties': {'paragraph': {'type': 'string', 'maxLength': 1500}}}
 BATCH_EFFECTS = ('misprint', 'reference', 'imprecision', 'gap', 'breaks_proof', 'statement_false')
@@ -204,12 +238,45 @@ BATCH_SCHEMA = {
 }
 
 
-READER_SCHEMA = {**P.AUDIT_SCHEMA, 'required': P.AUDIT_SCHEMA['required'] + ['uses'],
-                 'properties': {**P.AUDIT_SCHEMA['properties'], 'uses': {'type': 'array', 'maxItems': 60, 'items': {
+# The issues come first, so that an answer cut at the output limit still holds its complete issues (salvage_answer).
+READER_SCHEMA = {**P.AUDIT_SCHEMA, 'required': ['issues', 'uses', 'verdict', 'explanation', 'external'],
+                 'properties': {'issues': P.AUDIT_SCHEMA['properties']['issues'],
+                                'uses': {'type': 'array', 'maxItems': 60, 'items': {
                      'type': 'object', 'additionalProperties': False, 'required': ['use', 'verdict', 'note'],
                      'properties': {'use': {'type': 'string', 'maxLength': 8},
                                     'verdict': {'type': 'string', 'enum': list(USE_VERDICTS)},
-                                    'note': {'type': 'string', 'maxLength': 400}}}}}}
+                                    'note': {'type': 'string', 'maxLength': 400}}}},
+                                **{k: P.AUDIT_SCHEMA['properties'][k] for k in ('verdict', 'explanation', 'external')}}}
+
+
+def salvage_answer(text):
+    """The complete items of a reader's JSON answer cut at the output limit: {'issues', 'uses', 'explanation'}, or
+    None when it holds no complete issue or use. The verdict of a cut answer is never trusted."""
+    decoder, out = json.JSONDecoder(), {}
+    for key in ('issues', 'uses'):
+        found = re.search(r'"%s"\s*:\s*\[' % key, text or '')
+        items, pos = [], found.end() if found else len(text or '')
+        while found:
+            while pos < len(text) and text[pos] in ' \t\r\n,':
+                pos += 1
+            if pos >= len(text) or text[pos] != '{':
+                break
+            try:
+                item, pos = decoder.raw_decode(text, pos)
+            except ValueError:
+                break  # the item the limit cut
+            if isinstance(item, dict):
+                items.append(item)
+        out[key] = items
+    if not out['issues'] and not out['uses']:
+        return None
+    explanation = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    try:
+        out['explanation'] = json.loads('"' + explanation.group(1) + '"') if explanation else ''
+    except ValueError:
+        out['explanation'] = ''
+    out.update(verdict='issues_found' if out['issues'] else 'uncertain', external=[])
+    return out
 
 
 class RefereeFinished(Exception):
@@ -480,6 +547,7 @@ class MeteredClient:
         with runner._mutex:
             if runner._tokens_left() < cap or runner._input_left() < count:
                 raise RefereeStop('The review\'s token allowance cannot cover another round.')
+            runner._admit_call(self.role, cap, count)
             # The request artifact holds the messages new since the previous round: the transcript without copying
             # the manuscript into every file.
             messages, previous = payload['messages'], self.sent
@@ -615,6 +683,7 @@ class RefereeRunner(PaperReviewRunner):
         for row in s['internal_uses']:
             row['reader'] = next((r['key'] for r in s['readers'] if row['in'] == 'proof' and any(
                 a <= row['line'] <= b for a, b in (r['segment'] or self._unit(r['unit'])['proofs']))), None)
+            row['owner'] = self._use_owner(row)
         s['bibliography_check'] = self._bibliography_check()
         limit = min(CLOCK['limit'], s['settings']['max_seconds'])
         s['referee_clock'] = {k: round(v * limit / CLOCK['limit'], 1) for k, v in CLOCK.items()}
@@ -720,7 +789,7 @@ class RefereeRunner(PaperReviewRunner):
         start = next((n for n, line in enumerate(lines, 1) if '\\begin{document}' in line), 0)
         rows, seen = [], set()
 
-        def add(n, cited, label, quote, named, problem=None):
+        def add(n, cited, label, quote, named, problem=None, uncertain=None):
             citing = self._unit_id_at(n)
             unit = self._unit(citing) if citing else None
             where = ('proof' if unit and any(a <= n <= b for a, b in unit.get('proofs') or []) else
@@ -742,7 +811,8 @@ class RefereeRunner(PaperReviewRunner):
             rows.append({'id': f'X{len(rows) + 1}', 'line': n, 'text': _clip(text, 300), 'quote': quote, 'label': label,
                          'cited': cited['id'] if cited else None, 'cited_name': cited['name'] if cited else None,
                          'citing': citing, 'in': where, 'named': named or None,
-                         'forward': bool(cited and cited['statement'][0] > n), 'problem': problem, 'check': None})
+                         'forward': bool(cited and cited['statement'][0] > n), 'problem': problem, 'check': None,
+                         **({'uncertain': uncertain} if uncertain else {})})
 
         for n, raw in enumerate(lines, 1):
             if n <= start:
@@ -757,17 +827,52 @@ class RefereeRunner(PaperReviewRunner):
                         add(n, cited, label, match.group(0), named)
                     elif label not in defined:
                         add(n, None, label, match.group(0), named, 'unresolved')
-            # "Lemma 2.4" written out, outside citations of other works ("[Theorem 8.20]{GT}", "Theorem 3 of [5]").
+            # "Lemma 2.4" written out, outside citations of other works ("[Theorem 8.20]{GT}", "Theorem 3 of [5]",
+            # "[5], Lemma 3.3", "in [5] ... Lemma 3.3"): the sentence around it decides (`_sentence_at`).
             masked = re.sub(r'\\cite\w*\*?\s*(?:\[[^\]]*\]\s*)*\{[^}]*\}', lambda m: ' ' * len(m.group(0)), line)
             for match in USE_NAMED.finditer(masked):
-                after = masked[match.end():match.end() + 40]
-                if re.match(r'\s*(?:of|in|from)\b', after) or '\\cite' in line[match.end():match.end() + 40]:
-                    continue
+                before, after = self._sentence_at(lines, n, match.start(), match.end())
+                if GOVERNS_AFTER.match(after) or GOVERNS_BEFORE.search(before):
+                    continue  # a result of the cited work
                 found = by_number.get(match.group(2)) or []
-                if found:
-                    cited = next((u for u in found if u['type'] == match.group(1).lower()), found[0])
-                    add(n, cited, match.group(1) + ' ' + match.group(2), match.group(0), match.group(1))
+                if not found:
+                    continue
+                cited = next((u for u in found if u['type'] == match.group(1).lower()), None)
+                doubt = ('the sentence also cites another work' if '\\cite' in before + after else
+                         None if cited else f'this paper\'s {match.group(2)} is a {found[0]["type"]}, not a {match.group(1).lower()}')
+                add(n, cited or found[0], match.group(1) + ' ' + match.group(2), match.group(0),
+                    None if doubt else match.group(1), uncertain=doubt)
         return rows
+
+    def _use_owner(self, row):
+        """Who checks a use: the focused reader of the proof that holds it; else the co-referee whose direction holds
+        the citing result (or, failing that, the citing line); else, and for every row code flagged or found uncertain,
+        the lead (the introduction, remarks outside the directions, the numerics)."""
+        if row.get('problem') or row.get('uncertain'):
+            return 'lead'
+        if row.get('reader'):
+            return 'R:' + next(r['unit'] for r in self.state['readers'] if r['key'] == row['reader'])
+        directions = self.state.get('directions') or []
+        found = next((d['id'] for d in directions if row.get('citing') in d['units']), None)
+        if found is None:
+            spans = [(d['lines'][1] - d['lines'][0], d['id']) for d in directions
+                     if d.get('lines') and d['lines'][0] <= row['line'] <= d['lines'][1]]
+            found = min(spans)[1] if spans else None
+        return found or 'lead'
+
+    @staticmethod
+    def _sentence_at(lines, n, start, end):
+        """(the sentence before a match at line n, columns start..end; the sentence after it), within a few lines
+        around it; a sentence ends at '.', ';', '?' or '!' followed by a space or the line's end, or at a blank line."""
+        def clean(text):
+            return re.sub(r'(?<!\\)%.*', '', text)
+        before = '\n'.join([clean(lines[k]) for k in range(max(0, n - 4), n - 1)] + [clean(lines[n - 1])[:start]])
+        after = '\n'.join([clean(lines[n - 1])[end:]] + [clean(lines[k]) for k in range(n, min(len(lines), n + 3))])
+        stop = re.compile(r'(?<!\b[eE]\.g)(?<!\bi\.e)(?<!\bcf)[.;?!](?=\s|$)|\n\s*\n')
+        cut = [m.end() for m in stop.finditer(before)]
+        before = before[cut[-1]:] if cut else before
+        first = stop.search(after)
+        return before, after[:first.start()] if first else after
 
     def _uses_text(self, rows, limit=None):
         """Rows as the agents read them, each with the cited result's statement for a reader."""
@@ -782,10 +887,49 @@ class RefereeRunner(PaperReviewRunner):
             a, b = unit['statement']
             flag = {'kind_mismatch': f' [code: the sentence says {row["named"]}, the label is a {unit["type"]}]',
                     'circular': ' [code: the cited result\'s proof uses the result being proved: circular?]'}.get(row['problem'], '')
+            if row.get('uncertain'):
+                flag += (f' [code, uncertain: {row["uncertain"]}; it may be a result of a cited work: say not_internal '
+                         'if so]')
             out.append(head + f'{unit["name"]}, statement {_lines_text(a, b)}' + (' (stated later)' if row['forward'] else '') + flag)
             if limit is None:
                 out.append(_clip(self._numbered(sid, a, b, mark=False), 900))
         return '\n'.join(out)
+
+    def _owner_of(self, row):
+        """A row's owner; a job saved before owners existed: the lead for every row no reader holds."""
+        return row.get('owner') or ('R:' + next((r['unit'] for r in self.state.get('readers') or []
+                                                  if r['key'] == row['reader']), '') if row.get('reader') else 'lead')
+
+    def _uses_from_issue(self, who, ident):
+        """An issue reported at the line of a use, naming the cited result: the use is checked and failed (the
+        issue is the check) and the issue carries the `internal_uses` tag."""
+        with self._mutex:
+            issue = next((i for i in self.state['issues'] if i['id'] == ident), None)
+            if issue is None or issue['kind'] in ('misprint', 'compilation'):
+                return
+            text = ' '.join([issue['claim'], issue['evidence'], issue['quote']]
+                            + [r['claim'] + ' ' + r['evidence'] for r in issue.get('other_reports') or []])
+            changed = False
+            for row in self.state.get('internal_uses') or []:
+                if not issue['start_line'] <= row['line'] <= issue['end_line'] or row['cited'] is None:
+                    continue
+                name = r'\s*(?:~|\\ )?\s*'.join(map(re.escape, (row['cited_name'] or '').split()))
+                if not ((name and re.search(rf'\b{name}(?![\w.]*\d)', text)) or row['label'] in text
+                        or row['quote'] in issue['quote']):
+                    continue
+                if not (row.get('check') and row['check']['verdict'] in USE_FAILURES):
+                    verdict = ('hypotheses_fail' if re.search(r'(?i)hypothes|assum|condition|\bonly (?:for|when|if)\b',
+                                                              issue['claim']) else 'not_exact')
+                    previous = row.get('check')
+                    row['check'] = {'by': who, 'verdict': verdict, 'note': _clip(sentences(issue['claim'], 1), 400),
+                                    'at': round(self._elapsed(), 1), 'issue': ident}
+                    if previous:
+                        row.setdefault('other_checks', []).append(previous)
+                if row['id'] not in issue.setdefault('internal_uses', []):
+                    issue['internal_uses'].append(row['id'])
+                changed = True
+            if changed:
+                self._save()
 
     def _use_check(self, who, ident, verdict, note):
         """A verdict on one internal use; a failure becomes an issue (tagged internal_use) unless one is there."""
@@ -796,7 +940,13 @@ class RefereeRunner(PaperReviewRunner):
             raise ValueError('verdict must be one of ' + ', '.join(USE_VERDICTS))
         note = str(note or '').strip()[:400]
         with self._mutex:
-            row['check'] = {'by': who, 'verdict': verdict, 'note': note, 'at': round(self._elapsed(), 1)}
+            check = {'by': who, 'verdict': verdict, 'note': note, 'at': round(self._elapsed(), 1)}
+            if row.get('check') and row['check']['verdict'] in USE_FAILURES and verdict not in USE_FAILURES:
+                row.setdefault('other_checks', []).append(check)  # a failure (often an issue) is not undone by a pass
+            else:
+                if row.get('check'):
+                    row.setdefault('other_checks', []).append(row['check'])
+                row['check'] = check
             self._save()
         if verdict not in USE_FAILURES:
             return None
@@ -820,6 +970,26 @@ class RefereeRunner(PaperReviewRunner):
         found = re.search(r'\b(I\d+)\b', answer)
         return found.group(1) if found else None
 
+    def _judging_share(self):
+        """(output, input) tokens kept for the judges and the verdict while referees and readers still run."""
+        pending = sum(1 for i in self.state.get('issues') or [] if i['status'] == 'pending') + 2
+        return CALL_CAP + pending * JUDGE_SHARE[0], pending * JUDGE_SHARE[1]
+
+    def _admit_call(self, role, cap, input_tokens):
+        """Referees and readers stop first: their call is refused when it would leave the review's allowance, or
+        the enclosing Assistant's pool, less than the judges' and the verdict's share."""
+        if role not in REFEREE_ROLES or not self._v4():
+            return
+        out, inp = self._judging_share()
+        client = self.agent.client
+        outer_out = getattr(client, 'remaining_tokens', None)
+        outer_in = getattr(client, 'remaining_input_tokens', None)
+        left_out = min([self._tokens_left()] + ([outer_out] if isinstance(outer_out, (int, float)) else []))
+        left_in = min([self._input_left()] + ([outer_in] if isinstance(outer_in, (int, float)) else []))
+        if left_out - out < cap or left_in - inp < input_tokens:
+            self.state['referees_stopped_for_judges'] = True
+            raise RefereeStop(ROOM_NOTE)
+
     def _run_reader(self, item):
         """One focused reading: the v3 line-by-line audit of one proof (or part), reasoning on. Its issues enter the
         issue ledger through `_report_issue` (reported by `R:<unit>`); its verdict stays with the reading."""
@@ -834,7 +1004,8 @@ class RefereeRunner(PaperReviewRunner):
             prompt = self._block() + '\n\n' + P.audit_prompt('line', self._unit_text(unit, item['segment']))
             prompt += ('\n\n' + USES_NOTE + '\n\nUSES OF THE PAPER\'S OWN RESULTS IN THESE LINES:\n' + self._uses_text(rows)
                        if rows else '\n\nNo use of another result of the paper was found in these lines: give uses as [].')
-            result = self._ask('reader', prompt, cap=ROUND_CAP, schema=READER_SCHEMA, key='reader:' + item['key'], think=True)
+            prompt += '\n\n' + READER_BOUND
+            result = self._ask('reader', prompt, cap=READER_CAP, schema=READER_SCHEMA, key='reader:' + item['key'], think=True)
         except (RefereeStop, ResearchBudget) as exc:
             with self._mutex:
                 item.update(status='stopped', error=_clip(str(exc), 200), seconds=round(self._elapsed() - item['started'], 1))
@@ -849,7 +1020,17 @@ class RefereeRunner(PaperReviewRunner):
                 item.update(status='failed', error=_clip(str(exc), 200), seconds=round(self._elapsed() - item['started'], 1))
                 self._save()
             return
-        parsed = self._parse_audit(result, unit, item['segment'])
+        parsed, value, recovered = self._parse_audit(result, unit, item['segment']), result['value'], None
+        if not parsed['usable'] and not result['complete']:
+            value, recovered = salvage_answer(result['text']), 'partial'
+            if value is None:
+                value, recovered = self._reader_answer_now(item, prompt, result), 'answer_now'
+            if value is not None:
+                parsed = self._parse_audit({'value': value, 'complete': True}, unit, item['segment'])
+                if parsed['verdict'] == 'no_issue_found':
+                    parsed['verdict'] = 'uncertain'  # the reading did not end: not a clean bill
+            else:
+                recovered = None
         recorded, refused = [], []
         for issue in parsed['issues']:
             report = {'start_line': issue['start_line'], 'end_line': issue['end_line'], 'quote': issue['quote'],
@@ -865,7 +1046,7 @@ class RefereeRunner(PaperReviewRunner):
             if found:
                 recorded.append(found.group(1))
         mine = {r['id'] for r in rows}
-        for use in (result['value'] or {}).get('uses') or [] if parsed['usable'] else []:
+        for use in (value or {}).get('uses') or [] if parsed['usable'] else []:
             if isinstance(use, dict) and str(use.get('use')) in mine:
                 try:
                     ident = self._use_check(who, use['use'], use.get('verdict'), use.get('note'))
@@ -875,16 +1056,39 @@ class RefereeRunner(PaperReviewRunner):
                 if ident and ident not in recorded:
                     recorded.append(ident)
         with self._mutex:
+            if recovered:
+                item['recovered'] = recovered
             item.update(status='done' if parsed['usable'] else 'unusable', verdict=parsed['verdict'],
                         explanation=parsed['explanation'], issues=recorded, refused=refused,
                         error=parsed.get('error'), seconds=round(self._elapsed() - item['started'], 1),
                         at=round(self._elapsed(), 1))
             self._save()
 
+    def _reader_answer_now(self, item, prompt, result):
+        """One short call without reasoning for a reading cut while it reasoned: its notes (the reasoning, the
+        latest part when long) and the request for the answer. Returns the answer's value or None."""
+        notes = (result.get('thinking') or '')[-READER_NOTES:]
+        if len(notes.strip()) < 200:
+            return None
+        self.emit('notice', 'A focused reading reached its output limit: asking for its findings')
+        try:
+            second = self._ask('reader', prompt + '\n\nYOUR NOTES ON THESE LINES SO FAR (cut at the output limit):\n'
+                               + notes + '\n\n' + READER_ANSWER_NOW, cap=READER_ANSWER_CAP, schema=READER_SCHEMA,
+                               key='reader:' + item['key'] + ':answer', think=False)
+        except (RefereeStop, ResearchBudget, AgentError, OSError, ValueError) as exc:
+            if isinstance(exc, TokenBudgetError):
+                raise
+            if provider_refused(exc):
+                self._refused(exc)
+            return None
+        return second['value'] if second['complete'] else salvage_answer(second['text'])
+
     def _use_counts(self):
         """Per cited result: {uses, checked, failed}; saved as state['use_coverage'] with the report."""
         out = {}
         for row in self.state.get('internal_uses') or []:
+            if (row.get('check') or {}).get('verdict') == 'not_internal':
+                continue  # a result of a cited work, not a use of the paper's own
             key = row['cited'] or 'unresolved'
             entry = out.setdefault(key, {'uses': 0, 'checked': 0, 'failed': 0})
             entry['uses'] += 1
@@ -1051,15 +1255,15 @@ class RefereeRunner(PaperReviewRunner):
         parts += ['', 'THE RESULTS AND THEIR PROOFS (list_results gives their status):', self._results_table(who), '', task,
                   'Start now: your first round is short, so call a tool in it (read what you check first, or run a '
                   'computation) and record each finding as you go.']
-        if who == 'lead':
-            rows = [r for r in s.get('internal_uses') or [] if r.get('problem') or not r.get('reader')]
-            rows.sort(key=lambda r: (not r.get('problem'), r['in'] == 'text', r['line']))
-            rows = [r for r in rows if not r.get('check')]
-            if rows:
-                parts += ['', f'INTERNAL CITATIONS FOR YOU ({len(rows)}, job e; flagged by code first):',
-                          self._uses_text(rows, LEAD_USES)]
-                if len(rows) > LEAD_USES:
-                    parts.append(f'[{len(rows) - LEAD_USES} more uses, not listed: check those in the parts you read.]')
+        rows = [r for r in s.get('internal_uses') or [] if self._owner_of(r) == who and not r.get('check')]
+        rows.sort(key=lambda r: (not (r.get('problem') or r.get('uncertain')), r['in'] == 'text', r['line']))
+        if rows:
+            parts += ['', f'INTERNAL CITATIONS FOR YOU ({len(rows)}' + (', job e; flagged by code first' if who == 'lead' else '')
+                      + '): uses of the paper\'s own results in the lines you read. For each: does the cited result state '
+                      'exactly what is used, and do its hypotheses hold there? Record your checks with check_uses.',
+                      self._uses_text(rows, LEAD_USES)]
+            if len(rows) > LEAD_USES:
+                parts.append(f'[{len(rows) - LEAD_USES} more uses, not listed: check those in the parts you read.]')
         if again:
             done = [f'{i["id"]} ({i["kind"]}, {_lines_text(i["start_line"], i["end_line"])}): {_clip(i["claim"], 200)}'
                     for i in s['issues'] if who in i['reported_by']]
@@ -1118,17 +1322,22 @@ class RefereeRunner(PaperReviewRunner):
                 if use and use not in same.setdefault('internal_uses', []):
                     same['internal_uses'].append(use)
                 self._save()
-                # Who else reported it is not said: referees and readers stay independent (the disputed rule
-                # counts them as independent reports).
-                return f'Merged with {same["id"]} (a report on the same lines): the judge sees both reports.'
-            ident = f'I{len(issues) + 1}'
-            issues.append({'id': ident, 'start_line': issue['start_line'], 'end_line': issue['end_line'], 'quote': quote,
-                           'located': located, 'kind': item['kind'], 'question': bool(item.get('question')),
-                           'claim': claim, 'evidence': evidence, 'fix': report['fix'], 'experiment_ids': experiments,
-                           'results_affected': [str(r)[:80] for r in (item.get('results_affected') or [])][:6],
-                           'unit': self._unit_id_at(issue['start_line']), 'reported_by': [who], 'at': report['at'],
-                           'status': 'pending', 'judge': None, **({'internal_uses': [use]} if use else {})})
-            self._save()
+                merged = same['id']
+            else:
+                merged, ident = None, f'I{len(issues) + 1}'
+                issues.append({'id': ident, 'start_line': issue['start_line'], 'end_line': issue['end_line'], 'quote': quote,
+                               'located': located, 'kind': item['kind'], 'question': bool(item.get('question')),
+                               'claim': claim, 'evidence': evidence, 'fix': report['fix'], 'experiment_ids': experiments,
+                               'results_affected': [str(r)[:80] for r in (item.get('results_affected') or [])][:6],
+                               'unit': self._unit_id_at(issue['start_line']), 'reported_by': [who], 'at': report['at'],
+                               'status': 'pending', 'judge': None, **({'internal_uses': [use]} if use else {})})
+                self._save()
+        if merged:
+            self._uses_from_issue(who, merged)
+            # Who else reported it is not said: referees and readers stay independent (the disputed rule
+            # counts them as independent reports).
+            return f'Merged with {merged} (a report on the same lines): the judge sees both reports.'
+        self._uses_from_issue(who, ident)
         self.emit('notice', f'{who} reported {ident}: {KINDS[item["kind"]]} at {_lines_text(issue["start_line"], issue["end_line"])}')
         return f'Recorded as {ident}. An independent judge will check it.'
 
@@ -1210,11 +1419,14 @@ class RefereeRunner(PaperReviewRunner):
         unit = self._unit(uid) if uid else None
         where = (f'the proof of {unit["name"]} (' + ', '.join(_lines_text(a, b) for a, b in unit['proofs']) + ')'
                  if unit and unit.get('proofs') else 'the proof of your direction that the main results use most')
+        open_uses = [r['id'] for r in self.state.get('internal_uses') or [] if self._owner_of(r) == who and not r.get('check')]
+        uses = (f' Also check the {len(open_uses)} use(s) of the paper\'s own results listed for you and not checked yet ('
+                + ', '.join(open_uses[:15]) + (' ...' if len(open_uses) > 15 else '') + ') with check_uses.' if open_uses else '')
         return (f'About {left / 60:.0f} min remain before the wrap-up. Take a second look at {where}, the step of your '
                 'direction that the main results depend on most: re-read its key step line by line (every inference, '
                 'the hypotheses of each result applied, limits and interchanges of limits, whether what is reached is '
                 'exactly the statement), report what you find, update its status with mark_result, then call finish '
-                'again.'), uid
+                'again.' + uses), uid
 
     def _record_experiment(self, ident, who, purpose, status):
         with self._mutex:
@@ -1758,17 +1970,14 @@ class RefereeRunner(PaperReviewRunner):
                          + _clip(sentences(i['claim'], 2), 400) for i in group[:12]]
         if not rows:
             rows.append('NO PROBLEM WAS CONFIRMED.')
-        mains = []
-        for uid in self._main_ids():
-            mark = s['coverage'].get(uid) or {}
-            mains.append(f'{self._unit(uid)["name"]}: {mark.get("status", "no status")}'
-                         + (f' ({_clip(mark.get("how_checked"), 300)})' if mark.get('how_checked') else ''))
+        mains = [f'{m["name"]}: {m["text"]}' for m in c['mains']]
         bad = c['refuted'] + c['withdrawn']
         summary = (s['referees'].get('lead') or {}).get('summary') or ''
         summary = ' '.join(x for x in re.split(r'(?<=[.!?])\s+', summary)
                            if not any(re.search(rf'\b{b["id"]}\b', x) for b in bad))
         prompt = (self._block() + '\n\n' + VERDICT_POLICY + '\n\nTHE JUDGED FINDINGS:\n' + '\n'.join(rows)
-                  + '\n\nTHE MAIN RESULTS:\n' + ('\n'.join(mains) or 'none identified')
+                  + '\n\nTHE STATUS OF THE MAIN RESULTS (computed from the judged findings and the dependencies '
+                    'between the results; fixed facts, state them as given):\n' + ('\n'.join(mains) or 'none identified')
                   + '\n\nTHE LEAD REFEREE\'S SUMMARY (background only):\n' + (_clip(summary, 3000) or 'none'))
         record = {'by': 'code', 'text': None}
         try:
@@ -1794,9 +2003,16 @@ class RefereeRunner(PaperReviewRunner):
             return 'empty'
         if re.search(r'\bI\d+\b', text):
             return 'names an issue id'
-        unknown = set(re.findall(r'\b([EGQM]\d+)\b', text)) - set(c['labels'].values())
+        named = set(re.findall(r'\b([EGQM]\d+)\b', text))
+        unknown = named - set(c['labels'].values())
         if unknown:
             return 'names a label not in the report: ' + ', '.join(sorted(unknown))
+        missing = [c['labels'][i['id']] for i in c['errors'] if c['labels'][i['id']] not in named]
+        if missing:
+            return 'omits the confirmed error(s) ' + ', '.join(missing)
+        clean = clean_claim(text, [m for m in c['mains'] if m['status'] != 'no_error_found'])
+        if clean:
+            return f'calls {clean} free of error against its computed status'
         words = ' ' + ' '.join(_public_words(text)) + ' '
         kept = {n for i in c['active'] if i not in c['refuted'] for n in range(i['start_line'], i['end_line'] + 1)}
         for i in c['refuted'] + c['withdrawn']:
@@ -1938,11 +2154,106 @@ def classify(runner):
     labels.update({i['id']: f'M{n}' for n, i in enumerate(misprints, 1)})
     # A reported error on the main results' chain that nobody settled counts for the recommendation.
     unresolved = [i for i in undecided if i['kind'] in ERROR_KINDS and runner._on_main_chain(i)]
-    recommendation = ('major_revision' if errors or unresolved else
-                      'minor_revision' if gaps or misprints or undecided else 'accept')
-    return {'withdrawn': withdrawn, 'active': active, 'judged': judged, 'refuted': refuted, 'confirmed': confirmed,
-            'undecided': undecided, 'errors': errors, 'gaps': gaps, 'misprints': misprints, 'labels': labels,
-            'unresolved': unresolved, 'recommendation': recommendation}
+    c = {'withdrawn': withdrawn, 'active': active, 'judged': judged, 'refuted': refuted, 'confirmed': confirmed,
+         'undecided': undecided, 'errors': errors, 'gaps': gaps, 'misprints': misprints, 'labels': labels,
+         'unresolved': unresolved}
+    c['mains'] = main_statuses(runner, c)
+    # The recommendation follows the same facts: a confirmed error anywhere, or a main result that has or relies on
+    # an unsettled error, asks for a major revision.
+    c['recommendation'] = ('major_revision' if errors or any(m['status'] in ('error', 'relies_on_error', 'unsettled')
+                                                             for m in c['mains']) or unresolved else
+                           'minor_revision' if gaps or misprints or undecided else 'accept')
+    return c
+
+
+CLEAN = re.compile(r'(?i)\bno (?:\w+ ){0,2}(?:errors?|problems?|issues?|flaws?)\b|\berror[- ]free\b|\bfree (?:of|from) '
+                   r'(?:\w+ )?(?:errors?|problems?)\b|\bwithout (?:any )?(?:errors?|problems?)\b|\b(?:is|are|remains?|'
+                   r'stands?) (?:fully )?(?:correct|sound|valid|verified|established|intact|unaffected)\b|\bunaffected\b'
+                   r'|\bchecked (?:and|with) (?:found )?(?:correct|sound|no)\b')
+EVERY_MAIN = re.compile(r'(?i)\b(?:all|both|each|every|the(?: \w+)?) (?:of the )?(?:\w+ )?main (?:results?|theorems?)\b')
+
+
+def clean_claim(text, flagged):
+    """The name of a main result that a sentence of the verdict calls free of error although its computed status
+    (in `flagged`) says otherwise, or None. A sentence that also gives one of its labels, or says it relies on
+    something, is not such a claim."""
+    for sentence in re.split(r'(?<=[.;])\s+', text):
+        if not CLEAN.search(sentence) or re.search(r'(?i)\brel(?:y|ies|ying)\b|\bdepends?\b|\bexcept\b|\bbut\b|'
+                                                  r'\bhowever\b|\bnot (?:fully )?checked\b', sentence):
+            continue
+        for m in flagged:
+            name = r'\s+'.join(map(re.escape, m['name'].split()))
+            if ((re.search(rf'\b{name}(?![\w.]*\d)', sentence) or EVERY_MAIN.search(sentence))
+                    and not any(re.search(rf'\b{x}\b', sentence) for x in m['labels'])):
+                return m['name']
+    return None
+
+
+def _attached(runner, issue):
+    """The results an issue concerns: its unit and the results it names as affected."""
+    units = {issue.get('unit')} | {runner._resolve_result(n) for n in issue.get('results_affected') or []}
+    return {u for u in units if u}
+
+
+def _proof_checked(runner, uid):
+    """Whether a proof was checked: a referee marked it (no error found, or an issue reported) or a focused reading
+    gave its verdict; never while a focused reading of it ran and ended without a complete answer."""
+    s = runner.state
+    if any(r['unit'] == uid and (r['status'] in ('unusable', 'failed', 'stopped') or r.get('recovered'))
+           for r in s.get('readers') or []):
+        return False
+    mark = (s.get('coverage') or {}).get(uid) or {}
+    return mark.get('status') in ('no_error_found', 'issue') or runner._readings(uid) in ('no_issue_found', 'issues_found')
+
+
+def main_statuses(runner, c):
+    """The status of each main result, computed through the map's dependencies from the judged ledger:
+    error (a confirmed error in its own proof or statement), relies_on_error (in a result it uses), unsettled (an
+    error reported on it or on what it uses that nobody settled), not_checked (a proof it rests on was not checked),
+    no_error_found (its proof and every result it uses were checked, with no confirmed or unsettled error).
+    [{uid, name, status, text, labels, gaps}]; the text is what the report and the verdict call print."""
+    labels, out = c['labels'], []
+    for uid in runner._main_ids():
+        unit = runner._unit(uid)
+        chain = runner._chain(uid)
+        own, inherited, open_own, open_used, gaps = [], {}, [], {}, []
+        for group, own_list, used in ((c['errors'], own, inherited), (c['unresolved'], open_own, open_used)):
+            for i in group:
+                units = _attached(runner, i)
+                if uid in units:
+                    own_list.append(labels[i['id']])
+                else:
+                    for v in sorted(units & chain):
+                        used.setdefault(v, []).append(labels[i['id']])
+        gaps = [labels[i['id']] for i in c['gaps'] if uid in _attached(runner, i)]  # its own proof only
+        needed = [v for v in sorted(chain) if (runner._unit(v) or {}).get('proofs')
+                  and (runner._unit(v) or {}).get('type') in manuscript.PROVABLE]
+        unchecked = [v for v in needed if not _proof_checked(runner, v)]
+
+        def names(group):
+            return ', '.join(f'{runner._unit(v)["name"]} ({", ".join(dict.fromkeys(ls))})' for v, ls in group.items())
+        parts = []
+        if own:
+            parts.append('error in its own proof: ' + ', '.join(own))
+        if inherited:
+            parts.append('relies on a result with a confirmed error: ' + names(inherited))
+        if open_own:
+            parts.append('unsettled error reported in its own proof: ' + ', '.join(open_own))
+        if open_used:
+            parts.append('relies on a result with an unsettled issue: ' + names(open_used))
+        if unchecked and not (own or inherited):
+            parts.append('not fully checked: ' + ', '.join(runner._unit(v)['name'] for v in unchecked[:6])
+                         + (f' and {len(unchecked) - 6} more' if len(unchecked) > 6 else '') + ' not checked')
+        status = ('error' if own else 'relies_on_error' if inherited else 'unsettled' if open_own or open_used else
+                  'not_checked' if unchecked else 'no_error_found')
+        text = '; '.join(parts) or 'no error found'
+        if gaps:
+            text += '; confirmed gap(s) or imprecision(s) in its own proof: ' + ', '.join(dict.fromkeys(gaps))
+        out.append({'uid': uid, 'name': unit['name'], 'status': status, 'text': text,
+                    'labels': list(dict.fromkeys(own + [x for ls in inherited.values() for x in ls]
+                                                 + open_own + [x for ls in open_used.values() for x in ls])),
+                    'unchecked': [runner._unit(v)['name'] for v in unchecked]})
+    return out
 
 
 def code_verdict(runner, c=None):
@@ -1962,15 +2273,8 @@ def code_verdict(runner, c=None):
         parts.append('The judged findings also include ' + ', '.join(counts) + '.')
     if not (c['errors'] or c['unresolved'] or counts):
         parts.append('No problem was confirmed.')
-    statuses = []
-    for uid in runner._main_ids():
-        mark = (runner.state.get('coverage') or {}).get(uid) or {}
-        hit = [labels[i['id']] for i in c['errors'] + c['unresolved'] if i.get('unit') == uid]
-        statuses.append(runner._unit(uid)['name'] + ': ' + ('error ' + ', '.join(hit) if hit else
-                        {'no_error_found': 'no error found', 'issue': 'issues reported',
-                         'not_checked': 'not checked'}.get(mark.get('status'), 'no status')))
-    if statuses:
-        parts.append('Main results: ' + '; '.join(statuses) + '.')
+    if c['mains']:
+        parts.append('Main results: ' + '. '.join(f'{m["name"]}: {m["text"]}' for m in c['mains']) + '.')
     return ' '.join(parts)
 
 
@@ -2038,7 +2342,9 @@ def render(runner):
     final = c['recommendation']
     provisional = (' (provisional: the review is not finished)' if running else
                    ' (provisional: the review is incomplete)' if incomplete else
-                   ' (provisional: a reported error is not settled)' if unresolved else '')
+                   ' (provisional: a reported error is not settled)' if unresolved else
+                   ' (provisional: a main result is not fully checked)'
+                   if any(m['status'] == 'not_checked' for m in c['mains']) else '')
     out += ['## Verdict', '', f'**Recommendation: {P.RECOMMENDATIONS[final]}.**' + provisional, '']
     if incomplete:
         unseen = unchecked()
@@ -2064,16 +2370,13 @@ def render(runner):
     if main:
         out += ['## Main results', '', '| Result | Status | Checked by | How it was checked | Counterexample tried |',
                 '|---|---|---|---|---|']
+        # The status is computed by code through the map's dependencies (main_statuses): a confirmed error in a
+        # result the proof uses reaches the main result even when nobody marked the dependence.
+        computed = {m['uid']: m for m in c['mains']}
         for uid in main:
             unit = runner._unit(uid)
             mark = s['coverage'].get(uid) or {}
-            hit = [labels[i['id']] for i in errors + unresolved + gaps + undecided
-                   if i.get('unit') == uid or unit['name'] in affected(i)]
-            hit = list(dict.fromkeys(hit))
-            status = ('error: ' + ', '.join(hit) if any(h.startswith('E') for h in hit) else
-                      'see ' + ', '.join(hit) if hit else
-                      {'no_error_found': 'no error found', 'issue': 'issue reported, not confirmed',
-                       'not_checked': 'not checked'}.get(mark.get('status'), 'not checked (no status given)'))
+            status = computed[uid]['text']
             reading = runner._readings(uid)
             by = [mark['by']] if mark.get('by') else []
             if reading:
@@ -2232,7 +2535,8 @@ def render(runner):
             notes.append(f'{rid}: {_clip(r["not_checked"], 400)}')
         if r.get('status') in ('stopped', 'failed'):
             notes.append(f'{rid} did not finish ({r["status"]}: {_clip(r.get("stop") or r.get("summary") or "", 160)}).')
-    uses = s.get('internal_uses') or []
+    external = [r for r in s.get('internal_uses') or [] if (r.get('check') or {}).get('verdict') == 'not_internal']
+    uses = [r for r in s.get('internal_uses') or [] if r not in external]
     if uses:
         counts = runner._use_counts()
         s['use_coverage'] = counts
@@ -2243,6 +2547,13 @@ def render(runner):
         notes.append(f'Uses of the paper\'s own results: {len(uses)}, {checked} checked ({failed} found wrong, reported above).'
                      + (' Not all uses checked: ' + ', '.join(partly[:12]) + (f' and {len(partly) - 12} more' if len(partly) > 12 else '')
                         + '.' if partly else ''))
+        if external:
+            notes.append(f'{len(external)} written-out reference(s) taken by code for the paper\'s own results were '
+                         'results of cited works (left out of these counts).')
+        doubtful = [r for r in uses if r.get('uncertain') and not r.get('check')]
+        if doubtful:
+            notes.append('Not settled whether a written-out reference is to this paper or to a cited work: '
+                         + '; '.join(f'line {r["line"]} ("{r["label"]}": {r["uncertain"]})' for r in doubtful[:8]) + '.')
         flagged = [r for r in uses if r.get('problem') and not r.get('check')]
         if flagged:
             notes.append('Flagged by code and not checked: ' + '; '.join(
@@ -2250,11 +2561,20 @@ def render(runner):
                                          'kind_mismatch': f'"{r["named"]}" points at {r["cited_name"]}',
                                          'circular': f'{r["cited_name"]} is used in a proof it depends on'}[r['problem']]
                 for r in flagged[:10]) + '.')
+    def reading(r):
+        return f'{runner._unit(r["unit"])["name"]}' + (f' part {r["part"] + 1}' if r['parts'] > 1 else '')
+
     unread = [r for r in s.get('readers') or [] if r['status'] in ('skipped', 'stopped', 'failed', 'unusable')]
     if unread:
         notes.append('Focused readings not done: ' + ', '.join(
-            f'{runner._unit(r["unit"])["name"]}' + (f' part {r["part"] + 1}' if r['parts'] > 1 else '') + f' ({r["status"]})'
+            reading(r) + ' (' + READING_STATUS.get(r['status'], r['status'])
+            + (', cut at the output limit' if 'cut at the output limit' in (r.get('error') or '') else '') + ')'
             for r in unread[:12]) + '.')
+    cut = [r for r in s.get('readers') or [] if r['status'] == 'done' and r.get('recovered')]
+    if cut:
+        notes.append('Focused readings cut at the output limit, kept in part (their proofs are not counted as checked): '
+                     + ', '.join(reading(r) + (' (the problems written before the cut)' if r['recovered'] == 'partial'
+                                               else ' (an answer written from its notes)') for r in cut[:12]) + '.')
     if withdrawn:
         notes.append(f'{len(withdrawn)} report(s) taken back by their own referees are left out (they stay in the job).')
     out += ['- ' + n for n in notes] if notes else ['Every result received a status.']

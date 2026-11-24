@@ -863,14 +863,21 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   result) is listed by code, and each use is checked on two points, whether the
   cited result states exactly what is used there and whether its hypotheses
   hold there (a label that points nowhere, at another kind of result, or a
-  circular use is flagged); the uses inside the proofs the focused readers read
-  go to those readers, who check them first, the others to the lead. Each
+  circular use is flagged; "Lemma 3.3" written out counts only when no citation
+  of another work governs its sentence, and a doubtful one is shown as such);
+  the uses inside the proofs the focused readers read go to those readers, who
+  check them first, the uses in a co-referee's group to that co-referee, and the
+  rest (introduction, remarks, numerics, every flagged or doubtful use) to the
+  lead; a problem reported at a use counts as its check. Each
   co-referee checks the proofs of one group
   (the main results' proofs, then the others by position in the paper) and
   reports anything else it notices. Beside them, from the start, **focused
   readers** read the proofs of the main results and of what they use (up to
   twelve proofs, a long one in parts) line by line, one reasoning call each,
-  without seeing what the referees report. A co-referee that finishes early is
+  without seeing what the referees report. A reading cut at its output limit
+  keeps the problems it had written, or writes its answer from its notes in one
+  short call; its proof is then not counted as checked, and a reading that gave
+  nothing is named under "What could not be checked". A co-referee that finishes early is
   asked once for a second look at the step of its group the main results depend
   on most, and a referee that stops without finishing is asked once to go on. They
   have tools: they read and search the manuscript, **run Python** in the sandbox
@@ -906,8 +913,13 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   The report has, in order: the verdict (a recommendation that follows the
   judged findings by rule: a confirmed error, or an error on the main results
   that nobody settled, means a major revision; then one line per such error and
-  a short paragraph written after the judge from the judged findings only),
-  the main results with their status, how they were checked and the
+  a short paragraph written after the judge from the judged findings only; the
+  code checks that it names every confirmed error and never calls a main result
+  free of error against its status, and writes the paragraph itself otherwise),
+  the main results with their status, computed by the code through the
+  dependencies between the results (an error in its own proof, a result it uses
+  with a confirmed error, an unsettled error, not fully checked, or no error
+  found only when its proof and everything it uses were checked), how they were checked and the
   counterexamples tried, the errors (location, quote, the problem in at most four
   sentences, the fix, the results affected, how it was verified), gaps and
   imprecisions, questions to the authors (problems the judge could not decide,
@@ -919,14 +931,15 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   each, the problems a referee raised and the judge rejected, so that a wrong
   rejection can be caught. Whenever a referee and the judge disagree the report
   says so. An unfinished review (a referee stopped, problems not judged) and an
-  error on the main results that nobody settled make the recommendation
-  provisional; the verdict then says what was not checked. It is rewritten as
+  error on the main results that nobody settled, and a main result not fully
+  checked, make the recommendation provisional; the verdict then says what was not checked. It is rewritten as
   the review goes on. Language typos are left to the typo check, which you can start at the
   same time on the same file.
 
   The referees and judges run at once (up to the model-request limit in Settings:
   set it to 16 for reviews with DS4), also when the review is started in a
-  conversation. A review of a 3,000-line paper took about 14 minutes in a test.
+  conversation. If the allowance runs short, the referees and readers stop first,
+  so that every reported problem is still judged. A review of a 3,000-line paper took about 14 minutes in a test.
 
   When the whole paper does not fit the model's context (a small local model),
   the review checks the proofs one by one instead, as described under "How it
@@ -943,9 +956,11 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   each main result, the closest earlier result the literature review found, what
   differs, and whether that changes the recommendation. This part is written
   only from the literature review's checked text and verified records; the
-  references are printed by the code, a work with your manuscript's title is
-  labelled as the manuscript itself (your own preprint) and a work of the same
-  authors as theirs, and neither counts as prior work. If the literature review
+  references are printed by the code, a work with exactly your manuscript's
+  title and one of its authors is labelled as the manuscript itself (your own
+  preprint), and a work whose authors are all among yours (all but one for three
+  or more authors) as a work of the manuscript's authors; neither counts as
+  prior work. If the literature review
   failed or did not finish, the answer says that the position is missing; none
   is written from memory. With online search off, or when your request excludes
   it ("without searching online"), the review starts alone and the answer says

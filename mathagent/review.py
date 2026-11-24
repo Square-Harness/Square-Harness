@@ -604,6 +604,10 @@ class ReviewBase(ResearchRunner):
                 raise
             return result
 
+    def _admit_call(self, role, cap, input_tokens):
+        """A last check before a call is charged (under the mutex): raise to refuse it. The Review keeps a share of
+        the allowance for its judges this way."""
+
     @retry_generation_call
     def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None,
                   reference=True):
@@ -634,6 +638,7 @@ class ReviewBase(ResearchRunner):
                 raise WorkerInputError(str(exc), code='context_overflow', scope='context', details=exc.details) from None
             cap = payload['options']['num_predict']
             estimated, counting_method = allocation['input_tokens'], allocation['method']
+            self._admit_call(role, cap, estimated)
             if estimated > self._input_left():
                 raise ResearchBudget('Input-token budget exhausted')
             request = self._artifact(role + '-request', json.dumps(payload, ensure_ascii=False, indent=2))
@@ -644,7 +649,7 @@ class ReviewBase(ResearchRunner):
             self.state['tokens_charged'] += cap
             self.state['input_tokens_charged'] += estimated
             self._save()
-        text, done, stats, stream = '', False, {}, None
+        text, thinking, done, stats, stream = '', '', False, {}, None
         started = self._elapsed()
         try:
             fd = os.open(self.directory / 'artifacts' / stream_name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
@@ -653,7 +658,9 @@ class ReviewBase(ResearchRunner):
                 for event in stream:
                     output.write(json.dumps(event, ensure_ascii=False) + '\n')
                     output.flush()
-                    text += event.get('message', {}).get('content', '')
+                    message = event.get('message', {})
+                    text += message.get('content', '')
+                    thinking += ''.join(message.get(k) or '' for k in ('thinking', 'reasoning', 'reasoning_content'))
                     if event.get('done'):
                         done = True
                         stats = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'done_reason') if k in event}
@@ -685,7 +692,7 @@ class ReviewBase(ResearchRunner):
         if value is not None and degenerate(text):
             self._warn(f'A {role} answer fell into a repetition loop and was discarded.')
             value = None
-        return {'text': text, 'complete': complete, 'value': value, 'output_limit': cap}
+        return {'text': text, 'complete': complete, 'value': value, 'output_limit': cap, 'thinking': thinking}
 
     def _wave(self, jobs, admit=None):
         """Run independent jobs [(key, fn)]; each fn stores its own result. Re-raise the first failure.

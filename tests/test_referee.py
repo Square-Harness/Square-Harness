@@ -72,9 +72,16 @@ class ScriptClient:
             self.verdict_prompts.append(messages[-1]['content'])
             text = json.dumps({'paragraph': self.verdict})
         elif payload.get("format") == R.READER_SCHEMA:
-            unit = re.search(r'STATEMENT: ([^\n]+)', messages[-1]['content']).group(1)
-            text = json.dumps(self.readers.get(unit, {'explanation': 'Read line by line.', 'issues': [],
-                                                      'verdict': 'no_issue_found', 'external': []}))
+            content = messages[-1]['content']
+            unit = re.search(r'STATEMENT: ([^\n]+)', content).group(1)
+            answer = self.readers.get(unit + (':answer' if R.READER_ANSWER_NOW in content else ''),
+                                      {'explanation': 'Read line by line.', 'issues': [], 'verdict': 'no_issue_found',
+                                       'external': []})
+            if isinstance(answer, tuple):  # (answer text, reasoning): cut at the output limit
+                yield {'message': {'content': answer[0], 'thinking': answer[1]}, 'done': True, 'done_reason': 'length',
+                       'eval_count': payload['options']['num_predict'], 'prompt_eval_count': 1000}
+                return
+            text = json.dumps(answer)
         else:
             ident = re.search(r'THE REPORTED PROBLEM \((I\d+),', first).group(1)
             text = json.dumps(self.judges.get(ident, {'verdict': 'confirmed', 'effect': 'gap', 'reason': 'Checked.', 'fix': ''}))
@@ -632,6 +639,237 @@ class InternalUseTests(RefereeCase):
         self.assertIn("Uses of the paper's own results: ", result['report'])
         self.assertIn('Lemma 2 (1 of 2)', result['report'])  # the remark's use of Lemma 2 was not checked
         self.assertEqual(runner.state['use_coverage'][runner._resolve_result('lem:b')]['failed'], 1)
+
+
+GOVERNED = CITING.replace(r"""\end{remark}
+\end{document}""", r"""\end{remark}
+Unlike in \cite{GT} (see in particular Lemma 2),
+the holes here are explicit. We follow the proof of Theorem 1 and Lemma 2 of \cite{GT}.
+By Lemma 2 and the estimate in \cite{GT}, the claim holds.
+Proposition 2 is used too.
+\end{document}""")
+
+
+class CitationRuleTests(RefereeCase):
+    def setUp(self):
+        super().setUp()
+        (self.root / 'paper.tex').write_text(GOVERNED)
+
+    def line(self, text):
+        return next(n for n, row in enumerate(GOVERNED.splitlines(), 1) if text in row)
+
+    def test_written_out_results_of_a_cited_work_are_not_ours(self):
+        runner, _ = self.run_review(ScriptClient({}), co_referees=0)
+        rows = {(r['line'], r['label']): r for r in runner.state['internal_uses']}
+        self.assertNotIn((self.line('see in particular'), 'Lemma 2'), rows)  # "in \cite{GT} (see ... Lemma 2)"
+        self.assertNotIn((self.line('We follow'), 'Theorem 1'), rows)  # "Theorem 1 and Lemma 2 of \cite{GT}"
+        self.assertNotIn((self.line('We follow'), 'Lemma 2'), rows)
+        doubt = rows[(self.line('By Lemma 2 and'), 'Lemma 2')]
+        self.assertEqual((doubt['uncertain'], doubt['problem'], doubt['owner']),
+                         ('the sentence also cites another work', None, 'lead'))
+        other = rows[(self.line('Proposition 2 is used'), 'Proposition 2')]  # this paper's 2 is a lemma
+        self.assertIn('is a lemma, not a proposition', other['uncertain'])
+        self.assertIsNone(other['problem'])  # uncertain, not a mismatch
+        lead = runner._first_message('lead')
+        self.assertIn('[code, uncertain: the sentence also cites another work', lead)
+
+    def test_an_issue_at_a_use_checks_it_and_a_not_internal_verdict(self):
+        step = self.line('By Lemma~')
+        reader = {'explanation': 'Read.', 'verdict': 'issues_found', 'external': [], 'uses': [], 'issues': [
+            {'start_line': step, 'end_line': step, 'quote': 'applied to $n-1$', 'kind': 'invalid_inference',
+             'effect': 'gap', 'evidence': 'Lemma 2 assumes $n\\ge 1$, and it is applied at $n-1=0$.',
+             'suggestion': 'Start at $n=2$.'}]}
+        doubt = self.line('By Lemma 2 and')
+        client = ScriptClient({'lead': ['Done.']}, readers={'Theorem 1 (Main theorem)': reader})
+        runner, result = self.run_review(client, co_referees=0)
+        rows = {r['id']: r for r in runner.state['internal_uses']}
+        row = next(r for r in rows.values() if r['line'] == step and r['label'] == 'lem:b')
+        self.assertEqual(row['check']['verdict'], 'hypotheses_fail')  # the issue is the check
+        issue = next(i for i in runner.state['issues'] if i['start_line'] == step)
+        self.assertEqual(row['check']['issue'], issue['id'])
+        self.assertIn(row['id'], issue['internal_uses'])
+        # A pass by someone else does not undo it; not_internal takes a row out of the counts.
+        runner._use_check('lead', row['id'], 'exact', 'Fine.')
+        self.assertEqual(row['check']['verdict'], 'hypotheses_fail')
+        ident = next(r['id'] for r in rows.values() if r['line'] == doubt)
+        self.assertIsNone(runner._use_check('lead', ident, 'not_internal', 'Lemma 2 of [GT].'))
+        counts = runner._use_counts()[runner._resolve_result('lem:b')]
+        self.assertEqual(counts['failed'], 1)
+        self.assertEqual(counts['uses'], sum(1 for r in rows.values() if r['cited'] == runner._resolve_result('lem:b')) - 1)
+
+    def test_rows_outside_the_readers_go_to_the_co_referee_of_their_direction(self):
+        (self.root / 'paper.tex').write_text(PAPER)
+        runner, _ = self.run_review(ScriptClient({}), co_referees=1, reading=False)
+        row = next(r for r in runner.state['internal_uses'] if r['label'] == 'lem:step')
+        self.assertEqual((row['in'], row['problem'], row['owner']), ('proof', None, 'C1'))
+        self.assertIn(row['id'] + ',', runner._first_message('C1'))
+        self.assertNotIn(row['id'] + ',', runner._first_message('lead'))
+        self.assertIn(row['id'], runner._second_look('C1')[0])
+
+
+class StatusTests(RefereeCase):
+    """The status of the main results is computed through the map's dependencies; the verdict is checked against it."""
+
+    def test_an_error_in_a_used_lemma_reaches_the_main_theorem(self):
+        step = line_of(DOUBLING)
+        co = [[call('report_issue', start_line=step, end_line=step, quote=DOUBLING, kind='proof',
+                    claim='The doubling bound needs $b_n\\le a_n$, which fails for $n=1$.', evidence='Take $b_1=2a_1$.')],
+              [call('mark_result', result='lem:step', status='issue', how_checked='Line by line.', issue_ids=['I1'])],
+              [call('finish', summary='The lemma fails.')], [call('finish', summary='The lemma fails.')]]
+        lead = [[call('mark_result', result='thm:main', status='no_error_found', how_checked='The induction is fine.')],
+                [call('finish', summary='The theorem is fine.')]]
+        client = ScriptClient({'lead': lead, 'C1': co},
+                              judges={'I1': {'verdict': 'confirmed', 'effect': 'breaks_proof', 'reason': 'The bound fails.',
+                                             'fix': '', 'fill': '', 'new_ingredient': ''}})
+        client.verdict = ('The paper proves a bound for doubling sequences. The main theorem has no error found. '
+                          'The lemma it uses has the confirmed error E1.')
+        runner, result = self.run_review(client)
+        c = R.classify(runner)
+        main = c['mains'][0]
+        self.assertEqual(main['status'], 'relies_on_error')
+        self.assertIn('relies on a result with a confirmed error: Lemma (lem:step) (E1)', main['text'])
+        self.assertEqual(c['recommendation'], 'major_revision')
+        record = runner.state['verdict_text']
+        self.assertEqual(record['by'], 'code')  # the model called the theorem free of error
+        self.assertIn('calls Theorem (Main theorem) free of error', record['rejected']['why'])
+        self.assertIn('relies on a result with a confirmed error', client.verdict_prompts[0])
+        report = result['report']
+        self.assertIn('| Theorem (Main theorem) | relies on a result with a confirmed error: Lemma (lem:step) (E1) |', report)
+        self.assertIn('Main results: Theorem (Main theorem): relies on', report)
+        # The checks on a written verdict.
+        self.assertIn('omits the confirmed error(s) E1',
+                      runner._verdict_problem('The paper proves a bound for doubling sequences; see the findings.', c))
+        flagged = [m for m in c['mains']]
+        self.assertEqual(R.clean_claim('The three main results carry the status no error found.', flagged), 'Theorem (Main theorem)')
+        self.assertIsNone(R.clean_claim('The main theorem relies on the lemma, which has an error.', flagged))
+        self.assertIsNone(R.clean_claim('The main theorem has no error of its own but E1 breaks it.', flagged))
+
+    def test_no_error_found_needs_every_used_proof_checked(self):
+        client = ScriptClient({'lead': ['Done.'], 'C1': ['Done.']})
+        runner, _ = self.run_review(client, reading=False, judging=False)
+        main = R.classify(runner)['mains'][0]
+        self.assertEqual(main['status'], 'not_checked')
+        self.assertIn('Lemma (lem:step)', main['text'])
+        for name in ('thm:main', 'lem:step'):
+            runner.state['coverage'][runner._resolve_result(name)] = {'status': 'no_error_found', 'by': 'C1', 'how_checked': 'Read.'}
+        self.assertEqual(R.classify(runner)['mains'][0]['status'], 'no_error_found')
+
+
+class ReaderCutTests(RefereeCase):
+    """A focused reading cut at its output cap keeps what it can; one that keeps nothing is named."""
+    ISSUE = {'start_line': 0, 'end_line': 0, 'quote': BASE_CASE, 'kind': 'invalid_inference', 'effect': 'breaks_proof',
+             'evidence': 'Nothing gives $a_1\\le 2$.', 'suggestion': 'Assume it.'}
+
+    def reading(self, runner):
+        return next(r for r in runner.state['readers'] if r['unit'] == runner._resolve_result('thm:main'))
+
+    def test_salvage_of_a_cut_answer(self):
+        issue = dict(self.ISSUE, start_line=line_of(BASE_CASE), end_line=line_of(BASE_CASE))
+        cut = '{"issues": [' + json.dumps(issue) + ', {"start_line": 3, "quote": "The ba'
+        self.assertEqual(R.salvage_answer(cut)['issues'], [issue])
+        self.assertIsNone(R.salvage_answer('{"explanation": "I read the first li'))
+        client = ScriptClient({'lead': ['Done.']}, readers={'Theorem (Main theorem)': (cut, 'reasoning ' * 50)})
+        runner, result = self.run_review(client, co_referees=0)
+        reading = self.reading(runner)
+        self.assertEqual((reading['status'], reading['recovered'], reading['verdict']), ('done', 'partial', 'issues_found'))
+        self.assertEqual(len(reading['issues']), 1)
+        self.assertEqual(sum(1 for p in client.payloads if p.get('format') == R.READER_SCHEMA), 2)  # no follow-up call
+        self.assertIn('Theorem (Main theorem) (the problems written before the cut)', result['report'])
+        self.assertNotEqual(R.classify(runner)['mains'][0]['status'], 'no_error_found')
+
+    def test_answer_from_the_notes_and_nothing_at_all(self):
+        notes = 'The base case needs $a_1\\le 2$. ' * 20
+        client = ScriptClient({'lead': ['Done.']}, readers={
+            'Theorem (Main theorem)': ('', notes),
+            'Theorem (Main theorem):answer': {'issues': [], 'uses': [], 'verdict': 'no_issue_found', 'explanation': 'Fine.',
+                                              'external': []},
+            'Lemma (lem:step)': ('{"issues": [', 'short')})
+        runner, result = self.run_review(client, co_referees=0)
+        reading = self.reading(runner)
+        self.assertEqual((reading['status'], reading['recovered'], reading['verdict']), ('done', 'answer_now', 'uncertain'))
+        answer = next(p for p in client.payloads if R.READER_ANSWER_NOW in p['messages'][-1]['content'])
+        self.assertFalse(answer['think'])
+        self.assertIn(notes[:60], answer['messages'][-1]['content'])
+        self.assertEqual(answer['options']['num_predict'], R.READER_ANSWER_CAP)
+        lemma = next(r for r in runner.state['readers'] if r['unit'] == runner._resolve_result('lem:step'))
+        self.assertEqual(lemma['status'], 'unusable')
+        self.assertIn('Focused readings not done: Lemma (lem:step) (no usable answer, cut at the output limit)', result['report'])
+        self.assertIn('an answer written from its notes', result['report'])
+        main = R.classify(runner)['mains'][0]
+        self.assertEqual(main['status'], 'not_checked')
+        self.assertIn('Lemma (lem:step)', main['text'])
+        first = next(p for p in client.payloads if p.get('format') == R.READER_SCHEMA)
+        self.assertEqual(first['options']['num_predict'], R.READER_CAP)
+        self.assertIn(R.READER_BOUND, first['messages'][-1]['content'])
+
+
+class BudgetTests(RefereeCase):
+    def test_the_pool_charges_the_providers_input_count(self):
+        """About 110 calls of about 90k real input tokens, each reserved at a byte count 3.4 times larger."""
+        from mathagent.assistant_budget import BudgetClient
+
+        class Provider:
+            timeout = 60
+            in_flight = []
+
+            def count_input_tokens(self, payload):
+                return 306_000
+
+            def stream(self, payload):
+                self.in_flight.append(tree.pool.state['input_tokens'])
+                yield {'message': {'content': 'ok'}, 'done': True, 'done_reason': 'stop', 'eval_count': 2000,
+                       'prompt_eval_count': 90_000}
+        limit = 33_554_432
+        tree = BudgetClient(Provider(), max_tokens=12_000_000, max_input_tokens=limit, max_seconds=10_000)
+        usage = {'tokens': 0, 'input_tokens': 0}
+        review = tree.fork(Provider(), allowance=None, usage=usage, input_allowance=limit)
+        payload = {'model': 'm', 'messages': [{'role': 'user', 'content': 'x'}],
+                   'options': {'num_predict': 32_000, 'num_ctx': 1_000_000}}
+        for n in range(110):
+            list(review.stream(copy.deepcopy(payload)))
+            if n == 0:
+                self.assertEqual(Provider.in_flight[0], 306_000)  # the reservation holds only while the call runs
+        self.assertEqual(tree.pool.state['input_tokens'], 110 * 90_000)
+        self.assertEqual(usage['input_tokens'], 110 * 90_000)
+        self.assertLess(tree.pool.state['input_tokens'], limit / 3)
+        self.assertEqual(review.remaining_input_tokens, limit - 110 * 90_000)
+
+    def test_referees_and_readers_stop_before_the_judges(self):
+        runner, _ = self.run_review(ScriptClient({'lead': ['Done.']}), co_referees=0)
+
+        class Short:
+            remaining_tokens = 10_000_000
+            remaining_input_tokens = 350_000
+        runner.agent.client = Short()
+        with self.assertRaises(R.RefereeStop):
+            runner._admit_call('reader', 32_000, 150_000)
+        with self.assertRaises(R.RefereeStop):
+            runner._admit_call('co-referee', 8_000, 150_000)
+        runner._admit_call('judge', 40_000, 150_000)  # the judges and the verdict keep the rest
+        runner._admit_call('verdict', 2_500, 150_000)
+        runner._admit_call('reader', 32_000, 100_000)  # 350k - 100k still leaves the share of two judgments
+
+
+class OwnRecordTests(unittest.TestCase):
+    def test_the_manuscript_itself_and_its_authors_works(self):
+        from mathagent.review_position import own_marks
+        manuscript = (r'\documentclass{article}\title[The narrow escape problem in arbitrary dimension]{The narrow escape '
+                      r'problem in arbitrary dimension}\author[Carillo, Leli\`evre, Normand, Stoltz, Vaes]{Louis '
+                      r'Carillo\textsuperscript{1,2,3}, Tony Leli\`evre\textsuperscript{1,2}, Thomas Normand\textsuperscript{2,1}, '
+                      r'Gabriel Stoltz\textsuperscript{1,2}, and Urbain Vaes\textsuperscript{2,1}}\begin{document}\maketitle'
+                      '\nWe study the narrow escape problem.\n\\end{document}')
+        records = [
+            {'k': 8, 'title': 'The narrow escape problem', 'authors': ['D. Holcman', 'Z. Schuss'], 'year': 2014},
+            {'k': 9, 'title': 'The narrow escape problem in arbitrary dimension',
+             'authors': ['Louis Carillo', 'Tony Lelièvre', 'Thomas Normand', 'Gabriel Stoltz', 'Urbain Vaes'], 'arxiv': '2608.02212'},
+            {'k': 5, 'title': 'A spectral approach to the narrow escape problem in two-dimensional domains',
+             'authors': ['Carillo, Louis', 'Lelièvre, Tony', 'Normand, Thomas', 'Vaes, Urbain']},
+            {'k': 4, 'title': 'A spectral approach to the narrow escape problem in the disk',
+             'authors': ['Tony Lelièvre', 'Mohamad Rachid', 'Gabriel Stoltz']},
+            {'k': 6, 'title': 'Narrow escape in the disk', 'authors': ['Tony Lelièvre', 'Mohamad Rachid']},
+            {'k': 7, 'title': 'The narrow escape problem in arbitrary dimension', 'authors': ['A. Other']},
+        ]
+        self.assertEqual(own_marks(records, manuscript), {9: 'manuscript', 5: 'authors', 4: 'authors'})
 
 
 class WorkerSlotsTests(unittest.TestCase):

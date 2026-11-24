@@ -194,7 +194,9 @@ class LiteratureReviewTests(unittest.TestCase):
             self.assertEqual((rejected['charged_tokens'], rejected['charged_input_tokens']), (0, 0))
             self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (20, 100))
             self.assertEqual(budget.snapshot()['tokens'], 20)
-            self.assertEqual(budget.snapshot()['input_tokens'], count_input(transport, transport.requests[0])[0])
+            # The pool charges the provider's input count once a call ends, as the job does (not the reservation).
+            self.assertLess(100, count_input(transport, transport.requests[0])[0])
+            self.assertEqual(budget.snapshot()['input_tokens'], 100)
             self.assertTrue((runner.directory / 'review.md').is_file())
             resumed = runner.resume(paused['id'])
         self.assertEqual(resumed['id'], paused['id'])

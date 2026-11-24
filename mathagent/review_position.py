@@ -72,7 +72,9 @@ only the JSON object."""
 
 
 def _words(text):
-    text = unicodedata.normalize('NFKD', re.sub(r'\\[a-zA-Z]+|[{}$~]', ' ', str(text)))
+    # LaTeX accents first (Leli\`evre, {\'E}cole, \v{S}): the letter stays, so that names match their Unicode form.
+    text = re.sub(r'\\[`\'^"~=.]\s*\{?([A-Za-z])\}?|\\[uvHck]\s*\{([A-Za-z])\}', lambda m: m.group(1) or m.group(2), str(text))
+    text = unicodedata.normalize('NFKD', re.sub(r'\\[a-zA-Z]+|[{}$~]', ' ', text))
     return re.findall(r'[a-z0-9]+', ''.join(c for c in text if not unicodedata.combining(c)).casefold())
 
 
@@ -161,30 +163,66 @@ def literature_goal(value, head):
                    'manuscript itself: it is not prior work.')
 
 
+_BRACED = r'\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}'
+
+
+def _manuscript_names(manuscript):
+    """(titles, surnames) of a LaTeX manuscript from its \\title and \\author commands (both arguments), or
+    (None, None) when it has no \\author (a PDF or a text file)."""
+    head = manuscript[:60000]
+    titles = set()
+    for short, full in re.findall(r'\\title\s*(?:\[([^\]]*)\])?\s*' + _BRACED, head):
+        for title in (short, re.sub(r'\\(?:thanks|footnote)\s*\{[^{}]*\}', ' ', full)):
+            words = _words(re.sub(r'\\\\', ' ', title))
+            if len(words) >= 3:
+                titles.add(' '.join(words))
+    named = re.findall(r'\\author\s*(?:\[([^\]]*)\])?\s*' + _BRACED, head)
+    if not named:
+        return titles or None, None
+    surnames = set()
+    for group in [g for pair in named for g in pair if g]:
+        # Affiliation marks (\textsuperscript{1,2}, $^{1}$, \inst{2}) and notes are not names.
+        group = re.sub(r'\\(?:thanks|footnote|textsuperscript|inst|email|orcid)\s*\{[^{}]*\}|\$[^$]*\$', ' ', group)
+        for name in re.split(r'\\and\b|\band\b|,|;|\\\\', group):
+            tokens = [t for t in _words(name) if not t.isdigit()]
+            if tokens:
+                surnames.add(tokens[-1])
+    return titles or None, surnames
+
+
 def own_marks(references, manuscript):
-    """{reference number: 'manuscript' | 'authors'} for the records that are the manuscript itself (its title) or
-    works of its authors (every author of the record is an author of the manuscript)."""
+    """{reference number: 'manuscript' | 'authors'} for the records that are the manuscript itself or works of its
+    authors; neither counts as prior work.
+
+    The manuscript itself: the record's whole title is the manuscript's title (normalised words) and the record
+    shares at least one author surname with it; a record whose title is only a piece of the manuscript's title (a
+    survey called "The narrow escape problem" beside "The narrow escape problem in arbitrary dimension") is not it.
+    A work of its authors: every author of the record is an author of the manuscript, or all but one when the record
+    has three or more authors."""
     head = manuscript_head(manuscript)
     front = ' ' + ' '.join(_words(head[:3000])) + ' '
-    named = re.findall(r'\\author\s*(?:\[[^\]]*\])?\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', manuscript[:60000])
-    authors = set()
-    for group in named:
-        for name in re.split(r'\\and\b|\band\b|,|\\\\', re.sub(r'\\(?:thanks|footnote)\s*\{[^{}]*\}', ' ', group)):
-            tokens = _words(name)
-            if tokens:
-                authors.add(tokens[-1])
-    if not named:  # a PDF or a text file: the names stand in the lines before the abstract
-        authors = None
+    titles, authors = _manuscript_names(manuscript)
+    if titles is None:  # no \title: the title is one of the first lines (or two of them joined)
+        lines = [' '.join(_words(line)) for line in head.splitlines() if _words(line)][:12]
+        titles = {x for x in lines + [a + ' ' + b for a, b in zip(lines, lines[1:])] if len(x.split()) >= 3}
     marks = {}
     for row in references:
-        title = _words(row.get('title'))
-        surnames = [(_words(a.split(',')[0]) if ',' in a else _words(a))[-1:] for a in row.get('authors') or [] if isinstance(a, str)]
-        surnames = [s[0] for s in surnames if s]
-        if len(title) >= 3 and ' ' + ' '.join(title) + ' ' in front:
+        title = ' '.join(_words(row.get('title')))
+        surnames = []
+        for name in row.get('authors') or []:
+            if isinstance(name, str):
+                tokens = [t for t in (_words(name.split(',')[0]) if ',' in name else _words(name)) if not t.isdigit()]
+                if tokens:
+                    surnames.append(tokens[-1])
+        if authors is not None:
+            shared = [x for x in surnames if x in authors]
+        else:  # a PDF or a text file: the names stand in the lines before the abstract
+            shared = [x for x in surnames if ' ' + x + ' ' in front[:1500]]
+        if title and title in titles and shared:
             marks[row['k']] = 'manuscript'
-        elif surnames and (all(s in authors for s in surnames) if authors is not None
-                           else len(surnames) >= 2 and all(' ' + s + ' ' in front[:1500] for s in surnames)):
-            marks[row['k']] = 'authors'
+        elif surnames and (len(shared) == len(surnames) or (len(surnames) >= 3 and len(shared) >= len(surnames) - 1)):
+            if authors is not None or len(surnames) >= 2:
+                marks[row['k']] = 'authors'
     return marks
 
 

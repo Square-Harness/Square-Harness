@@ -44,6 +44,32 @@
   that its hypotheses hold there: by the focused reader of the proof it stands in, first, and by
   the lead for the others. A failure becomes an issue the judge sees with the cited statement;
   the report says how many uses of each result were checked.
+- Review (v4), fixes after the second benchmark (before a trial in the interface):
+  - In a conversation, the Assistant's input pool now charges each call what the provider
+    counted once the call ends (the reservation, a byte count about three times larger, holds
+    only while it runs), for the review and the literature review beside it; before, a review
+    of about 110 calls exhausted the pool and its last judges and verdict were refused. When an
+    allowance does run short, the referees and readers stop first and the judges keep their share.
+  - A focused reading has room for its answer (a 48k cap, asked to stop reasoning well before
+    it). A reading cut at the cap keeps the complete problems of its answer, or writes its answer
+    from its notes in one short call without reasoning; a reading that gives nothing is named in
+    "What could not be checked", and neither counts its proof as checked.
+  - "Position in the literature": a record is the manuscript itself only when its whole title is
+    the manuscript's and it shares an author (a survey whose title is part of the manuscript's
+    was labelled so); a record whose authors are all among the manuscript's (all but one for
+    three or more) is a work of its authors. Author lists with affiliation marks and LaTeX
+    accents are read correctly.
+  - The status of each main result is computed by code through the dependencies between the
+    results: an error in its own proof, a result it uses with a confirmed error, an unsettled
+    error, not fully checked, or no error found only when its proof and everything it uses were
+    checked. The verdict paragraph receives these as facts; code rejects one that omits a
+    confirmed error or calls a main result free of error against its status, and writes the
+    verdict itself. A main result not fully checked makes the recommendation provisional.
+  - Internal citations: "Lemma 3.3" written out is a use of the paper's own Lemma 3.3 only when
+    no citation of another work governs its sentence; a doubtful one is shown as such. A problem
+    reported at the line of a use, naming the cited result, counts as its failed check. The uses
+    outside the readers' proofs go to the co-referee whose group holds them; the lead keeps the
+    introduction, remarks outside the groups, numerics and every flagged or doubtful use.
 - Review (v4), after its first benchmark run: the judge keeps false alarms out and never makes a
   real finding smaller or invisible. Its rubric has the v3 effect scale again (a gap whose repair
   needs a fact the paper neither proves nor cites, or an unjustified limit, is a failed proof); a
