@@ -7,10 +7,13 @@ import json
 import re
 import tempfile
 import threading
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from mathagent import referee as R
+from mathagent import review_policy as P
 from mathagent.agent import Agent, AgentError
 from mathagent.literature import LiteratureTools
 from mathagent.numerics.policy import PolicyError, REVIEW_RUNS, resolve, review_policy
@@ -34,8 +37,11 @@ class ScriptClient:
     host = 'http://fake.invalid'
     timeout = 60
 
-    def __init__(self, rounds, judges=None, batch=None):
-        self.rounds, self.judges, self.batch = rounds, judges or {}, batch or {}
+    verdict = 'The paper proves a bound for doubling sequences; its main theorem is checked and the findings are listed below.'
+
+    def __init__(self, rounds, judges=None, batch=None, readers=None):
+        self.rounds, self.judges, self.batch, self.readers = rounds, judges or {}, batch or {}, readers or {}
+        self.verdict_prompts = []
         self.payloads = []
         self.lock = threading.Lock()
 
@@ -56,7 +62,19 @@ class ScriptClient:
                 calls = step
         elif payload.get('format') == R.BATCH_SCHEMA:
             ids = re.findall(r'^(I\d+) \(', messages[-1]['content'], re.M)
-            text = json.dumps({'items': [{'id': i, 'verdict': self.batch.get(i, 'confirmed'), 'reason': 'Checked.'} for i in ids]})
+            items = []
+            for i in ids:
+                verdict = self.batch.get(i, 'confirmed')
+                verdict, effect = verdict if isinstance(verdict, tuple) else (verdict, 'misprint')
+                items.append({'id': i, 'verdict': verdict, 'effect': effect, 'reason': 'Checked.'})
+            text = json.dumps({'items': items})
+        elif payload.get('format') == R.VERDICT_SCHEMA:
+            self.verdict_prompts.append(messages[-1]['content'])
+            text = json.dumps({'paragraph': self.verdict})
+        elif payload.get('format') == P.AUDIT_SCHEMA:
+            unit = re.search(r'STATEMENT: ([^\n]+)', messages[-1]['content']).group(1)
+            text = json.dumps(self.readers.get(unit, {'explanation': 'Read line by line.', 'issues': [],
+                                                      'verdict': 'no_issue_found', 'external': []}))
         else:
             ident = re.search(r'THE REPORTED PROBLEM \((I\d+),', first).group(1)
             text = json.dumps(self.judges.get(ident, {'verdict': 'confirmed', 'effect': 'gap', 'reason': 'Checked.', 'fix': ''}))
@@ -108,7 +126,8 @@ class LedgerTests(RefereeCase):
                     claim='Doubling should read halving.', evidence='Read.', fix='halving')],
               [call('mark_result', result='lem:step', status='no_error_found', how_checked='Line by line.')],
               [call('mark_result', result='thm:main', status='issue', how_checked='The induction.', issue_ids=['I1'])],
-              [call('finish', summary='Checked the lemma.')]]
+              [call('finish', summary='Checked the lemma.')],  # time is left: a second look is asked for once
+              [call('finish', summary='Checked the lemma again.')]]
         client = ScriptClient({'lead': lead, 'C1': co},
                               judges={'I1': {'verdict': 'confirmed', 'effect': 'breaks_proof', 'reason': 'The base case fails.',
                                              'fix': 'Assume $a_1\\le 2$.'}},
@@ -133,12 +152,16 @@ class LedgerTests(RefereeCase):
         self.assertIn('Merged with I', results[2])
         self.assertIn('min left', results[0])
         roles = {c['role'] for c in s['calls']}
-        self.assertEqual(roles, {'lead', 'co-referee', 'judge', 'judge-batch'})
+        self.assertEqual(roles, {'lead', 'co-referee', 'reader', 'judge', 'judge-batch', 'verdict'})
         self.assertTrue(all(c.get('stats') for c in s['calls']))
         # The report: the confirmed error raises the lead's "accept"; the refuted misprint is counted, not printed.
         report = result['report']
-        self.assertIn('**Recommendation: Major revision.** (raised', report)
+        # The recommendation follows the judged findings by rule (the lead said accept).
+        self.assertIn('**Recommendation: Major revision.**\n', report)
         self.assertIn('**E1**', report)
+        self.assertEqual(s['referees']['C1']['second_look']['on'], 'finish')
+        self.assertTrue(any(m['role'] == 'tool' and m['content'].startswith('Not yet. About') and 'second look at the proof of'
+                            in m['content'] for p in client.payloads for m in p['messages']))
         self.assertIn('## Errors', report)
         self.assertIn('Found by lead; verified by the judge', report)
         # The refuted misprint is not a finding, but it is listed, one line, so that a wrong rejection can be caught.
@@ -326,8 +349,7 @@ class JudgeTests(RefereeCase):
         runner, result, _ = self.review_with({'I1': {'verdict': 'undecided', 'effect': 'breaks_proof', 'reason': 'Cannot tell.',
                                                      'fix': '', 'fill': '', 'new_ingredient': ''}}, lead=lead, co_referees=0)
         report = result['report']
-        self.assertIn('**Recommendation: Major revision.** (raised', report)
-        self.assertIn('(provisional: a reported error is not settled)', report)
+        self.assertIn('**Recommendation: Major revision.** (provisional: a reported error is not settled)', report)
         self.assertIn('reported as error in a proof and not settled', report)
 
     def test_the_judge_sees_the_other_side(self):
@@ -365,7 +387,7 @@ class WithdrawTests(RefereeCase):
                                           claim='First claim.', evidence='Read.'))
         co.execute('report_issue', dict(start_line=doubling, end_line=doubling, quote=DOUBLING, kind='gap',
                                         claim='Second claim.', evidence='Computed.'))
-        self.assertIn('still report', lead.execute('withdraw_issue', {'issue_id': 'I2', 'reason': 'Wrong.'}))
+        self.assertIn('another report on the same lines stands', lead.execute('withdraw_issue', {'issue_id': 'I2', 'reason': 'Wrong.'}))
         second = runner.state['issues'][1]
         self.assertEqual((second['claim'], second['reported_by'], second['status']), ('Second claim.', ['C1'], 'pending'))
         # Saved before this check: a non-finding in the ledger is never printed.
@@ -423,11 +445,112 @@ class ReportTests(RefereeCase):
               [call('finish', summary='Checked.')]]
         runner, result = self.run_review(ScriptClient({'lead': ['I stop.'], 'C1': co}))
         report = result['report']
-        self.assertIn('| Theorem (Main theorem) | no error found | C1 | Checked the induction;', report)
+        self.assertIn('| Theorem (Main theorem) | no error found | C1; reader: no problem found | Checked the induction;', report)
         checklist = report.split('## What was verified by computation')[1].split('##')[0]
         self.assertIn('Checked by computation, no error found:', checklist)
         self.assertIn('- Theorem (Main theorem) (C1): Checked the induction;', checklist)
         self.assertNotIn('Line by line', checklist)
+
+
+class ReaderTests(RefereeCase):
+    """Focused readers (the v3 line-by-line audit) on the main chain's proofs, beside the referees."""
+
+    def test_plan_order_and_slots(self):
+        client = ScriptClient({'lead': ['Done.'], 'C1': ['Done.']})
+        runner, _ = self.run_review(client, concurrency=1)  # two model slots: the referees hold both at first
+        readers = runner.state['readers']
+        names = [runner._unit(r['unit'])['name'] for r in readers]
+        self.assertEqual(names, ['Theorem (Main theorem)', 'Lemma (lem:step)'])  # the main proof first, then what it uses
+        self.assertEqual([r['depth'] for r in readers], [0, 1])
+        self.assertEqual({r['status'] for r in readers}, {'done'})
+        self.assertLessEqual(readers[0]['started'], readers[1]['started'])
+        calls = [c for c in runner.state['calls'] if c['role'] == 'reader']
+        self.assertEqual(len(calls), 2)
+        prompt = next(p for p in client.payloads if p.get('format') == P.AUDIT_SCHEMA)
+        self.assertTrue(prompt['think'])
+        self.assertIn('LINE BY LINE', prompt['messages'][-1]['content'])
+        with unittest.mock.patch.object(R, 'READERS', 1):
+            self.assertEqual(len(runner._reader_plan()), 1)
+
+    def test_reader_issue_in_the_ledger_and_merged_with_a_referee(self):
+        base = line_of(BASE_CASE)
+        reader = {'explanation': 'The base case is asserted.', 'verdict': 'issues_found', 'external': [], 'issues': [
+            {'start_line': base, 'end_line': base, 'quote': BASE_CASE, 'kind': 'invalid_inference', 'effect': 'breaks_proof',
+             'evidence': 'Nothing in the paper gives $a_1\\le 2$. The induction cannot start.', 'suggestion': 'Assume it.'}]}
+
+        class Ordered(ScriptClient):  # the judge answers after both reports (either may come first)
+            def stream(self, payload):
+                if 'THE REPORTED PROBLEM' in json.dumps(payload['messages'][:3]):
+                    time.sleep(0.5)
+                yield from super().stream(payload)
+        lead = [[call('report_issue', start_line=base, end_line=base, quote=BASE_CASE, kind='proof',
+                      claim='Why is $a_1\\le 2$?', evidence='Read.')], 'Done.']
+        client = Ordered({'lead': lead}, readers={'Theorem (Main theorem)': reader},
+                         judges={'I1': {'verdict': 'refuted', 'effect': 'gap', 'reason': 'It is in the definitions.', 'fix': ''}})
+        runner, result = self.run_review(client, co_referees=0)
+        issue = runner.state['issues'][0]
+        uid = runner._resolve_result('thm:main')
+        self.assertEqual(sorted(issue['reported_by']), ['R:' + uid, 'lead'])
+        self.assertEqual(issue['kind'], 'proof')
+        self.assertEqual(issue['status'], 'disputed')  # a reader and a referee: two independent reports
+        reading = next(r for r in runner.state['readers'] if r['unit'] == uid)
+        self.assertEqual((reading['verdict'], reading['issues']), ('issues_found', ['I1']))
+        self.assertIn('the reader of Theorem (Main theorem)', result['report'].split('## Questions to the authors')[1])
+
+
+class VerdictTests(RefereeCase):
+    def test_the_verdict_is_written_after_the_judge_and_checked(self):
+        base, doubling = line_of(BASE_CASE), line_of(DOUBLING)
+        lead = [[call('report_issue', start_line=base, end_line=base, quote=BASE_CASE, kind='gap',
+                      claim='The base case fails for the sequence of the second section.', evidence='Read.')],
+                [call('mark_result', result='thm:main', status='issue', how_checked='Read.')],
+                [call('finish', summary='The base case fails for the sequence of the second section (I1).',
+                      recommendation='major_revision')]]
+        judges = {'I1': {'verdict': 'refuted', 'effect': 'gap', 'reason': 'It is in the definitions.', 'fix': '',
+                         'fill': '', 'new_ingredient': ''}}
+        client = ScriptClient({'lead': lead}, judges=judges)
+        client.verdict = 'The main theorem is in doubt: the base case fails for the sequence of the second section.'
+        runner, result = self.run_review(client, co_referees=0)
+        record = runner.state['verdict_text']
+        self.assertEqual(record['by'], 'code')
+        self.assertIn('repeats the claim of I1', record['rejected']['why'])
+        prompt = client.verdict_prompts[0]
+        self.assertNotIn('(I1)', prompt)  # the lead's sentence naming the rejected issue is not passed on
+        self.assertIn('NO PROBLEM WAS CONFIRMED', prompt)
+        report = result['report']
+        self.assertIn('**Recommendation: Accept.**', report)  # by rule: the lead's major revision rested on I1
+        self.assertIn('No problem was confirmed.', report)
+        self.assertNotIn('second section', report.split('## Raised by a referee')[0])
+        c = R.classify(runner)
+        self.assertEqual(runner._verdict_problem('I1 is wrong, and the paper is otherwise fine as written.', c), 'names an issue id')
+        self.assertIn('E3', runner._verdict_problem('The error E3 decides it; the rest of the paper is fine.', c))
+        self.assertIsNone(runner._verdict_problem('The paper proves a bound for doubling sequences; nothing was confirmed.', c))
+
+    def test_a_referee_that_stops_without_finish_is_nudged_once(self):
+        client = ScriptClient({'lead': ['I stop here.', 'Still nothing.']})
+        runner, _ = self.run_review(client, co_referees=0)
+        lead = runner.state['referees']['lead']
+        self.assertEqual(lead['status'], 'ended')
+        self.assertIn('unit', lead['nudged'])
+        rounds = [p for p in client.payloads if p.get('tools') and 'YOUR TASK (lead' in json.dumps(p['messages'][:3])]
+        self.assertIn('You stopped without calling finish. About', rounds[-1]['messages'][-1]['content'])
+        self.assertEqual(len(rounds), 2)
+
+    def test_batch_judge_reroutes_more_than_a_misprint(self):
+        doubling = line_of(DOUBLING)
+        co = [[call('report_issue', start_line=doubling, end_line=doubling, quote=DOUBLING, kind='misprint',
+                    claim='The "=" should be "\\le": only the inequality holds.', evidence='Read.', fix='\\le')], 'Done.']
+        client = ScriptClient({'lead': ['Done.'], 'C1': co}, batch={'I1': ('confirmed', 'imprecision')},
+                              judges={'I1': {'verdict': 'confirmed', 'effect': 'imprecision', 'reason': 'Only an inequality holds.',
+                                             'fix': '', 'fill': '', 'new_ingredient': ''}})
+        runner, result = self.run_review(client)
+        issue = runner.state['issues'][0]
+        self.assertEqual(issue['rerouted']['effect'], 'imprecision')
+        self.assertFalse(issue['judge'].get('batch'))
+        self.assertEqual(issue['judge']['effect'], 'imprecision')
+        self.assertIn('**G1. ', result['report'])
+        judge = next(p for p in client.payloads if 'THE REPORTED PROBLEM (I1' in json.dumps(p['messages']))
+        self.assertIn('MORE THAN A MISPRINT (imprecision)', json.dumps(judge['messages']))
 
 
 class WorkerSlotsTests(unittest.TestCase):

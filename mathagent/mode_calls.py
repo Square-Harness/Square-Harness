@@ -15,7 +15,7 @@ from .orchestrator import Orchestrator
 from .proof_routing import route_request
 from .research import _job_directory, _read_state
 from .review_position import (BRIEF_OUTPUT, BRIEF_POLICY, BRIEF_SCHEMA, POSITION_OUTPUT, POSITION_POLICY, POSITION_SCHEMA,
-                              bounded_json, literature_goal, manuscript_head, missing_position, own_marks,
+                              bounded_json, copied_phrases, literature_goal, manuscript_head, missing_position, own_marks,
                               position_prompt, render_position)
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, effort_for
 from .source_tasks import (access_check_source, automatic_source_action, excludes_external_sources, _instruction_text,
@@ -411,14 +411,23 @@ class ModeOrchestrator(Orchestrator):
                 text = '\n'.join(_source_lines(self.agent.workspace, names[0])[0])
             head = manuscript_head(text)
             self.emit('progress', 'Writing the question of the literature review…')
-            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY,
-                                 'TITLE, ABSTRACT AND INTRODUCTION OF THE MANUSCRIPT:\n' + head, BRIEF_SCHEMA, BRIEF_OUTPUT)
+            user = 'TITLE, ABSTRACT AND INTRODUCTION OF THE MANUSCRIPT:\n' + head
+            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user, BRIEF_SCHEMA, BRIEF_OUTPUT)
+            goal = literature_goal(value, head)
+            copied = copied_phrases(value, head) if goal is None else []
+            if copied:
+                # One more try: a brief that repeats a phrase of the manuscript word for word is dropped whole (its
+                # text would reach a search engine), and the model often keeps one long technical phrase verbatim.
+                value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user
+                                     + '\n\nYOUR PREVIOUS ANSWER COPIED THESE PHRASES OF THE MANUSCRIPT WORD FOR WORD; restate '
+                                     'every sentence in your own words:\n' + '\n'.join('- ' + c for c in copied[:8]),
+                                     BRIEF_SCHEMA, BRIEF_OUTPUT)
+                goal = literature_goal(value, head)
         except (AgentError, CallContextError, ValueError, TypeError, OSError, IndexError, UnicodeError) as exc:
             return None, ('the question of the literature review could not be written from the manuscript '
                           f'({str(exc)[:160] or type(exc).__name__})')
         finally:
             self.emit('progress', '')
-        goal = literature_goal(value, head)
         return (goal, None) if goal else (None, 'the question of the literature review could not be written in public '
                                                 'words from the manuscript')
 

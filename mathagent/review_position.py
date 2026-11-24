@@ -116,6 +116,24 @@ def bounded_json(client, model, ctx, system, user, schema, output):
     return value
 
 
+def copied_phrases(value, head):
+    """The runs of COPIED_WORDS consecutive manuscript words that a brief repeats (its question and results)."""
+    source = ' ' + ' '.join(_words(head)) + ' '
+    found = []
+    for item in [value.get('question')] + list(value.get('results') or [])[:4]:
+        tokens = _words(item or '')
+        starts = [i for i in range(len(tokens) - COPIED_WORDS + 1)
+                  if ' ' + ' '.join(tokens[i:i + COPIED_WORDS]) + ' ' in source]
+        spans = []  # overlapping runs joined into one phrase
+        for i in starts:
+            if spans and i <= spans[-1][1]:
+                spans[-1][1] = i + COPIED_WORDS
+            else:
+                spans.append([i, i + COPIED_WORDS])
+        found += [' '.join(tokens[a:b]) for a, b in spans if ' '.join(tokens[a:b]) not in found]
+    return found
+
+
 def literature_goal(value, head):
     """The request of the literature review, from the brief the model wrote, or None when nothing usable is left.
 

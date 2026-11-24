@@ -429,9 +429,18 @@ class FanOutCase(unittest.TestCase):
 
     def test_question_copied_from_the_manuscript_starts_no_literature_review(self):
         copied = {**BRIEF, 'question': 'For every integer $n\\ge 1$ we have $a_n \\le 2^n$ and more words.'}
-        result = self.assistant([copied]).run('Referee this paper.', files=['paper.tex'])
+        result = self.assistant([copied, copied]).run('Referee this paper.', files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
         self.assertIn('could not be written in public words', result['answer'])
+        # The second try was told which phrase it copied.
+        self.assertIn('COPIED THESE PHRASES', self.client.requests[1]['messages'][1]['content'])
+        self.assertIn('- for every integer n 1 we have a n 2 n\n', self.client.requests[1]['messages'][1]['content'] + '\n')
+
+    def test_a_copied_brief_is_written_again_once(self):
+        copied = {**BRIEF, 'question': 'For every integer $n\\ge 1$ we have $a_n \\le 2^n$ and more words.'}
+        result = self.assistant([copied, BRIEF, POSITION]).run('Referee this paper.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee', 'literature'])
+        self.assertIn(BRIEF['question'], result['children'][1]['action']['request'])
 
     def test_review_the_assistant_routes_itself_gets_the_same_fan_out(self):
         result = self.assistant([BRIEF, POSITION], required_mode=None).run('Review the paper paper.tex', files=['paper.tex'])
