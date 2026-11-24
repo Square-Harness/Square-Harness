@@ -28,6 +28,9 @@
   GHCR package.
 - Add `--dev` and SHA-pinned dev-image selection to the Bash and PowerShell
   launchers, with a separate development data volume by default.
+- Attach a source-free, release-version-pinned Docker ZIP and reusable
+  quick-start Markdown to stable GitHub Releases; point ordinary users to the
+  release bundle while retaining source setup guidance for developers.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same

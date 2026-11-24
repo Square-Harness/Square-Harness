@@ -12,7 +12,7 @@ jobs:
     if: github.repository == 'Square-Harness/Square-Harness' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Check out release
@@ -21,6 +21,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Verify release tag matches app version
+        id: version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -41,6 +42,8 @@ jobs:
                   f"Release tag {tag!r} does not match app version "
                   f"{version_match.group(1)!r}."
               )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version_match.group(1)}\n")
           print(f"Publishing Square Harness {version_match.group(1)}")
           PY
 
@@ -80,3 +83,33 @@ jobs:
           cache-to: type=gha,mode=max
           sbom: true
           provenance: mode=max
+
+      - name: Assemble source-free Docker download
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/square-harness-docker"
+          assets="$RUNNER_TEMP/square-harness-release-assets"
+          mkdir -p "$bundle/deployment" "$assets"
+
+          cp compose.yaml "$bundle/compose.yaml"
+          cp -p deployment/start-local.sh deployment/start-local.ps1 "$bundle/deployment/"
+          cp deployment/release/README.md "$bundle/README.md"
+          cat > "$bundle/deployment/compose.local.env.example" <<EOF
+          SQUARE_HARNESS_MODE=local
+          SQUARE_GUI_PORT=8765
+          SQUARE_DATA_VOLUME=square-harness-local-data
+          SQUARE_HARNESS_IMAGE=ghcr.io/square-harness/square-harness:${APP_VERSION}
+          EOF
+
+          zip_path="$assets/square-harness-${APP_VERSION}-docker.zip"
+          (cd "$bundle" && zip -qr "$zip_path" compose.yaml deployment README.md)
+          cp "$bundle/README.md" "$assets/square-harness-${APP_VERSION}-docker-README.md"
+
+          gh release upload "$RELEASE_TAG" \
+            "$zip_path" \
+            "$assets/square-harness-${APP_VERSION}-docker-README.md" \
+            --clobber

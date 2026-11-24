@@ -24,10 +24,11 @@ the model itself is not included in the image.
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) on
    Windows or macOS, or Docker Engine with the Compose plugin on Linux. Start
    Docker Desktop/Engine.
-2. [Download the source ZIP](https://github.com/Square-Harness/Square-Harness/archive/refs/heads/main.zip)
-   and extract it.
-3. From the extracted project folder (usually named `Square-Harness-main`),
-   run the launcher:
+2. Open the [latest GitHub Release](https://github.com/Square-Harness/Square-Harness/releases/latest)
+   and download its `square-harness-<version>-docker.zip` asset. Extract it.
+   The separate `square-harness-<version>-docker-README.md` asset contains the
+   same quick-start instructions for preview.
+3. From the extracted folder, run the launcher:
 
    **macOS or Linux**
    ```bash
@@ -39,12 +40,14 @@ the model itself is not included in the image.
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local.ps1
    ```
 
-The launcher checks Docker and Compose, pulls the published app image, starts
-it in local mode, and opens the private app link in your browser. It does
-**not** install Docker automatically: Docker installation requires
+The release bundle contains only the Compose configuration, launchers and
+instructions; it does not contain application source or build the app. The
+launcher checks Docker and Compose, pulls the image pinned to that release,
+starts it in local mode, and opens the private app link in your browser. It
+does **not** install Docker automatically: Docker installation requires
 operating-system-specific steps and your approval. Python and Node.js are not
-needed. Image downloads will be available after the first stable GitHub Release
-publishes the package.
+needed. These release assets will be available after the first stable GitHub
+Release publishes them.
 The PowerShell command's execution-policy bypass applies only to that
 PowerShell process; it does not change your system policy.
 
@@ -52,7 +55,8 @@ The app and its saved workspace data remain in Docker. To stop the app without
 deleting data, run this from the extracted folder:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example down
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example down
 ```
 
 ### Change or create a workspace
@@ -100,8 +104,16 @@ operator-configured managed secret store. See the [user guide](docs/guide.md)
 and [full installation guide](docs/llm-install.md) for provider and server
 details.
 
-For native Python/terminal use, remote GPU setups, or advanced model hosting,
-see the [installation guide](docs/llm-install.md).
+### Developers: run from source
+
+To modify Square Harness, contribute code or build a development image, use the
+[source repository](https://github.com/Square-Harness/Square-Harness) instead
+of the app-only release bundle. Follow the [development guide](docs/llm-development.md)
+and [installation guide](docs/llm-install.md). Non-main branch dev images can
+be tried with the launcher's `--dev` option; see the installation guide.
+
+For native Python/terminal use or remote GPU setups, see the
+[installation guide](docs/llm-install.md).
 
 ### Use Square Harness on Android
 
@@ -147,8 +159,8 @@ each skill and how it is built.
 
 - [Guide](docs/guide.md): philosophy, every skill, how skills are made, effort,
   data and privacy.
-- [Install guide](docs/llm-install.md): Docker quick start, native installation,
-  remote GPU/cluster setup and server deployment.
+- [Install guide](docs/llm-install.md): release bundle, development images,
+  native installation, remote GPU/cluster setup and server deployment.
 - [Development guide](docs/llm-development.md): architecture, rules, how to add a
   feature, benchmarks.
 - [Changelog](CHANGELOG.md).

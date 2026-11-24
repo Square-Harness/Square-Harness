@@ -32,8 +32,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
 - The `Publish app container` workflow publishes stable GitHub Releases to
   `ghcr.io/square-harness/square-harness` for `linux/amd64` and `linux/arm64`.
   The release tag must match `mathagent/__init__.py`; it creates version,
-  major/minor and `latest` tags. The first published package must be changed to
-  public in GitHub Packages settings before anonymous users can pull it.
+  major/minor and `latest` tags. After the image push succeeds, that workflow
+  also adds a source-free, version-pinned Docker ZIP and its Markdown quick-start
+  as separate assets on the same release; the Markdown is also inside the ZIP.
+  The first published package must be changed to public in GitHub Packages
+  settings before anonymous users can pull it.
 - The `Publish development container` workflow publishes non-`main` branch
   pushes and manual runs from non-`main` branches to the separate
   `ghcr.io/square-harness/square-harness-dev` package, with immutable

@@ -74,13 +74,13 @@ try {
     }
     Push-Location $repoRoot
     try {
-        & docker compose --env-file $envFile pull
+        & docker compose -p square-harness-local --env-file $envFile pull
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'Could not download the Square Harness image. Check your internet connection and confirm that the selected GHCR image is available to you.'
             exit $LASTEXITCODE
         }
 
-        & docker compose --env-file $envFile up -d
+        & docker compose -p square-harness-local --env-file $envFile up -d
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'Docker could not start Square Harness. Check Docker Desktop, available disk space and port 8765.'
             exit $LASTEXITCODE
@@ -89,7 +89,7 @@ try {
         Write-Host 'Waiting for Square Harness to start...'
         $openUrl = $null
         for ($attempt = 0; $attempt -lt 60 -and -not $openUrl; $attempt++) {
-            $logs = & docker compose --env-file $envFile logs --no-color --no-log-prefix --tail=200 square-harness 2>$null
+            $logs =& docker compose -p square-harness-local --env-file $envFile logs --no-color --no-log-prefix --tail=200 square-harness 2>$null
             $match = [regex]::Match(($logs -join "`n"), 'Open:\s+(http://\S+)')
             if ($match.Success) {
                 $openUrl = $match.Groups[1].Value
@@ -99,7 +99,7 @@ try {
         }
 
         if (-not $openUrl) {
-            Write-Error 'Square Harness did not provide its private app link. Check container status with: docker compose --env-file deployment/compose.local.env.example ps'
+            Write-Error 'Square Harness did not provide its private app link. Check container status with: docker compose -p square-harness-local --env-file deployment/compose.local.env.example ps'
             exit 1
         }
 

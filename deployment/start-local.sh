@@ -81,18 +81,18 @@ if [[ "$use_dev" == true ]]; then
   printf 'Using development image: %s\n' "$SQUARE_HARNESS_IMAGE"
 fi
 
-if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" pull; then
+if ! SQUARE_HARNESS_MODE=local docker compose -p square-harness-local --env-file "$env_file" pull; then
   fail 'Could not download the Square Harness image. Check your internet connection and confirm that the selected GHCR image is available to you.'
 fi
 
-if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" up -d; then
+if ! SQUARE_HARNESS_MODE=local docker compose -p square-harness-local --env-file "$env_file" up -d; then
   fail 'Docker could not start Square Harness. Check Docker Desktop/Engine, available disk space and port 8765.'
 fi
 
 printf '%s\n' 'Waiting for Square Harness to start...'
 open_url=''
 for _ in {1..60}; do
-  logs="$(docker compose --env-file "$env_file" logs --no-color --no-log-prefix --tail=200 square-harness 2>/dev/null || true)"
+  logs="$(docker compose -p square-harness-local --env-file "$env_file" logs --no-color --no-log-prefix --tail=200 square-harness 2>/dev/null || true)"
   open_url="$(printf '%s\n' "$logs" | sed -n 's/.*Open: \(http:\/\/[^[:space:]]*\).*/\1/p' | tail -n 1)"
   [[ -n "$open_url" ]] && break
   sleep 2
@@ -101,7 +101,7 @@ done
 if [[ -z "$open_url" ]]; then
   printf '%s\n' \
     'Square Harness did not provide its private app link.' \
-    'Check the container with: docker compose --env-file deployment/compose.local.env.example ps' \
+    'Check the container with: docker compose -p square-harness-local --env-file deployment/compose.local.env.example ps' \
     'For help, inspect its logs locally; do not share logs containing the private app link.'
   exit 1
 fi

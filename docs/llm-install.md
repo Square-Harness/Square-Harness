@@ -2,12 +2,12 @@
 
 ## Run locally with Docker (no Python setup)
 
-This is the recommended way to start the web app without installing Python,
-Node.js or Square Harness directly on your computer. You still need Docker:
-Docker Desktop on Windows/macOS, or Docker Engine and the Compose plugin on
-Linux. [Download the source ZIP](https://github.com/Square-Harness/Square-Harness/archive/refs/heads/main.zip),
-extract it, then run the launcher from the extracted project folder (usually
-named `Square-Harness-main`):
+This is the recommended way to run the app without installing Python, Node.js
+or building Square Harness from source. You still need Docker: Docker Desktop
+on Windows/macOS, or Docker Engine and the Compose plugin on Linux. Open the
+[latest GitHub Release](https://github.com/Square-Harness/Square-Harness/releases/latest)
+and download `square-harness-<version>-docker.zip`. Extract it and run the
+launcher from the extracted folder:
 
 ```sh
 # macOS or Linux
@@ -25,6 +25,9 @@ the Compose plugin are available, pull the published app image, start local
 mode, and open the private app link. The image will be available after the
 first stable GitHub Release publishes it. If the GHCR package has not been made
 public yet, Docker login may be required.
+The release also contains a standalone Markdown quick-start asset with the
+same instructions as the README inside the ZIP. Each ZIP pins its image to the
+matching release version, so it remains reproducible after later releases.
 
 The launchers do not install Docker. Docker installation is operating-system
 specific, may require administrator approval or a restart, and should be done
@@ -64,11 +67,12 @@ Make the dev package public for anonymous pulls, or authenticate Docker with a
 GitHub token that has `read:packages`.
 
 For developers who need to build from the current source checkout instead of
-pulling an image, use the development Compose override:
+using the release bundle or a published development image, use the development
+Compose override:
 
 ```sh
 docker compose --env-file deployment/compose.local.env.example \
-  -f compose.yaml -f compose.dev.yaml up --build -d
+  -p square-harness-local -f compose.yaml -f compose.dev.yaml up --build -d
 ```
 
 The local app listens only on `127.0.0.1:8765`. Its workspace and saved
@@ -77,7 +81,8 @@ persists when the container stops. From the repository folder, stop the app
 without deleting its data with:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example down
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example down
 ```
 
 The image contains the app, not an LLM. In the app's **Model provider** panel,
@@ -1076,30 +1081,35 @@ Never add a Docker-socket mount to the shared server deployment.
 Start local mode from the repository root with the published image:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example pull
-docker compose --env-file deployment/compose.local.env.example up -d
-docker compose --env-file deployment/compose.local.env.example ps
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example pull
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example up -d
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example ps
 ```
 
 For a local source build instead, run:
 
 ```sh
 docker compose --env-file deployment/compose.local.env.example \
-  -f compose.yaml -f compose.dev.yaml up --build -d
+  -p square-harness-local -f compose.yaml -f compose.dev.yaml up --build -d
 ```
 
 Open `http://127.0.0.1:8765` and use the `Open:` URL from the app logs, which
 contains the local workspace token. To view it, run:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example logs -f square-harness
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example logs -f square-harness
 ```
 
 The default named volume is `square-harness-local-data`; it holds workspaces
 and any explicitly remembered provider key. Stop the app with:
 
 ```sh
-docker compose --env-file deployment/compose.local.env.example down
+docker compose -p square-harness-local \
+  --env-file deployment/compose.local.env.example down
 ```
 
 Do not add `-v` if the data should remain.
