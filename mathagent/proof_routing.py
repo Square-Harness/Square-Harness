@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 OUTPUT_TOKENS = 1024
 SCHEMA = {
     'type': 'object',
@@ -61,6 +61,11 @@ Use check for a targeted verified reference, literature for a survey,
 python_lab for a specifically requested execution or numerical simulation, explore
 for a mathematical explanation without a source or of a whole document, explain for one
 named result, page, section or appendix of an attached file, and prove for a nontrivial proof.
+For a manuscript file: referee writes a referee report on the whole paper (every proof checked, a
+recommendation; it does not list typos); typo_check lists only its typos, misprints, language and
+presentation problems, each correction checked, and checks no proof: use it whenever the user asks for
+typos, proofreading, spelling or grammar of a file, never explore; quick_review checks one given proof.
+A review and the typos of the same file are two tasks, referee and typo_check, that start together.
 Use writeup when the user asks for a document: a LaTeX note, a write-up, a .tex
 or PDF file of results. It writes the file from the results of the conversation,
 so it waits (after_results) for the tasks whose results it states or cites.
