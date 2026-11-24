@@ -54,7 +54,7 @@ from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
 LABELS = {'literature': 'Literature review', 'referee': 'Review', 'writeup': 'Write-up', 'summarize': 'Summary', 'style': 'Writing style', 'check': 'Literature check',
-          'quick_review': 'Review · quick check', 'explain': 'Review · explanation', 'typo_check': 'Typo check'}
+          'quick_review': 'Proof check', 'explain': 'Review · explanation', 'typo_check': 'Typo'}
 LABELS['detailed_review'] = 'Review'  # the former detailed review is the review
 VARIANT_LABELS = {'review': 'Review', 'journal': 'Review', 'typos': LABELS['typo_check'], 'quick': LABELS['quick_review'],
                   'explain': LABELS['explain']}

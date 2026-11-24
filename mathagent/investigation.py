@@ -186,7 +186,7 @@ def validate_plan(plan, files=(), max_effort='medium', task_limit=MAX_TASKS):
         if 'fixed_case' in task and (type(task['fixed_case']) is not bool or (task['fixed_case'] and 'candidate' not in task)):
             raise ValueError('A fixed special-case Proof needs a precise candidate and a Boolean fixed_case flag.')
         if mode == 'quick_review' and not files:
-            raise ValueError('Quick Review needs an attached source file.')
+            raise ValueError('Proof Check needs an attached source file.')
     if sum(t['mode'] == 'prove' for t in tasks) > MAX_PROOFS:
         raise ValueError('At most two Proof tasks may be planned.')
     reached = set()
@@ -264,7 +264,7 @@ def list_records(root):
 
 
 STEP_NAMES = {'explore': 'Exploration', 'check': 'Literature check', 'literature': 'Literature review',
-              'prove': 'Proof', 'quick_review': 'Quick review'}  # as the notebook names them (outputs.ts)
+              'prove': 'Proof', 'quick_review': 'Proof check'}  # as the notebook names them (outputs.ts)
 
 
 def _step_name(tasks, key):

@@ -11,7 +11,7 @@ import { go } from '../router'
 import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 import { capacityFull } from '../concurrency'
-import { FIXED_VARIANTS, VARIANT_EFFORT, VARIANT_INPUT_SCALE, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
+import { FIXED_VARIANTS, VARIANT_COVERS, VARIANT_EFFORT, VARIANT_INPUT_SCALE, VARIANT_NAMES, VARIANT_SCALE, VARIANTS } from '../review'
 import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
@@ -36,7 +36,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, and gives every objection a second opinion (a defence of the paper, then a judge). The report is rewritten as checks finish: a first draft is readable within minutes. There is one depth, so no effort to choose. Typos are a separate, faster job: the Typo Check.',
+    lede: 'Pin the manuscript. The harness reads the whole paper and checks every proof, appendices included, the main results first; it reads across the paper for inconsistencies and unproved claims, and gives every objection a second opinion (a defence of the paper, then a judge). The report is rewritten as checks finish: a first draft is readable within minutes. There is one depth, so no effort to choose. Typos are a separate, faster job: Typo.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (a TeX source gives the best results; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
@@ -184,13 +184,13 @@ export function ResearchNew({ kind }: { kind: Kind }) {
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
         <div className="entry"><span className="in-margin" /><WorkspaceSwitch /></div>
         <div className="entry">
-          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={review && variant === 'explain' ? 'explain' : kind} /></span>
+          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={review ? VARIANT_COVERS[variant] : kind} /></span>
           <div>
             {review && (
               <div className="segmented" role="group" aria-label="Kind of review">
                 {VARIANTS.map((item) => (
                   <button key={item} type="button" aria-pressed={variant === item} onClick={() => chooseVariant(item)}>
-                    {VARIANT_NAMES[item]}
+                    <span className="segmented-mark" aria-hidden="true"><Glyph mode={VARIANT_COVERS[item]} /></span>{VARIANT_NAMES[item]}
                   </button>
                 ))}
               </div>

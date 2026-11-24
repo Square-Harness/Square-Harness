@@ -758,7 +758,7 @@ readable without an upgrade.
 Ordinary mathematical chat with read access to your folder (`.tex`, `.bib`, PDF
 text, …). **Explore** gives promising approaches early, with the first useful
 step and the main obstacle for each. It labels heuristic steps and may run a
-quick numerical sanity check. Use **Quick Review** to check a proof or **Fresh
+quick numerical sanity check. Use **Proof Check** to check a proof or **Fresh
 review** to audit a previous answer. Saved Critique conversations can still be
 read and continued as ordinary mathematical chats.
 

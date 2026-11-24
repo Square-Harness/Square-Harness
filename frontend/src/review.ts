@@ -3,6 +3,7 @@
 
 import type { Budget, ReviewVariant, RouteMode } from './api'
 import type { EffortLevel } from './effort'
+import type { Cover } from './components/Glyph'
 import type { Variant } from './components/Square'
 
 /** The kinds of review behind the Review notebook; the engine kind stays 'referee'. */
@@ -10,10 +11,15 @@ import type { Variant } from './components/Square'
 export const VARIANTS: ReviewVariant[] = ['quick', 'review', 'typos', 'explain']
 
 export const VARIANT_NAMES: Record<ReviewVariant, string> = {
-  quick: 'Quick Check', review: 'Review', journal: 'Review', typos: 'Typo Check', explain: 'Explanation',
+  quick: 'Proof Check', review: 'Review', journal: 'Review', typos: 'Typo', explain: 'Explanation',
 }
 
-/** A quick check ends with a verdict on the proof, shown with the notebook's squares. */
+/** The mark of each kind (components/Glyph.tsx): a ticked square, the pilcrow, a letter underlined, a bulb. */
+export const VARIANT_COVERS: Record<ReviewVariant, Cover> = {
+  quick: 'proof_check', review: 'referee', journal: 'referee', typos: 'typo', explain: 'explain',
+}
+
+/** A proof check ends with a verdict on the proof, shown with the notebook's squares. */
 export const VERDICTS: Record<string, { variant: Variant; label: string }> = {
   no_issue_found: { variant: 'reviewed', label: 'No issue found' },
   issues_found: { variant: 'refuted', label: 'Issues found' },

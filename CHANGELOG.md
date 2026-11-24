@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Interface names: the quick check of one proof is **Proof Check** and the typo check is **Typo**
+  (the calls stay `@quick_review` and `@typo_check`). Proof Check, Review and Typo each have their own
+  mark: a ticked end-of-proof square, the pilcrow, a letter with a wavy underline; the New review form
+  shows the mark beside each kind.
 - The Review (v4, pipeline `review-v4`) is rebuilt around free referees and an independent
   judge. With the whole paper in the model's context (DS4), a lead referee and up to five
   co-referees (one per group of proofs) work at once, each a tool loop on the whole paper: they
