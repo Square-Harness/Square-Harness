@@ -32,6 +32,37 @@ through the official instructions: <https://docs.docker.com/get-docker/>. If
 Docker is installed but stopped, start Docker Desktop/Engine and run the
 launcher again.
 
+#### Try a development image (for testing)
+
+The `Publish development container` GitHub Actions workflow runs for every
+push event on a non-`main` branch. Once the workflow is on the default branch,
+you can also open **Actions → Publish development container → Run workflow**
+and select a non-`main` branch; manual runs on `main` are refused.
+One push event builds the branch tip once, even if it contains several commits.
+To check the result, open the repository's **Actions** tab, select **Publish
+development container**, and wait for the run for your commit to succeed.
+Copy the first 12 characters of the commit SHA shown on that run to select its
+exact image:
+
+```sh
+bash deployment/start-local.sh --dev a1b2c3d4e5f6
+```
+
+Or use `--dev` without a SHA to run the floating `dev` image from the most
+recently completed successful non-`main` build. Because multiple branches share
+this tag, prefer the SHA form when you need reproducible testing. The same
+options work in PowerShell:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deployment\start-local.ps1 --dev a1b2c3d4e5f6
+```
+
+Dev mode uses a separate `square-harness-dev-data` volume by default and
+replaces the running app container; run the launcher without `--dev` to switch
+back to the stable image and its data. GHCR packages may initially be private.
+Make the dev package public for anonymous pulls, or authenticate Docker with a
+GitHub token that has `read:packages`.
+
 For developers who need to build from the current source checkout instead of
 pulling an image, use the development Compose override:
 

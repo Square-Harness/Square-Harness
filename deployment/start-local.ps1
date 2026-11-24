@@ -4,6 +4,34 @@
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $envFile = Join-Path $repoRoot 'deployment/compose.local.env.example'
+$useDev = $false
+$devSha = $null
+
+if ($args.Count -gt 0) {
+    if ($args[0] -in @('-h', '--help')) {
+        Write-Output 'Usage: powershell.exe -File deployment/start-local.ps1 [--dev [12-character-SHA]]'
+        Write-Output ''
+        Write-Output 'Without --dev, start the latest stable image.'
+        Write-Output '--dev starts the most recently completed successful non-main build.'
+        Write-Output '--dev <SHA> starts the development image built from that exact commit.'
+        Write-Output 'Development mode uses a separate data volume unless SQUARE_DATA_VOLUME is set.'
+        exit 0
+    }
+
+    if ($args[0] -ne '--dev' -or $args.Count -gt 2) {
+        [Console]::Error.WriteLine('Usage: deployment/start-local.ps1 [--dev [12-character-SHA]]')
+        exit 64
+    }
+
+    $useDev = $true
+    if ($args.Count -eq 2) {
+        if ($args[1] -notmatch '^[0-9a-fA-F]{12}$') {
+            [Console]::Error.WriteLine('--dev requires exactly 12 hexadecimal characters when a SHA is supplied.')
+            exit 64
+        }
+        $devSha = $args[1].ToLowerInvariant()
+    }
+}
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Error 'Docker is not installed or is not on PATH. Install Docker Desktop: https://docs.docker.com/get-docker/'
@@ -28,8 +56,22 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
 }
 
 $previousMode = [Environment]::GetEnvironmentVariable('SQUARE_HARNESS_MODE', 'Process')
+$previousImage = [Environment]::GetEnvironmentVariable('SQUARE_HARNESS_IMAGE', 'Process')
+$previousVolume = [Environment]::GetEnvironmentVariable('SQUARE_DATA_VOLUME', 'Process')
 try {
     $env:SQUARE_HARNESS_MODE = 'local'
+    if ($useDev) {
+        if ($devSha) {
+            $env:SQUARE_HARNESS_IMAGE = "ghcr.io/square-harness/square-harness-dev:dev-$devSha"
+        }
+        else {
+            $env:SQUARE_HARNESS_IMAGE = 'ghcr.io/square-harness/square-harness-dev:dev'
+        }
+        if ([string]::IsNullOrWhiteSpace($env:SQUARE_DATA_VOLUME)) {
+            $env:SQUARE_DATA_VOLUME = 'square-harness-dev-data'
+        }
+        Write-Host "Using development image: $env:SQUARE_HARNESS_IMAGE"
+    }
     Push-Location $repoRoot
     try {
         & docker compose --env-file $envFile pull
@@ -80,5 +122,17 @@ finally {
     }
     else {
         $env:SQUARE_HARNESS_MODE = $previousMode
+    }
+    if ($null -eq $previousImage) {
+        Remove-Item Env:SQUARE_HARNESS_IMAGE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:SQUARE_HARNESS_IMAGE = $previousImage
+    }
+    if ($null -eq $previousVolume) {
+        Remove-Item Env:SQUARE_DATA_VOLUME -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:SQUARE_DATA_VOLUME = $previousVolume
     }
 }

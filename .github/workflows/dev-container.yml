@@ -43,6 +43,7 @@ jobs:
           images: ghcr.io/square-harness/square-harness-dev
           tags: |
             type=sha,prefix=dev-
+            type=raw,value=dev
 
       - name: Build and publish multi-platform image
         uses: docker/build-push-action@v6

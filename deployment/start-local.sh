@@ -13,6 +13,43 @@ fail() {
   exit "${2:-1}"
 }
 
+usage() {
+  cat <<'EOF'
+Usage: bash deployment/start-local.sh [--dev [12-character-SHA]]
+
+Without --dev, start the latest stable image.
+--dev starts the most recently completed successful non-main build.
+--dev <SHA> starts the development image built from that exact commit.
+Development mode uses a separate data volume unless SQUARE_DATA_VOLUME is set.
+EOF
+}
+
+use_dev=false
+dev_sha=''
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  --dev)
+    use_dev=true
+    if (($# > 2)); then
+      usage >&2
+      exit 64
+    fi
+    if (($# == 2)); then
+      [[ "$2" =~ ^[[:xdigit:]]{12}$ ]] || fail '--dev requires exactly 12 hexadecimal characters when a SHA is supplied.' 64
+      dev_sha="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    fi
+    ;;
+  '')
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac
+
 if ! command -v docker >/dev/null 2>&1; then
   printf '%s\n' \
     'Docker is not installed or is not on PATH.' \
@@ -31,6 +68,18 @@ fi
 
 [[ -f "$env_file" ]] || fail 'The local Compose configuration is missing from this download.'
 cd "$repo_root"
+
+if [[ "$use_dev" == true ]]; then
+  if [[ -n "$dev_sha" ]]; then
+    export SQUARE_HARNESS_IMAGE="ghcr.io/square-harness/square-harness-dev:dev-$dev_sha"
+  else
+    export SQUARE_HARNESS_IMAGE='ghcr.io/square-harness/square-harness-dev:dev'
+  fi
+  if [[ -z "${SQUARE_DATA_VOLUME:-}" ]]; then
+    export SQUARE_DATA_VOLUME='square-harness-dev-data'
+  fi
+  printf 'Using development image: %s\n' "$SQUARE_HARNESS_IMAGE"
+fi
 
 if ! SQUARE_HARNESS_MODE=local docker compose --env-file "$env_file" pull; then
   fail 'Could not download the Square Harness image. Check your internet connection and confirm that the selected GHCR image is available to you.'

@@ -26,6 +26,8 @@
   source-build Compose override for development, update local launchers to pull
   before starting, and publish non-main test builds to a separate development
   GHCR package.
+- Add `--dev` and SHA-pinned dev-image selection to the Bash and PowerShell
+  launchers, with a separate development data volume by default.
 - Literature check: a standard reference now comes with the chapter or section
   the model remembers, shown as memory ("By memory, I think it is in Chapter 3,
   Section 3.5"), never as checked. The Assistant gives remembered places the same

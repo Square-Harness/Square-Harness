@@ -36,15 +36,17 @@ Version 1.1.0. The source of truth for the machine-readable version is
   public in GitHub Packages settings before anonymous users can pull it.
 - The `Publish development container` workflow publishes non-`main` branch
   pushes and manual runs from non-`main` branches to the separate
-  `ghcr.io/square-harness/square-harness-dev` package, tagged `dev-<12-char-sha>`.
-  It does not publish `latest` or change stable release tags. For a source build,
-  layer `compose.dev.yaml` over `compose.yaml`; the local launchers pull the
-  published image selected by `SQUARE_HARNESS_IMAGE` instead. To try a completed
-  branch build, set `SQUARE_HARNESS_IMAGE=ghcr.io/square-harness/square-harness-dev:dev-<12-char-sha>`
-  before running the local launcher and use
-  `SQUARE_DATA_VOLUME=square-harness-dev-data` to keep test data separate. The
-  development package must be public for anonymous pulls, or Docker must be
-  authenticated with `read:packages`.
+  `ghcr.io/square-harness/square-harness-dev` package, with immutable
+  `dev-<12-char-sha>` tags and a mutable `dev` tag for the most recently
+  completed successful build. A push event builds the branch tip once, even
+  when the push contains multiple commits. It does not publish `latest` or
+  change stable release tags. Use `bash deployment/start-local.sh --dev` for
+  the floating dev tag, or `bash deployment/start-local.sh --dev <12-char-SHA>`
+  to test an exact commit. The PowerShell launcher accepts the same options.
+  Dev mode defaults to `square-harness-dev-data`; re-run the launcher without
+  `--dev` to switch back to stable. The development package must be public for
+  anonymous pulls, or Docker must be authenticated with `read:packages`. For a
+  source build, layer `compose.dev.yaml` over `compose.yaml`.
 - A stale local branch may be literally named `origin/main`. Compare with
   `refs/remotes/origin/main`.
 - Before any commit, scan the diff for private data and remove it: absolute
