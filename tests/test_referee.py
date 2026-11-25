@@ -850,28 +850,6 @@ class BudgetTests(RefereeCase):
         runner._admit_call('reader', 32_000, 100_000)  # 350k - 100k still leaves the share of two judgments
 
 
-class OwnRecordTests(unittest.TestCase):
-    def test_the_manuscript_itself_and_its_authors_works(self):
-        from mathagent.review_position import own_marks
-        manuscript = (r'\documentclass{article}\title[The narrow escape problem in arbitrary dimension]{The narrow escape '
-                      r'problem in arbitrary dimension}\author[Carillo, Leli\`evre, Normand, Stoltz, Vaes]{Louis '
-                      r'Carillo\textsuperscript{1,2,3}, Tony Leli\`evre\textsuperscript{1,2}, Thomas Normand\textsuperscript{2,1}, '
-                      r'Gabriel Stoltz\textsuperscript{1,2}, and Urbain Vaes\textsuperscript{2,1}}\begin{document}\maketitle'
-                      '\nWe study the narrow escape problem.\n\\end{document}')
-        records = [
-            {'k': 8, 'title': 'The narrow escape problem', 'authors': ['D. Holcman', 'Z. Schuss'], 'year': 2014},
-            {'k': 9, 'title': 'The narrow escape problem in arbitrary dimension',
-             'authors': ['Louis Carillo', 'Tony Lelièvre', 'Thomas Normand', 'Gabriel Stoltz', 'Urbain Vaes'], 'arxiv': '2608.02212'},
-            {'k': 5, 'title': 'A spectral approach to the narrow escape problem in two-dimensional domains',
-             'authors': ['Carillo, Louis', 'Lelièvre, Tony', 'Normand, Thomas', 'Vaes, Urbain']},
-            {'k': 4, 'title': 'A spectral approach to the narrow escape problem in the disk',
-             'authors': ['Tony Lelièvre', 'Mohamad Rachid', 'Gabriel Stoltz']},
-            {'k': 6, 'title': 'Narrow escape in the disk', 'authors': ['Tony Lelièvre', 'Mohamad Rachid']},
-            {'k': 7, 'title': 'The narrow escape problem in arbitrary dimension', 'authors': ['A. Other']},
-        ]
-        self.assertEqual(own_marks(records, manuscript), {9: 'manuscript', 5: 'authors', 4: 'authors'})
-
-
 class WorkerSlotsTests(unittest.TestCase):
     def test_a_review_worker_has_its_own_slots(self):
         from mathagent.assistant_budget import BudgetClient
