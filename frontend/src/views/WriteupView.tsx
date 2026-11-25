@@ -5,6 +5,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { api, type ResearchDetail, type WriteupPlan } from '../api'
 import { ErrorNote, Loading, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
 import { PauseIcon, PlayIcon } from '../components/Icons'
+import { StopTurn } from '../components/JobActions'
 import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago } from '../format'
@@ -128,6 +129,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
             <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume saved work'}
           </button>
         ) : null}
+        {ours && <StopTurn task={ownTask} onError={setError} />}
         {data.running && (ownTask?.kind === 'chat' || route.from) && <span className="muted">Running for the Assistant in <a href={href('free', ownTask?.kind === 'chat' ? ownTask.target : route.from)}>{app.chats?.find((chat) => chat.id === (ownTask?.target || route.from))?.title || 'the conversation'}</a>.</span>}
       </div>
       {!ours && busy && resumable && !queued && <BusyNote queue />}

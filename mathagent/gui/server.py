@@ -364,6 +364,14 @@ def pause(h, body):
     return {'task': h.server.hub.pause(task, investigation_id=investigation, chat_id=chat).summary()}
 
 
+@route('POST', '/api/task/kill')
+def kill(h, body):
+    task = body.get('task')
+    if not isinstance(task, str) or not re.fullmatch(r'[0-9a-f]{12}', task):
+        raise ValueError('Give a valid task ID to stop.')
+    return {'task': h.server.hub.kill(task).summary()}
+
+
 @route('POST', '/api/concurrency')
 def concurrency(h, body):
     if not body or set(body) - {'chats', 'requests'}:
@@ -717,6 +725,11 @@ def investigation_stop(h, body, id):
     if expected is not None and not isinstance(expected, str):
         raise ValueError('Invalid investigation ID')
     return h.server.hub.stop_investigation(id, expected)
+
+
+@route('POST', '/api/chats/' + UUID + '/assistant/stop')
+def assistant_stop(h, body, id):
+    return h.server.hub.stop_assistant(id)
 
 
 @route('POST', '/api/chats/' + UUID + '/assistant/resume')

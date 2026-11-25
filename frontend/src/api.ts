@@ -187,6 +187,8 @@ export type TaskState = 'queued' | 'starting' | 'running' | 'pausing' | 'paused'
 export type TaskSummary = {
   /** A message queued to run after its conversation's current turn. */
   followup?: boolean
+  /** The user stopped this task for good: it pauses, then its Assistant turn is closed instead of awaiting Resume. */
+  killed?: boolean
   waiting_model_calls?: number
   position?: number
   queued_at?: number | null
@@ -740,6 +742,7 @@ export const api = {
   login: (token: string) => post<{ ok: boolean }>('/api/login', { token }),
   task: () => get<TaskSnapshot>('/api/task'),
   pause: (task: string, investigationId?: string, chatId?: string) => post<{ task: TaskSummary }>('/api/task/pause', { task, investigation_id: investigationId, chat_id: chatId }),
+  kill: (task: string) => post<{ task: TaskSummary }>('/api/task/kill', { task }),
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
@@ -817,6 +820,7 @@ export const api = {
   stopInvestigation: (id: string, expectedId?: string) => post<{ status: string; answer: string }>(
     `/api/chats/${id}/investigation/stop`, expectedId ? { investigation_id: expectedId } : {}),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
+  stopAssistant: (id: string) => post<{ status: string }>(`/api/chats/${id}/assistant/stop`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number | null> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),
   cancelRoute: (id: string, index: number) => post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/cancel`),

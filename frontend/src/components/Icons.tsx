@@ -28,6 +28,8 @@ export const NotebookIcon = (p: IconProps) => <Icon {...p}>
 export const MenuIcon = (p: IconProps) => <Icon {...p}><path d="M4 7h16M4 12h16M4 17h16" /></Icon>
 export const PlusIcon = (p: IconProps) => <Icon {...p}><path d="M12 5v14M5 12h14" /></Icon>
 export const PauseIcon = (p: IconProps) => <Icon {...p}><path d="M9 6v12M15 6v12" /></Icon>
+// A filled square, the notebook's end-of-proof mark: stop for good.
+export const StopIcon = (p: IconProps) => <Icon {...p}><rect x="6.5" y="6.5" width="11" height="11" rx="1" fill="currentColor" /></Icon>
 export const PlayIcon = (p: IconProps) => <Icon {...p}><path d="M8 5.5v13l10-6.5z" /></Icon>
 export const CloseIcon = (p: IconProps) => <Icon {...p}><path d="M6 6l12 12M18 6L6 18" /></Icon>
 export const TrashIcon = (p: IconProps) => <Icon {...p}><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></Icon>

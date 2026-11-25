@@ -8,11 +8,13 @@ import { Glyph } from './Glyph'
 import { EFFORTS, type EffortLevel } from './Effort'
 import './ModeMessage.css'
 
-export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, hasEffort, onSend, disabled }: {
+export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, hasEffort, onSend, onKey, disabled }: {
   value: string; onChange: (value: string) => void
   call: ModeCall | null; onCall: (call: ModeCall | null) => void
   effort: EffortLevel | null; onEffort: (effort: EffortLevel | null) => void; hasEffort: boolean
   onSend: () => void; disabled: boolean
+  /** Keys the skill menu did not take (message recall, Esc to pause); returns true when it handled the key. */
+  onKey?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean
 }) {
   const input = useRef<HTMLTextAreaElement>(null)
   const selectedCaret = useRef<number | null>(null)
@@ -83,6 +85,7 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
         return
       }
     }
+    if (onKey?.(event)) return
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); onSend() }
   }
   return (

@@ -16,7 +16,8 @@ import { PersonalizationSettings } from './Personalization'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, StopIcon, SunIcon, TrashIcon } from './Icons'
+import { clearDrafts } from '../drafts'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
 import { AgentSquares } from './AgentGroup'
@@ -478,6 +479,7 @@ function AccountMenu({ account, allowance }: { account: Account; allowance?: Tes
           : <p className="muted small">This account has no tester spending limit.</p>}
         <button type="button" className="btn btn-block" onClick={() => {
           document.documentElement.style.visibility = 'hidden'
+          clearDrafts()
           window.location.replace('/cdn-cgi/access/logout')
         }}>Sign out</button>
       </div>
@@ -501,6 +503,7 @@ function WorkspacePanel({ about }: { about: boolean }) {
       if (!current) return
       if (accountEmail.current && (!value || accountEmail.current !== value.email)) {
         document.documentElement.style.visibility = 'hidden'
+        clearDrafts()
         window.location.replace('/')
         return
       }
@@ -509,6 +512,7 @@ function WorkspacePanel({ about }: { about: boolean }) {
     }).catch((error: unknown) => {
       if (current && accountEmail.current && error instanceof ApiError && [401, 403].includes(error.status)) {
         document.documentElement.style.visibility = 'hidden'
+        clearDrafts()
         window.location.replace('/')
       }
     }) }
@@ -620,8 +624,14 @@ function WorkRow({ task, app, queued, onOpen }: { task: TaskSummary; app: AppSta
       </div>
       <button type="button" className="btn btn-small" disabled={pending || pausing}
         aria-label={`${label}: ${task.label} ${task.title}`} onClick={() => void act()}>
-        {!queued && <PauseIcon size={15} />} {queued ? 'Cancel' : label}
+        {!queued && <PauseIcon size={15} />} {queued ? 'Cancel' : pausing && task.killed ? 'Stopping…' : label}
       </button>
+      {!queued && task.kind === 'chat' && <button type="button" className="btn btn-small btn-delete" disabled={!!task.killed}
+        title="Stop this turn for good: it cannot be resumed. Jobs it started keep their saved work."
+        aria-label={`Stop for good: ${task.label} ${task.title}`}
+        onClick={() => { setError(''); api.kill(task.id).catch((reason: Error) => setError(reason.message)) }}>
+        <StopIcon size={15} /> Stop
+      </button>}
     </li>
   )
 }

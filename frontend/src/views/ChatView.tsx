@@ -7,7 +7,7 @@ import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, CopyButton, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
-import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
+import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon, StopIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
@@ -17,6 +17,8 @@ import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
+import { recentMessages, rememberMessage, useRecall } from '../recall'
+import { loadDraft, saveDraft } from '../drafts'
 import { artifactsOf, displayOf, type Artifact } from '../artifacts'
 import { literalUnderscores } from '../mathtext'
 import { ago, count, displayPath, duration } from '../format'
@@ -116,8 +118,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const routing = work.routing
   const [kept] = useState(() => id ? null : rescued)
   useEffect(() => { if (kept) rescued = null }, [kept])
-  const [draft, setDraft] = useState(kept?.draft || '')
-  const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
+  // An unsent message is kept for this conversation while the tab stays open (drafts.ts).
+  const [draft, setDraft] = useState(() => kept?.draft || loadDraft(id))
+  useEffect(() => { saveDraft(id, draft) }, [id, draft])
+  const [selectedCall, setSelectedCall] = useState<ModeCall | null>(() => mode === 'free' ? typedCall(draft, true) : null)
   // null: no effort named, so the harness picks its default for the mode.
   const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
   const selectCall = (next: ModeCall | null) => {
@@ -143,6 +147,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const deleted = (event: Event) => {
       if ((event as CustomEvent<string>).detail !== id) return
       rescued = { draft, attachments }
+      saveDraft(id, '')
       setProjectFilter(currentProject || 'all')
     }
     window.addEventListener('square-chat-deleted', deleted)
@@ -245,6 +250,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true, newProject)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall, queue)
       else await api.send(chatId, content, attachments)
+      if (text === undefined) rememberMessage(content)
+      saveDraft(id, '')  // at once: a first message leaves this view before the draft effect runs
       setDraft('')
       setSelectedCall(null)
       setAttachments([])
@@ -274,6 +281,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setProjectFilter(project || 'all')
   }
   const keys = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (boxKeys(event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() }
   }
   const changeThink = (value: boolean) => {
@@ -292,7 +300,30 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setSendError('')
     try { await api.stopInvestigation(id, data?.investigation?.id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
   }
+  // Stop for good: a running turn pauses and is then closed; a paused one is closed at once. Saved work is kept.
+  const stop = async () => {
+    if (!id || resuming) return
+    setSendError('')
+    try {
+      if (task) await api.kill(task.id)
+      else { setResuming(true); await api.stopAssistant(id) }
+    } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
+  }
   const transcript = data?.transcript || []
+  // ↑ in an empty message box recalls what was sent: this conversation's messages, or this tab's in a new one.
+  const sentHere = useMemo(() => sentMessages(data?.transcript || []), [data?.transcript])
+  const recall = useRecall(sentHere.length ? sentHere : recentMessages(), draft, (text) => {
+    setDraft(text)
+    selectCall(free ? typedCall(text, true) : null)
+  })
+  // Esc in the message box pauses the running turn, as the Pause button does.
+  const boxKeys = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (recall(event)) return true
+    if (event.key !== 'Escape' || !task || task.state === 'pausing' || event.nativeEvent.isComposing) return false
+    event.preventDefault()
+    api.pause(task.id).catch((reason: Error) => setSendError(reason.message))
+    return true
+  }
   const lastTask = app.snapshot.task
   const taskError = lastTask?.target === id && lastTask.state === 'error' ? lastTask.error : ''
   const last = transcript.at(-1)
@@ -300,6 +331,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     transcript.some(item => item.role === 'route' && item.task === lastTask?.id && item.error === taskError))
   // Another conversation's work can be queued; this conversation has one active turn.
   const blocked = work.blocked
+  // Only an Assistant turn is closed by Stop; a job started from a card pauses and resumes from its own page.
+  const stoppable = free && task?.kind === 'chat'
+  // With Queue beside them, Pause and Stop keep only their icons on a narrow screen, so the text box keeps its room.
+  const crowded = ours && canQueue && !!(draft.trim() || hasImages)
 
   return (
     <MathMacrosProvider definitions={data?.math_macros}>
@@ -330,7 +365,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               <div>
                 <p className="notice">{pausedInvestigation
                   ? 'The investigation is paused. Resume the plan or finish with a report on the evidence collected so far.'
-                  : 'The assistant is paused. Resume its saved work or send a new message to set this turn aside.'}</p>
+                  : 'The assistant is paused. Resume its saved work, stop it for good, or send a new message to set this turn aside.'}</p>
                 {pausedInvestigation && <button type="button" className="btn btn-quiet btn-small" disabled={resuming || work.blocked}
                   onClick={stopInvestigation}>Stop and report</button>}
               </div>
@@ -360,7 +395,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-box">
           {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
             effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !FIXED_EFFORT[selectedCall.mode] && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
-            onSend={() => { send() }} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+            onSend={() => { send() }} onKey={boxKeys} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Continue the conversation…' : 'Ask about an approach, a reformulation or a connection…'}
@@ -371,15 +406,18 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               <SendIcon size={16} /> {sending ? 'Queueing…' : 'Queue'}
             </button>
           )}
-          {ours ? (
-            <button type="button" className={'btn composer-send' + (canQueue && (draft.trim() || hasImages) ? ' btn-quiet' : '')} disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
-              {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} {task?.state === 'pausing' ? 'Pausing…' : free ? 'Pause' : 'Stop'}
+          {ours ? <>
+            <button type="button" className={'btn composer-send' + (crowded ? ' btn-quiet' : '')} disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}
+              aria-label={free ? 'Pause' : 'Stop'} title={free ? 'Pause at the next checkpoint: the work is saved and can be resumed (Esc in the message box)' : 'Esc in the message box'}>
+              {task?.state === 'pausing' ? <PlayIcon size={16} /> : <PauseIcon size={16} />} <span className={crowded ? 'composer-long-label' : undefined}>{task?.state === 'pausing' ? (task.killed ? 'Stopping…' : 'Pausing…') : free ? 'Pause' : 'Stop'}</span>
             </button>
-          ) : paused && (pausedInvestigation || (!draft.trim() && !hasImages)) ? (
+            {stoppable && <StopButton disabled={!!task?.killed} investigation={!!data?.investigation?.current} compact={crowded} onClick={stop} />}
+          </> : paused && (pausedInvestigation || (!draft.trim() && !hasImages)) ? <>
             <button type="button" className="btn btn-primary composer-send" disabled={work.blocked || resuming || sending || !!uploading} onClick={resume}>
               <PlayIcon size={16} /> {resuming ? 'Resuming…' : 'Resume'}
             </button>
-          ) : work.queued && !work.active && !work.queued.followup ? (
+            <StopButton disabled={work.blocked || resuming || sending} investigation={pausedInvestigation} onClick={stop} />
+          </> : work.queued && !work.active && !work.queued.followup ? (
             <button type="button" className="btn composer-send" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
               <CloseIcon size={16} /> Cancel queued turn
             </button>
@@ -399,7 +437,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
                 budgetDisplay.context, budgetDisplay.time].filter(Boolean).join(' · ')}</p>}
             </details>
           )}
-          {free && <span className="composer-hint">@ selects a skill</span>}
+          {free && <span className="composer-hint">@ selects a skill<span className="composer-long-label">{ours ? ' · Esc pauses' : ' · ↑ recalls your last message'}</span></span>}
         </div>
         <ModelWaitNote taskId={task?.id} />
         {work.queued && (work.active || work.routing || work.queued.followup ? (
@@ -420,6 +458,15 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     </div>
     </MathMacrosProvider>
   )
+}
+
+/** Ends the turn for good, beside Pause or Resume. The square is the notebook's end mark. */
+function StopButton({ disabled, investigation, compact, onClick }: { disabled: boolean; investigation: boolean; compact?: boolean; onClick: () => void }) {
+  return <button type="button" className="btn btn-delete composer-send" disabled={disabled} onClick={onClick} aria-label="Stop for good"
+    title={investigation ? 'Stop the investigation for good and report on the evidence collected so far'
+      : 'Stop this turn for good: it cannot be resumed. Jobs it started keep their saved work.'}>
+    <StopIcon size={16} /> <span className={compact ? 'composer-long-label' : undefined}>Stop</span>
+  </button>
 }
 
 function Intro({ mode, project, onPick }: { mode: ChatMode; project?: string; onPick: (text: string) => void }) {
@@ -511,6 +558,21 @@ function Transcript({ items, mode, chatId, lanes, plan, waiting, paused }: { ite
 
 // The route card the harness saves for a skill the person picked with @ (mode_calls.py).
 const EXPLICIT_CALL = 'User explicitly selected @'
+
+/** The messages sent in a conversation, oldest first, as they were typed: a skill picked with @ leads its message again. */
+function sentMessages(transcript: TranscriptItem[]) {
+  const sent: string[] = []
+  transcript.forEach((item, index) => {
+    if (item.role !== 'user' || !item.content.trim()) return
+    let call: TranscriptItem | undefined
+    for (let next = index + 1; next < transcript.length && transcript[next].role !== 'user' && !call; next++) {
+      if (transcript[next].role === 'route' && transcript[next].reason?.startsWith(EXPLICIT_CALL)) call = transcript[next]
+    }
+    const text = call?.mode && call.mode !== 'clarify' ? `@${call.mode} ${item.content}` : item.content
+    if (sent.at(-1) !== text) sent.push(text)
+  })
+  return sent
+}
 
 function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptItem }) {
   const files = (item.files || []).filter(path => !item.images?.length || !isImagePath(path))

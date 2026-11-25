@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Conversations: **Stop** ends a turn for good, beside **Pause** while it runs and beside **Resume** once it is paused. The turn can no longer be resumed and the conversation takes a new message at once; the jobs it started keep their saved work, and an investigation closes with its report on the evidence collected. Also on the page of a job the Assistant is running and in **Parallel work**. API: `POST /api/task/kill` and `POST /api/chats/<id>/assistant/stop`.
+- Conversations: in an empty message box, the up arrow recalls the last message sent, and the up and down arrows walk through the earlier ones, as in a terminal.
+- Conversations: Esc in the message box pauses the running turn. An unsent message is kept with its conversation while the browser tab stays open (reload, visit to another conversation). When work ends while the tab is in the background, the tab title announces it until you return.
 - Interface names: the quick check of one proof is **Proof Check** and the typo check is **Typo**
   (the calls stay `@quick_review` and `@typo_check`). Proof Check, Review and Typo each have their own
   mark: a ticked end-of-proof square, the pilcrow, a letter with a wavy underline; the New review form

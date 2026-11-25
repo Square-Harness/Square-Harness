@@ -447,16 +447,28 @@ one with a message.
   a proof) attempts; the page says what will be added, and the addition is
   recorded in the job and its report. **Delete…** on a proof page moves an idle
   proof to the workspace trash after a confirmation. A paused conversation shows **Resume** while the text box
-  is empty; type a new message instead to set the paused turn aside. While a turn
+  is empty; type a new message instead to set the paused turn aside. **Stop**, beside
+  **Pause** while a turn runs and beside **Resume** once it is paused, ends the turn
+  for good: it cannot be resumed, the conversation is ready for a new message, and
+  the jobs the turn started keep their saved work on their own pages. Stopping an
+  investigation finishes it with a report on the evidence collected so far. While a turn
   is running you can queue one follow-up message: it starts when the turn ends
-  (after a turn you paused, only once you resume it), and you can cancel it in
-  **Parallel work** before it starts. "Back to
+  (after a turn you paused, only once you resume or stop it), and you can cancel it in
+  **Parallel work** before it starts. In an empty text box, the up arrow brings back
+  the last message you sent, as in a terminal; the up and down arrows then walk
+  through the earlier messages of the conversation (in a new conversation, those
+  sent from this browser tab). **Esc** in the text box pauses the running turn. A
+  message you have not sent yet is kept with its conversation while the browser tab
+  stays open, so it is still there after a reload or a visit to another
+  conversation (attachments are not kept). When work ends while you are looking at
+  another tab, the tab's title says so (for example "∎ Proof finished") until you
+  come back. "Back to
   conversation" returns to the chat that started the job. The standalone forms (New proof, New literature review, New review, New
   write-up) start a job without a conversation.
 - **The sidebar footer** shows the model and its status, the theme and phone
   pairing, then four buttons:
-  - **Parallel work** shows running and queued jobs, with controls to pause or
-    cancel them. Set how many jobs and model requests may run at once there
+  - **Parallel work** shows running and queued jobs, with controls to pause,
+    stop or cancel them. Set how many jobs and model requests may run at once there
     (1–8 each; 2 and 2 by default). The values are saved and apply again after
     a restart, unless you launch with `--gui-concurrency` or
     `--gui-model-concurrency`. The button shows the count while work is
