@@ -341,7 +341,7 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
         startFolder={startFolder ? prefix + startFolder.replace(/\/+$/, '') : undefined}
         badge={(file) => fromRoot.includes(file.path) ? 'Attached' : undefined}
         folderNote={(folder) => inOpenFolder(folder + '/') === null
-          ? `This folder is outside ${openName}, the open folder. Files you attach from it are copied into ${destination} first: the model reads only the open folder's files.`
+          ? 'This folder is outside the active workspace. Files you select here will be copied into the active workspace so that the agent can access them.'
           : undefined} />
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
