@@ -69,6 +69,58 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
             self.assertEqual((guarded.snapshot()['tokens'], len(fake.completions)), (4096, 5))
 
+    def test_a_busy_provider_is_waited_out_by_time_and_said_each_time(self):
+        """DeepInfra's overload refusal (2026-11-26): it costs nothing, so a call keeps trying until its patience is
+        used, says so at every refusal, and recognises the same refusal inside an accepted stream."""
+        import mathagent.deepinfra as D
+        from mathagent.deepinfra import busy_patience, generation_window, provider_busy
+        fake = FakeDeepInfra()
+        self.addCleanup(fake.close)
+        body = {'error': {'message': 'Model busy, retry later', 'type': 'invalid_request_error', 'code': 'engine_overloaded'}}
+        busy = {'http_status': 429, 'body': body}
+        with patch('mathagent.deepinfra.BACKOFF', (0.05,) * 5), patch.dict('mathagent.deepinfra._cooldown', {'until': 0.0}), \
+                patch.dict(os.environ, {'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key,
+                                        'DEEPINFRA_API_KEY_FILE': '', 'SH_DEEPINFRA_QUOTA_FILE': ''}):
+            client = DeepInfra(fake.host, timeout=30)
+            payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Synthetic example'}],
+                       'options': {'num_predict': 128, 'num_ctx': 16384}, 'think': False}
+            # More refusals than RETRIES: they are waited out, each one said, and the answer arrives.
+            notices = []
+            fake.replies = [busy] * (RETRIES + 3) + [('Ready', '', 4)]
+            events = list(generation_stream(client, payload, lambda kind, text: notices.append((kind, text))))
+            self.assertTrue(events[-1]['done'])
+            self.assertEqual(len(notices), RETRIES + 3)
+            self.assertTrue(all(kind == 'notice' and text.startswith('DeepInfra is busy (the model is temporarily at capacity); '
+                                                                     'trying again in ') for kind, text in notices), notices)
+            # The patience is a time bound: past it, the refusal is raised (and is the provider's being busy).
+            fake.replies = [busy] * 50
+            before = len(fake.completions)
+            with busy_patience(0.12), self.assertRaises(DeepInfraRateLimit) as stopped:
+                list(generation_stream(client, payload, lambda *_: None))
+            self.assertTrue(provider_busy(stopped.exception))
+            self.assertLess(len(fake.completions) - before, 10)
+            # A caller that replaces the whole call itself (litreview) keeps no refusal retries here.
+            fake.replies = [busy, ('Unused', '', 1)]
+            before = len(fake.completions)
+            with generation_window(client, replacement=True), self.assertRaises(DeepInfraRateLimit):
+                list(client.stream(payload))
+            self.assertEqual(len(fake.completions) - before, 1)
+            fake.replies = []
+            # The same refusal inside an accepted stream, before any output, is a temporary failure: sent again.
+            fake.replies = [{'events': [body]}, ('Recovered', '', 4)]
+            notices = []
+            self.assertTrue(list(generation_stream(client, payload, lambda kind, text: notices.append(text)))[-1]['done'])
+            self.assertIn('ended the request before producing output', notices[0])
+        # Reworded busy messages are recognised; credit limits and unreadable 429s are still not retried.
+        for detail, retried in [({'error': {'message': 'Model is busy, please retry later'}}, True),
+                                ({'error': {'message': 'Model busy, retry later (queue full)'}}, True),
+                                ({'detail': {'error': 'Engine overloaded'}}, False),  # nested deeper than we read
+                                ({'error': {'message': 'Insufficient balance, add credit; retry later'}}, False),
+                                ({'detail': 'something else'}, False)]:
+            signals = D._provider_signals(detail)
+            self.assertEqual(not D._credit_limit(signals) and D._mentions(signals, D._BUSY), retried, detail)
+        self.assertEqual(D._generation_failure(body)[0], 'service_unavailable')
+
     def test_conversation_retries_only_failures_before_output_within_one_shared_allowance(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
@@ -92,21 +144,22 @@ class HostedQuotaTests(unittest.TestCase):
                     with self.assertRaises(DeepInfraGenerationError):
                         list(generation_stream(client, payload, lambda *_: self.fail('Unexpected retry')))
                     self.assertEqual(len(fake.completions) - before, 1)
-            # Refusals and failures before any output share RETRIES replacements; then the call fails.
-            for sequence in ([busy] + [ending] * RETRIES, [ending, busy] + [ending] * (RETRIES - 1), [ending] * (RETRIES + 1)):
+            # Failures before any output share RETRIES replacements; then the call fails. A refusal (429 or 5xx before
+            # generation) costs nothing and is waited out by time instead, so it does not use a replacement.
+            for sequence in ([busy] + [ending] * (RETRIES + 1), [ending, busy] + [ending] * RETRIES, [ending] * (RETRIES + 1)):
                 before = len(fake.completions)
                 fake.replies = list(sequence)
                 with self.assertRaises(DeepInfraGenerationError):
                     list(generation_stream(client, payload, lambda *_: None))
-                self.assertEqual(len(fake.completions) - before, RETRIES + 1)
+                self.assertEqual(len(fake.completions) - before, len(sequence))
             before = len(fake.completions)
             fake.replies = [ending, busy, ending, ('Recovered', '', 4)]
             self.assertTrue(list(generation_stream(client, payload, lambda *_: None))[-1]['done'])
             self.assertEqual(len(fake.completions) - before, 4)
             # A replacement differs only by leading spaces, which made silent starts rarer on DeepInfra; a refused
-            # request is sent again unchanged.
+            # request is sent again unchanged, and the refusal does not use a replacement (so two spaces at the end).
             self.assertEqual([c['messages'][0]['content'] for c in fake.completions[-4:]],
-                             ['Synthetic example', ' Synthetic example', ' Synthetic example', '   Synthetic example'])
+                             ['Synthetic example', ' Synthetic example', ' Synthetic example', '  Synthetic example'])
             before = len(fake.completions)
             client.cancel = threading.Event()
             fake.replies = [ending]
@@ -214,7 +267,9 @@ class HostedQuotaTests(unittest.TestCase):
     def test_pre_stream_rejection_retries_and_settles_only_one_reservation(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
-        with tempfile.TemporaryDirectory() as directory, patch('mathagent.deepinfra.BACKOFF', (0,) * 5), patch.dict(os.environ, {
+        # A provider that asks for no wait (Retry-After: 0) is retried until MAX_REFUSALS; here as many as RETRIES + 1.
+        with tempfile.TemporaryDirectory() as directory, patch('mathagent.deepinfra.BACKOFF', (0,) * 5), \
+                patch('mathagent.deepinfra.MAX_REFUSALS', RETRIES + 1), patch.dict(os.environ, {
             'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key, 'DEEPINFRA_API_KEY_FILE': '',
             'SH_DEEPINFRA_SERVICE_TIER': 'standard', 'SH_DEEPINFRA_QUOTA_USD': '4',
             'SH_DEEPINFRA_QUOTA_FILE': str(Path(directory).resolve() / 'quota.sqlite'),

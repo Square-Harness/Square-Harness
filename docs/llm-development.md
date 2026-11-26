@@ -1253,14 +1253,24 @@ usage footer, which holds the status line (job ID, phase, effort)
 the terminal; `report.md` and the job page keep the rest.
 
 Provider failures on DeepInfra are handled in `deepinfra.py`, for every key and
-mode. An HTTP 429 with provider code `engine_overloaded` or message
-`Model busy, retry later` is a temporary capacity refusal. `DeepInfraRateLimit`
-passes the classified retryability to the worker, so exhausting the transport
-retries leaves the worker resumable. Credit and unclassified 429s remain
-non-retryable. `_request_url` sends a request refused before streaming (429 with a transient
-reason, 500/502/503/504) again after `BACKOFF` or a `Retry-After` of at most
-`LONGEST_RETRY_AFTER`, and sets a process-wide cooldown that other completions wait
-out. `DeepInfra.stream` gives every request a start limit (`START_SECONDS` plus
+mode. An HTTP 429 whose fields mention a busy or overloaded model (`_BUSY`, matched inside
+the fields: DeepInfra sends code `engine_overloaded`, message `Model busy, retry later`) is a
+temporary capacity refusal, as is a transient rate limit or a 500/502/503/504 before streaming.
+`DeepInfraRateLimit` passes the classified retryability to the worker, so a refusal that outlasts
+the patience leaves the worker resumable. Credit and unclassified 429s remain non-retryable.
+`_request_url` waits out such a refusal by time, not by count: it sends again after `BACKOFF`
+(capped at `BUSY_STEP`) or a `Retry-After` of at most `LONGEST_RETRY_AFTER`, until
+`BUSY_PATIENCE` seconds (300) have passed since the call's first refusal or `MAX_REFUSALS`
+sends; refusals do not spend the window's `RETRIES` replacements, and a caller-managed
+replacement window (`generation_window(replacement=True)`, litreview) keeps none. Every refusal
+is announced through `refusal_notices(emit)`, which `generation_attempts` installs with its
+owner's emit ("DeepInfra is busy (…); trying again in N s"). `busy_patience(seconds)` shortens
+the wait for a step with a fallback: routing (`mode_calls.ROUTING_PATIENCE`, 20 s) answers
+directly when `provider_busy(exc)`, saving `proof_routing` with `route: direct` and
+`fallback: provider_busy`; other routing failures still stop the turn. The same busy wording
+inside an accepted stream maps to `service_unavailable` in `_generation_failure`, so
+`generation_attempts` replaces it before output. A refusal also sets the process-wide cooldown
+that other completions wait out. `DeepInfra.stream` gives every request a start limit (`START_SECONDS` plus
 prefill time), so a silent accepted stream raises `DeepInfraSilentStart` instead of
 waiting for the provider's own error. `generation_attempts` replaces a failed logical
 call up to `RETRIES` times within its window's deadline: a failure before output at

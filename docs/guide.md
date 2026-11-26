@@ -960,18 +960,25 @@ requests to arXiv.
 ### When the model provider is busy
 
 With the hosted model (DS4 on DeepInfra), every mode and every key handles provider
-failures the same way. When DeepInfra says the model is busy or temporarily rate limits
-a call (HTTP 429), or returns HTTP 500, 502, 503 or 504 before answering, the server
-tries again after a growing pause (about 2, 5, 15 and 30 seconds, or the wait the
-provider asks for, up to two minutes), and the other
-calls of the server wait out that pause too. A request the provider accepts but does
-not start to answer within about 30 seconds (longer for a long prompt) is closed and
-sent again at once. A stream that stalls or breaks in the middle of its answer is
-sent again by a background job (Proof, the reviews, write-ups, literature checks),
-at most twice; in a conversation, where the answer was already shown, it is not.
-Each logical call gets at most four replacements within its time allowance. If
-DeepInfra still reports that the model is busy, Explore pauses. Use **Resume**
-to restart the unfinished worker with its selected files and remaining budget.
+failures the same way. DeepInfra sometimes refuses calls for minutes at a time because
+the model is busy for all its customers ("Model busy, retry later"; on 26 November 2026
+about a third of all calls, whatever the request). Such a refusal (HTTP 429 when the
+model is busy or the provider limits requests for a moment, or HTTP 500, 502, 503 or 504
+before answering) costs nothing, so the call keeps trying for up to five minutes, every
+2, 5, 15, then 30 seconds (or after the wait the provider asks for, up to two minutes),
+and says so each time in the conversation or on the job's card: "DeepInfra is busy (…);
+trying again in 15 s". The other calls of the server wait out that pause too. Only if the
+model is still busy after five minutes does the turn or job pause; **Resume** then goes on
+with the saved work and the remaining budget. Choosing a workflow for a message waits only
+about 20 seconds: if DeepInfra is still busy, the message is answered directly (the
+Assistant can still start a workflow itself) and a notice says so. A request the provider
+accepts but does not start to answer within about 30 seconds (longer for a long prompt) is
+closed and sent again at once; the same "busy" error arriving at the start of an accepted
+stream is sent again too. A stream that stalls or breaks in the middle of its answer is
+sent again by a background job (Proof, the reviews, write-ups, literature checks), at
+most twice; in a conversation, where the answer was already shown, it is not. These
+replacements are at most four per logical call within its time allowance; refusals do not
+count against them.
 
 ### Quick review, Review, Typo check, Explain
 

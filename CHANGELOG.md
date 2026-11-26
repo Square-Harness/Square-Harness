@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- DeepInfra overloads no longer stop a conversation after a minute, and are no longer silent.
+  DeepInfra's "Model busy" refusal (about a third of calls on 26 November 2026, whatever the
+  request size, reasoning or service tier) is waited out for up to five minutes per call, and
+  each refusal is shown: "DeepInfra is busy (…); trying again in 15 s". Choosing a workflow
+  waits only about 20 seconds, then the message is answered directly instead of pausing. The
+  same refusal at the start of an accepted stream is sent again too. Refusals no longer use
+  up the four replacements kept for silent starts and broken streams.
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.

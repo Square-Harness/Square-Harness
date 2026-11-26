@@ -315,6 +315,39 @@ class DeepInfraWorkflowTests(GuiCase):
         os.environ.pop('SQUARE_OPENAI_STRUCTURED_THINKING_FRACTION', None)
         super().setUp()
 
+    def test_a_busy_provider_is_waited_out_visibly_and_never_blocks_routing(self):
+        """DeepInfra's overload refusal (2026-11-26): routing falls back to a direct answer, the answer call keeps
+        trying and says so in the conversation, and the turn completes."""
+        busy = {'http_status': 429, 'body': {'error': {'message': 'Model busy, retry later',
+                                                      'type': 'invalid_request_error', 'code': 'engine_overloaded'}}}
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        live = []  # what the conversation shows while the turn runs
+        publish = self.hub.bus.publish
+
+        def watch(event_type, mutate=None, **data):
+            if event_type == 'chat' and data.get('kind') == 'notice':
+                live.append(data.get('text'))
+            return publish(event_type, mutate, **data)
+        with patch('mathagent.deepinfra.BACKOFF', (0.05,) * 5), patch('mathagent.deepinfra._cooldown', {'until': 0.0}), \
+                patch('mathagent.mode_calls.ROUTING_PATIENCE', 0), patch.object(self.hub.bus, 'publish', watch):
+            # routing: one refusal and it gives up; answer: three refusals, then the answer.
+            self.fake.replies = [busy, busy, busy, busy, ('Hello! How can I help?', '', 7)]
+            self.ok('POST', f'/api/chats/{chat}/route', {'content': 'hi !'})
+            task = self.wait_task(timeout=30)
+        self.assertEqual(task['state'], 'done', task)
+        saved = store.load_chat(self.root, chat)
+        state = saved['assistant_state']
+        self.assertEqual((state['status'], state['proof_routing']['route'], state['proof_routing']['fallback']),
+                         ('complete', 'direct', 'provider_busy'))
+        self.assertIn('Hello! How can I help?', state['answer'])
+        shown = json.dumps(saved['transcript'])
+        self.assertIn('answered directly', shown)
+        self.assertIn('DeepInfra is busy (the model is temporarily at capacity); trying again in', shown)
+        # Each refusal is shown while the call waits, not only in the saved transcript afterwards.
+        self.assertEqual(len([text for text in live if 'DeepInfra is busy' in text]), 3, live)
+        self.assertNotIn('HTTP 429', json.dumps(saved['transcript']))
+        self.assertEqual(len(self.fake.completions), 5)
+
     def test_proof_preparation_is_short_and_hands_off_after_a_capped_or_unproductive_call(self):
         definition = 'In this discussion, E denotes the real numbers.'
         source = 'Let z be arbitrary in E. The requested statement is z=z.'

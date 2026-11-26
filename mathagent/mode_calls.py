@@ -10,7 +10,7 @@ from pathlib import Path
 from .agent import AgentError
 from .call_policy import CallContextError
 from .backends import MeasuredStreamCancellation
-from .deepinfra import DeepInfraGenerationError, rejected_before_inference
+from .deepinfra import DeepInfraGenerationError, busy_patience, provider_busy, rejected_before_inference
 from .orchestrator import Orchestrator
 from .proof_routing import route_request
 from .research import _job_directory, _read_state
@@ -22,6 +22,9 @@ from .source_tasks import (access_check_source, automatic_source_action, exclude
                            _source_lines)
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
+
+# Seconds the routing call waits for a busy provider before the message is answered directly.
+ROUTING_PATIENCE = 20
 
 
 _NO_SEARCH = re.compile(
@@ -885,14 +888,24 @@ class ModeOrchestrator(Orchestrator):
             self.emit('progress', 'Selecting the appropriate workflow…')
             try:
                 current = next(message for message in reversed(state['messages']) if message.get('role') == 'user')
-                decision = route_request(self.agent.client, self.agent.model, state['query'],
-                                         history=state['history'], files=state['files'], ctx=self.agent.ctx,
-                                         current_images=current.get('images'),
-                                         suggested_mode=(state.get('suggested_specialist') or {}).get('mode'))
+                # Routing has a fallback (the answer call, which can still delegate), so it waits only briefly
+                # for a busy provider; the answer call then waits the full patience, visibly.
+                with busy_patience(ROUTING_PATIENCE):
+                    decision = route_request(self.agent.client, self.agent.model, state['query'],
+                                             history=state['history'], files=state['files'], ctx=self.agent.ctx,
+                                             current_images=current.get('images'),
+                                             suggested_mode=(state.get('suggested_specialist') or {}).get('mode'))
             except AgentError as exc:
-                state['proof_routing'] = {'status': 'error', 'error': str(exc)}
-                self._save()
-                raise
+                if not provider_busy(exc):
+                    state['proof_routing'] = {'status': 'error', 'error': str(exc)}
+                    self._save()
+                    raise
+                # The provider refused or was unavailable: answer directly instead of pausing the turn. Any other
+                # routing failure (malformed decision, invalid usage) still stops before an answer.
+                decision = {'route': 'direct', 'effort': 'medium', 'fallback': 'provider_busy',
+                            'reason': 'Routing was skipped because the model provider was busy.', 'error': str(exc)[:300]}
+                self.emit('notice', 'The model provider was busy while choosing a workflow, so this message is answered '
+                                    'directly.')
             finally:
                 self.emit('progress', '')
             state['proof_routing'] = decision = {'status': 'complete', **decision}
