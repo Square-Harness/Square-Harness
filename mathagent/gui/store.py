@@ -743,8 +743,8 @@ def list_files(root, limit=2000):
 
 
 def browse_files(root, relative='', limit=2000):
-    """One folder of the workspace, for the file explorer: its subfolders (empty ones too) and the files the
-    model can be given, with size and modification time. A project's folder carries the project's name and
+    """One folder at or below `root` (the interface root), for the file explorer: its subfolders (empty ones
+    too) and the files the model can be given, with size and modification time. A project's folder carries the project's name and
     hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
     root = Path(root).resolve(strict=True)
     target = resolve_folder(root, relative)

@@ -625,6 +625,9 @@ select {
 .ws-file-crumbs { flex: 1 1 260px; min-width: 0; margin: 0; }
 .ws-file-crumbs .crumb[aria-current="page"] { background: var(--ink-soft); }
 .ws-file-search { flex: 0 1 230px; min-width: 160px; }
+.ws-file-home { flex: none; }
+.ws-file-note { margin: 0; }
+.ws-open-pill { border-color: var(--ink); color: var(--ink); }
 .ws-file-head { display: flex; align-items: center; gap: 10px; padding: 0 12px 0 40px; }
 .ws-file-head button { padding: 2px 0; border: 0; background: none; color: var(--text-3); font: 700 12px var(--font-ui); text-align: left; cursor: pointer; }
 .ws-file-head button:hover { color: var(--ink); }

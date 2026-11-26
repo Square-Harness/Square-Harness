@@ -749,6 +749,9 @@ export const api = {
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
+  /** Every listed file below the interface root, with paths relative to it (the explorer's search). */
+  filesEverywhere: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files?scope=root'),
+  /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,

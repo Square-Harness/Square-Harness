@@ -431,9 +431,11 @@ one with a message.
   are attached to your next message. **Attach files** opens a menu: **From my
   device** uploads files the same way, and **From the workspace** opens a file
   browser on the files already in the folder, to attach some of them. **See my
-  files**, at the bottom of the folder window, opens the same browser on what the
-  open folder holds: the text, PDF and image files the model can be given, with
-  their extension, size and modification date. It works like a desktop file
+  files**, at the bottom of the folder window, opens the same browser on all your
+  folders (everything below `--gui-root`) and their text, PDF and image files,
+  with their extension, size and modification date. Both open in the open folder
+  and can go up to the others; only files of the open folder can be attached,
+  since the model reads only that folder. The browser works like a desktop file
   manager: double-click a folder (or press Enter) to open it, go back with **Up**,
   Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
   Mac) to add or remove one, Shift-click to select a range; sort by name, size or

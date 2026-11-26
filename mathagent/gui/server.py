@@ -392,13 +392,19 @@ def approval(h, body, approval):
 
 @route('GET', '/api/files')
 def files(h, body):
-    records = store.list_files(h.server.hub.root, limit=2001)
+    # The open folder's files, relative to it; with scope=root, every folder the interface can open (the file
+    # explorer's search), relative to the interface root.
+    hub = h.server.hub
+    everywhere = (h.query.get('scope') or [''])[0] == 'root'
+    records = store.list_files(hub.base if everywhere else hub.root, limit=2001)
     return {'files': records[:2000], 'truncated': len(records) > 2000}
 
 
 @route('GET', '/api/files/browse')
 def files_browse(h, body):
-    return store.browse_files(h.server.hub.root, (h.query.get('path') or [''])[0])
+    # One folder at or below the interface root (paths relative to it), as the folder browser can open:
+    # the explorer starts in the open folder and can go up to the root.
+    return store.browse_files(h.server.hub.base, (h.query.get('path') or [''])[0])
 
 
 @route('POST', '/api/images/preview')

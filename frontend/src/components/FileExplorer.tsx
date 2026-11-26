@@ -40,7 +40,7 @@ function useFolder(path: string) {
   return { listing: listing && listing.path === path ? listing : null, error }
 }
 
-/** Every listed file of the workspace, read once a search starts. */
+/** Every listed file below the interface root (paths relative to it), read once a search starts. */
 function useAllFiles(enabled: boolean) {
   const [files, setFiles] = useState<WorkspaceFile[] | null>(null)
   const [truncated, setTruncated] = useState(false)
@@ -49,7 +49,7 @@ function useAllFiles(enabled: boolean) {
   useEffect(() => {
     if (!enabled || files) return
     let live = true
-    api.files().then((result) => { if (live) { setFiles(result.files); setTruncated(!!result.truncated) } }, () => { if (live) setFiles([]) })
+    api.filesEverywhere().then((result) => { if (live) { setFiles(result.files); setTruncated(!!result.truncated) } }, () => { if (live) setFiles([]) })
     return () => { live = false }
   }, [enabled, files])
   return { files, truncated }
@@ -67,14 +67,16 @@ function compare(sort: Sort) {
 }
 
 /**
- * The files of the open workspace, browsed folder by folder like a desktop file manager.
+ * The folders below the interface root and their files, browsed like a desktop file manager. It opens in the
+ * open folder (the workspace), where the user's files most likely are, and can go up to the root and into any
+ * other folder. Paths are relative to the interface root.
  *
  * Folders open on a double click (or Enter); the breadcrumb and Up go back. A click selects a file; with
  * `multiple`, Ctrl/⌘-click adds or removes one file and Shift-click selects the range from the last file
  * clicked. Typing in the search box searches every folder. Opening a file is not decided yet: pass `onOpen`
  * and a double click (or Enter) on a file calls it, for instance to download or preview that file.
  */
-export function FileExplorer({ selected, onSelect, multiple = false, onOpen, unavailable, badge, startFolder = '' }: {
+export function FileExplorer({ selected, onSelect, multiple = false, onOpen, unavailable, badge, startFolder, folderNote }: {
   selected: string[]
   onSelect: (paths: string[]) => void
   multiple?: boolean
@@ -83,11 +85,14 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
   unavailable?: (file: WorkspaceFile) => string | undefined
   /** A short label shown after a file's name (for instance "Attached"). */
   badge?: (file: WorkspaceFile) => string | undefined
-  /** The folder shown first, relative to the workspace (a project's folder, for instance). */
+  /** The folder shown first, relative to the interface root; by default the open folder. */
   startFolder?: string
+  /** A note about the folder shown (for instance that its files cannot be attached), or nothing. */
+  folderNote?: (folder: string) => string | undefined
 }) {
   const { status } = useApp()
-  const [folder, setFolder] = useState(startFolder.replace(/\/+$/, ''))
+  const openFolder = status?.workspace_path || ''
+  const [folder, setFolder] = useState((startFolder ?? openFolder).replace(/\/+$/, ''))
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>({ key: 'name', descending: false })
   const [anchor, setAnchor] = useState<string | null>(null)
@@ -97,7 +102,8 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
   const searching = query.trim().length > 0
   const all = useAllFiles(searching)
   const rowRefs = useRef<(HTMLDivElement | null)[]>([])
-  const root = status?.workspace.split('/').filter(Boolean).pop() || 'Workspace'
+  const root = status?.root.split('/').filter(Boolean).pop() || 'Folders'
+  const openName = openFolder.split('/').pop() || root
 
   // A folder that disappeared (deleted or renamed outside the interface): back to the workspace.
   useEffect(() => { if (error && folder) { setFolder(''); } }, [error, folder])
@@ -194,10 +200,13 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
             </span>
           ))}
         </nav>
+        {openFolder !== folder && !searching && <button type="button" className="btn btn-quiet btn-small ws-file-home" onClick={() => go(openFolder)}
+          title="Go back to the open folder"><FolderIcon size={14} /> {openName}</button>}
         <input className="text-input ws-file-search" type="search" value={query} onChange={(event) => { setQuery(event.target.value); setFocus(0) }}
           placeholder="Search all folders" aria-label="Search files in all folders" />
       </div>
       <ErrorNote>{error && folder ? '' : error}</ErrorNote>
+      {!searching && folderNote?.(folder) && <p className="warning-note ws-file-note">{folderNote(folder)}</p>}
       {truncated && <p className="warning-note" role="status">{searching ? 'The search covers the first 2,000 files of this workspace.' : 'This folder has more entries than can be listed.'}</p>}
       <div className="ws-file-head" aria-hidden="true">
         <button type="button" onClick={() => sortBy('name')}>Name{arrow('name')}</button>
@@ -221,6 +230,7 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
                 <FolderIcon size={16} />
                 <span className="ws-file-name">{item.name}</span>
                 {item.project && <span className="pill">Project</span>}
+                {openFolder && item.path === openFolder && <span className="pill ws-open-pill">Open folder</span>}
                 <span className="ws-file-size">{item.items === 1 ? '1 item' : `${count(item.items)} items`}</span>
                 <span className="ws-file-date" />
                 <span className="ws-folder-go"><ChevronIcon size={14} /></span>
@@ -261,12 +271,10 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
 
 /** "See my files": what the open workspace holds, from the folder browser. */
 export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?: () => void }) {
-  const { status } = useApp()
   const [selected, setSelected] = useState<string[]>([])
-  const folder = status?.workspace.split('/').filter(Boolean).pop() || 'the workspace'
   return (
-    <Modal title={`Files in ${folder}`} icon={<FileIcon />} onClose={onClose} wide>
-      <p className="modal-lede">The text, PDF and image files of the open folder: the files the model can be given.</p>
+    <Modal title="My files" icon={<FileIcon />} onClose={onClose} wide>
+      <p className="modal-lede">Your folders and their text, PDF and image files, starting in the open folder, whose files the model can be given.</p>
       <FileExplorer selected={selected} onSelect={setSelected} multiple />
       <div className="modal-actions">
         {onBack && <button type="button" className="btn action-start" onClick={onBack}><BackIcon size={15} /> Back to folders</button>}
@@ -276,22 +284,33 @@ export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?:
   )
 }
 
-/** Choose files already in the workspace and attach them to the next message. */
+/** Choose files already in the open folder and attach them to the next message; startFolder is relative to it. */
 export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder }: {
   attached: string[]; onAttach: (paths: string[]) => void; onClose: () => void; startFolder?: string
 }) {
   const { status } = useApp()
   const [selected, setSelected] = useState<string[]>([])
-  const unavailable = (file: WorkspaceFile) => attached.includes(file.path) ? 'Already attached to your next message'
+  // The explorer's paths are relative to the interface root; attachments are relative to the open folder,
+  // the only one the model reads.
+  const prefix = status?.workspace_path ? status.workspace_path + '/' : ''
+  const inOpenFolder = (path: string) => path.startsWith(prefix) ? path.slice(prefix.length) : null
+  const fromRoot = attached.map((path) => prefix + path)
+  const openName = status?.workspace.split('/').filter(Boolean).pop() || 'the open folder'
+  const unavailable = (file: WorkspaceFile) => fromRoot.includes(file.path) ? 'Already attached to your next message'
+    : inOpenFolder(file.path) === null ? `Outside ${openName}, the open folder: the model reads only that folder's files. Open this file's folder to attach it.`
     : isImagePath(file.path) && !status?.image_support ? 'This model cannot read images' : undefined
   return (
     <Modal title="Attach files from the workspace" icon={<FileIcon />} onClose={onClose} wide>
       <p className="modal-lede">Select the files to attach to your next message.</p>
-      <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={unavailable} startFolder={startFolder}
-        badge={(file) => attached.includes(file.path) ? 'Attached' : undefined} />
+      <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={unavailable}
+        startFolder={startFolder ? prefix + startFolder.replace(/\/+$/, '') : undefined}
+        badge={(file) => fromRoot.includes(file.path) ? 'Attached' : undefined}
+        folderNote={(folder) => inOpenFolder(folder + '/') === null
+          ? `This folder is outside ${openName}, the open folder. Its files can be seen here but not attached: the model reads only the open folder's files.` : undefined} />
       <div className="modal-actions">
         <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn btn-primary" disabled={!selected.length} onClick={() => { onAttach(selected); onClose() }}>
+        <button type="button" className="btn btn-primary" disabled={!selected.length}
+          onClick={() => { onAttach(selected.flatMap((path) => inOpenFolder(path) ?? [])); onClose() }}>
           {selected.length > 1 ? `Attach ${count(selected.length)} files` : 'Attach'}
         </button>
       </div>
