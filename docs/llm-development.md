@@ -1261,9 +1261,10 @@ the patience leaves the worker resumable. Credit and unclassified 429s remain no
 `_request_url` waits out such a refusal by time, not by count: it sends again after
 `_refusal_delay` (the `BACKOFF` step capped at `BUSY_STEP`, or a longer `Retry-After` of at most
 `LONGEST_RETRY_AFTER`, never less than the step) until `BUSY_PATIENCE` seconds (300) have passed
-since the call started (the shared cooldown wait counts, and a cooldown that would outlast the
-patience raises the busy refusal at once) or `MAX_REFUSALS` sends; refusals do not spend the
-window's `RETRIES` replacements. A plain HTTP 500 keeps counted retries (`RETRIES`), and a
+since the call started (the shared cooldown wait counts; when another call's cooldown would outlast
+the patience, a call not yet sent is sent once anyway and a call already refused raises the busy
+refusal at once) or `MAX_REFUSALS` sends; refusals do not spend the window's `RETRIES` replacements.
+A plain HTTP 500 keeps its own count of `RETRIES` retries, apart from busy refusals, and a
 caller-managed replacement window (`generation_window(replacement=True)`, litreview) keeps none.
 Refusals and cooldown waits are announced through `refusal_notices(emit)`, which
 `generation_attempts` and litreview's `_ask` install with their owner's emit ("DeepInfra is busy

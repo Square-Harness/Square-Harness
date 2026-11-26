@@ -970,8 +970,10 @@ about a third of all calls, whatever the request). Such a refusal (HTTP 429 when
 model is busy or the provider limits requests for a moment, or HTTP 500, 502, 503 or 504
 before answering) costs nothing, so the call keeps trying for up to five minutes from its
 start, after pauses of about 2, 5, 15, then 30 seconds (or the longer wait the provider asks
-for, up to two minutes), and says so in the conversation or on the job's card: "DeepInfra
-is busy (…); trying again in 15 s", at the first refusal and then at most every 45 seconds.
+for, up to two minutes), and says so in the conversation (the Assistant's answer) or on the
+card of a worker or a literature review: "DeepInfra is busy (…); trying again in 15 s", at the
+first refusal and then at most every 45 seconds. A few short side calls (a conversation title,
+the position of a result in the literature) wait the same way without a notice.
 The other calls of the server wait out that pause too, and that wait counts in the five
 minutes. Only if the model is still busy after five minutes does the turn or job pause;
 **Resume** then goes on with the saved work and the remaining budget. An HTTP 500 may come

@@ -140,11 +140,32 @@ class HostedQuotaTests(unittest.TestCase):
                 list(generation_stream(client, payload, lambda *_: None))
             self.assertEqual(len(fake.completions) - before, RETRIES + 1)
             fake.replies = []
-            # Another call's cooldown that would outlast this call's patience is a busy refusal, raised at once.
-            with patch.dict('mathagent.deepinfra._cooldown', {'until': time.monotonic() + 60}), busy_patience(5), \
-                    self.assertRaises(DeepInfraRateLimit) as stopped:
-                list(generation_stream(client, payload, lambda *_: None))
-            self.assertTrue(provider_busy(stopped.exception))
+            # Busy refusals do not use up the counted retries of a plain 500 that follows them.
+            fake.replies = [busy] * RETRIES + [{'http_status': 500, 'body': {}}, ('Ready', '', 4)]
+            before = len(fake.completions)
+            self.assertTrue(list(generation_stream(client, payload, lambda *_: None))[-1]['done'])
+            self.assertEqual(len(fake.completions) - before, RETRIES + 2)
+            # Another call's cooldown that would outlast this call's patience: a call not yet sent is sent once
+            # anyway (its own answer decides); refused, it gives up as busy at once.
+            for reply, succeeds in ((('Ready', '', 4), True), (busy, False)):
+                fake.replies = [reply]
+                before = len(fake.completions)
+                with patch.dict('mathagent.deepinfra._cooldown', {'until': time.monotonic() + 60}), busy_patience(5):
+                    if succeeds:
+                        self.assertTrue(list(generation_stream(client, payload, lambda *_: None))[-1]['done'])
+                    else:
+                        with self.assertRaises(DeepInfraRateLimit) as stopped:
+                            list(generation_stream(client, payload, lambda *_: None))
+                        self.assertTrue(provider_busy(stopped.exception))
+                self.assertEqual(len(fake.completions) - before, 1)
+            # A wait on another call's cooldown is said, and so is this call's own first refusal right after it.
+            notices = []
+            fake.replies = [busy, ('Ready', '', 4)]
+            with patch.dict('mathagent.deepinfra._cooldown', {'until': time.monotonic() + 1.2}):
+                list(generation_stream(client, payload, lambda kind, text: notices.append(text)))
+            self.assertEqual(len(notices), 2, notices)
+            self.assertIn('another request was just refused', notices[0])
+            self.assertIn('trying again in', notices[1])
         self.assertEqual(D._generation_failure(body)[0], 'service_unavailable')
         self.assertEqual(D._generation_failure({'error': {'message': 'Insufficient credit, retry later'}})[0], 'quota')
         # The pause: never under the backoff step (a Retry-After of 0 must not make calls send back to back), at most

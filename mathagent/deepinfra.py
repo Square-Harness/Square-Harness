@@ -517,7 +517,7 @@ class DeepInfra(OpenAICompatible):
         if timeout <= 0:
             raise ModelNotDispatched('The DeepInfra request time allowance elapsed before dispatch.')
         cancel = getattr(self, 'cancel', None)
-        attempt, started, announced = 0, time.monotonic(), [None]
+        attempt, plain_errors, started, announced = 0, 0, time.monotonic(), {'at': None, 'refused': False}
         window = _generation_window.get() if completion else None
         # A completion in a generation window waits out refusals by time (a caller-managed replacement window,
         # litreview's, keeps none); the patience counts from the start of the call.
@@ -526,10 +526,13 @@ class DeepInfra(OpenAICompatible):
         patience = BUSY_PATIENCE if patience is None else patience
         notice = _refusal_notice.get() if completion else None
 
-        def announce(text):
+        def announce(text, refusal=False):
+            # The call's own first refusal is always said; otherwise at most one notice every NOTICE_EVERY seconds.
             now = time.monotonic()
-            if notice is not None and (announced[0] is None or now - announced[0] >= NOTICE_EVERY):
-                announced[0] = now
+            first_refusal = refusal and not announced['refused']
+            announced['refused'] = announced['refused'] or refusal
+            if notice is not None and (first_refusal or announced['at'] is None or now - announced['at'] >= NOTICE_EVERY):
+                announced['at'] = now
                 notice('notice', text)
 
         while True:
@@ -540,12 +543,15 @@ class DeepInfra(OpenAICompatible):
                 # calls do not keep hitting an overloaded provider.
                 with _cooldown_lock:
                     wait = _cooldown['until'] - time.monotonic()
-                if 0 < wait <= LONGEST_RETRY_AFTER:
-                    if patient and time.monotonic() + wait - started > patience:
-                        # Another call's pause would outlast this call's patience: the provider is busy (checked before
-                        # the deadline, so routing falls back instead of pausing the turn).
+                if 0 < wait <= LONGEST_RETRY_AFTER and patient and time.monotonic() + wait - started > patience:
+                    # Another call's pause would outlast this call's patience. A call that has not been sent yet is
+                    # sent once anyway (its own answer decides); one already refused gives up as busy (checked before
+                    # the deadline, so routing falls back instead of pausing the turn).
+                    if attempt:
                         raise DeepInfraRateLimit('The model is temporarily at capacity.', completion_rejected=completion,
                                                  transient=True)
+                    wait = 0
+                if 0 < wait <= LONGEST_RETRY_AFTER:
                     if time.monotonic() + wait >= deadline:
                         raise ModelNotDispatched('The provider asked to wait beyond this request\'s time allowance.')
                     if wait >= 1:
@@ -582,14 +588,15 @@ class DeepInfra(OpenAICompatible):
                     # replacements. A plain 500 may come from the request itself, so it keeps counted retries.
                     give_up = attempt + 1 >= MAX_REFUSALS or now - started + (delay or 0) > patience
                 elif completion and window is not None:
-                    give_up = window.replacement or attempt >= RETRIES
+                    plain_errors += exc.code == 500  # a plain 500 has its own count, apart from busy refusals
+                    give_up = window.replacement or plain_errors > RETRIES
                 else:
                     give_up = bool(attempt)  # a request outside a generation window (catalog, tokenizer) retries once
                 if give_up or not transient or delay is None or now + delay >= deadline:
                     raise rejection from None
                 announce(f'DeepInfra is busy ({hint.rstrip(".").lower() if exc.code == 429 else "temporarily unavailable"}); '
                          f'trying again in {max(1, round(delay))} s (waited {round(now - started)} s, '
-                         f'up to {max(1, round(patience / 60))} min).')
+                         f'up to {max(1, round(patience / 60))} min).', refusal=True)
                 attempt += 1
                 if completion:
                     with _cooldown_lock:
