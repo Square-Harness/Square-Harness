@@ -284,34 +284,72 @@ export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?:
   )
 }
 
-/** Choose files already in the open folder and attach them to the next message; startFolder is relative to it. */
-export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder }: {
-  attached: string[]; onAttach: (paths: string[]) => void; onClose: () => void; startFolder?: string
+/** The kinds of files an upload accepts: only those can be copied into the open folder. */
+const COPYABLE = /\.(tex|sty|cls|bib|md|txt|pdf|py|png|jpe?g|webp|tar\.gz|tgz|tar|gz)$/i
+
+/**
+ * Choose files and attach them to the next message. A file of another folder is copied into the open folder
+ * first (into the project's folder in a project's conversation), as an upload would be: the model reads only
+ * the open folder, and that limit stays. `attached` and `startFolder` are relative to the open folder.
+ */
+export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, projectId }: {
+  attached: string[]; onAttach: (paths: string[]) => void; onClose: () => void; startFolder?: string; projectId?: string | null
 }) {
-  const { status } = useApp()
+  const { status, projects } = useApp()
   const [selected, setSelected] = useState<string[]>([])
-  // The explorer's paths are relative to the interface root; attachments are relative to the open folder,
-  // the only one the model reads.
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  // The explorer's paths are relative to the interface root; attachments are relative to the open folder.
   const prefix = status?.workspace_path ? status.workspace_path + '/' : ''
   const inOpenFolder = (path: string) => path.startsWith(prefix) ? path.slice(prefix.length) : null
   const fromRoot = attached.map((path) => prefix + path)
   const openName = status?.workspace.split('/').filter(Boolean).pop() || 'the open folder'
+  const project = projects?.find((item) => item.id === projectId)
+  const destination = project ? `the folder of the project ${project.name}` : openName
   const unavailable = (file: WorkspaceFile) => fromRoot.includes(file.path) ? 'Already attached to your next message'
-    : inOpenFolder(file.path) === null ? `Outside ${openName}, the open folder: the model reads only that folder's files. Open this file's folder to attach it.`
-    : isImagePath(file.path) && !status?.image_support ? 'This model cannot read images' : undefined
+    : isImagePath(file.path) && !status?.image_support ? 'This model cannot read images'
+    : inOpenFolder(file.path) === null && !COPYABLE.test(file.path) ? 'Only the kinds of files you can upload can be copied into the open folder'
+    : undefined
+  const outside = selected.filter((path) => inOpenFolder(path) === null)
+  const attach = async () => {
+    setBusy(true); setError('')
+    try {
+      const paths = selected.flatMap((path) => inOpenFolder(path) ?? [])
+      const failed: { source: string; error: string }[] = []
+      if (outside.length) {
+        const result = await api.copyFiles(outside, projectId || undefined)
+        for (const item of result.files) {
+          if (item.path) paths.push(item.path)
+          else failed.push({ source: item.source, error: item.error || 'not copied' })
+        }
+      }
+      if (paths.length) onAttach(paths)
+      if (!failed.length) { onClose(); return }
+      setSelected(failed.map((item) => item.source))
+      setError(failed.map((item) => `${item.source.split('/').pop()}: ${item.error}`).join(' · ')
+        + (paths.length ? ' The other files were attached.' : ''))
+    } catch (reason) {
+      setError((reason as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
-    <Modal title="Attach files from the workspace" icon={<FileIcon />} onClose={onClose} wide>
+    <Modal title="Attach files from the workspace" icon={<FileIcon />} onClose={busy ? undefined : onClose} wide>
       <p className="modal-lede">Select the files to attach to your next message.</p>
       <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={unavailable}
         startFolder={startFolder ? prefix + startFolder.replace(/\/+$/, '') : undefined}
         badge={(file) => fromRoot.includes(file.path) ? 'Attached' : undefined}
         folderNote={(folder) => inOpenFolder(folder + '/') === null
-          ? `This folder is outside ${openName}, the open folder. Its files can be seen here but not attached: the model reads only the open folder's files.` : undefined} />
+          ? `This folder is outside ${openName}, the open folder. Files you attach from it are copied into ${destination} first: the model reads only the open folder's files.`
+          : undefined} />
+      <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn btn-primary" disabled={!selected.length}
-          onClick={() => { onAttach(selected.flatMap((path) => inOpenFolder(path) ?? [])); onClose() }}>
-          {selected.length > 1 ? `Attach ${count(selected.length)} files` : 'Attach'}
+        {outside.length > 0 && <span className="muted small action-start">
+          {outside.length === 1 ? '1 file' : `${count(outside.length)} files`} from another folder will be copied into {destination}.</span>}
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className="btn btn-primary" disabled={!selected.length || busy} onClick={() => void attach()}>
+          {busy ? 'Copying…' : selected.length > 1 ? `Attach ${count(selected.length)} files` : 'Attach'}
         </button>
       </div>
     </Modal>
@@ -319,8 +357,9 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder }
 }
 
 /** The composer's "Attach files" button: a menu to attach from this device (an upload) or from the workspace. */
-export function AttachMenu({ label, disabled, attached, onAttach, startFolder }: {
+export function AttachMenu({ label, disabled, attached, onAttach, startFolder, projectId }: {
   label: string; disabled?: boolean; attached: string[]; onAttach: (paths: string[]) => void; startFolder?: string
+  projectId?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const [choosing, setChoosing] = useState(false)
@@ -358,10 +397,11 @@ export function AttachMenu({ label, disabled, attached, onAttach, startFolder }:
           <FileIcon size={15} /><span><strong>From my device</strong><span className="attach-menu-hint">Upload files; they are saved in the workspace</span></span>
         </button>
         <button type="button" role="menuitem" className="attach-menu-item" onClick={() => pick('workspace')}>
-          <FolderIcon size={15} /><span><strong>From the workspace</strong><span className="attach-menu-hint">Files already uploaded to this folder</span></span>
+          <FolderIcon size={15} /><span><strong>From the workspace</strong><span className="attach-menu-hint">Files already uploaded; from another folder, a copy is made here</span></span>
         </button>
       </div>}
-      {choosing && <AttachFromWorkspace attached={attached} onAttach={onAttach} onClose={() => setChoosing(false)} startFolder={startFolder} />}
+      {choosing && <AttachFromWorkspace attached={attached} onAttach={onAttach} onClose={() => setChoosing(false)}
+        startFolder={startFolder} projectId={projectId} />}
     </div>
   )
 }

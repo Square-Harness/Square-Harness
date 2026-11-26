@@ -1749,6 +1749,53 @@ def save_upload(workspace, name, data):
     return target.name
 
 
+def copy_into(base, workspace, destination, relative):
+    """A file of another folder below the interface root, copied into `destination` (the open folder, or a
+    project's folder in it) so that it can be attached: the model reads only the open folder, and that limit
+    stays. Returns (path relative to the workspace, copied). The copy follows the upload rules (types, size,
+    never replaces a file); a file already in the open folder is used as it is, and an identical copy made
+    earlier is reused instead of a second one."""
+    base, workspace = Path(base).resolve(strict=True), Path(workspace).resolve(strict=True)
+    destination = Path(destination).resolve(strict=True)
+    if not isinstance(relative, str) or not relative.strip('/') or len(relative) > 1000:
+        raise ValueError('Give the file path relative to the interface root')
+    parts = Path(relative.strip('/')).parts
+    if Path(relative).is_absolute() or any(part in ('', '.', '..') or part.startswith('.') for part in parts):
+        raise ValueError('Files are relative to the interface root; hidden files and folders are excluded')
+    source = base.joinpath(*parts)
+    folder = source.parent.resolve(strict=True)
+    if not folder.is_relative_to(base) or any(part.startswith('.') for part in folder.relative_to(base).parts):
+        raise ValueError('That file is outside the interface root')
+    source = folder / source.name
+    info = source.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Only regular files can be attached')
+    if not _listable(source):
+        raise ValueError('Only text, PDF and image files can be attached')
+    if source.is_relative_to(workspace):
+        return source.relative_to(workspace).as_posix(), False
+    if not is_source_archive(source.name) and source.suffix.lower() not in UPLOAD_SUFFIXES:
+        raise ValueError('Only the files that can be uploaded (.tex .sty .cls .bib .md .txt .pdf .py, TeX source '
+                         'archives, PNG, JPEG and WebP images) can be copied into the open folder')
+    if info.st_size > UPLOAD_BYTES:
+        raise ValueError('Files are limited to 20 MB')
+    data = source.read_bytes()
+    archive = is_source_archive(source.name)
+    suffix = next((ext for ext in ('.tar.gz', '.tgz', '.tar', '.gz') if source.name.lower().endswith(ext)), '') if archive \
+        else source.suffix.lower()
+    stem = source.name[:-len(suffix)] if suffix else source.name
+    for name in [source.name] + [f'{stem}-{number}{suffix}' for number in range(2, 21)]:
+        earlier = destination / name
+        try:
+            if earlier.is_file() and not earlier.is_symlink() and earlier.stat().st_size == len(data) \
+                    and earlier.read_bytes() == data:
+                return earlier.relative_to(workspace).as_posix(), False
+        except OSError:
+            continue
+    saved = save_upload(destination, source.name, data)
+    return (destination / saved).relative_to(workspace).as_posix(), True
+
+
 def _template_dir(root, name):
     if not isinstance(name, str) or not re.fullmatch(r'[\w][\w .-]{0,59}', name):
         raise ValueError('Template names use letters, digits, spaces, dots and dashes (at most 60)')

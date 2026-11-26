@@ -859,6 +859,37 @@ def upload(h, body):
     return result
 
 
+@route('POST', '/api/files/copy')
+def files_copy(h, body):
+    """Copy files of other folders into the open folder (or a project's folder) to attach them."""
+    hub = h.server.hub
+    paths = body.get('paths')
+    if not isinstance(paths, list) or not paths or len(paths) > 50 or any(not isinstance(p, str) for p in paths):
+        raise ValueError('Give 1 to 50 file paths relative to the interface root')
+    project_id = body.get('project_id') or ''
+    try:
+        folder = projects.read_project(hub.root, project_id)['folder'] if project_id else ''
+    except FileNotFoundError:
+        raise store.NotFound('Unknown project') from None
+    results = []
+    for path in paths:
+        try:
+            saved, copied = store.copy_into(hub.base, hub.root, hub.root / folder if folder else hub.root, path)
+            if copied and images.is_image(saved):
+                try:
+                    images.snapshot(hub.root, [saved])
+                except (AgentError, ValueError, OSError):
+                    (hub.root / saved).unlink(missing_ok=True)  # an invalid image is not kept, as for an upload
+                    raise
+            if copied:
+                hub.bus.publish('files', path=saved)
+            results.append({'source': path, 'path': saved, 'copied': copied})
+        except (OSError, ValueError, LookupError, AgentError) as exc:
+            message = str(exc) if isinstance(exc, (ValueError, LookupError, AgentError)) else _os_message(exc)
+            results.append({'source': path, 'error': message})
+    return {'files': results}
+
+
 @route('GET', '/api/templates')
 def templates(h, body):
     return {'templates': store.list_templates(h.server.hub.base)}

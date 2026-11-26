@@ -434,8 +434,11 @@ one with a message.
   files**, at the bottom of the folder window, opens the same browser on all your
   folders (everything below `--gui-root`) and their text, PDF and image files,
   with their extension, size and modification date. Both open in the open folder
-  and can go up to the others; only files of the open folder can be attached,
-  since the model reads only that folder. The browser works like a desktop file
+  and can go up to the others. The model reads only the open folder, so a file
+  attached from another folder is first copied into the open folder (into the
+  project's folder in a project's conversation), with the upload rules: same
+  types and size limit, an existing file is never replaced, and attaching the
+  same file again reuses its copy. The browser works like a desktop file
   manager: double-click a folder (or press Enter) to open it, go back with **Up**,
   Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
   Mac) to add or remove one, Shift-click to select a range; sort by name, size or

@@ -12,10 +12,12 @@
   double click is not decided yet: `FileExplorer` takes an `onOpen` callback for
   it. **Attach files** is now a menu: **From my device** uploads as before, and
   **From the workspace** attaches files already uploaded, for example in an
-  earlier conversation, to the next message; files of other folders are shown
-  but cannot be attached, since the model reads only the open folder. A new
-  `GET /api/files/browse?path=` lists one folder below the interface root, and
-  `GET /api/files?scope=root` lists every folder's files for the search.
+  earlier conversation, to the next message. The model still reads only the
+  open folder: a file attached from another folder is copied into it first (or
+  into the project's folder), with the upload rules, and attaching it again
+  reuses that copy (`POST /api/files/copy`). `GET /api/files/browse?path=` lists
+  one folder below the interface root, and `GET /api/files?scope=root` lists
+  every folder's files for the search.
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.
