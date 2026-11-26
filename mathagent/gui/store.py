@@ -8,10 +8,12 @@ records: the terminal keeps chat in memory, while a browser tab or phone needs
 the conversation to survive a reload.
 """
 import codecs
+from datetime import datetime, timezone
 import copy
 import errno
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -707,6 +709,19 @@ def research_artifact(root, job_id, name, stream_from=None):
 
 # -- workspace files that can be pinned ------------------------------------
 
+def _listable(path):
+    """A file the model can be given: text, PDF or an image."""
+    suffix = source_suffix(path)
+    return suffix in TEXT or suffix == '.pdf' or images.is_image(path)
+
+
+def _file_record(path, root, info):
+    suffix = source_suffix(path)
+    return {'path': path.relative_to(root).as_posix(), 'size': info.st_size,
+            'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text',
+            'updated_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
+
+
 def list_files(root, limit=2000):
     root = Path(root)
     found = []
@@ -715,18 +730,59 @@ def list_files(root, limit=2000):
                          and not (Path(folder) / d).is_symlink())
         for name in sorted(files):
             path = Path(folder) / name
-            suffix = source_suffix(path)
-            if name.startswith('.') or path.is_symlink() or (suffix not in TEXT and suffix != '.pdf' and not images.is_image(path)):
+            if name.startswith('.') or path.is_symlink() or not _listable(path):
                 continue
             try:
-                size = path.stat().st_size
+                info = path.stat()
             except OSError:
                 continue
-            found.append({'path': path.relative_to(root).as_posix(), 'size': size,
-                          'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text'})
+            found.append(_file_record(path, root, info))
             if len(found) >= limit:
                 return found
     return found
+
+
+def browse_files(root, relative='', limit=2000):
+    """One folder of the workspace, for the file explorer: its subfolders (empty ones too) and the files the
+    model can be given, with size and modification time. A project's folder carries the project's name and
+    hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
+    root = Path(root).resolve(strict=True)
+    target = resolve_folder(root, relative)
+    label = lambda path: (projects.folder_label(path) or {}).get('name')
+    notebook = {'PROJECT.md', projects.DELETED} if label(target) else set()
+    folders, files, truncated = [], [], False
+    try:
+        entries = sorted(os.scandir(target), key=lambda entry: entry.name.casefold())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.name.startswith('.') or entry.is_symlink():
+            continue
+        path = Path(entry.path)
+        if len(folders) + len(files) >= limit:
+            truncated = True
+            break
+        if entry.is_dir(follow_symlinks=False):
+            if entry.name in SKIP:
+                continue
+            try:
+                inside = sum(1 for child in itertools.islice(os.scandir(path), 1000) if not child.name.startswith('.')
+                             and not child.is_symlink() and (child.is_dir(follow_symlinks=False) and child.name not in SKIP
+                                                             or child.is_file(follow_symlinks=False) and _listable(child.name)))
+            except OSError:
+                inside = 0
+            folders.append({'name': label(path) or entry.name, 'path': path.relative_to(root).as_posix(),
+                            'project': bool(label(path)), 'items': inside})
+        elif entry.is_file(follow_symlinks=False) and entry.name not in notebook and _listable(path):
+            try:
+                files.append(_file_record(path, root, entry.stat(follow_symlinks=False)))
+            except OSError:
+                continue
+    folders.sort(key=lambda folder: folder['name'].casefold())
+    parts = target.relative_to(root).parts
+    crumbs = [{'name': label(root.joinpath(*parts[:i + 1])) or part, 'path': '/'.join(parts[:i + 1])}
+              for i, part in enumerate(parts)]
+    return {'path': '/'.join(parts), 'crumbs': crumbs, 'folders': folders, 'files': files, 'truncated': truncated}
 
 
 # -- chats --------------------------------------------------------------------

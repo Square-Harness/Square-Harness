@@ -383,7 +383,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           <WorkspaceSwitch />
           <ProjectSelector value={currentProject} onChange={(project) => { void changeProject(project) }} disabled={sending || resuming || projectSaving || work.blocked || (!!id && !data)} />
           <AttachMenu label={'Attach files' + (app.status?.image_support ? ' or images' : '')} disabled={sending || projectSaving || (work.blocked && !canQueue)}
-            attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])} />
+            attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])}
+            startFolder={app.projects?.find((item) => item.id === currentProject)?.folder} />
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
             <span key={path} className="chip" title={path}>
               <FileIcon size={14} /><span>{displayPath(path)}</span>

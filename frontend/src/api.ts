@@ -649,7 +649,10 @@ export type Artifact = {
   stream?: { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; stats: Record<string, unknown> }
 }
 
-export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' }
+export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
+/** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
+export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
+export type FolderFiles = { path: string; crumbs: { name: string; path: string }[]; folders: WorkspaceFolder[]; files: WorkspaceFile[]; truncated: boolean }
 export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
 /** An explicit extra allowance for resuming a job: recorded in its state and report. */
 export type AllowanceAdditions = { add_tokens?: number; add_seconds?: number; add_rounds?: number }
@@ -746,6 +749,7 @@ export const api = {
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
+  browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 

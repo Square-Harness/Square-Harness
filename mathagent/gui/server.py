@@ -396,6 +396,11 @@ def files(h, body):
     return {'files': records[:2000], 'truncated': len(records) > 2000}
 
 
+@route('GET', '/api/files/browse')
+def files_browse(h, body):
+    return store.browse_files(h.server.hub.root, (h.query.get('path') or [''])[0])
+
+
 @route('POST', '/api/images/preview')
 def image_preview(h, body):
     paths = _files(body, 'files')
