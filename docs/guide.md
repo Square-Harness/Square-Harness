@@ -142,8 +142,12 @@ facts (such as expanding a square) from nontrivial proof requests. The latter
 start the saved Proof workflow before the Assistant attempts an argument.
 Explicit mode selections take priority, and a request to use the raw model
 directly is respected. The routing decision and its usage are saved with the
-turn; resuming does not create a second completed Proof job. A failed routing
-decision pauses the work instead of authorizing an unchecked direct proof.
+turn; resuming does not create a second completed Proof job. A malformed or invalid
+routing decision pauses the work instead of authorizing an unchecked direct proof.
+When the model provider is busy and the routing call cannot get an answer within
+about 20 seconds, the message is answered directly instead (the Assistant can still
+start Proof or another workflow itself), and a notice says so; if that turn is
+paused and resumed before its answer, the routing is tried again.
 
 ## TeX source archives
 
@@ -964,14 +968,16 @@ failures the same way. DeepInfra sometimes refuses calls for minutes at a time b
 the model is busy for all its customers ("Model busy, retry later"; on 26 November 2026
 about a third of all calls, whatever the request). Such a refusal (HTTP 429 when the
 model is busy or the provider limits requests for a moment, or HTTP 500, 502, 503 or 504
-before answering) costs nothing, so the call keeps trying for up to five minutes, every
-2, 5, 15, then 30 seconds (or after the wait the provider asks for, up to two minutes),
-and says so each time in the conversation or on the job's card: "DeepInfra is busy (…);
-trying again in 15 s". The other calls of the server wait out that pause too. Only if the
-model is still busy after five minutes does the turn or job pause; **Resume** then goes on
-with the saved work and the remaining budget. Choosing a workflow for a message waits only
-about 20 seconds: if DeepInfra is still busy, the message is answered directly (the
-Assistant can still start a workflow itself) and a notice says so. A request the provider
+before answering) costs nothing, so the call keeps trying for up to five minutes from its
+start, after pauses of about 2, 5, 15, then 30 seconds (or the longer wait the provider asks
+for, up to two minutes), and says so in the conversation or on the job's card: "DeepInfra
+is busy (…); trying again in 15 s", at the first refusal and then at most every 45 seconds.
+The other calls of the server wait out that pause too, and that wait counts in the five
+minutes. Only if the model is still busy after five minutes does the turn or job pause;
+**Resume** then goes on with the saved work and the remaining budget. An HTTP 500 may come
+from the request itself, so it is retried only four times, as before. Choosing a workflow
+for a message waits at most about 20 seconds: if DeepInfra is still busy, the message is
+answered directly (the Assistant can still start a workflow itself) and a notice says so. A request the provider
 accepts but does not start to answer within about 30 seconds (longer for a long prompt) is
 closed and sent again at once; the same "busy" error arriving at the start of an accepted
 stream is sent again too. A stream that stalls or breaks in the middle of its answer is

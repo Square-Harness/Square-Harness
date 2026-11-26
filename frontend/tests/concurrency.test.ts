@@ -36,3 +36,15 @@ test('interleaved chat deltas and activity stay attached to their own task after
   assert.equal(chatWork(current, 'chat-b').active?.activity[0].text, 'Read b.tex')
   assert.deepEqual(snapshot.tasks?.[0].live?.steps, [])
 })
+
+test('a notice shown while a model call waits (a busy provider) does not hide the answer that follows', () => {
+  let current: TaskSnapshot = { ...snapshot, tasks: JSON.parse(JSON.stringify(snapshot.tasks)) }
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 2, kind: 'start' })
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 3, kind: 'notice', text: 'DeepInfra is busy; trying again in 2 s' })
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 4, kind: 'delta', text: 'Hello' })
+  current = reduceChat(current, { task: 'first', chat: 'chat-a', seq: 5, kind: 'delta', text: '!' })
+  assert.deepEqual(chatWork(current, 'chat-a').active?.live?.steps, [
+    { type: 'call', text: 'Hello!', thinking: '' },
+    { type: 'notice', text: 'DeepInfra is busy; trying again in 2 s' },
+  ])
+})

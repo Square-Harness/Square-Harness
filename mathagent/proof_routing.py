@@ -465,7 +465,9 @@ def route_request(client, model, query, history=(), files=(), ctx=1_048_576, cur
     """Return a validated route, reasoning, usage and request-allocation record.
 
 No worker is executed here. Failures are raised to the controller, which must
-preserve the unfinished routing step instead of falling back to a long answer.
+preserve the unfinished routing step instead of falling back to a long answer; the one exception is a provider
+that refused or could not serve the call (deepinfra.provider_busy): the controller then answers directly, the
+Assistant can still delegate, and the routing is tried again if the turn resumes before its first answer call.
 """
     timeout = getattr(client, 'timeout', None)
     if (timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))

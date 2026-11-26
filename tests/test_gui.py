@@ -324,10 +324,16 @@ class DeepInfraWorkflowTests(GuiCase):
         live = []  # what the conversation shows while the turn runs
         publish = self.hub.bus.publish
 
+        steps = []  # the live steps of the turn as last published
+
         def watch(event_type, mutate=None, **data):
             if event_type == 'chat' and data.get('kind') == 'notice':
                 live.append(data.get('text'))
-            return publish(event_type, mutate, **data)
+            event = publish(event_type, mutate, **data)
+            running = self.hub._tasks.get(data.get('task')) if event_type == 'chat' else None
+            if running is not None and running.live:
+                steps[:] = copy.deepcopy(running.live['steps'])
+            return event
         with patch('mathagent.deepinfra.BACKOFF', (0.05,) * 5), patch('mathagent.deepinfra._cooldown', {'until': 0.0}), \
                 patch('mathagent.mode_calls.ROUTING_PATIENCE', 0), patch.object(self.hub.bus, 'publish', watch):
             # routing: one refusal and it gives up; answer: three refusals, then the answer.
@@ -344,9 +350,45 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertIn('answered directly', shown)
         self.assertIn('DeepInfra is busy (the model is temporarily at capacity); trying again in', shown)
         # Each refusal is shown while the call waits, not only in the saved transcript afterwards.
-        self.assertEqual(len([text for text in live if 'DeepInfra is busy' in text]), 3, live)
+        # The first refusal is announced at once; the next ones only after NOTICE_EVERY (45 s).
+        self.assertEqual(len([text for text in live if 'DeepInfra is busy' in text]), 1, live)
         self.assertNotIn('HTTP 429', json.dumps(saved['transcript']))
         self.assertEqual(len(self.fake.completions), 5)
+        # The notice shown while the answer call waited does not hide the answer streamed after it.
+        self.assertIn('Hello! How can I help?', ''.join(s.get('text', '') for s in steps if s['type'] == 'call'), steps)
+
+    def test_routing_failures_other_than_a_busy_provider_still_stop_the_turn(self):
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        self.fake.replies = [('not a routing decision', '', 3)]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Prove that every even perfect number is triangular.'})
+        task = self.wait_task(timeout=30)
+        self.assertEqual(task['result_status'], 'paused', task)
+        state = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(state['proof_routing']['status'], 'error')
+        self.assertEqual(len(self.fake.completions), 1)  # no answer call
+        self.assertNotIn('answered directly', json.dumps(store.load_chat(self.root, chat)['transcript']))
+
+    def test_a_routing_skipped_for_a_busy_provider_is_tried_again_on_resume(self):
+        busy = {'http_status': 429, 'body': {'error': {'message': 'Model busy, retry later', 'code': 'engine_overloaded'}}}
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        with patch('mathagent.deepinfra.BACKOFF', (0.05,) * 5), patch('mathagent.deepinfra._cooldown', {'until': 0.0}), \
+                patch('mathagent.mode_calls.ROUTING_PATIENCE', 0), patch('mathagent.deepinfra.BUSY_PATIENCE', 0.3):
+            self.fake.replies = [busy] + [busy] * 20  # routing gives up at once; the answer call outlasts its patience
+            self.ok('POST', f'/api/chats/{chat}/route', {'content': 'hi !'})
+            task = self.wait_task(timeout=30)
+            self.assertEqual(task['result_status'], 'paused', task)
+            state = store.load_chat(self.root, chat)['assistant_state']
+            self.assertEqual((state['proof_routing'].get('fallback'), state['main_calls']), ('provider_busy', 0))
+            before = len(self.fake.completions)
+            self.fake.replies = [(json.dumps({'route': 'direct', 'effort': 'low', 'tasks': [], 'reason': 'A greeting.'}), '', 9),
+                                 ('Hello!', '', 3)]
+            self.ok('POST', f'/api/chats/{chat}/assistant/resume', {})
+            task = self.wait_task(timeout=30)
+        self.assertEqual(task['state'], 'done', task)
+        sent = self.fake.completions[before:]
+        self.assertTrue(sent[0]['messages'][0]['content'].lstrip().startswith('Classify the CURRENT USER REQUEST'), sent[0])
+        state = store.load_chat(self.root, chat)['assistant_state']
+        self.assertNotIn('fallback', state['proof_routing'])
 
     def test_proof_preparation_is_short_and_hands_off_after_a_capped_or_unproductive_call(self):
         definition = 'In this discussion, E denotes the real numbers.'

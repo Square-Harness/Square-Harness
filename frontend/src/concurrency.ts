@@ -78,8 +78,11 @@ export function reduceChat(snapshot: TaskSnapshot, event: ChatEvent): TaskSnapsh
     if (event.kind === 'start') steps.push({ type: 'call', thinking: '', text: '' })
     else if (event.kind === 'progress' && event.text) steps.push({ type: 'notice', text: event.text, progress: true })
     else if (event.kind === 'delta') {
-      const last = steps[steps.length - 1]
-      if (last?.type === 'call') steps[steps.length - 1] = { ...last, thinking: last.thinking + (event.thinking || ''), text: last.text + (event.text || '') }
+      // Output belongs to the current model call, even when a notice (a provider wait) was shown after it started.
+      let index = steps.length - 1
+      while (index >= 0 && steps[index].type !== 'call') index -= 1
+      const call = steps[index]
+      if (call?.type === 'call') steps[index] = { ...call, thinking: call.thinking + (event.thinking || ''), text: call.text + (event.text || '') }
     } else if (event.kind === 'tool' || event.kind === 'result' || event.kind === 'notice') steps.push({ type: event.kind, text: event.text || '' })
     else if (event.kind === 'experiment' && event.item?.role === 'experiment') steps.push({ type: 'experiment', item: event.item })
     return { ...entry, live: { ...entry.live, steps } }

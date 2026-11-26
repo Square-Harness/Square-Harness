@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -84,12 +85,15 @@ class HostedQuotaTests(unittest.TestCase):
             client = DeepInfra(fake.host, timeout=30)
             payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Synthetic example'}],
                        'options': {'num_predict': 128, 'num_ctx': 16384}, 'think': False}
-            # More refusals than RETRIES: they are waited out, each one said, and the answer arrives.
-            notices = []
-            fake.replies = [busy] * (RETRIES + 3) + [('Ready', '', 4)]
-            events = list(generation_stream(client, payload, lambda kind, text: notices.append((kind, text))))
-            self.assertTrue(events[-1]['done'])
-            self.assertEqual(len(notices), RETRIES + 3)
+            # More refusals than RETRIES: they are waited out and the answer arrives. The first refusal is said at
+            # once, the next ones at most every NOTICE_EVERY seconds (all of them when that is 0).
+            for every, expected in ((D.NOTICE_EVERY, 1), (0, RETRIES + 3)):
+                notices = []
+                fake.replies = [busy] * (RETRIES + 3) + [('Ready', '', 4)]
+                with patch('mathagent.deepinfra.NOTICE_EVERY', every):
+                    events = list(generation_stream(client, payload, lambda kind, text: notices.append((kind, text))))
+                self.assertTrue(events[-1]['done'])
+                self.assertEqual(len(notices), expected)
             self.assertTrue(all(kind == 'notice' and text.startswith('DeepInfra is busy (the model is temporarily at capacity); '
                                                                      'trying again in ') for kind, text in notices), notices)
             # The patience is a time bound: past it, the refusal is raised (and is the provider's being busy).
@@ -111,15 +115,45 @@ class HostedQuotaTests(unittest.TestCase):
             notices = []
             self.assertTrue(list(generation_stream(client, payload, lambda kind, text: notices.append(text)))[-1]['done'])
             self.assertIn('ended the request before producing output', notices[0])
-        # Reworded busy messages are recognised; credit limits and unreadable 429s are still not retried.
-        for detail, retried in [({'error': {'message': 'Model is busy, please retry later'}}, True),
-                                ({'error': {'message': 'Model busy, retry later (queue full)'}}, True),
-                                ({'detail': {'error': 'Engine overloaded'}}, False),  # nested deeper than we read
-                                ({'error': {'message': 'Insufficient balance, add credit; retry later'}}, False),
-                                ({'detail': 'something else'}, False)]:
-            signals = D._provider_signals(detail)
-            self.assertEqual(not D._credit_limit(signals) and D._mentions(signals, D._BUSY), retried, detail)
+            # Reworded busy messages are retried through the real classifier; credit limits and unreadable 429s
+            # are still refused at once (one send).
+            for detail, retried in [({'error': {'message': 'Model is busy, please retry later'}}, True),
+                                    ({'error': {'message': 'Model busy, retry later (queue full)'}}, True),
+                                    ({'detail': {'error': 'Engine overloaded'}}, False),  # nested deeper than we read
+                                    ({'error': {'message': 'Insufficient balance, add credit; retry later'}}, False),
+                                    ({'detail': 'something else'}, False)]:
+                fake.replies = [{'http_status': 429, 'body': detail}, ('Ready', '', 4)]
+                before = len(fake.completions)
+                if retried:
+                    self.assertTrue(list(generation_stream(client, payload, lambda *_: None))[-1]['done'])
+                    self.assertEqual(len(fake.completions) - before, 2, detail)
+                else:
+                    with self.assertRaises(DeepInfraRateLimit) as stopped:
+                        list(generation_stream(client, payload, lambda *_: None))
+                    self.assertFalse(stopped.exception.retryable, detail)
+                    self.assertEqual(len(fake.completions) - before, 1, detail)
+                fake.replies = []
+            # A plain HTTP 500 may come from the request: counted retries (RETRIES), not five minutes.
+            fake.replies = [{'http_status': 500, 'body': {}}] * (RETRIES + 1) + [('Unused', '', 1)]
+            before = len(fake.completions)
+            with self.assertRaises(DeepInfraGenerationError):
+                list(generation_stream(client, payload, lambda *_: None))
+            self.assertEqual(len(fake.completions) - before, RETRIES + 1)
+            fake.replies = []
+            # Another call's cooldown that would outlast this call's patience is a busy refusal, raised at once.
+            with patch.dict('mathagent.deepinfra._cooldown', {'until': time.monotonic() + 60}), busy_patience(5), \
+                    self.assertRaises(DeepInfraRateLimit) as stopped:
+                list(generation_stream(client, payload, lambda *_: None))
+            self.assertTrue(provider_busy(stopped.exception))
         self.assertEqual(D._generation_failure(body)[0], 'service_unavailable')
+        self.assertEqual(D._generation_failure({'error': {'message': 'Insufficient credit, retry later'}})[0], 'quota')
+        # The pause: never under the backoff step (a Retry-After of 0 must not make calls send back to back), at most
+        # BUSY_STEP when the provider names no wait, the provider's longer Retry-After otherwise.
+        with patch('mathagent.deepinfra.random.uniform', return_value=1.0):
+            self.assertEqual(D._refusal_delay(0, '0', 0), D.BACKOFF[0])
+            self.assertEqual(D._refusal_delay(60, None, 4), D.BUSY_STEP)
+            self.assertEqual(D._refusal_delay(90, '90', 1), 90)
+            self.assertEqual(D._refusal_delay(0, '0', 9), D.BUSY_STEP)
 
     def test_conversation_retries_only_failures_before_output_within_one_shared_allowance(self):
         fake = FakeDeepInfra()

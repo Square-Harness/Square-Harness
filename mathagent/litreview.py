@@ -32,7 +32,7 @@ from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
 from .model_limits import is_ds4, workflow_budget
 from .deepinfra import (DeepInfraGenerationError, DeepInfraRateLimit, DeepInfraSilentStart, generation_window,
-                        rejected_before_inference)
+                        refusal_notices, rejected_before_inference)
 from .assistant_budget import AssistantBudget
 from .reporting import usage_footer
 from .research import (ResearchRunner, ResearchBudget, _job_directory, _read_state, _reference_prompt,
@@ -1211,7 +1211,8 @@ class ReviewRunner(ResearchRunner):
                 raise ResearchBudget(f'The {role} phase deadline was reached')
             try:
                 replacement = any(self._failure_count(role, key) for key in units or (role,))
-                with self._timeout(), generation_window(self.agent.client, replacement=replacement, deadline=deadline):
+                with self._timeout(), generation_window(self.agent.client, replacement=replacement, deadline=deadline), \
+                        refusal_notices(getattr(self, 'emit', None)):
                     result = self._started(role, prompt, cap=cap, schema=schema, temperature=temperature,
                                            units=units, answer_only=answer_only)
                     if attempt == 0 and result.get('stopped') == 'reasoning_limit':

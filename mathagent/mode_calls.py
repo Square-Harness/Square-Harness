@@ -880,7 +880,11 @@ class ModeOrchestrator(Orchestrator):
                 or state.get('automatic_source_mode') or state.get('children')):
             return
         decision = state.get('proof_routing') or {}
-        if decision.get('status') != 'complete':
+        provisional = (decision.get('fallback') == 'provider_busy' and not state.get('main_calls')
+                       and not getattr(self, '_routing_fell_back', False))
+        if decision.get('status') != 'complete' or provisional:
+            # A routing skipped because the provider was busy is tried again when the turn resumes before its first
+            # answer call (in the run that skipped it, the direct answer goes ahead).
             if not allow_tools:
                 raise AgentError('The request needs a routing decision, but further actions are disabled; saved work is unchanged.')
             state['proof_routing'] = {'status': 'running'}
@@ -904,6 +908,7 @@ class ModeOrchestrator(Orchestrator):
                 # routing failure (malformed decision, invalid usage) still stops before an answer.
                 decision = {'route': 'direct', 'effort': 'medium', 'fallback': 'provider_busy',
                             'reason': 'Routing was skipped because the model provider was busy.', 'error': str(exc)[:300]}
+                self._routing_fell_back = True
                 self.emit('notice', 'The model provider was busy while choosing a workflow, so this message is answered '
                                     'directly.')
             finally:

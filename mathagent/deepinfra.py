@@ -51,9 +51,10 @@ START_SECONDS = 30  # an accepted stream silent this long (plus prefill time) is
 # waves of a minute or more (measured 2026-11-26: about 37% of calls refused for hours, whatever the request size,
 # reasoning or service tier). Such refusals do not use the RETRIES replacements: a call keeps sending again, every
 # BUSY_STEP seconds at most, until BUSY_PATIENCE seconds have passed since its first refusal, and says so each time.
-BUSY_PATIENCE = 300
-BUSY_STEP = 30
-MAX_REFUSALS = 60  # a provider asking for no wait at all cannot make a call send forever
+BUSY_PATIENCE = 300  # measured from the start of the call, so waits on other calls' cooldown count too
+BUSY_STEP = 30  # longest pause between two sends (about 24-36 s with jitter) unless the provider asks for longer
+MAX_REFUSALS = 60
+NOTICE_EVERY = 45  # seconds between two "DeepInfra is busy" notices of one call (the first is always shown)
 _cooldown = {'until': 0.0}
 _cooldown_lock = threading.Lock()
 
@@ -390,6 +391,16 @@ def _rate_limit(exc, deadline):
     return 'The provider rate, capacity or spending limit was reached.', False
 
 
+def _refusal_delay(delay, header, attempt):
+    """The pause before sending a refused completion again: the provider's Retry-After when it asks for longer,
+    never less than the backoff step (a Retry-After of 0 must not make calls send back to back), at most BUSY_STEP
+    when the provider names no wait."""
+    if delay is None:
+        return None
+    step = min(BACKOFF[min(attempt, len(BACKOFF) - 1)], BUSY_STEP) * random.uniform(.8, 1.2)
+    return max(delay, step) if header is not None else min(delay, BUSY_STEP * random.uniform(.8, 1.2))
+
+
 def _retry_delay(header, attempt=0):
     """Seconds to wait, or None when the provider requests a long or invalid wait. Without Retry-After the
     wait grows with each refusal (with jitter, so that parallel calls do not return together)."""
@@ -506,7 +517,21 @@ class DeepInfra(OpenAICompatible):
         if timeout <= 0:
             raise ModelNotDispatched('The DeepInfra request time allowance elapsed before dispatch.')
         cancel = getattr(self, 'cancel', None)
-        attempt, first_refusal = 0, None
+        attempt, started, announced = 0, time.monotonic(), [None]
+        window = _generation_window.get() if completion else None
+        # A completion in a generation window waits out refusals by time (a caller-managed replacement window,
+        # litreview's, keeps none); the patience counts from the start of the call.
+        patient = completion and window is not None and not window.replacement
+        patience = _busy_patience.get()
+        patience = BUSY_PATIENCE if patience is None else patience
+        notice = _refusal_notice.get() if completion else None
+
+        def announce(text):
+            now = time.monotonic()
+            if notice is not None and (announced[0] is None or now - announced[0] >= NOTICE_EVERY):
+                announced[0] = now
+                notice('notice', text)
+
         while True:
             if attempt and cancel is not None and cancel.is_set():
                 raise _RejectedRetryCancelled(completion)
@@ -516,8 +541,16 @@ class DeepInfra(OpenAICompatible):
                 with _cooldown_lock:
                     wait = _cooldown['until'] - time.monotonic()
                 if 0 < wait <= LONGEST_RETRY_AFTER:
+                    if patient and time.monotonic() + wait - started > patience:
+                        # Another call's pause would outlast this call's patience: the provider is busy (checked before
+                        # the deadline, so routing falls back instead of pausing the turn).
+                        raise DeepInfraRateLimit('The model is temporarily at capacity.', completion_rejected=completion,
+                                                 transient=True)
                     if time.monotonic() + wait >= deadline:
                         raise ModelNotDispatched('The provider asked to wait beyond this request\'s time allowance.')
+                    if wait >= 1:
+                        announce(f'DeepInfra is busy (another request was just refused); sending in {round(wait)} s '
+                                 f'(waited {round(time.monotonic() - started)} s, up to {max(1, round(patience / 60))} min).')
                     if cancel is not None and cancel.wait(wait):
                         raise _RejectedRetryCancelled(completion)
                     if cancel is None:
@@ -541,26 +574,22 @@ class DeepInfra(OpenAICompatible):
                         hint, transient = _rate_limit(exc, deadline)
                         delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
                         rejection = DeepInfraRateLimit(hint, completion_rejected=completion, transient=transient)
-                window = _generation_window.get() if completion else None
                 now = time.monotonic()
-                first_refusal = now if first_refusal is None else first_refusal
-                patience = _busy_patience.get()
-                patience = BUSY_PATIENCE if patience is None else patience
-                if delay is not None and exc.headers is not None and exc.headers.get('Retry-After') is None:
-                    delay = min(delay, BUSY_STEP * random.uniform(.8, 1.2))
-                if completion and window is not None:
-                    # A refusal costs nothing: it is waited out by time, not counted against the replacements.
-                    give_up = (window.replacement or attempt + 1 >= MAX_REFUSALS
-                               or now - first_refusal + (delay or 0) > patience)
+                if completion:
+                    delay = _refusal_delay(delay, exc.headers.get('Retry-After') if exc.headers else None, attempt)
+                if patient and exc.code != 500:
+                    # A busy or unavailable provider costs nothing: waited out by time, not counted against the
+                    # replacements. A plain 500 may come from the request itself, so it keeps counted retries.
+                    give_up = attempt + 1 >= MAX_REFUSALS or now - started + (delay or 0) > patience
+                elif completion and window is not None:
+                    give_up = window.replacement or attempt >= RETRIES
                 else:
                     give_up = bool(attempt)  # a request outside a generation window (catalog, tokenizer) retries once
                 if give_up or not transient or delay is None or now + delay >= deadline:
                     raise rejection from None
-                notice = _refusal_notice.get() if completion else None
-                if notice is not None:
-                    notice('notice', f'DeepInfra is busy ({hint.rstrip(".").lower() if exc.code == 429 else "temporarily unavailable"}); '
-                                     f'trying again in {max(1, round(delay))} s (waited {round(now - first_refusal)} s, '
-                                     f'up to {max(1, round(patience / 60))} min).')
+                announce(f'DeepInfra is busy ({hint.rstrip(".").lower() if exc.code == 429 else "temporarily unavailable"}); '
+                         f'trying again in {max(1, round(delay))} s (waited {round(now - started)} s, '
+                         f'up to {max(1, round(patience / 60))} min).')
                 attempt += 1
                 if completion:
                     with _cooldown_lock:

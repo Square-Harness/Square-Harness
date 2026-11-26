@@ -472,7 +472,8 @@ class ChatCapture:
             elif kind == 'progress' and data['text']:
                 steps.append({'type': 'notice', 'text': data['text'], 'progress': True})
             elif kind == 'delta':
-                step = steps[-1] if steps and steps[-1]['type'] == 'call' else None
+                # Output belongs to the current model call, even after a notice (a provider wait) shown since it started.
+                step = next((s for s in reversed(steps) if s['type'] == 'call'), None)
                 if step is not None:
                     step['thinking'] += data.get('thinking', '')
                     step['text'] += data.get('text', '')
