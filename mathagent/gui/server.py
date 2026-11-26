@@ -1460,25 +1460,6 @@ def bind(host, port, hub, token):
     raise OSError(f'Cannot listen on {host} ports {port}–{port + 9}: {error}. Choose another --gui-port.')
 
 
-def reopen_last_folder(base, root):
-    """The folder last opened in the interface, already held for this interface, when the launch named the
-    interface root itself (the default): a restart comes back to the folder the user was working in. A launch
-    that names a subfolder wins, and a folder that is gone, holds a project's files or is served by another
-    interface is skipped (the launch folder opens). Returns (folder, lock), or (None, None)."""
-    if root != base:
-        return None, None
-    recent = store.recent_folders(base)
-    if not recent or not recent[0]:
-        return None, None
-    try:
-        target = store.resolve_folder(base, recent[0])
-        if target == base or projects.holds_projects(target) or projects.folder_label(target):
-            return None, None
-        return target, folder_lock(target)
-    except (OSError, ValueError, LookupError):
-        return None, None
-
-
 def serve(args):
     root = Path(args.workspace).expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -1493,11 +1474,8 @@ def serve(args):
         raise ValueError('--gui-root must be a folder that contains the --workspace folder')
     args.workspace, args.gui_root = root, base
     token = workspace_token(base)
-    reopened, lock = reopen_last_folder(base, root)
-    if reopened is not None:
-        root = args.workspace = reopened
     hub = Hub(args)
-    hub.folder_lock = lock or folder_lock(root)
+    hub.folder_lock = folder_lock(root)
     server = bind(args.gui_host, args.gui_port, hub, token)
     port = server.server_address[1]
     if args.gui_port and port != args.gui_port:
@@ -1512,8 +1490,7 @@ def serve(args):
     query = '/?' + urlencode({'token': token})
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
              f'│ {args.model} · {args.backend} at {args.host}',
-             f'│ Workspace: {root}' + (' (the folder last opened)' if reopened is not None else '')
-             + (f' (folders below {base} can be opened)' if base != root else ''),
+             f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
              f'│ Research: {"offline, locked by --offline (local/cache only)" if hub.online_locked else "online by default, switchable per job"}'
              ' · proof: solve → verify → repair',
              f'│ Open: {local}{query}']

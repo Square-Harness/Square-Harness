@@ -2,11 +2,6 @@
 
 ## Unreleased
 
-- The interface reopens the folder you opened last when it restarts, instead of
-  the launch folder (unless the launch names a subfolder with `--workspace`, or
-  that folder is gone, holds a project's files or is served by another
-  interface).
-
 - See and reuse the workspace's files. **See my files**, at the bottom of the
   folder window, opens a file browser on the open folder: its subfolders and its
   text, PDF and image files, with their extension, size and modification date.

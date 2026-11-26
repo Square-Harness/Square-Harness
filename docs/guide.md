@@ -423,8 +423,7 @@ one with a message.
   the skills; it points to **About**, which does.
 - **Your folder** is shown above the text box. Click it to open another folder
   (below `--gui-root`; by default only the workspace itself). Other open tabs
-  follow the new folder and say so. A restart reopens the folder you opened last,
-  unless the launch names a subfolder with `--workspace`. Drop files onto the
+  follow the new folder and say so. Drop files onto the
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
   `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Empty files are refused, and so is a `.pdf`
