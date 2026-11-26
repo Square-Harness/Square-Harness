@@ -12,6 +12,16 @@
   is sent again too. Refusals no longer use up the four replacements kept for silent starts
   and broken streams; a plain HTTP 500 keeps its four counted retries. A notice shown while a
   call waits no longer hides the live answer that follows.
+- The workspace tools return results sized to the model's context instead of a
+  fixed 6,000 characters and 200 lines (a limit set for the earlier local
+  model): a `read_file` excerpt, a `list_files` page, `search_text` matches and
+  a `read_index` excerpt may hold 3% of the context, at about 3 characters a
+  token, and never less than 6,000 characters. A 65k-token model keeps 6,000
+  characters; DS4 gets about 94,000, so a 79-page paper takes three reads
+  instead of about forty. Without `end_line`, `read_file` reads as far as that
+  budget allows; `list_files` pages hold up to 1,000 names. Conversation titles
+  keep their own limits.
+
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.

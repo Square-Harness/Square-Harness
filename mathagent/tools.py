@@ -26,6 +26,18 @@ READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
+# A workspace tool result (a read_file excerpt, a list_files page, search_text matches) may take this share of the
+# model's context, at about 3 characters a token (LaTeX and extracted PDF text run close to that), and never less
+# than MAX_RESULT: a 65k-token model keeps 6000 characters, DS4's 1M tokens give about 94,000 (a 79-page paper in
+# three reads). Each result stays in the conversation for the rest of the turn and is sent again with every
+# call, so a larger share makes long reading turns expensive. Conversation titles have their own limits.
+RESULT_SHARE = 0.03
+CHARS_PER_TOKEN = 3
+
+
+def result_budget(ctx):
+    """Characters one workspace tool result may hold for a model with `ctx` tokens of context."""
+    return max(MAX_RESULT, int(ctx * RESULT_SHARE * CHARS_PER_TOKEN)) if type(ctx) is int and ctx > 0 else MAX_RESULT
 _WRITE_LOCK = Lock()
 SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
 
@@ -165,6 +177,7 @@ class Workspace:
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
         self.index = None
+        self.result_chars = MAX_RESULT  # set from the model's context by its Agent (result_budget)
         self.pinned = set()
         self.selected_files_only = False
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
@@ -262,13 +275,13 @@ class Workspace:
                     return
 
     def list_files(self, offset=0, limit=100):
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
-            raise ValueError('Use a nonnegative file offset and a limit from 1 to 200')
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError('Use a nonnegative file offset and a limit from 1 to 1000')
         paths = sorted(self.pinned) if self.selected_files_only else self.files(self.readable)
         names = [str(p.relative_to(self.root)) for p in paths]
         selected, size = [], 0
         for name in names[offset:offset + limit]:
-            if selected and size + len(name) + 1 > MAX_RESULT - 300:
+            if selected and size + len(name) + 1 > self.result_chars - 300:
                 break
             selected.append(name)
             size += len(name) + 1
@@ -277,8 +290,10 @@ class Workspace:
         return ('\n'.join(selected) or '(no readable files at this offset)') + suffix
 
     def read_file(self, path, start_line=1, end_line=None, start_column=1):
+        # Without end_line, the excerpt runs as far as the result budget allows (result_chars, a share of the
+        # model's context); a cut excerpt says where to continue.
         if end_line is None:
-            end_line = start_line + 99 if type(start_line) is int else 100
+            end_line = start_line + 10 ** 9 if type(start_line) is int else 1
         if type(start_column) is not int or start_column < 1:
             raise ValueError('start_column must be a positive character position on the first line')
         if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
@@ -295,9 +310,9 @@ class Workspace:
                 pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
         else:
             lines = self.text(p).splitlines()
-        end = min(end_line, start_line + 199, len(lines))
+        end = min(end_line, len(lines))
         result = f'{path}: {pagination}{len(lines)} total lines; requested excerpt {start_line}-{end}\n'
-        remaining = MAX_RESULT - len(result) - 250
+        remaining = self.result_chars - len(result) - 250
         selected = []
         for index in range(start_line - 1, end):
             column = start_column if index == start_line - 1 else 1
@@ -486,7 +501,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
                    + (', including extracted PDF text' if self.literature is not None else '')
                    + '; TeX source archives are read as a labelled, read-only source bundle; members are never executed or written to disk'
-                   + '. At most 200 lines / 6000 characters.',
+                   + f'. At most {self.result_chars:,} characters a call; a longer excerpt says where to continue.',
                    {'path': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['path']))
         result += [
             schema('write_file', 'Create/replace a text file ONLY when requested by the user; shows a diff for approval.',
@@ -528,7 +543,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
             if self.index is not None and name in self.index.names:
-                return self.index.execute(name, arguments)
+                return self.index.execute(name, arguments, budget=self.result_chars)
             if self.numerics is not None and name in self.numerics.tool_names:
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:
@@ -539,6 +554,6 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 # its own offline gate. Do not split citation JSON mid-record.
                 return self.literature.execute(name, arguments)
             value = str(getattr(self, name)(**arguments))
-            return value if len(value) <= MAX_RESULT else value[:MAX_RESULT] + '\n[TRUNCATED: request a smaller excerpt]'
+            return value if len(value) <= self.result_chars else value[:self.result_chars] + '\n[TRUNCATED: request a smaller excerpt]'
         except (OSError, ValueError, TypeError, UnicodeError) as e:
             return f'Tool error: {e}'

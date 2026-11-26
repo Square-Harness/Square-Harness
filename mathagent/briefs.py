@@ -135,7 +135,8 @@ class IndexReader:
                 schema('read_index', 'Read a numbered excerpt of a saved, fallible earlier result.',
                        {'entry': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['entry'])]
 
-    def execute(self, name, args):
+    def execute(self, name, args, budget=6000):
+        """`budget`: characters a result may hold, the workspace's result budget (tools.result_budget)."""
         from . import project_index
         entries = self.view['entries']
         if name == 'list_index':
@@ -146,7 +147,7 @@ class IndexReader:
             hits = [line for line in lines if query.casefold() in line.casefold()]
             page, size = [], 0
             for line in hits[offset:offset + 20]:
-                if size + len(line) > 6000:
+                if size + len(line) > budget:
                     break
                 page.append(line)
                 size += len(line) + 1
@@ -162,11 +163,11 @@ class IndexReader:
         body = project_index.read_text(self.root, self.view, entry['id'])
         lines = body.splitlines() or ['']
         start, column = args.get('start_line', 1), args.get('start_column', 1)
-        end = args.get('end_line', min(len(lines), start + 199) if type(start) is int else 0)
-        if any(type(n) is not int for n in (start, end, column)) or not 1 <= start <= end or end-start >= 200 or start > len(lines) or not 1 <= column <= max(1, len(lines[start-1])):
-            raise ValueError('Read an existing range of up to 200 lines and a valid start column')
+        end = args.get('end_line', len(lines) if type(start) is int else 0)
+        if any(type(n) is not int for n in (start, end, column)) or not 1 <= start <= end or start > len(lines) or not 1 <= column <= max(1, len(lines[start-1])):
+            raise ValueError('Read an existing range of lines and a valid start column')
         out = [LEAD_START + '\n' + _inert(project_index.line(entry)) + '\nEarlier model output; check the evidence and its qualifications.']
-        available = 5900 - len(out[0])
+        available = budget - 100 - len(out[0])
         for n in range(start, min(end, len(lines)) + 1):
             col = column if n == start else 1
             value = _inert(lines[n-1][col-1:])
