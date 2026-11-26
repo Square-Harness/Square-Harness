@@ -219,9 +219,10 @@ class DeepInfraSilentStart(DeepInfraGenerationError):
 class DeepInfraRateLimit(DeepInfraGenerationError):
     """A definitive HTTP 429 response, before the transport opened a success stream."""
 
-    def __init__(self, hint, *, completion_rejected):
+    def __init__(self, hint, *, completion_rejected, transient=False):
         super().__init__('DeepInfra HTTP 429: ' + hint, category='rate_limit')
         self.completion_rejected = completion_rejected
+        self.retryable = transient
 
 
 class DeepInfraUnavailable(DeepInfraRateLimit):
@@ -330,7 +331,8 @@ def _rate_limit(exc, deadline):
     if signals & {'rate limited', 'rate limit exceeded', 'rate limit error', 'too many requests',
                   'concurrency limit exceeded', 'too many concurrent requests'}:
         return 'The provider is temporarily limiting requests.', True
-    if signals & {'model busy', 'model overloaded', 'capacity exceeded', 'server overloaded'}:
+    if signals & {'model busy', 'model busy, retry later', 'engine overloaded', 'model overloaded',
+                  'capacity exceeded', 'server overloaded'}:
         return 'The model is temporarily at capacity.', True
     return 'The provider rate, capacity or spending limit was reached.', False
 
@@ -484,7 +486,7 @@ class DeepInfra(OpenAICompatible):
                     else:
                         hint, transient = _rate_limit(exc, deadline)
                         delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
-                        rejection = DeepInfraRateLimit(hint, completion_rejected=completion)
+                        rejection = DeepInfraRateLimit(hint, completion_rejected=completion, transient=transient)
                 window = _generation_window.get() if completion else None
                 if ((window.retry_spent if window else attempt) or not transient or delay is None
                         or time.monotonic() + delay >= deadline):

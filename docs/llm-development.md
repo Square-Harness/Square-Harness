@@ -1253,7 +1253,11 @@ usage footer, which holds the status line (job ID, phase, effort)
 the terminal; `report.md` and the job page keep the rest.
 
 Provider failures on DeepInfra are handled in `deepinfra.py`, for every key and
-mode. `_request_url` sends a request refused before streaming (429 with a transient
+mode. An HTTP 429 with provider code `engine_overloaded` or message
+`Model busy, retry later` is a temporary capacity refusal. `DeepInfraRateLimit`
+passes the classified retryability to the worker, so exhausting the transport
+retries leaves the worker resumable. Credit and unclassified 429s remain
+non-retryable. `_request_url` sends a request refused before streaming (429 with a transient
 reason, 500/502/503/504) again after `BACKOFF` or a `Retry-After` of at most
 `LONGEST_RETRY_AFTER`, and sets a process-wide cooldown that other completions wait
 out. `DeepInfra.stream` gives every request a start limit (`START_SECONDS` plus

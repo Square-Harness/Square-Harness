@@ -960,16 +960,18 @@ requests to arXiv.
 ### When the model provider is busy
 
 With the hosted model (DS4 on DeepInfra), every mode and every key handles provider
-failures the same way. A request the provider refuses (HTTP 429, 500, 502, 503 or
-504 before answering) is sent again after a growing pause (about 2, 5, 15, 30 and
-60 seconds, or the wait the provider asks for, up to two minutes), and the other
+failures the same way. When DeepInfra says the model is busy or temporarily rate limits
+a call (HTTP 429), or returns HTTP 500, 502, 503 or 504 before answering, the server
+tries again after a growing pause (about 2, 5, 15 and 30 seconds, or the wait the
+provider asks for, up to two minutes), and the other
 calls of the server wait out that pause too. A request the provider accepts but does
 not start to answer within about 30 seconds (longer for a long prompt) is closed and
 sent again at once. A stream that stalls or breaks in the middle of its answer is
 sent again by a background job (Proof, the reviews, write-ups, literature checks),
 at most twice; in a conversation, where the answer was already shown, it is not.
-Each logical call gets at most four replacements within its own time allowance;
-the job shows "sending it again (k of 4 retries)" and pauses only when they are used.
+Each logical call gets at most four replacements within its time allowance. If
+DeepInfra still reports that the model is busy, Explore pauses. Use **Resume**
+to restart the unfinished worker with its selected files and remaining budget.
 
 ### Quick review, Review, Typo check, Explain
 

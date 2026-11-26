@@ -222,7 +222,9 @@ class HostedQuotaTests(unittest.TestCase):
             payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Hello'}],
                        'options': {'num_predict': 128}, 'think': False}
             client = DeepInfra(fake.host)
-            busy = {'http_status': 429, 'body': {'detail': 'Model busy'}, 'headers': {'Retry-After': '0'}}
+            busy = {'http_status': 429, 'body': {'error': {'code': 'engine_overloaded',
+                    'type': 'invalid_request_error', 'message': 'Model busy, retry later', 'param': None}},
+                    'headers': {'Retry-After': '0'}}
             fake.replies = [busy, ('Ready', '', 5)]
             self.assertTrue(list(client.stream(payload))[-1]['done'])
             self.assertEqual(len(fake.completions), 2)
@@ -239,10 +241,13 @@ class HostedQuotaTests(unittest.TestCase):
                     list(client.stream(payload))
                 self.assertTrue(rejected_before_inference(stopped.exception))
                 self.assertIn(reason, str(stopped.exception))
+                self.assertEqual(stopped.exception.retryable, reason == 'temporarily')
                 self.assertNotIn(fake.key, str(stopped.exception))
-            fake.replies = [busy] * (RETRIES + 1)
-            with self.assertRaises(DeepInfraRateLimit):
+            fake.replies = [{**busy, 'body': {'error': {'code': 'engine_overloaded'}}}] * (RETRIES + 1)
+            with self.assertRaises(DeepInfraRateLimit) as stopped:
                 list(client.stream(payload))
+            self.assertTrue(stopped.exception.retryable)
+            self.assertIn('temporarily at capacity', str(stopped.exception))
             client.timeout = .5
             fake.replies = [{**busy, 'headers': {'Retry-After': '1'}}]
             with self.assertRaises(DeepInfraRateLimit):
