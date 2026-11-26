@@ -428,7 +428,12 @@ one with a message.
   `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Empty files are refused, and so is a `.pdf`
   that is not a PDF (a LaTeX file named `.pdf`) or is cut short. Dropped files
-  are attached to your next message. Text files are best saved as UTF-8; older files in Latin-1 or
+  are attached to your next message. **Attach files** opens a menu: **From my
+  device** uploads files the same way, and **From the workspace** lists the files
+  already in the folder (grouped by folder, with their extension and size) so you
+  can click the ones to attach; they stay where they are. **See my files**, at the
+  bottom of the folder window, shows what the open folder holds: the text, PDF and
+  image files the model can be given. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and

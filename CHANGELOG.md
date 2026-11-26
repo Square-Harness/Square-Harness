@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- See and reuse the workspace's files. **See my files**, at the bottom of the
+  folder window, lists the open folder's text, PDF and image files, grouped by
+  folder, with their name, extension and size; a click selects a file (opening
+  it on a double click is not decided yet: `FileExplorer` takes an `onOpen`
+  callback for it). **Attach files** is now a menu: **From my device** uploads as
+  before, and **From the workspace** attaches files already uploaded, for
+  example in an earlier conversation, to the next message.
+
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.

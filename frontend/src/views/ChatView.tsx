@@ -33,6 +33,7 @@ import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
+import { AttachMenu } from '../components/FileExplorer'
 
 type ChatMode = 'critic' | 'explore' | 'free'
 
@@ -381,7 +382,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <div className="composer-top">
           <WorkspaceSwitch />
           <ProjectSelector value={currentProject} onChange={(project) => { void changeProject(project) }} disabled={sending || resuming || projectSaving || work.blocked || (!!id && !data)} />
-          <button type="button" className="btn btn-quiet btn-small" disabled={sending || projectSaving || (work.blocked && !canQueue)} onClick={() => window.dispatchEvent(new Event('square-attach-files'))} aria-label={'Attach files' + (app.status?.image_support ? ' or images' : '')}><FileIcon size={14} /><span className="composer-long-label"> Attach files{app.status?.image_support ? ' or images' : ''}</span></button>
+          <AttachMenu label={'Attach files' + (app.status?.image_support ? ' or images' : '')} disabled={sending || projectSaving || (work.blocked && !canQueue)}
+            attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])} />
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
             <span key={path} className="chip" title={path}>
               <FileIcon size={14} /><span>{displayPath(path)}</span>
