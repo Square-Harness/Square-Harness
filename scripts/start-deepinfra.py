@@ -141,7 +141,7 @@ def main():
         print('DeepInfra service tier: ' + environment['SH_DEEPINFRA_SERVICE_TIER'])
     elif ds4:
         print('Served through OpenRouter (zero data retention, fp8; providers: '
-              + (os.environ.get('SH_OPENROUTER_PROVIDERS') or 'deepinfra,cohere,parasail,coreweave,crusoe') + ').')
+              + (os.environ.get('SH_OPENROUTER_PROVIDERS') or 'crusoe,cohere,coreweave,deepinfra,parasail') + ').')
     print('Private workspace: ' + str(workspace))
     print('The authenticated Open address is in the private GUI log: ' + str(log))
     return 0

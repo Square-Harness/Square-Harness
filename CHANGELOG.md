@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The hosted model provider is a setting: `--api-profile openrouter` (or `scripts/start-deepinfra.py --provider
+  openrouter`) serves the same DeepSeek V4.1 Flash 1017 through OpenRouter, `--api-profile deepinfra` (the default)
+  through DeepInfra as before. OpenRouter routes each call among a fixed list of providers that keep no data
+  (Crusoe, Cohere, CoreWeave, DeepInfra, Parasail by default; `SH_OPENROUTER_PROVIDERS`), so a busy provider is
+  replaced by the next one; every request asks for zero data retention, no data collection, 8-bit (fp8) serving,
+  the standard tier and a price cap, and turns OpenRouter's context compression off. Its key is saved by
+  `scripts/setup-openrouter.py`. Everything built for DeepInfra (busy waits, retries, silent-start detection, the
+  tester ledger) applies to both; DeepInfra's requests are unchanged. Native images stay DeepInfra-only for now.
+
 - DeepInfra overloads no longer stop a conversation after a minute, and are no longer silent.
   DeepInfra's "Model busy" refusal (about a third of calls on 26 November 2026, whatever the
   request size, reasoning or service tier) is waited out for up to five minutes per call, and

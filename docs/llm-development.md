@@ -1872,6 +1872,26 @@ seconds. Container startup timing starts after admission; tiny availability
 calibration may occur outside this gate. Unset configuration preserves the
 single-user path. Keep all existing container restrictions intact.
 
+### Hosted provider profiles (DeepInfra, OpenRouter)
+
+The hosted DS4 profiles are `model_limits.HOSTED_DS4` (`deepinfra`, `openrouter`): every DS4 budget, preset,
+routing, concurrency and retry decision keys on that set (`is_ds4`, `ds4_args`, `hosted_profile`), never on one
+provider's name. `api_profiles.profile_class(name)` returns the client class. `deepinfra.DeepInfra` is the hosted
+transport; its provider values are class attributes (`display`, `origin_host`, `api_path`, `host_paths`, `routes`,
+`public_routes`, `tokenize_path`, `key_file_env`/`key_env`/`loopback_env`, `model_ids` mapping Square Harness's
+model name to the wire name, `tolerate_repeated_finish`) and its provider wording sits in `_refusal` (HTTP refusals:
+unavailable, rate_limit or fatal), `_stream_error` (errors inside an accepted stream) and `_read_service_tier`.
+`openrouter.OpenRouter` overrides them: wire model `deepseek/deepseek-v4.1-flash-1017`; no tokenizer (byte
+estimate); `_payload` adds `provider` (`routing()`: order/only from `SH_OPENROUTER_PROVIDERS`, default
+`DEFAULT_PROVIDERS`; allow_fallbacks, require_parameters, data_collection deny, zdr, fp8, `max_price` = `MAX_PRICE`
+or the tester ledger rates when `SH_DEEPINFRA_QUOTA_FILE` is set), `service_tier: default`, `usage: {include}`,
+and the context-compression plugin disabled; an in-flight budget 402 (`error.metadata.limit_source`) is a transient
+rate limit whose message omits the status (referee.provider_refused stops a review on `HTTP 402`); its stream
+repeats an empty finish frame carrying usage, which `backends._stream` accepts only for such a class. DeepInfra's
+requests and messages are byte-for-byte those of the single-provider version. `start-deepinfra.py --provider`
+picks the profile and key file (`.local/<provider>/credential`); the runtime folder stays `.local/deepinfra`. Tests:
+`tests/test_openrouter.py` (loopback `FakeOpenRouter` shaped like the measured stream).
+
 ### DeepInfra profile
 
 `--api-profile deepinfra` defaults to the hosted DS4.1 Flash 1017 checkpoint. The

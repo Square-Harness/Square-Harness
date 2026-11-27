@@ -19,10 +19,21 @@ the terminal. The current release is version 1.1.0.
 
 Self-hosting on your own computer or research GPU is the primary setup. For a
 temporary hosted-model test, `--backend openai --api-profile deepinfra`
-uses DeepSeek V4.1 Flash 1017 through DeepInfra. The harness and saved jobs run
-on the computer or server hosting SH; model prompts, selected source text and tool context
-are sent to DeepInfra. Its retention policy applies to that processing. Keep
-the provider credential on the backend, never in the browser or a saved job.
+uses DeepSeek V4.1 Flash 1017 through DeepInfra, and `--api-profile openrouter`
+uses the same model through OpenRouter, which routes each call among a fixed list
+of providers that keep no data (Crusoe first, then Cohere, CoreWeave, DeepInfra,
+Parasail; change it with `SH_OPENROUTER_PROVIDERS`), so a busy provider is replaced
+by the next one. The provider is only a setting: `scripts/start-deepinfra.py
+--provider openrouter` (or `deepinfra`, the default), each with its own key
+(`scripts/setup-deepinfra.py`, `scripts/setup-openrouter.py`). The harness and
+saved jobs run on the computer or server hosting SH; model prompts, selected source
+text and tool context are sent to the provider. Its retention policy applies to that
+processing: with OpenRouter, every request asks for zero data retention and no
+data collection; also turn on Zero Data Retention for all models and keep prompt
+logging off in your OpenRouter privacy settings, and give the key a credit limit
+(an OpenRouter key has full account power). A paused job resumes only with the
+provider that started it. Keep the provider credential on the backend, never in
+the browser or a saved job.
 `--allow-remote-model --offline` permits those model calls while locking web
 research off. See the hosted-API setup in [llm-install.md](llm-install.md).
 

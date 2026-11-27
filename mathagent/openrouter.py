@@ -28,8 +28,10 @@ from .deepinfra import (DeepInfra, HINTS, MODEL, _BUSY, _credit_limit, _generati
 
 WIRE_MODEL = 'deepseek/deepseek-v4.1-flash-1017'
 # Chosen 2026-11-27 among OpenRouter's endpoints for this model: fp8, zero data retention, at least 384k output,
-# structured outputs. DeepInfra first (the reference serving), then by price.
-DEFAULT_PROVIDERS = ('deepinfra', 'cohere', 'parasail', 'coreweave', 'crusoe')
+# structured outputs. Order chosen 2026-11-27 after measuring them through this client (long reasoning answers):
+# Crusoe ~243 tok/s ($0.19/$0.78 per M), Cohere ~155 ($0.12/$0.40), CoreWeave ~317 ($0.30/$1.20), DeepInfra ~136
+# ($0.10/$0.29), Parasail erratic (65-376). The first available one serves; the next takes over when it is busy.
+DEFAULT_PROVIDERS = ('crusoe', 'cohere', 'coreweave', 'deepinfra', 'parasail')
 MAX_PRICE = {'prompt': '0.30', 'completion': '1.20'}  # USD per million tokens; leaves out "fast" tiers ($0.60/$2.40)
 _SLUG = re.compile(r'^[a-z0-9][a-z0-9._-]*(/[a-z0-9._-]+)*$')
 # OpenRouter's wording of a refusal that is worth waiting out, matched inside its fields.
