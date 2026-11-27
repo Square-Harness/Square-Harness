@@ -17,6 +17,7 @@ import { useApp, useTick } from '../store'
 import { Report, Passage, flaggedCitations } from '../views/ResearchView'
 import { TexSource } from '../views/WriteupView'
 import { ArtifactView } from '../views/ChatView'
+import { CodeView } from './CodeEditor'
 import { ErrorNote, useLoad } from './common'
 import { Inline, Markdown, MathMacrosProvider } from './Markdown'
 import './workTabs.css'
@@ -273,8 +274,9 @@ function CitedPassage({ data, cite, onClose }: { data: ResearchDetail; cite: str
     sources={sources.data?.sources || null} onClose={onClose} /></>
 }
 
-function LiteratureReading({ output, data, error }: { output: WorkOutput; data?: ResearchDetail; error: string }) {
-  const papers = useMemo(() => {
+/** The links of a review's citations to their papers. */
+function usePaperLinks(data?: ResearchDetail) {
+  return useMemo(() => {
     const links: PaperLinks = new Map()
     for (const ref of data?.references || []) {
       const url = ref.doi ? 'https://doi.org/' + ref.doi : ref.arxiv ? 'https://arxiv.org/abs/' + ref.arxiv
@@ -283,6 +285,48 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
     }
     return links
   }, [data?.references])
+}
+
+/**
+ * A document result as the file viewer shows it: the document alone (a PDF, a rendered review or report, coloured
+ * LaTeX or BibTeX, a figure), without the notebook's title, request and buttons, which the reader has in the
+ * notebook and in the worker's box. Citations still show their source passage.
+ */
+export function ResultDocument({ output, chat }: { output: WorkOutput; chat: string }) {
+  const tick = useTick(output.job)
+  const textual = ['report', 'tex', 'body', 'bib'].includes(output.kind)
+  const [value, setValue] = useState<Preview | null>(null)
+  const [error, setError] = useState('')
+  const [cite, setCite] = useState('')
+  useEffect(() => {
+    if (!textual) return
+    let active = true
+    previewText(output, chat).then(next => { if (active) { setError(''); setValue(next) } },
+      reason => { if (active) setError((reason as Error).message) })
+    return () => { active = false }
+  }, [output.id, output.status, chat, textual, tick])
+  const research = value?.research
+  const papers = usePaperLinks(research)
+  const flagged = useMemo(() => research ? flaggedCitations(research) : new Set<string>(), [research])
+  const issues = useMemo(() => research ? [...new Set([...research.citation_issues, ...research.review_context_issues, ...research.warnings])] : [], [research])
+  const display = output.file ? displayOf(output.file.mime_type) : null
+  if (output.kind === 'pdf' || display === 'document')
+    return <iframe className="file-view-frame" title={output.fileName || output.name} src={output.url + (output.kind === 'pdf' ? PDF_FIT : '')} />
+  if (output.file && output.url) return <ArtifactView artifact={{ ...output.file, url: output.url }} />
+  if (error) return <ErrorNote>{error}</ErrorNote>
+  if (!value) return <p role="status" className="muted">Loading the document…</p>
+  const passage = cite && research && <CitedPassage data={research} cite={cite} onClose={() => setCite('')} />
+  if (output.kind === 'report') return <div className="result-document">
+    {output.mode === 'literature'
+      ? <Markdown mathProse className="literature-text" papers={papers} onCite={setCite} flagged={flagged}>{research?.draft || value.text}</Markdown>
+      : research ? <Report data={research} flagged={flagged} issues={issues} onCite={setCite} /> : <Markdown>{value.text}</Markdown>}
+    {passage}
+  </div>
+  return <CodeView name={output.fileName || (output.kind === 'bib' ? 'references.bib' : 'document.tex')} text={value.text} />
+}
+
+function LiteratureReading({ output, data, error }: { output: WorkOutput; data?: ResearchDetail; error: string }) {
+  const papers = usePaperLinks(data)
   const [cite, setCite] = useState('')
   const issues = useMemo(() => data ? [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])] : [], [data])
   const flagged = useMemo(() => data ? flaggedCitations(data) : undefined, [data])
@@ -309,8 +353,7 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
   </article>
 }
 
-/** One result. `fit`: in the viewer panel, where a PDF fills the height and fits its width. */
-export function OutputPreview({ output, chat, fit = false }: { output: WorkOutput; chat: string; fit?: boolean }) {
+function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
   const tick = useTick(output.job)
   const isText = ['conversation', 'experiment', 'answer', 'check', 'proof', 'report', 'tex', 'body', 'bib'].includes(output.kind)
   const [value, setValue] = useState<Preview | null>(null)
@@ -362,7 +405,7 @@ export function OutputPreview({ output, chat, fit = false }: { output: WorkOutpu
     {cite && research && <CitedPassage data={research} cite={cite} onClose={() => setCite('')} />}
     {output.file && output.url && <ArtifactView artifact={{ ...output.file, url: output.url }} purpose={output.objective} />}
     {(output.kind === 'pdf' || display === 'document') && <iframe className="work-output-frame" title={output.name}
-      src={output.url + (fit && output.kind === 'pdf' ? PDF_FIT : '')} />}
+      src={output.url} />}
     {output.kind === 'source' && <p className="muted">Download the ZIP to inspect the source files.</p>}
   </section>
 }

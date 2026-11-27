@@ -56,6 +56,25 @@ export function ViewerPanel({ label, children }: { label: string; children: Reac
   </>
 }
 
+/** The viewer panel's header, for a file or a document: its name and facts, its tools (Edit, Save), then Download
+ * and Close on the same line, so that the document below keeps the height. */
+export function ViewerHead({ name, title, meta, tools, download, downloadName, downloadTitle, onClose }: {
+  name: string; title?: string; meta: ReactNode; tools?: ReactNode
+  download?: string; downloadName?: string; downloadTitle?: string; onClose: () => void
+}) {
+  return <header className="work-panel-head file-panel-head">
+    <span className="notebook-header-mark" aria-hidden="true"><FileIcon size={17} /></span>
+    <div className="notebook-heading">
+      <h2 title={title || name}>{name}</h2>
+      <span className="notebook-head-status">{meta}</span>
+    </div>
+    {tools}
+    {download && <a className="icon-btn" href={download} download={downloadName || true} aria-label={'Download ' + name}
+      title={downloadTitle || 'Download'}><DownloadIcon size={18} /></a>}
+    <button type="button" className="icon-btn" aria-label="Close the viewer" title="Close the viewer" onClick={onClose}><CloseIcon size={18} /></button>
+  </header>
+}
+
 /**
  * A file of the workspace: a PDF in the browser's viewer, fitted to the width; Markdown rendered; other text as
  * text, coloured for TeX and code; an image as it is. Markdown and text files are edited in place: click in the
@@ -140,6 +159,7 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
   const meta = (folder ? folder + ' · ' : '') + (file ? `${bytes(file.size)} · modified ${ago(file.updated_at)}` : '')
     + (file?.encoding && file.encoding !== 'utf-8' ? ` · ${file.encoding}` : '')
   const conflict = error.includes('changed since it was opened')
+  const state = saving ? 'Saving…' : dirty ? 'Unsaved changes' : saved
   const actions = <>
     {file?.kind === 'markdown' && <button type="button" className="btn btn-quiet btn-small file-view-mode" onClick={() => setEditing((on) => !on)}>
       {editing ? 'Preview' : 'Edit'}</button>}
@@ -147,22 +167,22 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
       title={dirty ? 'Download the file as last saved; save first to include your changes' : 'Download this file'}>
       <DownloadIcon size={14} /> Download</a>}
     {file?.editable && <>
-      <span className="muted small file-view-state" role="status">{saving ? 'Saving…' : dirty ? 'Unsaved changes' : saved}</span>
+      <span className="muted small file-view-state" role="status">{state}</span>
       <button type="button" className="btn btn-primary btn-small" disabled={!dirty || saving} onClick={() => void save()} title="Save (Ctrl+S)">Save</button>
     </>}
   </>
   return (
     <>
-      {panel && <header className="work-panel-head file-panel-head">
-        <span className="notebook-header-mark" aria-hidden="true"><FileIcon size={17} /></span>
-        <div className="notebook-heading">
-          <h2 title={displayPath(path)}>{name}</h2>
-          <span className="notebook-head-status">{meta}</span>
-        </div>
-        <button type="button" className="icon-btn" aria-label="Close the file" title="Close the file" onClick={onClose}><CloseIcon size={18} /></button>
-      </header>}
+      {panel && <ViewerHead name={name} title={displayPath(path)} onClose={onClose!}
+        meta={<>{meta}{state && <> · <span className="file-view-state-inline">{state}</span></>}<span className="sr-only" role="status">{state}</span></>}
+        tools={<>
+          {file?.kind === 'markdown' && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing((on) => !on)}>{editing ? 'Preview' : 'Edit'}</button>}
+          {file?.editable && <button type="button" className="btn btn-primary btn-small" disabled={!dirty || saving} onClick={() => void save()} title="Save (Ctrl+S)">Save</button>}
+        </>}
+        download={file ? fileDownloadUrl(path) : undefined} downloadName={file?.name}
+        downloadTitle={dirty ? 'Download the file as last saved; save first to include your changes' : 'Download this file'} />}
       <div className={'file-view' + (file?.kind === 'pdf' ? ' file-view-pdf' : '')}>
-        {panel ? (file && <div className="file-view-tools">{actions}</div>) : (
+        {!panel && (
           <header className="file-view-head">
             <FileIcon size={18} />
             <div className="file-view-title"><h1>{name}</h1><p className="muted small">{meta}</p></div>

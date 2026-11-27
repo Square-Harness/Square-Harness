@@ -5,10 +5,17 @@
 - Documents open in the file viewer beside the conversation, not inside the
   notebook: **View** in a worker's box, **Read literature review**, and the
   PDF, LaTeX, BibTeX, review and figure results of the notebook's **Results**
-  (`?result=<id>` in the conversation's address, `ResultPanel`, which shows the
-  notebook's reading of the result with the viewer's room; PDFs fit the width).
-  Closing the viewer brings the notebook back. Answers, proofs and experiments
-  are still read in the notebook.
+  (`?result=<id>` in the conversation's address, `ResultPanel`). They open like
+  any file: the file name on top (`theta-scheme.pdf`, `review.md`,
+  `references.bib`), then the document alone, a PDF fitted to the width, LaTeX
+  and BibTeX coloured, a review rendered with its citations; the request and
+  the buttons stay in the notebook and the worker's box. Closing the viewer
+  brings the notebook back. Answers, proofs and experiments are still read in
+  the notebook.
+- The viewer's header is one line: the name and facts, Edit or Preview and
+  Save for a text file (the save state joins the facts), then Download and
+  Close. The row of buttons above the file is gone, so the document keeps the
+  height.
 
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook

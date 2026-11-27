@@ -8,6 +8,16 @@ import './CodeEditor.css'
 /** Beyond this many characters the text is left uncoloured, so that typing stays immediate. */
 const MAX_COLOURED = 400_000
 
+/** A text to read only (a write-up's LaTeX, a BibTeX file), coloured for its language like the editor. */
+export function CodeView({ name, text }: { name: string; text: string }) {
+  const language = languageOf(name)
+  const html = useMemo(() => language && text.length <= MAX_COLOURED ? highlight(text, language) : null, [language, text])
+  return <div className="code-editor code-view">
+    {html === null ? <pre className="code-editor-highlight">{text}</pre>
+      : <pre className="code-editor-highlight" dangerouslySetInnerHTML={{ __html: html }} />}
+  </div>
+}
+
 /**
  * A text file to edit, coloured for its language (TeX, BibTeX, Python, Julia, Rust and other code). The
  * coloured copy lies under a transparent textarea with the same metrics: the textarea grows with the text and the

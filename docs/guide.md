@@ -470,7 +470,8 @@ one with a message.
   other files are marked as not supported. The viewer can open and save text
   files up to the 20 MiB per-file upload allowance. To edit Markdown or text, click in the text
   (on a Markdown page, click the rendered text or **Edit**), type, then **Save**
-  or Ctrl+S (⌘S on a Mac); **Download** saves the file as last saved. The file
+  or Ctrl+S (⌘S on a Mac). The viewer's header holds these buttons, then
+  **Download** (the file as last saved) and the close button, on one line. The file
   keeps its encoding. If the file changed on disk after you opened it (the model
   edited it, for example), it is not overwritten: reload it, or copy your text
   first. Closing the viewer, opening another file or leaving the conversation
@@ -567,11 +568,12 @@ can be opened while the other agents continue. If an answer reached its output
 limit, the agent shows the failure and its partial text remains readable. A
 worker that produced a document (a write-up, a summary, a literature review)
 shows **View** and its downloads in its box once it is done: **View** opens the
-document in the file viewer beside the conversation, and the downloads are the
-PDF, the sources, the LaTeX file, the review or the BibTeX file it saved.
-Documents chosen in the notebook's **Results** (a PDF, LaTeX or BibTeX file, a
-review, a figure) open in the same viewer, which has more room than the
-notebook; closing it brings the notebook back. Answers, proofs and experiments
+document in the file viewer beside the conversation, like any file (its name on
+top, then the document alone), and the downloads are the PDF, the sources, the
+LaTeX file, the review or the BibTeX file it saved. Documents chosen in the
+notebook's **Results** (a PDF, LaTeX or BibTeX file, a review, a figure) open in
+the same viewer, which has more room than the notebook; closing it brings the
+notebook back. Answers, proofs and experiments
 are read in the notebook.
 
 - **Agents** shows what each specialist is doing. From a Literature task,
