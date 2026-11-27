@@ -465,7 +465,9 @@ one with a message.
   while you read. In a conversation answer, click a paper citation such as
   **draft.tex:42–48** to open the source at those lines. You can edit a matching
   workspace text file there. For a published paper or a manuscript that has
-  since changed, the viewer shows the text the worker actually cited.
+  since changed, the viewer shows the text the worker actually cited. The
+  numbered editor preserves the edition’s line numbers and colors LaTeX
+  formulas in arXiv passages.
   The file viewer shows a PDF in the browser's PDF viewer, fitted to the
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,

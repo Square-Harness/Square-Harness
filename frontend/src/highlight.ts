@@ -8,7 +8,7 @@
  * `<span class="tok-…">` with a fixed class name.
  */
 
-export type Language = 'latex' | 'bibtex' | 'python' | 'julia' | 'rust' | 'javascript' | 'c' | 'shell' | 'json' | 'toml' | 'yaml'
+export type Language = 'latex' | 'paper' | 'bibtex' | 'python' | 'julia' | 'rust' | 'javascript' | 'c' | 'shell' | 'json' | 'toml' | 'yaml'
 
 const EXTENSIONS: Record<string, Language> = {
   tex: 'latex', sty: 'latex', cls: 'latex', ltx: 'latex', bib: 'bibtex', py: 'python', jl: 'julia', rs: 'rust',
@@ -102,6 +102,18 @@ function math(text: string) {
 
 const environment = (command: string, name: string) => span('keyword', command) + '{' + span('variable', name) + '}'
 
+/** The HTML paper extractor wraps MathML alt text in TeX delimiters, sometimes across source lines. */
+const DELIMITED_MATH: Rule = {
+  re: String.raw`\$\$[\s\S]*?(?:\$\$|$)|\\\[[\s\S]*?(?:\\\]|$)|\\\([\s\S]*?(?:\\\)|$)|\$(?:\\[\s\S]|[^$\\\n]|\n(?![ \t]*\n))+?\$`,
+  render: (match) => {
+    const text = match[0], open = text.startsWith('$$') || text.startsWith('\\') ? 2 : 1
+    const closer = open === 1 ? '$' : text.startsWith('$$') ? '$$' : text.startsWith('\\[') ? '\\]' : '\\)'
+    const closed = text.length >= open + closer.length && text.endsWith(closer)
+    return span('math-delimiter', text.slice(0, open)) + math(text.slice(open, closed ? -closer.length : undefined))
+      + (closed ? span('math-delimiter', closer) : '')
+  },
+}
+
 const LATEX: Spec = {
   rules: [
     { re: String.raw`%.*`, kind: 'comment' },
@@ -121,16 +133,7 @@ const LATEX: Spec = {
         return environment('\\begin', name) + math(body) + (closed ? environment('\\end', name) : '')
       },
     },
-    { // $$ … $$, \[ … \], \( … \), $ … $ (inline mathematics stops at a blank line)
-      re: String.raw`\$\$[\s\S]*?(?:\$\$|$)|\\\[[\s\S]*?(?:\\\]|$)|\\\([\s\S]*?(?:\\\)|$)|\$(?:\\[\s\S]|[^$\\\n]|\n(?![ \t]*\n))+?\$`,
-      render: (match) => {
-        const text = match[0], open = text.startsWith('$$') || text.startsWith('\\') ? 2 : 1
-        const closer = open === 1 ? '$' : text.startsWith('$$') ? '$$' : text.startsWith('\\[') ? '\\]' : '\\)'
-        const closed = text.length >= open + closer.length && text.endsWith(closer)
-        return span('math-delimiter', text.slice(0, open)) + math(text.slice(open, closed ? -closer.length : undefined))
-          + (closed ? span('math-delimiter', closer) : '')
-      },
-    },
+    DELIMITED_MATH,
     { // \section{Title}: the title stands out
       re: String.raw`\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?(?:\[[^\]\n]*\])?\{(?:[^{}\n]|\{[^{}\n]*\})*\}`,
       render: (match) => {
@@ -155,6 +158,18 @@ const LATEX: Spec = {
     },
     { re: String.raw`#\d`, kind: 'variable' },
     { re: '&', kind: 'keyword' },
+  ],
+}
+
+/** Extracted papers contain prose, TeX from HTML, or mathematical Unicode from a PDF. */
+const PAPER: Spec = {
+  rules: [
+    DELIMITED_MATH,
+    { re: String.raw`\b(?:Theorem|Théorème|Proposition|Lemma|Lemme|Corollary|Corollaire|Definition|Définition|Example|Exemple|Remark|Remarque|Section|Figure|Table)[ \t]+\d+(?:\.\d+)*[a-z]?\b`, kind: 'heading' },
+    { re: String.raw`(?:^|(?<=\n))[ \t]*(?:Abstract|Résumé|Introduction|References|Références|Bibliography|Conclusion|Proof|Preuve|Démonstration)\b`, kind: 'heading' },
+    { re: String.raw`\[[ \t]*\d+(?:[ \t]*[,;–—-][ \t]*\d+)*[ \t]*\]|\(\d+(?:\.\d+)+[a-z]?\)`, kind: 'reference' },
+    // Greek variables, operators, super/subscripts and the mathematical alphabets used by PDF text extraction.
+    { re: String.raw`(?<![Ͱ-Ͽ])[Α-Ωα-ωϑϕϖ](?![Ͱ-Ͽ])|[=+×÷±²³¹⁰-ₜ←-⇿∀-⋿⟀-⟿⨀-⫿ℂℍℕℙℚℝℤ]|[\uD835][\uDC00-\uDFFF]`, kind: 'math' },
   ],
 }
 
@@ -306,7 +321,7 @@ const YAML: Spec = {
 }
 
 const SPECS: Record<Language, Spec> = {
-  latex: LATEX, bibtex: BIBTEX, python: PYTHON, julia: JULIA, rust: RUST, javascript: JAVASCRIPT, c: C,
+  latex: LATEX, paper: PAPER, bibtex: BIBTEX, python: PYTHON, julia: JULIA, rust: RUST, javascript: JAVASCRIPT, c: C,
   shell: SHELL, json: JSON_SPEC, toml: TOML, yaml: YAML,
 }
 

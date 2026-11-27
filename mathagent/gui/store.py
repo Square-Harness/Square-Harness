@@ -1845,6 +1845,13 @@ def view_document(base, root, document_id, *, content=False):
     if not content:
         return result
     result['text'] = '\n'.join(lines)  # Same line breaks (including PDF page boundaries) as read_paper.
+    # A paper title need not contain a file extension. Its cached original identifies
+    # the representation whose line numbers the citation uses.
+    suffix = source_suffix(meta.get('original_file') or '')
+    if meta.get('source_kind') == 'tex_source' or suffix == '.tex':
+        result['syntax'] = 'latex'
+    elif suffix in ('.html', '.pdf'):
+        result['syntax'] = 'paper'
     source = meta.get('source_url', '')
     if source.startswith('workspace:'):
         relative = source.removeprefix('workspace:')

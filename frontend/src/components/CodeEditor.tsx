@@ -2,23 +2,34 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties } from 'react'
-import { colour, languageOf, numberedLines } from '../highlight'
+import { colour, languageOf, numberedLines, type Language } from '../highlight'
 import { REVEAL_LINES, type LineRange } from '../router'
 import { ErrorNote } from './common'
 import './CodeEditor.css'
 
-/** Beyond this many characters the text is shown plain, without colours or line numbers, so that typing stays immediate. */
+/** Large uncited files fall back to plain text so that typing stays immediate. */
 const MAX_COLOURED = 400_000
 
-/** Large texts skip token colouring; a citation still needs numbered rows to locate its passage. */
-function useNumbered(name: string, text: string, lines?: LineRange) {
-  const language = languageOf(name)
+function useNumbered(name: string, text: string, lines?: LineRange, syntax?: Language, editable = false) {
+  const language = syntax ?? languageOf(name)
   const start = lines?.start, end = lines?.end
+  const enabled = !!lines || !!syntax || text.length <= MAX_COLOURED
+  // The editable overlay is rebuilt on each keystroke. For a large source, tokenize only the cited passage.
+  const rangeOnly = editable && text.length > MAX_COLOURED && language
+  const from = rangeOnly && start, to = rangeOnly && end
+  const coloured = useMemo(() => {
+    if (!enabled) return null
+    if (!from || !to) return colour(text, language)
+    const rows = text.split('\n')
+    return [rows.slice(0, from - 1), rows.slice(from - 1, to), rows.slice(to)]
+      .map((part, index) => part.length ? colour(part.join('\n'), index === 1 ? language : null) : null)
+      .filter((part) => part !== null).join('\n')
+  }, [enabled, text, language, from, to])
   return useMemo(() => {
-    if (text.length > MAX_COLOURED && !start) return null
-    const { html, count } = numberedLines(colour(text, text.length > MAX_COLOURED ? null : language), start, end)
+    if (coloured === null) return null
+    const { html, count } = numberedLines(coloured, start, end)
     return { html, count, style: { '--gutter': Math.max(2, String(count).length) + 'ch' } as CSSProperties }
-  }, [language, text, start, end])
+  }, [coloured, start, end])
 }
 
 function useRevealLines(lines?: LineRange) {
@@ -48,15 +59,17 @@ function useRevealLines(lines?: LineRange) {
 }
 
 /** A saved source or output, coloured and numbered like the editor. */
-export function CodeView({ name, text, lines }: { name: string; text: string; lines?: LineRange }) {
-  const numbered = useNumbered(name, text, lines)
+export function CodeView({ name, text, lines, syntax }: { name: string; text: string; lines?: LineRange; syntax?: Language }) {
+  const numbered = useNumbered(name, text, lines, syntax)
   const box = useRevealLines(lines)
   return <>
     {lines && numbered && lines.end > numbered.count && <ErrorNote>The citation extends past the end of this document.</ErrorNote>}
     <div ref={box} className="code-editor code-view" style={numbered?.style} tabIndex={lines ? 0 : undefined}
       aria-label={lines ? name : undefined} role={lines ? 'region' : undefined}>
-      {numbered ? <pre className="code-editor-highlight code-numbered" dangerouslySetInnerHTML={{ __html: numbered.html }} />
-        : <pre className="code-editor-highlight">{text}</pre>}
+      <div className="code-editor-layer">
+        {numbered ? <pre className="code-editor-highlight code-numbered" dangerouslySetInnerHTML={{ __html: numbered.html }} />
+          : <pre className="code-editor-highlight">{text}</pre>}
+      </div>
     </div>
   </>
 }
@@ -70,7 +83,7 @@ export function CodeView({ name, text, lines }: { name: string; text: string; li
 export function CodeEditor({ name, value, onChange, autoFocus = false, lines }: {
   name: string; value: string; onChange: (value: string) => void; autoFocus?: boolean; lines?: LineRange
 }) {
-  const numbered = useNumbered(name, value, lines)
+  const numbered = useNumbered(name, value, lines, undefined, true)
   const box = useRevealLines(lines)
   const input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { if (autoFocus) input.current?.focus() }, [autoFocus])

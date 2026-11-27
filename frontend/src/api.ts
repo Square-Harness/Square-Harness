@@ -648,7 +648,9 @@ export type Artifact = {
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
 /** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
-export type CitedDocument = { id: string; title: string; text: string; workspace_path?: string; sha256?: string }
+export type CitedDocument = {
+  id: string; title: string; text: string; syntax?: 'latex' | 'paper'; workspace_path?: string; sha256?: string
+}
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
   size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }

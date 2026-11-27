@@ -247,7 +247,7 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose?
         {!conflict && <ErrorNote>{error}</ErrorNote>}
         {conflict && <p className="warning-note" role="alert">This file changed on disk after you opened it, so your changes were not saved. <button type="button" className="link-btn" onClick={reload}>Reload it</button> (this discards them), or copy your text before reloading.</p>}
         {!file && !snapshot && !error && <Loading />}
-        {snapshot && <CodeView name={snapshot.title} text={snapshot.text} lines={lines} />}
+        {snapshot && <CodeView name={snapshot.title} text={snapshot.text} syntax={snapshot.syntax} lines={lines} />}
         {file?.kind === 'pdf' && <iframe className="file-view-frame" title={file.name} src={fileRawUrl(path) + PDF_FIT} />}
         {file?.kind === 'image' && <div className="file-view-image"><img src={fileRawUrl(path)} alt={file.name} /></div>}
         {file?.kind === 'markdown' && (editing
