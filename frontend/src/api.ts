@@ -120,8 +120,9 @@ export type FolderListing = {
   path: string
   current: string
   recent: string[]
-  files: { tex: number; pdf: number; py: number }
-  folders: { name: string; path: string; files: { tex: number; pdf: number; py: number }; jobs: boolean
+  /** How many files the folder holds directly, of any type. */
+  files: number
+  folders: { name: string; path: string; files: number; jobs: boolean
     /** A project's own file folder: shown by its name, never opened as a workspace. */
     project?: FolderProject | null }[]
   /** Set when the listed folder itself is a project's file folder. */

@@ -36,7 +36,7 @@ from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import _job_directory, _read_state as _read_research
 from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
-from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
+from ..tools import SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
                      rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
@@ -1550,23 +1550,13 @@ def resolve_folder(root, relative=''):
 
 
 def _counts(folder):
-    counts = {'tex': 0, 'pdf': 0, 'py': 0}
+    """How many files a folder holds directly, of any type (hidden ones apart; the first 5000 entries)."""
     try:
-        entries = list(os.scandir(folder))
+        with os.scandir(folder) as found:
+            entries = list(itertools.islice(found, 5000))
     except OSError:
-        return counts
-    for entry in entries[:5000]:
-        if entry.name.startswith('.') or not entry.is_file(follow_symlinks=False):
-            continue
-        suffix = source_suffix(entry.name)
-        key = 'tex' if suffix in READ_GROUPS['tex'] else 'pdf' if suffix == '.pdf' else 'py' if suffix == '.py' else None
-        if key:
-            counts[key] += 1
-    return counts
-
-
-def _add_counts(total, more):
-    return {key: total[key] + more[key] for key in total}
+        return 0
+    return sum(1 for entry in entries if not entry.name.startswith('.') and entry.is_file(follow_symlinks=False))
 
 
 def list_folders(root, relative=''):
@@ -1585,7 +1575,7 @@ def list_folders(root, relative=''):
         if projects.holds_projects(path):
             for child in sorted(path.iterdir())[:200]:
                 if projects.folder_label(child):
-                    counts = _add_counts(counts, _counts(child))
+                    counts += _counts(child)
         folders.append({'name': project['name'] if project else entry.name, 'path': path.relative_to(root).as_posix(),
                         'files': counts, 'project': project,
                         'jobs': (path / '.mathagent' / 'proofs').is_dir() or (path / '.mathagent' / 'research').is_dir()})

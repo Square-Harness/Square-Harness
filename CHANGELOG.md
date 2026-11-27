@@ -30,7 +30,9 @@
   in the notebook's Results. The card's buttons are one component,
   `JobDownloads`, used by both.
 - The folder window is now **Select a workspace**, and says that the agent has
-  access to the files in the active workspace.
+  access to the files in the active workspace. Each folder shows how many files
+  it holds, of any type (was: its TeX, PDF and Python files); `GET /api/folders`
+  gives `files` as a number.
 - **Learn my writing style** moved from the sidebar to the top of
   **Personalization**, above the standing instructions.
 - File access is gone: the model lists, searches and reads every supported kind

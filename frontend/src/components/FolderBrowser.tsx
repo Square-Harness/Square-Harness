@@ -4,15 +4,13 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type FolderListing } from '../api'
 import { workspaceBusy } from '../concurrency'
+import { count } from '../format'
 import { markOwnFolderSwitch, refreshStatus, useApp } from '../store'
 import { ErrorNote, Loading, Modal } from './common'
 import { FilesDialog } from './FileExplorer'
 import { ChevronIcon, FileIcon, FolderIcon } from './Icons'
 
-function counts(files: { tex: number; pdf: number; py: number }) {
-  const parts = [files.tex && `${files.tex} TeX`, files.pdf && `${files.pdf} PDF`, files.py && `${files.py} Python`].filter(Boolean)
-  return parts.length ? parts.join(', ') : 'No TeX, PDF or Python files'
-}
+const counts = (files: number) => files === 0 ? 'No files' : files === 1 ? '1 file' : `${count(files)} files`
 
 export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const app = useApp()
