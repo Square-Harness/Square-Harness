@@ -16,7 +16,7 @@ from . import bibcheck, briefs, images
 from .agent import AgentError
 from .assistant_budget import AssistantBudget
 from .backends import TokenBudgetError
-from .call_policy import CallContextError
+from .call_policy import MIN_PROOF_REVIEW_TOKENS, CallContextError
 from .deepinfra import DeepInfraGenerationError, TesterAllowanceInsufficient
 from .ledger import ProofStore, _ID, _atomic_write, _bytes, _directory, _now, _read, _regular
 from .litreview import ReviewRunner, review_outcome
@@ -32,10 +32,6 @@ from .review import ReviewBase, runner_class as review_runner, runner_for_state
 from .source_tasks import explore_sources, named_explore_sources, requests_workspace_search
 from .worker_errors import WorkerInputError
 from .writeup import WriteupRunner
-
-# Said with every offline result of a locked interface, so that no answer offers a search that cannot happen here.
-OFFLINE_LOCKED = (' This interface was launched with --offline, so online search cannot be turned on here: to search the '
-                  'web, restart Square Harness without --offline; or attach the paper (PDF or source) to read it.')
 
 # Characters of output shown for each sandbox run that did not finish (timeout, error, memory).
 FAILED_RUN_OUTPUT = 1000
@@ -591,8 +587,8 @@ def run_worker(host, parent, budget, action, child, save):
                     solve, verify = min(solve, 4096), min(verify, 2048)
                 repair = min(solve, host.args.proof_repair_tokens or solve)
                 minimum = host.args.proof_min_solve_tokens or 128
-                if allocation is not None and allocation < minimum + 128:
-                    raise AssistantBudget(f'Proof needs {minimum} solver tokens and 128 verifier tokens.')
+                if allocation is not None and allocation < minimum + MIN_PROOF_REVIEW_TOKENS:
+                    raise AssistantBudget(f'Proof needs {minimum} solver tokens and {MIN_PROOF_REVIEW_TOKENS} verifier tokens.')
                 clean = briefs.proof_reference(context) if scoped is not None else None
                 if clean is not None and child.get('shared_proof_objective') and context.get('project_snapshot'):
                     questions = briefs.earlier_project_questions(root, local_view,
@@ -651,8 +647,7 @@ def run_worker(host, parent, budget, action, child, save):
                       'references': references, 'job_id': result['id'],
                       'artifact': str(Path(result['report_path']).relative_to(root)),
                       'warnings': list(runner.state.get('warnings', [])) +
-                                  ([] if online else ['Online search was off; only cached sources were used.'
-                                                      + (OFFLINE_LOCKED if getattr(agent.workspace.literature, 'offline_locked', False) else '')])}
+                                  ([] if online else ['The specified source scope allowed only cached material.'])}
             if references.get('lookup') == 'standard':
                 result['disposition'] = 'answer_with_qualification'
         elif mode in ('literature', 'writeup', 'summarize') or mode in REVIEW_MODES:

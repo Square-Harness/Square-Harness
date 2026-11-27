@@ -15,6 +15,7 @@ from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
+from .call_policy import MIN_PROOF_REVIEW_TOKENS
 from .api_profiles import API_PROFILES, create_profile_client, profile_class, resolve_api_profile
 from .format_request import markdown_conversion_request
 from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
@@ -148,7 +149,7 @@ Sandboxed Python (Docker, no network or files): /python-lab, and automatic check
 Unsandboxed Python is opt-in (--allow-python) and approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
-Literature search is online by default. Use --offline to restrict all jobs to local and cached sources.
+Literature searches use online sources. You can specify the permitted sources in your request.
 Proof can consult papers and request evidence.
 Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
@@ -203,12 +204,8 @@ def parser():
                    help='Verifier sampling temperature (default: --temperature)')
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
                    help='Pin a workspace theorem source, PDF or cached doc-ID; repeat for multiple sources')
-    network = p.add_mutually_exclusive_group()
-    network.add_argument('--online', dest='online', action='store_true', default=True,
-                         help='Allow external literature searches (default); search queries leave this computer')
-    network.add_argument('--offline', dest='online', action='store_false', help='Restrict research to local and cached sources')
-    p.add_argument('--allow-remote-model', action='store_true',
-                   help='Allow prompts, attached source text and tool context to be sent to the remote model --host; does not enable web research')
+    p.add_argument('--allow-remote-model', '--online', dest='allow_remote_model', action='store_true',
+                   help='Allow prompts, attached source text and tool context to be sent to the remote model --host')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
@@ -346,17 +343,15 @@ def main():
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         p.error('--host must be an http(s) model URL without credentials, query or fragment')
-    if not args.allow_remote_model and '--online' not in sys.argv[1:]:
+    if not args.allow_remote_model:
         try:
             local_host = host.hostname == 'localhost' or ipaddress.ip_address(host.hostname).is_loopback
         except ValueError:
             local_host = False
         if not local_host:
-            p.error('A remote model host requires --allow-remote-model (or an explicit --online for model and web research)')
+            p.error('A remote model host requires --allow-remote-model')
     if not 1 <= args.python_concurrency <= 8:
         p.error('Use python-concurrency from 1 to 8')
-    if not args.online and args.allow_python:
-        p.error('--allow-python requires --online: unrestricted Python can access the network')
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
@@ -370,7 +365,7 @@ def main():
             return 2
     ui = UI(args.show_thinking)
     try:
-        literature = LiteratureTools(args.workspace, online=args.online,
+        literature = LiteratureTools(args.workspace,
             max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
         sandbox = PythonSandbox.from_args(args)
@@ -386,7 +381,7 @@ def main():
         return 2
     ui.say(f'╭─ SQUARE HARNESS · v{__version__}\n│ {agent.model} · {args.host}\n'
            f'│ Workspace: {workspace.root}\n│ Context {agent.ctx} · max output {agent.predict} · mode {agent.mode}\n'
-           f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof: solve → verify → repair\n'
+           '│ Research: online · proof: solve → verify → repair\n'
            '╰─ /help for commands · proof progress saved automatically · manuscript edits require approval')
     if args.allow_python:
         ui.say('Python enabled: each snippet requires approval and runs with your account permissions.')
@@ -399,10 +394,9 @@ def main():
     one_shot = args.prompt is not None or args.resume is not None or args.research_resume is not None
 
     def fresh_library():
-        # A job restores its own counters and restrictions. Do not let an
-        # offline resume or another job's exhausted budget alter later jobs.
+        # Every new job starts with fresh source counters and its own request scope.
         nonlocal literature
-        literature = LiteratureTools(workspace.root, online=args.online,
+        literature = LiteratureTools(workspace.root,
             max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
         workspace.literature = literature
 
@@ -506,7 +500,7 @@ def main():
         if agent.mode == 'prove':
             if args.output:
                 raise ValueError('--output is for literature/referee reports; proof reports save automatically')
-            if args.proof_tokens is not None and args.proof_tokens < (args.proof_min_solve_tokens or 128) + 128:
+            if args.proof_tokens is not None and args.proof_tokens < (args.proof_min_solve_tokens or MIN_PROOF_REVIEW_TOKENS) + MIN_PROOF_REVIEW_TOKENS:
                 raise ValueError('The proof token allowance must cover the solver and verifier minimums.')
             unpinned = unpinned_files(query)
             if unpinned:
@@ -553,8 +547,6 @@ def main():
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
         elif agent.mode == 'check':
             ensure_model()
-            if not args.online:
-                ui.say('Note: research is offline, so the check can only use cached sources. Relaunch with --online.')
             runner = CheckRunner(agent, ui.emit)
             result = runner.start(query, lookup='precise' if precise_reference_request(query) else 'standard',
                                   max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,

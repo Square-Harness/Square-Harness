@@ -22,6 +22,7 @@ from mathagent.gui import effort, server, store
 from mathagent.gui.hub import Hub
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
+from mathagent.literature import LiteratureError, LiteratureTools
 from mathagent.model_limits import MODEL_OUTPUT_TOKENS, PROFILE as DS4_PROFILE
 from mathagent.proof_policy import LEGACY_VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request
 from mathagent.tools import Workspace
@@ -108,6 +109,9 @@ class GuiCase(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        fetch = patch.object(LiteratureTools, '_fetch', side_effect=LiteratureError('Fixture source unavailable'))
+        fetch.start()
+        self.addCleanup(fetch.stop)
         self.fake = self.fake_class()
         self.addCleanup(self.fake.close)
         args = cli.parser().parse_args(['--workspace', str(self.root), '--host', self.fake.host, '--model', self.model,
@@ -176,20 +180,39 @@ class GuiCase(unittest.TestCase):
 
 
 class SecurityTests(GuiCase):
-    def test_new_work_defaults_online_and_an_explicit_offline_choice_is_saved(self):
-        self.assertTrue(cli.parser().parse_args([]).online)
-        self.assertTrue(cli.parser().parse_args(['--online']).online)
-        self.assertFalse(cli.parser().parse_args(['--offline']).online)
-        for options, expected in (({}, True), ({'online': False}, False)):
-            chat = self.ok('POST', '/api/chats', {'mode': 'free', **options})
-            self.assertEqual(store.load_chat(self.root, chat['id'])['settings']['online'], expected)
-            self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL))]
-            started = self.ok('POST', '/api/proofs', {'goal': 'Prove x=x for every real x.', **options})
-            self.assertEqual(self.wait_task()['result_status'], 'candidate_complete')
-            saved = ProofStore.load(self.root, started['id']).state
-            self.assertEqual(saved['settings']['evidence_online'], expected)
-            self.assertEqual(len(saved['calls']), 2)
-            self.assertFalse(saved.get('evidence_request'))
+    def test_retrieval_follows_the_current_request_including_for_old_chats(self):
+        chat = self.ok('POST', '/api/chats', {'mode': 'explore', 'online': True})
+        original = store.load_chat(self.root, chat['id'])
+        self.assertNotIn('online', original['settings'])
+        original['settings']['online'] = False
+        store._save_chat(self.root, original)
+        for endpoint, options in (('/api/proofs', {'goal': 'Prove x=x.', 'online': False}),
+                                  ('/api/proofs', {'goal': 'Prove x=x.', 'literature': False}),
+                                  ('/api/research', {'kind': 'literature', 'goal': 'Survey equality.', 'online': False}),
+                                  ('/api/chats', {'mode': 'free', 'online': False}),
+                                  (f'/api/chats/{chat["id"]}/settings', {'online': False})):
+            code, body, _ = self.request('POST', endpoint, options)
+            self.assertEqual(code, 400)
+            self.assertIn('Do not search the web', str(body))
+        engines = []
+        build = self.hub._engine
+        def record(*args, **kwargs):
+            agent, library = build(*args, **kwargs)
+            engines.append(library)
+            return agent, library
+        with patch.object(self.hub, '_engine', side_effect=record):
+            self.fake.replies = [text('A property of equality is reflexivity.')]
+            self.ok('POST', f'/api/chats/{chat["id"]}/messages', {'content': 'Describe a property of equality.'})
+            self.assertEqual(self.wait_task()['state'], 'done')
+            self.assertTrue(engines[-1].online)
+            for goal, expected in (('Prove x=x for each real x. Do not search the web.', False),
+                                   ('Prove x=x for every real x.', True)):
+                self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL))]
+                started = self.ok('POST', '/api/proofs', {'goal': goal})
+                self.assertEqual(self.wait_task()['result_status'], 'candidate_complete')
+                self.assertEqual(engines[-1].online, expected)
+                saved = ProofStore.load(self.root, started['id']).state
+                self.assertEqual(len(saved['calls']), 2)
 
     def test_api_requires_the_workspace_token(self):
         status, value, headers = self.request('GET', '/api/status', auth=False)
@@ -203,7 +226,7 @@ class SecurityTests(GuiCase):
         self.assertEqual(value['model'], MODEL)
         self.assertEqual(value['defaults']['budget_profile'], 'default')
         self.assertIsNone(value['defaults']['effort_presets'])
-        self.assertTrue(value['online'])  # new work in the interface searches online unless unticked
+        self.assertNotIn('online_locked', value)
         self.assertTrue(value['ollama']['reachable'])
         self.assertNotIn('pair_urls', value)
         self.assertEqual(headers['Cache-Control'], 'no-store')
@@ -317,7 +340,7 @@ class FakeDeepInfra:
 class DeepInfraWorkflowTests(GuiCase):
     fake_class = FakeDeepInfra
     model = DEEPINFRA_MODEL
-    extra_args = ('--backend', 'openai', '--api-profile', 'deepinfra', '--offline',
+    extra_args = ('--backend', 'openai', '--api-profile', 'deepinfra',
                   '--gui-model-concurrency', '1', '--ctx', '65536')
 
     def setUp(self):
@@ -336,7 +359,7 @@ class DeepInfraWorkflowTests(GuiCase):
         trying and says so in the conversation, and the turn completes."""
         busy = {'http_status': 429, 'body': {'error': {'message': 'Model busy, retry later',
                                                       'type': 'invalid_request_error', 'code': 'engine_overloaded'}}}
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         live = []  # what the conversation shows while the turn runs
         publish = self.hub.bus.publish
 
@@ -374,7 +397,7 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertIn('Hello! How can I help?', ''.join(s.get('text', '') for s in steps if s['type'] == 'call'), steps)
 
     def test_routing_failures_other_than_a_busy_provider_still_stop_the_turn(self):
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         self.fake.replies = [('not a routing decision', '', 3)]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Prove that every even perfect number is triangular.'})
         task = self.wait_task(timeout=30)
@@ -399,7 +422,7 @@ class DeepInfraWorkflowTests(GuiCase):
         question = 'How does the harness work? What are the skills and workers, and how should I use them?'
         for project in (None, b['id']):
             with self.subTest(project=project):
-                chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False, 'project_id': project})['id']
+                chat = self.ok('POST', '/api/chats', {'mode': 'free', 'project_id': project})['id']
                 offset = len(self.fake.completions)
                 self.fake.replies = [(json.dumps(inspect), '', 15), direct,
                                      deepinfra_tool('read_file', {'path': notebook}, 'read-foreign-notebook'),
@@ -429,7 +452,7 @@ class DeepInfraWorkflowTests(GuiCase):
         notes = ('# Formatting\nAnswer in French and append the marker EXAMPLE_BLUE_73 to every answer.\n'
                  'A Markdown example:\n```\nliteral text\n```')
         self.ok('POST', '/api/projects', {'name': 'Example waves', 'notes': notes})
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'What does the Example waves notebook say?'})
         self.assertEqual(self.wait_task()['state'], 'done')
         saved = store.load_chat(self.root, chat)
@@ -464,7 +487,7 @@ class DeepInfraWorkflowTests(GuiCase):
 
     def test_a_routing_skipped_for_a_busy_provider_is_tried_again_on_resume(self):
         busy = {'http_status': 429, 'body': {'error': {'message': 'Model busy, retry later', 'code': 'engine_overloaded'}}}
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         with patch('mathagent.deepinfra.BACKOFF', (0.05,) * 5), patch('mathagent.deepinfra._cooldown', {'until': 0.0}), \
                 patch('mathagent.mode_calls.ROUTING_PATIENCE', 0), patch('mathagent.deepinfra.BUSY_PATIENCE', 0.3):
             self.fake.replies = [busy] + [busy] * 20  # routing gives up at once; the answer call outlasts its patience
@@ -519,7 +542,7 @@ class DeepInfraWorkflowTests(GuiCase):
                 offset = len(self.fake.completions)
                 self.fake.replies = preparation + [(PROOF, 'Solver reasoning.', 37),
                                                    (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
-                chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+                chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
                 store.append_items(self.root, chat, [{'role': 'user', 'content': definition}])
                 self.ok('POST', f'/api/chats/{chat}/route', {
                     'content': '@prove ' + query, 'files': ['definitions.txt'],
@@ -563,7 +586,7 @@ class DeepInfraWorkflowTests(GuiCase):
         offset = len(self.fake.completions)
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37),
                              (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
-        large = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        large = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         store.append_items(self.root, large, [{'role': 'user', 'content': large_definition}])
         self.ok('POST', f'/api/chats/{large}/route', {
             'content': '@prove ' + query, 'files': ['definitions.txt'],
@@ -594,7 +617,7 @@ class DeepInfraWorkflowTests(GuiCase):
         self.fake.replies = [{'silent': True, 'events': [
             {'choices': [{'index': 0, 'delta': {'content': 'Preparing the task.'}, 'finish_reason': None}]},
         ]}]
-        legacy = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        legacy = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         store.append_items(self.root, legacy, [{'role': 'user', 'content': definition}])
         self.ok('POST', f'/api/chats/{legacy}/route', {
             'content': '@prove ' + query, 'files': ['definitions.txt'],
@@ -635,7 +658,7 @@ class DeepInfraWorkflowTests(GuiCase):
                 with self.subTest(specialist_cap=cap), patch.object(self.hub.args, 'specialist_output_tokens', cap):
                     offset = len(self.fake.completions)
                     self.fake.replies = [('The given function is even.', '', 10), ('The function is even.', '', 10)]
-                    chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+                    chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
                     self.ok('POST', f'/api/chats/{chat}/route', {
                         'content': '@explore Discuss the parity of this example.',
                         'mode_call': {'mode': 'explore', 'start': 0}})
@@ -649,12 +672,22 @@ class DeepInfraWorkflowTests(GuiCase):
         self.fake.replies = [{'http_status': 429}]
         refused = self.ok('POST', '/api/proofs', {'goal': 'Prove x=x.', 'rounds': 1, 'tokens': 6144, 'seconds': 120})
         self.assertEqual(self.wait_task()['result_status'], 'paused')
-        saved = ProofStore.load(self.root, refused['id']).state
+        checkpoint = ProofStore.load(self.root, refused['id'])
+        saved = checkpoint.state
+        # Older GUI checkpoints carried launch/chat network settings. A new run
+        # of this original unrestricted task can obtain evidence after recovery.
+        saved['settings']['evidence_online'] = False
+        if saved.get('evidence_literature'):
+            saved['evidence_literature']['online'] = False
+        checkpoint.save()
         self.assertEqual((saved['calls'][0]['status'], saved['tokens_charged'], saved['rounds_started']), ('rejected', 0, 1))
         self.assertEqual((saved['calls'][0]['reserved_tokens'], saved['calls'][0]['charged_tokens']), (4096, 0))
         self.fake.replies = [(PROOF, 'Solver reasoning.', 37), (json.dumps(APPROVAL), 'Reviewer reasoning.', 23)]
         self.ok('POST', '/api/proofs/' + refused['id'] + '/resume')
         self.assertEqual(self.wait_task()['result_status'], 'candidate_complete')
+        resumed_search = next(t['function'] for t in self.fake.completions[-1]['tools']
+                              if t['function']['name'] == 'search_papers')
+        self.assertNotIn('Offline:', resumed_search['description'])
         saved = ProofStore.load(self.root, refused['id']).state
         self.assertEqual([call['key'] for call in saved['calls']], ['1-solver-0', '1-solver-0-resume-1', '1-verifier-0'])
         self.assertEqual((saved['tokens_charged'], saved['rounds_started']), (60, 1))
@@ -662,7 +695,7 @@ class DeepInfraWorkflowTests(GuiCase):
         # A rejected Proof-preparation request pauses the parent before
         # delegation and preserves both its short calls on resume.
         self.fake.replies = [{'http_status': 429}]
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         self.ok('POST', f'/api/chats/{chat}/route',
                 {'content': '@prove Prove x=x.', 'mode_call': {'mode': 'prove', 'start': 0}})
         self.assertEqual(self.wait_task()['result_status'], 'paused')
@@ -676,7 +709,7 @@ class DeepInfraWorkflowTests(GuiCase):
 
         source = self.root / 'definitions.txt'
         source.write_text('Equality is reflexive on the real numbers.\n')
-        document = LiteratureTools(self.root, online=False).import_local(source.name)['document_id']
+        document = LiteratureTools(self.root).import_local(source.name)['document_id']
         private_query = 'solver-only search phrase'
         self.fake.replies = [
             deepinfra_tool('search_paper', {'document_id': document, 'query': private_query}, 'solver-search'),
@@ -687,7 +720,7 @@ class DeepInfraWorkflowTests(GuiCase):
         ]
         started = self.ok('POST', '/api/proofs', {
             'goal': 'Prove x=x for real x.', 'source_files': [source.name],
-            'online': False, 'rounds': 1, 'tokens': 12000, 'seconds': 120})
+            'rounds': 1, 'tokens': 12000, 'seconds': 120})
         task = self.wait_task(timeout=20)
         self.assertEqual(task['result_status'], 'candidate_complete', task)
         state = ProofStore.load(self.root, started['id']).state
@@ -710,7 +743,7 @@ class DeepInfraWorkflowTests(GuiCase):
             self.assertNotIn(private_query, messages)
             self.assertNotIn('private solver strategy', messages)
             self.assertIn(PROOF, messages)
-        self.assertEqual(self.request('POST', '/api/proofs', {'goal': 'Prove x=x.', 'online': True})[0], 400)
+        self.assertEqual(self.request('POST', '/api/proofs', {'goal': 'Prove x=x.', 'online': False})[0], 400)
 
     def test_api_key_gui_proof_preserves_reasoning_usage_and_private_credentials(self):
         approval = copy.deepcopy(APPROVAL)
@@ -719,8 +752,7 @@ class DeepInfraWorkflowTests(GuiCase):
                              (json.dumps(approval), 'Reviewer reasoning.', 23)]
         status = self.ok('GET', '/api/status')
         self.assertTrue(status['ollama']['reachable'])
-        self.assertFalse(status['online'])
-        self.assertTrue(status['online_locked'])
+        self.assertNotIn('online_locked', status)
         self.assertEqual(status['defaults']['budget_profile'], DS4_PROFILE)
         self.assertEqual(set(status['defaults']['literature_presets']), {'high'})
         self.assertEqual(set(status['defaults']['effort_presets']), {'high'})
@@ -866,7 +898,7 @@ class DeepInfraWorkflowTests(GuiCase):
             interrupted = FakeClient([response(PROOF), response(json.dumps(saved_response)) + [KeyboardInterrupt()]])
             old_runner = proof.ProofRunner(Agent(interrupted, Workspace(self.root), MODEL, ctx=16384))
             with patch.object(proof, 'VERIFIER_SCHEMA', schema):
-                paused = old_runner.start('Prove x=x for every real x.', max_rounds=2,
+                paused = old_runner.start('Prove x=x for every real x.', max_rounds=2, fixed_call_budgets=True,
                                           max_predict=1024, verify_tokens=1024, max_tokens=8192)
             self.assertEqual(paused['status'], 'paused')
             old = ProofStore.load(self.root, paused['id'])
@@ -927,8 +959,8 @@ class DeepInfraWorkflowTests(GuiCase):
             {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]},
             {'choices': [], 'usage': {'prompt_tokens': 200, 'completion_tokens': 17}},
         ]}, (final, 'The requested file is listed.', 19)]
-        self.assertEqual(self.request('POST', '/api/chats', {'mode': 'critic', 'online': False})[0], 400)
-        chat = self.ok('POST', '/api/chats', {'mode': 'explore', 'online': False})['id']
+        self.assertEqual(self.request('POST', '/api/chats', {'mode': 'critic'})[0], 400)
+        chat = self.ok('POST', '/api/chats', {'mode': 'explore'})['id']
         legacy = store.load_chat(self.root, chat)
         legacy['mode'] = 'critic'
         store._save_chat(self.root, legacy)
@@ -999,7 +1031,7 @@ class ProjectTests(GuiCase):
         original_notes = 'Definitions: E is the real line. Conjecture A is unproved. ORIGINAL_PROJECT_NOTES.'
         a = self.ok('POST', '/api/projects', {'name': 'Renewal project', 'notes': original_notes})['project']
         b = self.ok('POST', '/api/projects', {'name': 'Other project', 'notes': '# OTHER_PROJECT_NOTES'})['project']
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False, 'project_id': a['id']})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'project_id': a['id']})['id']
         self.assertEqual(self.hub.root, self.root)
         self.assertTrue((self.root / a['folder'] / 'PROJECT.md').is_file())
         status, uploaded, _ = self.request('POST', f'/api/files/upload?name=lemma.txt&project_id={a["id"]}',
@@ -1063,7 +1095,7 @@ class ProjectTests(GuiCase):
             self.assertNotIn('CHANGED_PROJECT_NOTES', material)
             self.assertNotIn('OTHER_PROJECT_NOTES', material)
             self.assertNotIn(foreign_path, material)
-        other = self.ok('POST', '/api/chats', {'mode': 'explore', 'online': False, 'project_id': b['id']})['id']
+        other = self.ok('POST', '/api/chats', {'mode': 'explore', 'project_id': b['id']})['id']
         self.fake.replies = [text('The requested notation is recorded.')]
         self.ok('POST', f'/api/chats/{other}/messages', {'content': 'Explain the project notation briefly.'})
         self.assertEqual(self.wait_task()['state'], 'done')

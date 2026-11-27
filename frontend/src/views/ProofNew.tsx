@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { api, type WorkspaceFile } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
-import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField, Toggle } from '../components/common'
+import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
 import { describeLimits, effortLimits } from '../effort'
 import { Markdown } from '../components/Markdown'
 import { useDropTarget } from '../drop'
@@ -20,7 +20,6 @@ export function ProofNew() {
   const { status, snapshot } = useApp()
   const defaults = status?.defaults
   const [goal, setGoal] = useState('')
-  const [online, setOnline] = useState(true)
   const [files, setFiles] = useState<string[]>([])
   const [rounds, setRounds] = useState(5)
   const [tokens, setTokens] = useState<number | null>(null)
@@ -77,7 +76,7 @@ export function ProofNew() {
     setQueuedNote('')
     try {
       const result = await api.startProof({
-        goal, source_files: files, rounds, tokens, seconds: minutes * 60, online: online && !status?.online_locked,
+        goal, source_files: files, rounds, tokens, seconds: minutes * 60,
         solve_tokens: solveTokens, verify_tokens: verifyTokens, ctx: ctx !== defaults?.ctx ? ctx : undefined,
         queue: true,
       })
@@ -104,10 +103,10 @@ export function ProofNew() {
           <div>
             <h1 className="page-title">Prove a statement</h1>
             <p className="lede">
-              The harness keeps your statement fixed. The solver writes a complete proof with thinking on, a fresh
-              verifier reviews the whole written proof, and a concrete objection leads to a repair or a rebuttal that is
-              reviewed again. Both roles are the same model in separate contexts, so an approved proof is a candidate
-              to check yourself, not a certificate.
+              The solver works on your exact statement. A fresh verifier checks the entire proof or counterexample
+              and reviews any repair. Both roles can consult published papers and, when the Python sandbox is
+              available, check a calculation. They use the same model in separate contexts. You can inspect the
+              candidate, the evidence and the verifier’s judgment.
             </p>
           </div>
         </div>
@@ -136,9 +135,6 @@ export function ProofNew() {
             <span className="field-label">Pinned sources</span>
             <FilePicker selected={files} onChange={setFiles} allowImages allowPdf />
             <span className="field-hint">The job saves a fixed snapshot of each pinned file. PDF extraction can alter mathematical notation.</span>
-            <Toggle label="Search papers online" checked={online && !status?.online_locked} onChange={setOnline}
-              disabled={status?.online_locked} hint={status?.online_locked ? 'This session was launched offline.'
-                : 'Allow the prover and verifier to look up public sources. With search off, they can still consult cached papers.'} />
             {unpinned.length > 0 && (
               <p className="warning-note">
                 Named in the statement but not pinned, so the model will not see {unpinned.length === 1 ? 'it' : 'them'}: {unpinned.join(', ')}.{' '}

@@ -59,7 +59,7 @@ def command(name, argument, args, ui):
                     return 'complete'
                 task = hub.resume_assistant(chat_id)
             else:
-                chat_id = store.create_chat(hub.root, 'free', not args.no_think, args.model, args.online)['id']
+                chat_id = store.create_chat(hub.root, 'free', not args.no_think, args.model)['id']
                 files = list(dict.fromkeys([*args.proof_file, *args.research_file]))
                 task = hub.route(chat_id, argument, files, required_mode='investigate')
             try:

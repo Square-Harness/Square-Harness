@@ -4,7 +4,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type ReviewVariant } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
-import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField, Toggle } from '../components/common'
+import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
 import { describeLimits, effortLimits } from '../effort'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
@@ -93,7 +93,6 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
-  const [online, setOnline] = useState<boolean>()
 
   const uploading = useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
@@ -121,8 +120,6 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     try { window.localStorage.setItem(VARIANT_KEY, next) } catch { /* a convenience only */ }
   }
   const paperReview = manuscript && variant !== 'typos'
-  const offline = review && !paperReview
-  const searching = (online ?? !!status?.online) && !status?.online_locked && !offline
 
   const running = capacityFull(snapshot, status)
   const noun = copy.noun
@@ -142,7 +139,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     try {
       const result = await api.startResearch({
         kind, goal: request, source_files: files, rounds, tokens, seconds: minutes * 60,
-        input_tokens: inputTokens, requests, chars, online: status?.online_locked ? undefined : searching, queue: true,
+        input_tokens: inputTokens, requests, chars, queue: true,
         ...(review ? { variant, target: files.length ? target.trim() : '' } : {}),
       })
       if (result.task.state === 'queued') {
@@ -177,20 +174,11 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             )}
             <h1 className="page-title">{copy.title}</h1>
             <p className="lede">{copy.lede}</p>
-            {pasted ? (
-              <p className="network-note">The {noun} reads the pinned text and the statements it cites. Web search is off.</p>
-            ) : offline ? (
-              <p className="network-note">The typo check uses the pinned manuscript. Web search is off.</p>
-            ) : paperReview ? (
-              <p className={'network-note' + (searching ? ' network-online' : '')}>
-                {searching ? 'Cited-paper lookup is on. Public search services receive bibliographic queries, and the referees can open papers to check the results the manuscript cites.'
-                  : 'Cited-paper lookup is off. The referees can use the manuscript and papers already cached in the workspace.'}
-              </p>
-            ) : (
-              <p className={'network-note' + (searching ? ' network-online' : '')}>
-                {searching
-                  ? `Online search is on for this ${noun}: search queries and paper downloads leave this computer. Search uses short public topic queries; manuscript text stays local. Untick Search online below to keep it offline.`
-                  : `Online search is off: the ${noun} uses pinned files and papers already cached in this workspace, and will say that its coverage is limited.`}
+            {(!review || paperReview) && (
+              <p className="network-note network-online">
+                {paperReview
+                  ? 'Referees can look up cited works. Public search services receive bibliographic queries.'
+                  : 'Public search services receive short topic queries. The review can download papers to check their results.'}
               </p>
             )}
           </div>
@@ -230,10 +218,6 @@ export function ResearchNew({ kind }: { kind: Kind }) {
               <p className="field-hint effort-summary">{describeLimits('literature', { seconds: minutes * 60, requests, tokens })}.</p>
             </div>}
             {manuscript && <p className="field-hint">{variant === 'typos' ? 'A typo check' : 'A review'} has a fixed checking depth.</p>}
-            {!offline && (
-              <Toggle label={paperReview ? "Look up cited papers online" : "Search online"} checked={searching} onChange={setOnline} disabled={status?.online_locked}
-                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : paperReview ? 'Allow the referees to search for and open cited papers.' : 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.'} />
-            )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
                 {pasted && <NumberField label="Tries (sets passes and depth)" value={rounds} onChange={setRounds} min={1} />}
@@ -241,7 +225,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={0.001} step={0.001} suffix="min" />
                 <OptionalNumberField label="Total input token limit" value={inputTokens} onChange={setInputTokens} step={10000} hint="Optional. Repeated input counts again; this is not the context size." />
                 {paperReview && <OptionalNumberField label="Evidence characters" value={chars} onChange={setChars} step={1000} hint="Returned by literature tools" />}
-                {!offline && <OptionalNumberField label="Web requests" value={requests} onChange={setRequests} min={0} step={1} hint={searching ? 'External retrievals' : 'Unused while offline'} />}
+                {(!review || paperReview) && <OptionalNumberField label="Web requests" value={requests} onChange={setRequests} min={0} step={1} hint="External retrievals" />}
               </div>
             </Collapse>
           </div>

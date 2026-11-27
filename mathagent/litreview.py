@@ -1543,7 +1543,7 @@ class ReviewRunner(ResearchRunner):
         self._lane.append(future)
         if self.shared_source_budget:
             # Charge each HTTP dispatch on its native ledger before the next registry starts.
-            # A pause between lookups retains the counts and a live offline switch reaches both lanes.
+            # A pause between lookups retains the counts and cancellation reaches both lanes.
             future.result()
         return future
 
@@ -5053,11 +5053,7 @@ class ReviewRunner(ResearchRunner):
             if all(row.get('error') for row in queries):
                 offline, limited = self._web_failures()
                 if offline:
-                    locked = getattr(getattr(self.agent, 'workspace', None) and self.literature, 'offline_locked', False)
-                    return ('Web research was off for this review, and none of its searches were in the local cache, '
-                            'so no source was available. ' + ('This interface was launched with --offline: restart it '
-                            'without --offline to search the sources.' if locked else
-                            'Run the review with online search on to search the sources.'))
+                    return 'The review used local sources only. Its searches found no cached record.'
                 if limited:
                     return ('The sources limited the request rate (HTTP 429) and returned no usable response. '
                             'Resume the review later to search them again.')

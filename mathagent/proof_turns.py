@@ -7,6 +7,7 @@ import time
 
 from .agent import AgentError
 from .backends import _arguments
+from .call_policy import CallContextError, MIN_PROOF_REVIEW_TOKENS
 from .ledger import LedgerError
 from .proof_policy import VERIFIER_SCHEMA
 from .tools import result_budget
@@ -50,7 +51,10 @@ class ProofTurns:
 
     def configure(self, settings):
         self.names = set(settings.get('evidence_tools', []))
-        self.desk.restrict_online(settings.get('evidence_online') is True)
+        if 'execute_python' in self.names:
+            self.desk.bind_numerics(settings.get('sandbox_max_runs'))
+            if self.desk.numerics is not None and self.desk.numerics.run_limit is not None:
+                settings['sandbox_max_runs'] = self.desk.numerics.run_limit
 
     @contextmanager
     def meter(self):
@@ -83,7 +87,7 @@ class ProofTurns:
                 sandbox.on_run_change = old_run_change
 
     def available(self):
-        return [*self.desk.schemas(), *([REQUEST] if self.coordinator else [])]
+        return [*self.desk.schemas(), *([REQUEST] if self.coordinator and self.desk.assigned_documents is None else [])]
 
     def schemas(self, role):
         schemas = [s for s in self.available() if s['function']['name'] in self.names]
@@ -144,18 +148,59 @@ class ProofTurns:
         return json.dumps({'id': target, 'offset': offset, 'next_offset': end if end < len(content) else None,
                            'content': content[offset:end]}, ensure_ascii=False)
 
-    def indexed_context(self, role, latest=True):
+    def fit_indexed(self, role, choices, allocate):
+        """Fit a marked prefix of the latest visible record beside the mathematical input and role output."""
         records = self.visible(role)
-        last_id = next(reversed(records), None)
-        if last_id is None:
-            return ''
+        if not records:
+            return allocate(next(choices))
+        last_id = next(reversed(records))
         name, artifact = records[last_id]
-        note = (f'Evidence history exceeded this context window. Latest evidence: {last_id} ({name}). '
-                'Use read_proof_evidence with id=index for earlier records or an evidence ID for a page; '
-                'if a page cannot fit, request fewer characters. Verify essential facts from the original evidence.')
-        if latest:
-            note += '\nLatest observation:\n' + self.read(artifact)
-        return note
+        text = self.read(artifact)
+        input_left = getattr(self.runner.agent.client, 'remaining_input_tokens', math.inf)
+        for payload in choices:
+            offered = {s['function']['name'] for s in payload.get('tools', [])}
+            note = f'Evidence history exceeded the context. Latest record {last_id} ({name}). '
+            if len(records) > 1:
+                note += 'Earlier records are omitted. '
+            if 'read_proof_evidence' in offered:
+                note += 'Use read_proof_evidence with id=index or an evidence ID and offset for further pages. '
+                if 'read_paper' in offered:
+                    note += 'Use read_paper for the text at a cited document locator. '
+                else:
+                    note += 'A source locator alone does not establish its contents. '
+            else:
+                note += 'Further evidence reads are unavailable in this response. '
+            note += ('Report any essential gap you cannot resolve.' if role == 'solver' else
+                     'Record uncertainty for any essential dependency you cannot independently check.')
+
+            def with_page(size):
+                label = 'Complete latest record:' if size == len(text) else f'First {size} of {len(text)} characters:'
+                msg = {'role': 'user', 'content': f'{note}\n{label}\n' + text[:size]}
+                return allocate({**payload, 'messages': [*payload['messages'], msg]})
+
+            try:
+                best = with_page(0)
+            except CallContextError:
+                if offered:
+                    continue
+                raise
+            # Keep the actual output allowance this request has before adding the excerpt.
+            # A smaller reader schema can also rescue a request close to its shared input limit.
+            if best[1]['input_tokens'] > input_left and offered:
+                continue
+            low, high = 0, len(text)
+            while low < high:
+                size = high if high == len(text) else (low + high + 1) // 2
+                try:
+                    attempt = with_page(size)
+                except CallContextError:
+                    attempt = None
+                if (attempt and attempt[1]['output_tokens'] >= best[1]['output_tokens']
+                        and attempt[1]['input_tokens'] <= input_left):
+                    low, best = size, attempt
+                else:
+                    high = size - 1
+            return best
 
     def history(self, role):
         history = []
@@ -177,25 +222,48 @@ class ProofTurns:
 
     def remaining(self, role):
         settings = self.state['settings']
-        minimum = 128  # same floor as Proof's existing whole-candidate verifier
+        minimum = MIN_PROOF_REVIEW_TOKENS
         if role == 'solver':
             initial = self.state['pending']['kind'] in {'initial', 'retry'}
             minimum += settings['initial_min_solve_tokens' if initial else 'min_solve_tokens']
         return max(0, self.runner._remaining() - minimum)
 
-    def _role_outputs(self, role):
+    def final_allowance(self, role):
         reserve = self.runner._call_cap(self.state['settings']['verify_tokens'])
         if role == 'solver':
             reserve += self.runner._call_cap(self.runner._attempt_cap(self.state['pending']['kind']))
-        requesting = self.runner._find_call(self.runner._call_key(role))
-        return reserve, requesting['reserved_tokens']
+        return reserve
+
+    def available_for_turn(self, role):
+        # Every new role can investigate, including when the whole job starts with a short allowance.
+        # Subsequent optional calls spend only the surplus over the ordinary final role output(s).
+        if self.state['pending'].get(role + '_turns'):
+            return max(0, self.runner._remaining() - self.final_allowance(role))
+        # The first generation may be the finished answer. Its existing role allocation already fits the
+        # remaining job, and the solver allocation already reserves the whole-candidate verifier.
+        return self.runner._remaining()
+
+    def resource_note(self, role, *, tools):
+        client = self.runner.agent.client
+        resources = {'shared output tokens': self.runner._remaining(),
+                     'active seconds': min(self.state['settings']['max_seconds'] - self.runner._elapsed(),
+                                           getattr(client, 'remaining_seconds', math.inf)),
+                     'shared input tokens': getattr(client, 'remaining_input_tokens', math.inf)}
+        available = ', '.join(f'{max(0, int(n))} {key}' for key, n in resources.items() if math.isfinite(n))
+        if tools:
+            action = 'Finish as soon as the evidence settles the question, or identify the remaining gap.'
+        else:
+            action = ('Use the evidence already gathered to give the finished proof, refutation or remaining gap.'
+                      if role == 'solver' else 'Give the required review JSON from the evidence already gathered.')
+        return 'Remaining in this job: ' + available + '. ' + action
 
     def assistance_remaining(self, role):
         """Fit the support job beside the requested unfinished solve/review outputs under the shared allowance."""
         left = self.runner._remaining()
         if not math.isfinite(left):
             return left
-        reserve, help_output = self._role_outputs(role)
+        reserve = self.final_allowance(role)
+        help_output = self.runner._find_call(self.runner._call_key(role))['reserved_tokens']
         share = int(left) * help_output // (reserve + help_output)
         return max(0, min(self.remaining(role), max(int(left) - reserve, share)))
 
@@ -227,14 +295,12 @@ class ProofTurns:
         remaining = self.assistance_remaining(entry['role'])
         seconds = min(self.state['settings']['max_seconds'] - self.runner._elapsed(),
                       getattr(self.runner.agent.client, 'remaining_seconds', math.inf))
-        reserve, cap = self._role_outputs(entry['role'])
-        seconds *= cap / (reserve + cap)
         if remaining <= 0 or seconds <= 0:
             self._reply(entry, 'No remaining allowance for assistance. Use the available evidence or report the gap.')
             return
         request = {'id': f'{self.state["id"]}:{entry["id"]}', 'kind': kind, 'question': question, 'role': entry['role'],
                    'candidate': entry['candidate'], 'remaining_tokens': int(remaining) if math.isfinite(remaining) else None,
-                   'remaining_seconds': seconds, 'call_output_cap': cap}
+                   'remaining_seconds': seconds}
         if entry['candidate']:
             request['candidate_sha256'] = self.runner._get_candidate(entry['candidate'])['sha256']
         shared_input = getattr(self.runner.agent.client, 'remaining_input_tokens', math.inf)

@@ -110,6 +110,19 @@ class NumericsSession:
         self.on_record = None  # Set by the interface to show each saved run in the conversation.
         self._lock = threading.Lock()
 
+    def for_proof(self, saved_limit=None):
+        """Bind a whole proof job to this automatic sandbox without changing the caller's turn."""
+        if self.invocation != 'automatic' or self.policy.name != SANITY:
+            return None
+        job = NumericsSession(self.executor, self.store, self.policy, self.skill, explicit=False, cancel=self.cancel)
+        configured = self.run_limit
+        if self.policy.uses_chat_run_default and configured == self.policy.max_runs:
+            configured = None
+        job.run_limit = min((n for n in (configured, saved_limit) if n is not None), default=None)
+        job.runs, job.result_chars = self.runs, self.result_chars
+        job.on_run_change, job.on_record = self.on_run_change, self.on_record
+        return job
+
     def new_turn(self):
         with self._lock:
             self.runs = 0

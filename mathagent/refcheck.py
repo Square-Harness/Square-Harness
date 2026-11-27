@@ -17,11 +17,12 @@ a level is lowered when the passages actually read do not support it.
 import json
 import re
 import unicodedata
+from urllib.parse import unquote, urlsplit
 
 from .jsonutil import loads
 from .reporting import usage_footer
 from .ledger import _atomic_write, _bytes
-from .literature import UNLIMITED_SOURCE, bibliography_entry, bibliography_keys, cited_keys, cites_place, has_place, place_number
+from .literature import UNLIMITED_SOURCE, bibliography_entry, bibliography_keys, cited_keys, cites_place, has_place, place_number, question_urls
 from .model_limits import is_ds4, substantive_output, workflow_budget
 from .research import ResearchRunner, remaining_limit, _working_reference_prompt
 from .reference_search import StandardReferenceSearch
@@ -304,6 +305,34 @@ def question_identifiers(text):
     return [i for i in found if i.startswith(('doi:', 'arxiv:'))]
 
 
+def names_open_document(question, opened):
+    """An explicit identifier, quoted title, or numbered heading of a paper already opened in this turn."""
+    def words(text):
+        return ' '.join(re.findall(r'\w+', _fold(text)))
+    targets = [opened.get(key) or '' for key in ('requested_url', 'source_url', 'canonical_identifier')]
+    urls, identifiers = question_urls(question), question_identifiers(question)
+    if urls or identifiers:
+        return (all(url in targets for url in urls)
+                and set(identifiers) <= set(question_identifiers(' '.join(targets))))
+    path = unquote(urlsplit(targets[0]).path).strip('/').split('/')
+    path_match = False
+    if len(path) >= 2 and any(c.isdigit() for c in path[-1]):
+        namespace = re.escape(_fold(path[-2]))
+        mentions = re.findall(r'(?<!\w)' + namespace + r'\s+([\w.-]*\d[\w.-]*)', _fold(question))
+        if mentions:
+            path_match = all(label.rstrip('.') == _fold(path[-1]) for label in mentions)
+            if not path_match:
+                return False
+    title = opened.get('title') or ''
+    headings = [title, *(s.get('title') or '' for s in opened.get('sections', []))]
+    places = {' '.join(_fold(p).split()) for p in _PLACE.findall(question)}
+    labels = {' '.join(_fold(m[0]).split()) for h in headings if (m := _PLACE.match(h.strip()))}
+    if places and labels:
+        return len(places) == 1 and places <= labels
+    quoted = re.findall(r'["“«]([^"”»]+)["”»]', question)
+    return path_match or bool(title and any(words(t) == words(title) for t in quoted))
+
+
 def cited_work(text):
     """A work the question cites by authors and quoted title ("T. E. Harris, 'A lower bound ...', 1960"), with the
     place it names, as a candidate to check; None when the question cites none."""
@@ -336,6 +365,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     KINDS = ('check',)
     TERMINAL = ('answered', 'partial', 'budget_exhausted', 'budget_violation')
     FOLDER = 'checks'
+
+    def __init__(self, agent, emit=lambda kind, value: None, *, proof_source=None):
+        super().__init__(agent, emit)
+        self.proof_source = proof_source
 
     @property
     def emit(self):
@@ -397,7 +430,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
                 'discovered': False, 'answer': '', 'standard_author': '',
                 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
-                                                        'lookup': self._lookup, 'asker': self._asker}}
+                          'lookup': self._lookup, 'asker': self._asker,
+                          **({'proof_source': self.proof_source} if self.proof_source else {})}}
 
     # -- context -----------------------------------------------------------------
 
@@ -411,9 +445,6 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             fixed += '\n' + label + '\n' + s['statement'] + '\nKeywords: ' + ', '.join(s['keywords']) + '\n'
         online = bool(self.literature and self.literature.online)
         fixed += f'Internet enabled: {online}.\n'
-        if getattr(self.literature, 'offline_locked', False):
-            fixed += ('This interface was launched with --offline: online search cannot be turned on here. Never offer '
-                      'an online search; the user can restart without --offline or attach the paper.\n')
         optional = []
         if role in ('verify', 'verdict'):
             c = s['candidates'][s['current']]
@@ -536,8 +567,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         # Other URLs in the question are opened as given: the page is evidence, and a refusal (robots rules, size,
         # missing page) is reported as it is, never replaced by a topic search.
         covered = re.compile(r'https?://(?:(?:www\.|export\.)?arxiv\.org/(?:abs|pdf|html)/|(?:dx\.)?doi\.org/)', re.I)
-        urls = [u.rstrip('.,;:)]>\'"') for u in re.findall(r'https?://[^\s<>"]+', words)]
-        for url in list(dict.fromkeys(u for u in urls if not covered.match(u))):
+        for url in question_urls(words):
+            if covered.match(url):
+                continue
             self.emit('tool', 'open_paper ' + url)
             result = str(self.literature.execute('open_paper', {'identifier_or_url': url}))
             evidence_id = f'E{len(s["evidence"]) + 1}'
@@ -556,8 +588,59 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                                                        + (f', title “{value["title"]}”' if value.get('title') else '')})
         return found
 
+    def _verify_supplied_document(self):
+        """Start a precise Proof check at the one document its question actually opened."""
+        s = self.state
+        if s['check'].get('asker') != 'proof' or s['check'].get('lookup') != 'precise' or s['candidates']:
+            return False
+        checks = s.get('identifier_checks') or []
+        urls = question_urls(s['goal'])
+        origin = s['check'].get('proof_source') or self.proof_source
+        if (not origin and len(checks) == 1 and checks[0].get('kind') == 'url' and checks[0].get('found')
+                and urls == [checks[0]['identifier']] and not question_identifiers(s['goal'])):
+            url = urls[0]
+            opened = next((e for e in s['evidence'] if e['tool'] == 'open_paper' and
+                           e['arguments'].get('identifier_or_url') == url), None)
+            if opened is None:
+                return False
+            try:
+                document_id = json.loads(opened['result'])['document_id']
+                metadata, _ = self.literature._document(document_id)
+            except (KeyError, TypeError, ValueError, OSError):
+                return False
+        elif origin:
+            document_id, url = origin['document_id'], origin['requested_url']
+            try:
+                metadata, _ = self.literature._document(document_id)
+            except (ValueError, OSError):
+                return False
+            if metadata.get('text_sha256') != origin['text_sha256'] or metadata.get('requested_url') != url:
+                return False
+            s['check']['proof_source'] = origin
+            eid = f'E{len(s["evidence"]) + 1}'
+            result = json.dumps({k: metadata.get(k) for k in ('document_id', 'text_sha256', 'canonical_identifier',
+                                                               'requested_url', 'source_url', 'total_lines', 'title')})
+            opened = {'id': eid, 'tool': 'proof_open_paper', 'arguments': origin,
+                      'artifact': self._artifact('evidence-' + eid, result), 'result': result, 'round': s['rounds_started']}
+            s['evidence'].append(opened)
+        else:
+            return False
+        places = list(dict.fromkeys(_PLACE.findall(s['goal'])))
+        candidate = {'authors': [], 'title': metadata.get('title') or url, 'year': '',
+                     'locator': places[0] if len(places) == 1 else '', 'why': '', 'source_type': 'unknown',
+                     'source': 'supplied_url', 'supplied_document': document_id, 'rounds': 0, 'notes': [],
+                     'claimed': None, 'verdict': None}
+        opened['candidate'] = 0
+        s.update(candidates=[candidate], current=0, phase='verify')
+        self.emit('notice', 'Reading the source supplied in the Proof question: ' + url)
+        return True
+
     def _recall(self):
+        if (self.proof_source or self.state['check'].get('proof_source')) and self._verify_supplied_document():
+            return
         seeded = self._resolve_identifiers()
+        if not seeded and self._verify_supplied_document():
+            return
         cited = cited_work(self._human_words())
         if cited and not any(_words(cited['title']) and _words(cited['title']) <= _words(c['title']) for c in seeded):
             seeded.append(cited)  # the work the claim is attributed to is always checked
@@ -737,7 +820,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             c['rounds'] += 1
             s['rounds_started'] += 1
             self._save()
-            result = self._call('verify', VERIFY_METHOD, cap=1200, tools=self._schemas())
+            instruction = ('Check the question against the supplied document. Inspect the statement, hypotheses '
+                           'and exact lines. Use search_paper or read_paper for other parts of the document. '
+                           'When you have enough evidence, reply with short notes and no tool calls.'
+                           if c.get('supplied_document') else VERIFY_METHOD)
+            result = self._call('verify', instruction, cap=1200, tools=self._schemas())
             if result['text'].strip():
                 c['notes'].append(result['text'])
             calls = self._fresh(result['calls'], index)
@@ -745,7 +832,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
         if not self._out_of_time():
-            result = self._call('verdict', VERDICT_RULES, cap=700, format_schema=VERDICT_SCHEMA)
+            schema = VERDICT_SCHEMA
+            if c.get('supplied_document'):
+                schema = {**schema, 'properties': {**schema['properties'], 'needs_other_sources': {
+                    'type': 'boolean', 'description': 'Does the question also ask for other references or evidence beyond this document?'}},
+                    'required': [*schema['required'], 'needs_other_sources']}
+            result = self._call('verdict', VERDICT_RULES, cap=700, format_schema=schema)
             try:
                 claimed = loads(result['text'])
             except ValueError:
@@ -760,6 +852,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         return self.literature.stats['requests'] if self.literature else 0
 
     def _seed(self, c):
+        if c.get('supplied_document'):
+            return [{'function': {'name': 'read_paper', 'arguments': {'document_id': c['supplied_document']}}}]
         names = _surnames(c['authors'])
         if not names:
             return []
@@ -841,9 +935,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def _next(self):
         s = self.state
+        current = s['candidates'][s['current']]
+        needs_sources = not self._confirmed()
+        if current.get('supplied_document') and type((current.get('claimed') or {}).get('needs_other_sources')) is bool:
+            needs_sources = current['claimed']['needs_other_sources']
         if s['current'] + 1 < len(s['candidates']) and not self._out_of_time():
             s['current'] += 1
-        elif (not self._confirmed() and s['check']['discover'] and not s['discovered'] and not self._out_of_time()
+        elif (needs_sources and s['check']['discover'] and not s['discovered'] and not self._out_of_time()
               and (self.literature is None or self.literature.online)):  # an open-paper search needs the web
             s['phase'] = 'discover'
         else:
@@ -856,12 +954,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             self._tag('discover')
         rounds = sum(1 for e in s['notes'] if e.get('round') == 'discover')
         if rounds < 2 and not self._out_of_time():
+            broader = bool(self._confirmed())
             if rounds == 0:
-                self.emit('notice', 'No guess was confirmed; looking for an open paper that states the result and cites a source')
+                self.emit('notice', 'Looking for the additional sources requested' if broader else
+                          'No guess was confirmed; looking for an open paper that states the result and cites a source')
             s['notes'].append({'round': 'discover', 'text': '', 'complete': True})
             s['rounds_started'] += 1
             self._save()
-            instruction = ('None of the guesses was confirmed. Find an open paper or lecture notes that state this result '
+            instruction = (('The question asks for other references. ' if broader else 'None of the guesses was confirmed. ')
+                           + 'Find an open paper or lecture notes that state this result '
                            'and cite a precise source for it: search_papers with the keywords, open the '
                            'best open-access hit, search_paper for a keyword, and read which reference (and which theorem '
                            'or section of it) the paper cites for the result. Reply without '
@@ -988,6 +1089,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             return None
 
     def _document_is_work(self, document_id, candidate, record):
+        if candidate.get('supplied_document'):
+            return document_id == candidate['supplied_document']
         try:
             metadata, _ = self.literature._document(document_id)
         except (ValueError, OSError, AttributeError):
@@ -1009,7 +1112,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         words = lambda title: set(re.findall(r'[a-z0-9]+', _fold(title)))
         expected = words(candidate.get('title'))
         for e in evidence:
-            if e['tool'] != 'open_paper':
+            if e['tool'] not in ('open_paper', 'proof_open_paper'):
                 continue
             try:
                 doc = json.loads(e['result']).get('document_id')
@@ -1041,8 +1144,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         level = claimed.get('level') if claimed.get('level') in LEVELS else 'located'
         locator = str(claimed.get('locator') or '').strip() or c['locator']
         number = _number(locator)
-        record = (self._record(c, evidence, str(claimed.get('record') or ''))
-                  or self._opened_work(c, evidence, str(claimed.get('record') or '')))
+        claimed_record = str(claimed.get('record') or '')
+        record = None if c.get('supplied_document') else self._record(c, evidence, claimed_record)
+        record = record or self._opened_work(c, evidence, claimed_record)
         reasons, quote, doc, span, url, entry = [], '', None, None, None, ''
 
         def read(doc_id, a, b):
@@ -1183,7 +1287,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         if not top:
             top = [c for c in judged if c['verdict']['level'] == 'located']
         if (not top and self.state['check'].get('lookup') == 'standard'
-                and not self.state['settings'].get('online')):
+                and not (self.literature and self.literature.online)):
             top = [c for c in judged if c['verdict']['level'] != 'contradicted']
         return top
 

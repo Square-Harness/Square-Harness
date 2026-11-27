@@ -832,7 +832,7 @@ def _save_chat(root, chat):
     _atomic_write(_chats(root, create=True) / (chat['id'] + '.json'), data)
 
 
-def create_chat(root, mode, think=True, model='', online=True, project_id=None):
+def create_chat(root, mode, think=True, model='', *, project_id=None):
     if mode not in CHAT_MODES:
         raise ValueError('Chat mode must be explore or free')
     if project_id is not None:
@@ -840,7 +840,7 @@ def create_chat(root, mode, think=True, model='', online=True, project_id=None):
     now = _now()
     chat = {'version': 1, 'id': str(uuid.uuid4()), 'mode': mode, 'title': '',
             'created_at': now, 'updated_at': now,
-            'settings': {'think': bool(think), 'model': model, 'online': bool(online)},
+            'settings': {'think': bool(think), 'model': model},
             'history': [], 'transcript': [], 'project_id': project_id}
     _save_chat(root, chat)
     return chat
@@ -994,6 +994,7 @@ def load_chat(root, chat_id):
             or chat.get('mode') not in SAVED_CHAT_MODES or not isinstance(chat.get('history'), list)
             or not isinstance(chat.get('transcript'), list) or not isinstance(chat.get('settings'), dict)):
         raise ValueError('Invalid or unsupported chat file')
+    chat['settings'].pop('online', None)  # Task-specific source restrictions come from the user's request.
     # Preserve the maximum budget of route cards saved before the effort rename.
     for item in chat['transcript']:
         if isinstance(item, dict) and item.get('role') == 'route' and item.get('effort') == 'brezis':
@@ -1049,12 +1050,9 @@ def delete_chat(root, chat_id):
 
 
 @_locked_chat
-def update_chat_settings(root, chat_id, *, think=None, online=None):
+def update_chat_settings(root, chat_id, *, think):
     chat = load_chat(root, chat_id)
-    if think is not None:
-        chat['settings']['think'] = bool(think)
-    if online is not None:
-        chat['settings']['online'] = bool(online)
+    chat['settings']['think'] = bool(think)
     _save_chat(root, chat)
     return chat
 

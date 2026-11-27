@@ -196,12 +196,6 @@ Do not paraphrase the same objective, raise effort, or use another worker to
 evade it. Use an available independent capability or explain the blocker.
 """
 
-POLICY_OFFLINE = """
-Web research is locked off in this interface (it was launched with --offline). Never offer an
-online search, a web lookup or a later check online; answer from the conversation, attached
-files, the workspace and cached sources, and say plainly what could not be checked.
-"""
-
 POLICY_WRITE = """
 write_file saves one text file in the user's folder, only after the user approves its diff.
 Use it only when the user's own current message asks to save or create a file, with the
@@ -940,8 +934,6 @@ class Orchestrator:
                  'Use the reported preview restriction or compiler error to explain a missing PDF.\n']
         if 'write_file' in names:
             parts.append(POLICY_WRITE)
-        if getattr(getattr(getattr(self.agent, 'workspace', None), 'literature', None), 'offline_locked', False):
-            parts.append(POLICY_OFFLINE)
         return ''.join(parts)
 
     def _numerics_policy(self, tools):

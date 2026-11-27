@@ -36,8 +36,7 @@ started them. If you switch providers, select the original one again to resume
 a paused turn. An older Assistant turn without a recorded endpoint asks you to
 confirm the destination before sending its saved conversation. The provider
 credential stays on the backend.
-`--allow-remote-model --offline` permits those model calls while locking web
-research off. See the hosted-API setup in [llm-install.md](llm-install.md).
+Use `--allow-remote-model` to authorize a non-loopback model endpoint. See the hosted-API setup in [llm-install.md](llm-install.md).
 
 The current hosted checkpoint is `deepseek-ai/DeepSeek-V4.1-Flash-1017`.
 Existing V4 Flash 0731 jobs keep their saved model and allowances; resuming
@@ -361,10 +360,9 @@ working time, tokens and external requests. Saved jobs retain their original all
 answers cannot change what the harness is allowed to do:
 
 - writing a file needs your approval;
-- research tools can search online by default. Launch with `--offline` to restrict them to
-  local and cached sources. Referees use public bibliographic queries to look up cited papers;
+- research tools can consult online sources. Referees use public bibliographic queries to look up cited papers;
 - generated Python runs in a locked-down sandbox. Unsandboxed Python exists
-  only as an opt-in launch option (`--allow-python`, incompatible with `--offline`): the
+  only as an opt-in launch option (`--allow-python`): the
   Assistant and Explore chats may then propose `run_python`, and you approve
   each call after reading its code. Approved code runs with your account's
   permissions and the server's environment.
@@ -601,7 +599,7 @@ a statement, or `/prove <statement>`. Other commands:
 | Command | Purpose |
 | --- | --- |
 | `/explore` | Switch to exploration chat |
-| `/check <result>` | Find or verify a reference. Uses cached sources when launched with `--offline`. |
+| `/check <result>` | Find or verify a reference using scholarly databases and cached sources. |
 | `/literature <topic>` | Write a literature review of a topic |
 | `/quick_review`, `/referee`, `/typo_check`, `/explain` | The review kinds (the manuscript comes from `--research-file`; `/detailed_review` is `/referee`) |
 | `/writeup <instructions>` | LaTeX write-up of `--research-file` notes in the `--template-file` style |
@@ -785,7 +783,7 @@ Proof waits for the preceding steps listed in its plan. When the plan calls
 for a special case, the controller selects a precise statement from the evidence
 or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
 experiments are available through Explore when the numerical sandbox is enabled.
-An online investigation that explicitly asks for prior literature includes a
+An investigation that explicitly asks for prior literature includes a
 reference check or literature review in its plan.
 
 Pause saves the investigation. If Explore has already run a numerical check,
@@ -831,9 +829,11 @@ How it works: **solve → verify → repair**.
 
 1. The solver may give a proof, construct a rigorous counterexample or identify
    the precise step it could not justify. It chooses how to investigate the
-   statement. Either role can read cached papers, search public sources when
-   online access is enabled, and run an isolated Python experiment when the
-   automatic numerical sandbox is available. A straightforward proof can finish
+   statement. Either role can read cached papers, search scholarly sources online,
+   and run an isolated Python experiment when the
+   automatic numerical sandbox is available. Proof shares its job allowance across
+   computations. Setting `sanity.max_runs` in the sandbox configuration adds an
+   explicit run count across both roles, including after resume. A straightforward proof can finish
    in one solve and one review without using any of these tools.
 2. A fresh verifier, which has not seen the solver's reasoning, reads the whole
    written proof. It
@@ -869,11 +869,14 @@ How it works: **solve → verify → repair**.
 Either role can request help with a specific reference or a broader literature
 question. Proof saves the request and continues the same attempt when the
 evidence returns. A missing reference can still leave the proof unresolved.
-The time and output spent on this work count toward the job allowance.
+The time and output spent on this work count toward the job allowance. After
+a role uses tools, Proof reserves output for writing and reviewing the answer.
+An inconclusive reference check can return to the same role with the evidence
+it obtained.
 
-Online paper searches are enabled by default. Turn off **Search papers online**
-on the Proof form or launch with `--offline` to use cached sources only. A delegated Proof inherits the conversation’s
-setting. In offline mode, previously cached papers remain available.
+Both roles can search scholarly databases directly, open a paper and inspect the
+relevant passage. A request to use only the attached manuscript also applies
+to evidence gathered during that proof.
 
 Every version is kept, and the first answer is never lost. The default is five solver attempts. You can change the attempt and time limits. “Response reviewed” means the verifier found
 no blocking mathematical issue in the selected response; any nonblocking notes
@@ -1004,9 +1007,8 @@ Each reference gets an evidence level:
   absence proves nothing.
 
 The code lowers any level that the passages read do not support. A chapter,
-section or theorem number the model remembers stays labelled as memory. Needs
-online search; with it off, only cached sources are used, the answer says so,
-and a work with no cached evidence is inconclusive rather than not found. A
+section or theorem number the model remembers stays labelled as memory. If sources
+are unreachable and cached records supply no evidence, the check reports an inconclusive result. A
 question about the sources of a literature review shown in the conversation
 uses that review's saved records and the full texts it cached.
 
@@ -1016,7 +1018,7 @@ Ask the mathematical question you want to investigate. You can specify an audien
 
 The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper available by DOI, it can use OpenAIRE to locate a deposited manuscript. It follows references from relevant works, including papers with different terminology. Search terms, claims in a supplied brief and works recalled by the model are leads to investigate. Each citation in the review points to a retrieved record. A dagger in the references identifies works for which the review used only an abstract or a bibliographic record. The other entries used passages from the paper. After them, **Further reading** lists works the plan placed in the review that the checked text does not discuss; the review makes no claim about them. A bibliography entry establishes the identity of a work but a precise theorem still depends on its hypotheses and on the passage supporting it.
 
-Every sentence of a section is checked against the available evidence. A first pass names the source sentences that carry it, and a second compares it with those passages. A checker can correct a local error or withhold a sentence it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. When the question names an object after people (a "Boulard–Carillo conjecture") that no retrieved record mentions, the review's title and first paragraph say that no work defining or studying it was found, and the works it discusses are presented as nearby literature only. With web research off, the review says that only cached sources were used; an arXiv rate limit (HTTP 429) is reported as such, with the advice to resume later. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
+Every sentence of a section is checked against the available evidence. A first pass names the source sentences that carry it, and a second compares it with those passages. A checker can correct a local error or withhold a sentence it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. When the question names an object after people (a "Boulard–Carillo conjecture") that no retrieved record mentions, the review's title and first paragraph say that no work defining or studying it was found, and the works it discusses are presented as nearby literature only. When the request excludes online research, the review identifies the cached sources it used; an arXiv rate limit (HTTP 429) is reported as such, with the advice to resume later. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
@@ -1114,10 +1116,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   on most, and a referee that stops without finishing is asked once to go on. They
   have tools: they read and search the manuscript, **run Python** in the sandbox
   to recompute a constant or test a counterexample, and find and read cited
-  papers to check a theorem's hypotheses. Cited-paper lookup is on by default.
-  The review rejects public queries that repeat eight consecutive manuscript words.
-  Turn off **Look up cited papers online** in the review form to use the manuscript
-  and cached papers only. Each problem is reported as soon as it is found, with
+  papers to check a theorem's hypotheses. The review rejects public queries that
+  repeat eight consecutive manuscript words. Each problem is reported as soon as it is found, with
   its lines and an exact quote that the code checks, and every result of a
   referee's group must get a status (no error found, issue, not checked) before
   it can finish. A referee's first two rounds are short, so it starts with its
@@ -1195,9 +1195,7 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   or more authors) as a work of the manuscript's authors; neither counts as
   prior work. If the literature review
   failed or did not finish, the answer says that the position is missing; none
-  is written from memory. With online search off, or when your request excludes
-  it ("without searching online"), the review starts alone and the answer says
-  why there is no position. The literature review shares the provider's
+  is written from memory. The literature review shares the provider's
   throughput with the review, so the two together take longer than the review
   alone. A review started from the New review form or the terminal runs alone.
 - **Typo check** (`@typo_check`): the typos and presentation problems of a
@@ -1815,17 +1813,12 @@ What leaves your computer:
 - **Search requests**: short public queries to arXiv, Semantic Scholar, zbMATH,
   Crossref, OpenCitations and Open Library (book metadata); downloads of open-access papers; web pages you ask
   the Assistant to open; and, only with a `BRAVE_SEARCH_API_KEY`, general web
-  search. New conversations and research-capable jobs in both the web app and
-  terminal can search online by default. Launch with `--offline` to use local
-  and cached sources throughout the session. The web app also has a **Search
-  online** switch in the conversation and search settings on the Proof, Literature
-  review and manuscript review forms. Turning search off in a conversation stops
-  further web requests from its running jobs. Reopening an offline conversation
-  or resuming an offline job preserves that choice. Source-only tasks such as a
-  typo check or a write-up use their supplied material.
+  search. In both the web app and terminal, research workers can consult online
+  sources or reuse papers already cached in the workspace. Source-only tasks
+  such as a typo check or a write-up use their supplied material.
 - **Prompts and selected file contents** go to the model server you configure.
-  A non-loopback endpoint requires `--allow-remote-model` or an explicit
-  `--online`. A model reached through an SSH tunnel receives its inputs on the
+  Use `--allow-remote-model` to authorize a non-loopback endpoint.
+  A model reached through an SSH tunnel receives its inputs on the
   remote machine even though the harness connects to a local address.
 
 Nothing else leaves your computer. The web app listens on `127.0.0.1` only by

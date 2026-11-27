@@ -285,7 +285,7 @@ class OpenRouterTransportTests(unittest.TestCase):
 class OpenRouterWorkflowTests(GuiCase):
     fake_class = FakeOpenRouter
     model = MODEL
-    extra_args = ('--backend', 'openai', '--api-profile', 'openrouter', '--offline', '--allow-remote-model',
+    extra_args = ('--backend', 'openai', '--api-profile', 'openrouter', '--allow-remote-model',
                   '--gui-model-concurrency', '1', '--ctx', '65536')
 
     def setUp(self):
@@ -305,7 +305,7 @@ class OpenRouterWorkflowTests(GuiCase):
         status, upload, _ = self.request('POST', '/api/files/upload?name=green.png', raw=base64.b64decode(png))
         self.assertEqual(status, 200, upload)
         ref = upload['image']
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         direct = (json.dumps({'route': 'direct', 'effort': 'high', 'reason': 'Identify the color.', 'tasks': []}), '', 9)
         self.fake.replies = [direct, ('Green.', '', 7), direct, ('Yes.', '', 7)]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Identify the color.', 'files': [upload['path']]})
@@ -337,7 +337,7 @@ class OpenRouterWorkflowTests(GuiCase):
     def test_an_assistant_turn_runs_on_openrouter_with_ds4_budgets(self):
         status = self.ok('GET', '/api/status')
         self.assertEqual(status['defaults']['budget_profile'], 'ds4.1-flash-1017')  # DS4 presets, not local budgets
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         self.fake.replies = [(json.dumps({'route': 'direct', 'effort': 'low', 'tasks': [], 'reason': 'A greeting.'}), '', 9),
                              ('Hello! How can I help?', 'The user greets me.', 7)]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'hi !'})

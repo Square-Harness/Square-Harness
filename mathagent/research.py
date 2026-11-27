@@ -23,6 +23,7 @@ from .reporting import usage_footer
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, TokenBudgetError
 from .literature import UNLIMITED_SOURCE
+from .source_tasks import scoped_literature
 from .ledger import MAX_FILE_BYTES, _atomic_write, _bytes, _directory, _publish_job, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
@@ -233,14 +234,20 @@ class ResearchRunner:
         self.directory, self.state = None, None
         self._clock = None
         self._seconds_before = 0
+        self._task_library = None
 
     @property
     def literature(self):
-        return getattr(self.agent.workspace, 'literature', None)
+        return self._task_library or getattr(self.agent.workspace, 'literature', None)
+
+    def _scope_literature(self, goal, reference, sources):
+        user_query = reference.get('query') if isinstance(reference, dict) else None
+        self._task_library = scoped_literature(getattr(self.agent.workspace, 'literature', None), goal, user_query, sources=sources)
 
     def start(self, goal, *, kind='literature', source_files=(), max_rounds=6,
               max_tokens=None, max_input_tokens=None, max_seconds=None,
               max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE, reference_context=None, job_id=None):
+        self._task_library = None
         if kind not in self.KINDS:
             raise ValueError('Research kind must be ' + ' or '.join(self.KINDS))
         if not isinstance(goal, str) or not goal.strip():
@@ -338,6 +345,7 @@ class ResearchRunner:
         return sources
 
     def _create(self, goal, kind, settings, sources, skill, *, reference=None, job_id=None):
+        self._scope_literature(goal, reference[0] if reference is not None else None, sources)
         settings.update(model=self.agent.model, ctx=self.agent.ctx, predict=self.agent.predict,
                         document_output_cap=getattr(self.agent, 'document_output_cap', None),
                         host=getattr(self.agent.client, 'host', None),
@@ -388,6 +396,7 @@ class ResearchRunner:
         """Continue a saved job. ``additional_*`` is an explicit extra allowance, recorded in the job and its report."""
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
+        self._scope_literature(self.state['goal'], self.state.get('reference_context'), self.state['sources'])
         if self.state['kind'] not in self.KINDS:
             raise ValueError(f'This is a {self.state["kind"]} job; resume it from its own mode')
         self._validate_transport_resume()
@@ -510,10 +519,8 @@ class ResearchRunner:
 
     def _restore_literature(self):
         if self.literature and self.state.get('literature_snapshot'):
-            online = self.literature.online
             self.literature.reset_budget(max_requests=self.state['settings']['max_requests'], max_chars=self.state['settings']['max_chars'])
             self.literature.restore(self.state['literature_snapshot'])
-            self.literature.online = online and self.state['settings']['online']
 
     def _run(self):
         with self._lock():

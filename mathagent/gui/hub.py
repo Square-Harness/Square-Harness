@@ -68,8 +68,9 @@ VARIANT_LABELS = {'review': 'Review', 'journal': 'Review', 'typos': LABELS['typo
 class _ChatWorkerHost:
     """GUI effects used by the shared worker adapter."""
 
-    def __init__(self, hub, task, root, chat_id, online):
-        self.hub, self.task, self.root, self.chat_id, self.online = hub, task, root, chat_id, online
+    def __init__(self, hub, task, root, chat_id, request):
+        self.hub, self.task, self.root, self.chat_id, self.request = hub, task, root, chat_id, request
+        self.online = not excludes_external_sources(request)
         self.args, self.base, self.cancel = hub.args, hub.base, task.cancel
 
     def check_files(self, files, image_refs=()):
@@ -79,7 +80,7 @@ class _ChatWorkerHost:
         return projects.context(snapshot)
 
     def engine(self, mode):
-        return self.hub._engine(self.task, mode=mode, online=self.online)[0]
+        return self.hub._engine(self.task, mode=mode, source_request=self.request)[0]
 
     def bind_sandbox(self, skill, *, routed):
         return self.hub.sandbox.bind(skill, self.root, explicit=not routed, routed=routed, cancel=self.cancel,
@@ -429,7 +430,6 @@ class Task:
         self.work = None
         self.on_update = on_update
         self.origin_chat = target if kind == 'chat' else None
-        self.libraries = []  # literature tools of this task's engines: turning online off reaches them
         self.investigation_id = None
         self.investigation_phase = None
         # A message sent with queue while its conversation was busy: (content, files, mode, effort).
@@ -536,9 +536,6 @@ class Hub:
         if not self.root.is_relative_to(self.base):
             raise ValueError('The workspace must be inside --gui-root')
         self.bus = bus or EventBus()
-        # An explicit --offline at launch is a hard guarantee (for unaided work);
-        # otherwise online search is on, and the user may turn it off per conversation or job.
-        self.online_locked = not args.online
         self._lock = threading.Lock()
         self.task = None
         self._tasks = collections.OrderedDict()
@@ -899,7 +896,7 @@ class Hub:
                     if self._closing:
                         return
                     self.inference.register(task.id)
-                agent, _ = self._engine(task, think=False, online=False)
+                agent, _ = self._engine(task, think=False)
                 agent.client.timeout = min(agent.client.timeout, 15)
                 client = BudgetClient(agent.client, max_tokens=64, max_input_tokens=4096,
                                       max_seconds=15, concurrency=1)
@@ -1259,36 +1256,11 @@ class Hub:
 
     # -- engine construction (mirrors the terminal interface) ----------
 
-    def online(self, requested=None):
-        """Whether new work may search the web: on unless the user turns it off or launched --offline."""
-        if self.online_locked:
-            if requested:
-                raise ValueError('This interface was launched with --offline, so online search stays off')
-            return False
-        return True if requested is None else bool(requested)
-
-    def stop_online(self, chat_id):
-        """Turning a conversation's online search off also applies to its running work: each running job of the
-        conversation makes no further web request (cached sources stay usable). Returns how many were reached."""
-        reached = 0
-        for task in self.active_tasks():
-            if task.origin_chat == chat_id:
-                for library in task.libraries:
-                    reached += bool(library.online)
-                    library.online = False
-        return reached
-
-    def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
+    def _engine(self, task, *, mode='prove', think=None, ctx=None, source_request=''):
         args = self.args
-        library = LiteratureTools(self.root, online=self.online(online),
-                                  max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
-        library.offline_locked = self.online_locked  # launched --offline: online search cannot be turned on
-        if isinstance(getattr(task, 'libraries', None), list):
-            task.libraries.append(library)
-            # Register first so a concurrent offline switch also reaches a worker
-            # created after the parent took its original permissions snapshot.
-            if task.origin_chat and not store.load_chat(self.root, task.origin_chat)['settings'].get('online'):
-                library.online = False
+        library = LiteratureTools(self.root, online=not excludes_external_sources(source_request),
+                                  max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE,
+                                  max_chars=args.research_chars)
         # Proof and Explore can use the configured automatic numerical sandbox.
         numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
                     if mode in ('explore', 'prove') else None)
@@ -1416,8 +1388,7 @@ class Hub:
     # -- proofs --------------------------------------------------------
 
     def start_proof(self, goal, *, source_files=(), rounds=None, tokens=None, seconds=None,
-                    solve_tokens=None, verify_tokens=None, ctx=None, online=None, queue=False, on_update=None):
-        online = self.online(online)
+                    solve_tokens=None, verify_tokens=None, ctx=None, queue=False, on_update=None):
         args = self.args
         rounds = args.proof_rounds if rounds is None else rounds
         tokens = args.proof_tokens if tokens is None else tokens
@@ -1435,7 +1406,7 @@ class Hub:
         job_id = str(uuid.uuid4())  # known at once, so a queued proof can be followed by its id
 
         def work(task):
-            agent, _ = self._engine(task, mode='prove', ctx=ctx, online=online)
+            agent, _ = self._engine(task, mode='prove', ctx=ctx, source_request=goal)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
             runner = ProofRunner(agent, evidence_coordinator=True)
@@ -1494,8 +1465,8 @@ class Hub:
             ProofRunner.check_additions(state, additions)
 
         def work(task):
-            online = bool(state['settings'].get('evidence_online')) and not self.online_locked
-            agent, _ = self._engine(task, mode='prove', online=online)
+            original = (state['settings'].get('reference_context') or {}).get('query') or state['goal']
+            agent, _ = self._engine(task, mode='prove', source_request=original)
             runner = ProofRunner(agent, evidence_coordinator=True)
             runner.emit = self._job_emit(task, runner, 'proof')
             result = runner.resume(proof_id, add_tokens=add_tokens, add_seconds=add_seconds, add_rounds=add_rounds)
@@ -1539,7 +1510,7 @@ class Hub:
         limit = MAX_CAPACITY if getattr(self.args, 'api_profile', None) in HOSTED_DS4 else 4
         return min(limit, self.inference.capacity) if self.args.backend == 'openai' else 1
 
-    def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None,
+    def start_research(self, kind, goal, *, source_files=(), queue=False, on_update=None,
                        variant=None, target='', **limits):
         if kind not in ('literature', 'referee'):
             raise ValueError('Research kind must be literature or referee')
@@ -1550,13 +1521,12 @@ class Hub:
                 budgets['max_seconds'] = min(self.args.research_seconds, budgets['max_seconds'])
             elif limits.get('seconds') is None:
                 budgets['max_seconds'] = None
-        online = self.online(online)
         variant = ('review' if variant in (None, 'journal') else variant) if kind == 'referee' else None
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
         job_id = str(uuid.uuid4())  # known at once, so a queued job can be followed by its id
 
         def work(task):
-            agent, _ = self._engine(task, mode=kind, online=online)
+            agent, _ = self._engine(task, mode=kind, source_request=goal)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
             if kind == 'literature':  # a literature review written from verified records
@@ -1605,7 +1575,7 @@ class Hub:
 
         def work(task):
             # A write-up works from the pinned notes only; it never searches.
-            agent, _ = self._engine(task, mode='writeup', online=False)
+            agent, _ = self._engine(task, mode='writeup', source_request=goal)
             agent.personal_context = personal_context
             images.bind(agent, image_refs)
             runner = WriteupRunner(agent, styles_root=self.base)
@@ -1635,7 +1605,7 @@ class Hub:
 
         def work(task):
             # A style is learnt from the pinned articles only; it never searches.
-            agent, _ = self._engine(task, mode='writeup', online=False)
+            agent, _ = self._engine(task, mode='writeup', source_request=goal)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
             runner = StyleRunner(agent, styles_root=self.base)
@@ -1649,11 +1619,10 @@ class Hub:
         runner_class = (WriteupRunner if state['kind'] == 'writeup' else StyleRunner if state['kind'] == 'style' else
                         ReviewRunner if state.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE)
                         else runner_for_state(state))
-        # A job keeps the network choice it started with (never more, per the runner).
-        online = bool(state['settings'].get('online')) and not self.online_locked
+        original = (state.get('reference_context') or {}).get('query') or state['goal']
 
         def work(task):
-            agent, _ = self._engine(task, mode=state['kind'], online=online)
+            agent, _ = self._engine(task, mode=state['kind'], source_request=original)
             runner = (runner_class(agent, concurrency=self.review_concurrency())
                       if runner_class is ReviewRunner or issubclass(runner_class, ReviewBase)
                       else runner_class(agent, styles_root=self.base) if runner_class in (StyleRunner, WriteupRunner)
@@ -1713,8 +1682,7 @@ class Hub:
             fresh = store.load_chat(self.root, chat_id)
             store.save_chat_images(self.root, chat_id, image_refs)
             agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
-                                    online=bool(fresh['settings'].get('online')) and not self.online_locked
-                                    and not excludes_external_sources(content))
+                                    source_request=content)
             agent.history = store.image_history(fresh)
             agent.turn_image_refs = attached_images
             agent.personal_context = personal_context
@@ -1785,8 +1753,7 @@ class Hub:
 
         def work(task):
             fresh = store.load_chat(root, chat_id)
-            online = bool(fresh['settings'].get('online')) and not self.online_locked
-            agent, _ = self._engine(task, mode='check', online=online)
+            agent, _ = self._engine(task, mode='check', source_request=question)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
@@ -1814,11 +1781,6 @@ class Hub:
             answer = state.get('answer') or runner._compose()
             if state['status'] in ('paused', 'error', 'budget_exhausted', 'budget_violation'):
                 answer = f'*The check stopped early ({state.get("stop_reason", state["status"])}).*\n\n' + answer
-            if not online:
-                answer = ('*This interface was launched with --offline: web research is off, so only sources already in the '
-                          'local cache were used.*' if self.online_locked else
-                          '*Online search is off for this conversation, so only sources already in the local cache were used.*'
-                          ) + '\n\n' + answer
             answer += f'\n\nFull log: `.mathagent/checks/{result["id"]}/report.md`'
             history = fresh['history'] + [{'role': 'user', 'content': question}, {'role': 'assistant', 'content': answer}]
             store.commit_turn(root, chat_id, history, [], [], echo_user=False, mode='check', job_id=result['id'])
@@ -1843,7 +1805,7 @@ class Hub:
             fresh = store.load_chat(self.root, chat_id)
             last_user, last_answer = last_exchange(fresh)
             agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
-                                    online=fresh['settings'].get('online', False) and not self.online_locked)
+                                    source_request=last_user)
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
@@ -2109,12 +2071,8 @@ class Hub:
                 previous = copy.deepcopy(previous)
                 for key in ('history', 'messages'):
                     previous[key] = store.image_history(fresh, previous[key])
-            online = bool(fresh['settings'].get('online')) and not self.online_locked
-            if previous:
-                online = online and bool(previous.get('online', False))
-            elif excludes_external_sources(content):
-                online = False
-            main, _ = self._engine(task, mode='explore', think=False, online=online)
+            source_request = previous['query'] if previous else content
+            main, _ = self._engine(task, mode='explore', think=False, source_request=source_request)
             if resume:
                 if previous is None or previous.get('id') != saved.get('id'):
                     raise Busy('The paused Assistant turn changed before it could resume.')
@@ -2178,7 +2136,6 @@ class Hub:
                     with budget.pool.lock:
                         state = _copy(parent.state)
                         state['budget'] = budget.snapshot()
-                    state['online'] = online
                     state['web_budget'] = main.workspace.literature.snapshot()
                     if personal_context:
                         state['personal_context'] = personal_context
@@ -2230,7 +2187,7 @@ class Hub:
             def delegate(action, child, save):
                 self._hold_slot(task, budget, lambda: capture.emit('progress', 'Waiting for a free task slot to start a worker…'),
                                 resumed=resume)
-                return self._assistant_worker(task, root, chat_id, parent, budget, action, child, save, online, checkpoint_lock)
+                return self._assistant_worker(task, root, chat_id, parent, budget, action, child, save, source_request, checkpoint_lock)
 
             options = dict(emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
                            max_actions=previous['limits']['actions'] if previous else DEFAULT_ACTIONS,
@@ -2361,8 +2318,8 @@ class Hub:
                 'reason': ('Not started: this is a famous open problem. A ' + level + '-effort Proof may use up to '
                            + ', '.join(part for part in cost if part) + ' and is very unlikely to settle it.')}
 
-    def _assistant_worker(self, task, root, chat_id, parent, budget, action, child, save, online, state_lock):
-        host = _ChatWorkerHost(self, task, root, chat_id, online)
+    def _assistant_worker(self, task, root, chat_id, parent, budget, action, child, save, source_request, state_lock):
+        host = _ChatWorkerHost(self, task, root, chat_id, source_request)
         host.bind_child(child)
         return run_worker(host, parent, budget, action, child, save)
 
@@ -2457,7 +2414,6 @@ class Hub:
 
         limits = dict(limits or {})
         on_update._origin_chat = chat_id
-        online = bool(chat['settings'].get('online')) and not self.online_locked
         item = chat['transcript'][index]
         downloads = list(item.get('previous_downloads') or [])
         if item.get('mode') in ('writeup', 'summarize') and item.get('job_id') and item['job_id'] not in downloads:
@@ -2467,12 +2423,12 @@ class Hub:
                           previous_downloads=downloads, job_id=None, outputs=None, outcome='')
         try:
             if mode == 'prove':
-                task = self.start_proof(request, source_files=files, online=online, queue=True, on_update=on_update,
+                task = self.start_proof(request, source_files=files, queue=True, on_update=on_update,
                                         **{k: v for k, v in limits.items()
                                            if k in ('rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens')})
             elif mode == 'literature' or mode in REVIEW_MODES:
                 task = self.start_research('literature' if mode == 'literature' else 'referee', request, source_files=files,
-                                           variant=REVIEW_MODES.get(mode), online=online, queue=True, on_update=on_update,
+                                           variant=REVIEW_MODES.get(mode), queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
             elif mode == 'check':
                 task = self.check(chat_id, request, files=files, effort='high',

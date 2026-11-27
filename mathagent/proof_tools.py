@@ -2,15 +2,16 @@
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 """The tools a Proof role may use and the primary evidence it can share with the other role."""
-from copy import copy
 import json
-from urllib.parse import unquote_plus
+import re
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
+from .literature import LiteratureError, LiteratureTools, question_urls
 from .numerics.artifacts import ExperimentStore
-from .numerics.policy import SANITY
 from .numerics.session import normalize_code
 from .proof_policy import evidence_policy
 from .review_position import copied_phrases
+from .source_tasks import instruction_prose, scoped_literature
 
 PAPER_TOOLS = ('search_papers', 'open_paper', 'search_paper', 'read_paper')
 SANDBOX_TOOLS = ('execute_python', 'read_experiment')
@@ -18,39 +19,64 @@ SANDBOX_TOOLS = ('execute_python', 'read_experiment')
 
 class ProofDesk:
     def __init__(self, agent, private_texts=()):
-        self.literature = getattr(agent.workspace, 'literature', None)
-        session = getattr(agent.workspace, 'numerics', None)
-        self.numerics = session if (getattr(session, 'invocation', None) == 'automatic' and
-                                    getattr(getattr(session, 'policy', None), 'name', None) == SANITY) else None
+        self.workspace = agent.workspace
+        self._library = self.workspace.literature or LiteratureTools(self.workspace.root)
+        self.literature = self._library
+        self.assigned_documents = getattr(self.literature, 'assigned_sources', None)
+        self.bind_numerics()
         self.experiments = self.numerics.store if self.numerics else ExperimentStore(agent.workspace.root)
-        self.online_allowed = True
+        self.requested_urls = set()
         self.protect(private_texts)
 
     instructions = staticmethod(evidence_policy)
     new_receipt_id = staticmethod(ExperimentStore.new_id)
 
+    def bind_numerics(self, saved_limit=None):
+        session = self.workspace.numerics
+        self.numerics = session.for_proof(saved_limit) if session is not None else None
+
     def protect(self, private_texts):
         self.private_texts = (private_texts,) if isinstance(private_texts, str) else tuple(private_texts)
 
-    def restrict_online(self, allowed):
-        self.online_allowed = self.online_allowed and allowed
+    def scope(self, goal, statement, reference_context, sources):
+        original = reference_context.get('query') if isinstance(reference_context, dict) else None
+        instructions = [q for q in (goal, statement, original) if isinstance(q, str)]
+        if self.workspace.literature is None:
+            # A direct caller may omit the library; its page size still follows the active model context.
+            self._library.result_chars = self.workspace.result_chars
+        self.literature = scoped_literature(self._library, *instructions, sources=sources)
+        self.assigned_documents = getattr(self.literature, 'assigned_sources', None)
+        self.requested_urls = set()
+        request = original if isinstance(original, str) else goal or ''
+        for url in question_urls(instruction_prose(request, keep_quoted_urls=True)):
+            try:
+                _, target, _ = self.literature._canonical(url)
+            except LiteratureError:
+                continue
+            self.requested_urls.update((url, target))
 
-    def _library(self):
-        # Ordinary calls use the live library: disabling online in a running chat also interrupts future fetches.
-        if self.literature is None or self.online_allowed or not self.literature.online:
-            return self.literature
-        library = copy(self.literature)
-        library.online = False  # shares the live statistics and reservation callback
-        return library
+    def check_outbound(self, url):
+        """A support worker may reason about private text. Check what will actually reach each source."""
+        if url in self.requested_urls:
+            return
+        values = [unquote_plus(url)]
+        target = urlsplit(url)
+        if target.hostname == 'export.arxiv.org' and target.path == '/api/query':
+            for query in parse_qs(target.query).get('search_query', []):
+                # arxiv_query formats plain words as all:"word" AND all:"word" before the HTTP request.
+                query = re.sub(r'\b(?:all|ti|au|abs|co|jr|cat|rn|id|submittedDate):', '', query)
+                values.append(re.sub(r'\s+(?:ANDNOT|AND|OR)\s+', ' ', query))
+        self._check_text(values)
 
-    def restore_literature(self, snapshot):
-        if self.literature is not None and snapshot:
-            self.restrict_online(snapshot.get('online') is True)
-            self.literature.restore({**snapshot, 'online': self.literature.online})
+    def _check_text(self, values):
+        if any(copied_phrases({'results': values}, source) for source in self.private_texts):
+            raise LiteratureError('The query repeats private source text. Use public mathematical terms or a paper identifier.')
 
     def schemas(self):
-        library = self._library()
-        schemas = ([s for s in library.schemas() if s['function']['name'] in PAPER_TOOLS] if library else [])
+        papers = PAPER_TOOLS
+        if self.assigned_documents is not None:
+            papers = ('search_paper', 'read_paper') if self.assigned_documents else ()
+        schemas = [s for s in self.literature.schemas() if s['function']['name'] in papers]
         if self.numerics is not None:
             for item in self.numerics.schemas():
                 name = item['function']['name']
@@ -69,12 +95,14 @@ class ProofDesk:
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
-            if name in PAPER_TOOLS and (library := self._library()) is not None:
+            if name in PAPER_TOOLS:
+                library = self.literature
+                if self.assigned_documents is not None and name not in ('search_paper', 'read_paper'):
+                    raise ValueError('This request limits evidence to the assigned sources.')
                 if name in ('search_papers', 'open_paper') and library.online:
                     query = arguments.get('query') if name == 'search_papers' else arguments.get('identifier_or_url')
-                    if isinstance(query, str) and any(copied_phrases({'question': unquote_plus(query)}, text)
-                                                      for text in self.private_texts):
-                        raise ValueError('The query repeats private source text. Use public mathematical terms or a paper identifier.')
+                    if isinstance(query, str) and not (name == 'open_paper' and query in self.requested_urls):
+                        self._check_text([unquote_plus(query)])
                 return library.execute(name, arguments)
             if name in SANDBOX_TOOLS and self.numerics is not None:
                 if name == 'execute_python':

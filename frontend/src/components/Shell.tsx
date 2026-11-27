@@ -404,7 +404,6 @@ export function WorkspaceSwitch() {
       <button type="button" className="workspace-open" title={status.workspace + ': the active workspace, whose files the agent can access (click to select another)'} onClick={() => setBrowsing(true)}>
         <FolderIcon size={15} /><span>{folder}</span>
       </button>
-      {!status.online && <span className="pill" title="No external requests; local and cached sources only">Offline</span>}
       {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
     </div>
   )

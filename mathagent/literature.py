@@ -67,6 +67,18 @@ def upgrade_url(value):
     return _UPGRADABLE.sub(lambda m: 'https://' + m.group(1), value, count=1) if isinstance(value, str) and _UPGRADABLE.match(value) else value
 
 
+def question_urls(text):
+    """Explicit URLs in a reference question, excluding surrounding prose and Markdown delimiters."""
+    result = []
+    for match in re.findall(r'https?://[^\s<>"`\]]+', text):
+        url = match.rstrip('.,;:\'”’')
+        for left, right in [('(', ')'), ('[', ']')]:
+            while url.endswith(right) and url.count(right) > url.count(left):
+                url = url[:-1]
+        result.append(url)
+    return list(dict.fromkeys(result))
+
+
 class _Gate:
     """One request at a time per host, shared by every job of this process; an urgent requester (an interactive
     check) is let through before waiting background requesters. The pacing between requests is unchanged."""
@@ -575,6 +587,7 @@ class LiteratureTools:
             raise ValueError('Literature workspace must be a directory')
         self.result_chars = result_budget(None)
         self.online = bool(online)
+        self.assigned_sources = None  # Set on a scoped view when the task explicitly limits evidence to its inputs.
         self.timeout = min(30, max(1, float(timeout)))
         self._last_request = {}
         self.down = set()  # sources that kept failing: not asked again until DOWN_COOLDOWN has passed
@@ -603,8 +616,7 @@ class LiteratureTools:
     def restore(self, snapshot):
         if not isinstance(snapshot, dict):
             raise ValueError('Invalid literature snapshot')
-        # A saved job may further restrict a caller, never grant online permission.
-        self.online = self.online and snapshot.get('online') is True
+        # The snapshot records past usage. The current library controls access on this run.
         for name in ('max_requests', 'max_chars'):
             value = snapshot.get(name, getattr(self, name))
             if type(value) is not int or value < 0:
@@ -790,6 +802,8 @@ class LiteratureTools:
         return query.strip()
 
     def _cache_search(self, provider, query, limit, fetch, *, offset=0):
+        if self.assigned_sources is not None:
+            raise LiteratureError('This request limits evidence to the assigned sources.')
         key = _digest(json.dumps([provider, query, limit] + ([offset] if offset else [])))
         parts = ('searches', key + '.json')
         try:
@@ -812,7 +826,7 @@ class LiteratureTools:
                     result['stale_cache'] = True
                 return result
         if not self.online:
-            raise LiteratureError('Offline mode: this search is not cached or its cache is damaged. Enable online research explicitly to access the internet.', code='offline_uncached')
+            raise LiteratureError('Offline mode: this request uses local sources and the search has no usable cached result.', code='offline_uncached')
         results = fetch()
         result = {'provider': provider, 'query': query, 'results': results,
                   'retrieved_at': _stamp(), 'backend_version': BACKEND_VERSION,
@@ -1494,6 +1508,8 @@ class LiteratureTools:
         return canonical, canonical, None
 
     def open_paper(self, identifier_or_url, *, cache_only=False, section_offset=0):
+        if self.assigned_sources is not None:
+            raise LiteratureError('This request limits evidence to the assigned sources. Read a pinned document by ID.')
         if type(section_offset) is not int or section_offset < 0:
             raise LiteratureError('Give a nonnegative section offset', code='invalid_arguments')
         canonical, url, arxiv_id = self._canonical(identifier_or_url)
@@ -1710,10 +1726,14 @@ class LiteratureTools:
         if not isinstance(document_id, str) or not DOC_ID.fullmatch(document_id):
             raise LiteratureError('Invalid document_id; use the ID returned by open_paper')
         raw = self._read(('documents', document_id + '.json'), DOCUMENT_META_BYTES)
-        text = self._read(('documents', document_id + '.txt'))
-        if raw is None or text is None:
+        if raw is None:
             raise LiteratureError('Document not found in this workspace cache; use open_paper first')
         metadata = json.loads(raw)
+        if self.assigned_sources is not None and not ({document_id, metadata.get('source_url')} & self.assigned_sources):
+            raise LiteratureError('This request limits evidence to the assigned sources.')
+        text = self._read(('documents', document_id + '.txt'))
+        if text is None:
+            raise LiteratureError('Document not found in this workspace cache; use open_paper first')
         if metadata.get('text_sha256') != _digest(text):
             raise LiteratureError('Cached extraction changed; source hash verification failed')
         # Both local PDF extractors terminate every extracted page with a form
@@ -2041,6 +2061,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             host = self._url(url).hostname
             if allowed_hosts is not None and host not in allowed_hosts:
                 raise LiteratureError('Source redirect left the permitted arXiv origins')
+            if guard := getattr(self, 'outbound_guard', None):
+                guard(url)  # Includes redirects, before robots.txt, network access and HTTP budget reservation.
             self._remaining_timeout()
             if _robots:
                 self._check_robots(url)

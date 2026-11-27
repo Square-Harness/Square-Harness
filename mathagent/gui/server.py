@@ -269,8 +269,6 @@ def status(h, body):
     out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            'model_default': bool(getattr(args, 'model_default', False)),
-           # The default for new work in the interface: online unless launched --offline.
-           'online': hub.online(), 'online_locked': hub.online_locked,
            'image_support': hub.image_support(),
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
            'concurrency': hub.limits(),
@@ -481,11 +479,8 @@ def proof_start(h, body):
     unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'online', 'literature'}
     if unknown:
         raise ValueError('Unknown proof options: ' + ', '.join(sorted(unknown)))
-    online, literature = _flag(body, 'online'), _flag(body, 'literature')
-    if online is not None and literature is not None and online != literature:
-        raise ValueError('Conflicting online and literature settings')
     task = h.server.hub.start_proof(
-        _text(body, 'goal'), source_files=_files(body), online=literature if online is None else online,
+        _text(body, 'goal'), source_files=_files(body),
         rounds=_int(body, 'rounds', 1, MAX_ADD_ROUNDS), tokens=_int(body, 'tokens', 512),
         seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, MAX_ADD_TOKENS),
         verify_tokens=_int(body, 'verify_tokens', 128, MAX_ADD_TOKENS), ctx=_int(body, 'ctx', 2048),
@@ -569,7 +564,7 @@ def research_start(h, body):
         rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         requests=_int(body, 'requests', 0, UNLIMITED_SOURCE), chars=_int(body, 'chars', 1000, UNLIMITED_SOURCE),
-        online=_flag(body, 'online'), queue=bool(_flag(body, 'queue')))
+        queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
@@ -630,9 +625,9 @@ def chats(h, body):
 @route('POST', '/api/chats')
 def chat_create(h, body):
     hub = h.server.hub
-    think, online = _flag(body, 'think'), _flag(body, 'online')
+    think = _flag(body, 'think')
     chat = store.create_chat(hub.root, body.get('mode'), (not hub.args.no_think) if think is None else think,
-                             hub.args.model, hub.online(online), project_id=body.get('project_id'))
+                             hub.args.model, project_id=body.get('project_id'))
     hub.bus.publish('chat_saved', chat=chat['id'])
     return _chat_view(chat, hub.root)
 
@@ -709,16 +704,12 @@ def chat_project(h, body, id):
 @route('POST', '/api/chats/' + UUID + '/settings')
 def chat_settings(h, body, id):
     hub = h.server.hub
-    think, online = _flag(body, 'think'), _flag(body, 'online')
-    if think is None and online is None:
-        raise ValueError('Give think or online as true or false')
-    if online:
-        hub.online(True)  # refuses when launched with --offline
-    view = _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online), hub.root)
-    if online is False:
-        # Running work of this conversation stops web access at its next request, not only later turns.
-        view['online_stopped_jobs'] = hub.stop_online(id)
-    return view
+    think = _flag(body, 'think')
+    if think is None:
+        if _flag(body, 'online') is True:  # Old clients explicitly enabling search need no state change.
+            return _chat_view(store.load_chat(hub.root, id), hub.root)
+        raise ValueError('Give think as true or false')
+    return _chat_view(store.update_chat_settings(hub.root, id, think=think), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/messages')
@@ -1346,6 +1337,11 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeError, RecursionError) as exc:
                 return self.error(400, 'Invalid JSON body' if isinstance(exc, (json.JSONDecodeError, RecursionError)) else str(exc))
         try:
+            if isinstance(body, dict) and path.startswith(('/api/chats', '/api/proofs', '/api/research')):
+                keys = ('online', 'literature') if path == '/api/proofs' else ('online',)
+                if any(_flag(body, key) is False for key in keys):
+                    raise ValueError('The offline setting was retired. To restrict this task to your material, '
+                                     'remove the setting and include “Do not search the web” in the request.')
             result = function(self, body, **match.groupdict())
         except Busy as exc:
             return self.error(409, str(exc))
@@ -1579,7 +1575,7 @@ def serve(args):
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
              f'│ {args.model} · {args.backend} at {args.host}',
              f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
-             f'│ Research: {"offline, locked by --offline (local/cache only)" if hub.online_locked else "online by default, switchable per job"}'
+             '│ Research: external sources available'
              ' · proof: solve → verify → repair',
              f'│ Open: {local}{query}']
     for url in server.urls:

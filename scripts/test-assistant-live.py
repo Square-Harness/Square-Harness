@@ -4,7 +4,7 @@
 
 """Small opt-in Assistant smoke tests using the configured local model endpoint.
 
-Every case uses its own temporary offline workspace. This script does not
+Every case uses its own temporary online workspace. This script does not
 restart or write to an existing GUI, model server, or user workspace. Pass
 --parallel to compare two explicitly requested short Explore workers with one
 and two available inference slots. These timings are smoke evidence, not a
@@ -65,7 +65,7 @@ def run_case(host, model, query, concurrency=2, seconds=60):
         args = cli.parser().parse_args([
             '--workspace', directory, '--backend', 'openai', '--host', host,
             '--model', model, '--ctx', '40960', '--predict', '512', '--seed', '42',
-            '--request-timeout', str(seconds), '--offline', '--proof-rounds', '1',
+            '--request-timeout', str(seconds), '--proof-rounds', '1',
             '--proof-solve-tokens', '2048', '--proof-verify-tokens', '1024',
             '--proof-tokens', '6000', '--proof-seconds', str(seconds),
             '--research-rounds', '1', '--research-tokens', '6000',
@@ -76,7 +76,7 @@ def run_case(host, model, query, concurrency=2, seconds=60):
         args.assistant_tokens = 24000
         args.assistant_seconds = seconds
         hub = Hub(args)
-        chat = store.create_chat(Path(directory), 'free', model=model, online=False)
+        chat = store.create_chat(Path(directory), 'free', model=model)
         started = time.monotonic()
         InterruptibleOpenAI.stream = tracked_stream
         try:

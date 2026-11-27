@@ -162,9 +162,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }, [draft, attachments, sending])
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
-  const [online, setOnline] = useState<boolean>()
-  const [savingOnline, setSavingOnline] = useState(false)
-  const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLFormElement>(null)
   const pinned = useRef(true)
@@ -202,9 +199,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const uploading = useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]),
     currentProject)
   useEffect(() => { if (data) setThink(data.settings.think) }, [data?.id])
-  useEffect(() => {
-    if (id && data?.id === id) setOnline(!!data.settings.online)
-  }, [id, data?.id, data?.settings.online])
 
   // Follow new output while the reader is at the bottom; never yank them back up.
   const liveSize = live ? live.steps.reduce((n, step) => n + (step.type === 'call' ? step.text.length + step.thinking.length : 1), 0) : 0
@@ -237,13 +231,13 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
     const queue = canQueue
-    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || savingOnline || uploading || (work.blocked && !queue) || (hasImages && !app.status?.image_support)) return
+    if (!content.trim() || pausedInvestigation || sending || resuming || projectSaving || uploading || (work.blocked && !queue) || (hasImages && !app.status?.image_support)) return
     setSending(true)
     setSendError('')
     setBusyError(false)
     try {
       let chatId = id || createdChat.current
-      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : online, newProject)).id; createdChat.current = chatId }
+      if (!chatId) { chatId = (await api.createChat(mode, think, newProject)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall, queue)
       else await api.send(chatId, content, attachments)
       if (text === undefined) rememberMessage(content)
@@ -284,18 +278,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setThink(value)
     if (id) api.chatSettings(id, { think: value }).catch((reason: Error) => setSendError(reason.message))
   }
-  const changeOnline = async (value: boolean) => {
-    const chatId = id || createdChat.current
-    if (!chatId) { setOnline(value); return }
-    setSavingOnline(true)
-    try {
-      const saved = await api.chatSettings(chatId, { online: value })
-      setOnline(!!saved.settings.online)
-    } catch (reason) { setSendError((reason as Error).message) }
-    finally { setSavingOnline(false) }
-  }
   const resume = async () => {
-    if (!id || resuming || savingOnline) return
+    if (!id || resuming) return
     setResuming(true)
     setSendError('')
     try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
@@ -428,14 +412,12 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
               <CloseIcon size={16} /> Cancel queued turn
             </button>
           ) : (
-            <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || savingOnline || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
+            <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
               <SendIcon size={16} /> <span className="composer-send-label">{uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}</span>
             </button>
           )}
         </div>
         <div className="composer-bar">
-          <Toggle label="Search online" checked={!locked && (online ?? (id ? !!data?.settings.online : !!app.status?.online))}
-            disabled={locked || savingOnline || sending || !app.status || (!!id && data?.id !== id)} onChange={changeOnline} />
           {!free && <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           {free && (budgetDisplay || data?.usage_total) && (
             <details className="composer-usage"><summary>Usage details</summary>

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from mathagent.agent import Agent
-from mathagent.literature import LiteratureTools, _digest
+from mathagent.literature import LiteratureError, LiteratureTools, _digest
 from mathagent import refcheck
 from mathagent.refcheck import CheckRunner
 from mathagent.tools import Workspace
@@ -129,6 +129,59 @@ class CheckTests(unittest.TestCase):
                                           title='Functional analysis')]),
                 response('Open the hit.', [tool('open_paper', identifier_or_url=ARXIV)]),
                 response('Find the number.', [tool('search_paper', document_id=DOC, query='9.26')])]
+
+    def test_proof_check_reads_one_supplied_work_before_model_verification(self):
+        url = 'https://example.org/math/(groups)'
+        body = b'Notes\nLemma 3.4. A subgroup of a group contains its identity.\n'
+        for valid, broader in [(True, False), (False, False), (True, True)]:
+            with self.subTest(valid=valid, broader=broader):
+                library = LiteratureTools(self.root)
+                def replies():
+                    yield response('The statement in the supplied source is sufficient.')
+                    observed = next(e for e in runner.state['evidence'] if e['tool'] == 'read_paper')
+                    doc = json.loads(observed['result'])['document_id']
+                    yield text({'level': 'read', 'locator': 'Lemma 3.4', 'lines': 'L2-L2' if valid else 'L87-L87',
+                                'document_id': doc, 'record': url, 'statement_found': 'Every subgroup contains the identity.',
+                                'note': '', 'needs_other_sources': broader})
+                    if broader:
+                        yield response('No further source established.')
+                        yield text({'found': False, 'candidate': {}})
+                runner = CheckRunner(Agent(FakeClient(replies()), Workspace(self.root, literature=library), ctx=32768))
+                with patch.object(library, '_fetch', return_value=(body, 'text/plain', url)):
+                    runner.start(f'Check Lemma 3.4 in [the source]({url}).' + (' Find other references too.' if broader else ''),
+                                 asker='proof')
+                self.assertEqual([e['tool'] for e in runner.state['evidence']], ['open_paper', 'read_paper'])
+                self.assertEqual([c['role'] for c in runner.state['calls']],
+                                 ['verify', 'verdict'] + (['discover', 'discover'] if broader else []))
+                self.assertIn('A subgroup of a group contains its identity.', json.dumps(runner.agent.client.requests[0]['messages']))
+                verdict = runner.state['candidates'][0]['verdict']
+                docs = refcheck.export_evidence(runner.state)[0]['documents']
+                if valid:
+                    self.assertEqual((verdict['level'], verdict['source_url'], verdict['lines']), ('read', url, 'L2-L2'))
+                    self.assertEqual(docs[0]['passages'][0]['range'], 'L2-L2')
+                else:
+                    self.assertNotEqual(verdict['level'], 'read')
+                    self.assertFalse(docs)
+
+    def test_multi_source_blocked_and_standalone_checks_keep_reference_recall(self):
+        for name, asker, urls in [('multiple', 'proof', ['one', 'two']), ('blocked', 'proof', ['denied']),
+                                  ('standalone', None, ['one'])]:
+            with self.subTest(name=name):
+                library = LiteratureTools(self.root)
+                client = FakeClient([text({'statement': 'Group axioms.', 'keywords': [], 'candidates': []})])
+                runner = CheckRunner(Agent(client, Workspace(self.root, literature=library), ctx=32768))
+                def retrieve(url):
+                    if url.endswith('/denied'):
+                        raise LiteratureError('robots.txt disallows this request.')
+                    return b'Lemma 3.4. A subgroup contains the identity.', 'text/plain', url
+                with patch.object(library, '_fetch', side_effect=retrieve), patch.dict(refcheck.EFFORTS,
+                        {'high': {**refcheck.EFFORTS['high'], 'discover': False}}):
+                    runner.start('Check the cited sources ' + ' and '.join('https://example.org/' + path for path in urls),
+                                 asker=asker)
+                self.assertEqual([c['role'] for c in runner.state['calls']], ['recall'])
+                if name == 'blocked':
+                    self.assertIn('robots.txt', runner.state['identifier_checks'][0]['note'])
+                    self.assertFalse(refcheck.export_evidence(runner.state))
 
     def verdict(self, **fields):
         value = {'level': 'cited', 'locator': 'Theorem 9.26', 'document_id': DOC, 'lines': 'L3-L3',

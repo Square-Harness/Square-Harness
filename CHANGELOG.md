@@ -7,12 +7,17 @@
   configured provider route, including when a follow-up refers to an earlier
   attachment.
 
-- New jobs, the terminal and the hosted-model launcher enable online literature
-  search by default. An explicit offline setting restricts searches to the cache.
+- Scholarly search is available in the terminal, web app and nested workers.
+  The old offline launcher option and per-job switches have been retired.
+  Existing workspaces can search online when reopened. Users can still specify
+  which sources a mathematical task may use.
 - The Proof solver and verifier can consult papers, use the automatic numerical
   sandbox and request a focused reference check or a literature review during
-  an attempt. The verifier independently assesses the whole candidate. Saved
-  jobs retain their original tool access and allowances.
+  an attempt. Both roles see their remaining resources after using tools.
+  Python experiments share the Proof job budget, with an optional operator
+  run count. Proof reserves output for writing and independent review, and can continue
+  with partial evidence when a reference check exhausts its own allowance.
+  Pre-upgrade proofs retain their tool-free protocol and saved allowances.
 
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook

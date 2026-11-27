@@ -44,6 +44,7 @@ FLOOR = Limits(timeout_seconds=0.5, memory_mb=128, cpus=0.25, pids=16, tmpfs_mb=
 SANITY_BOUNDS = Limits(timeout_seconds=30, memory_mb=4096, cpus=2, pids=64, tmpfs_mb=128,
                        output_bytes=50_000, artifact_bytes=4_000_000)
 MAX_SANITY_RUNS = 10
+_DEFAULT_TURN_ALLOWANCE = object()
 
 # Memory is a cap, not a reservation: 2 GB lets a modest simulation run without crowding the host.
 SANITY_DEFAULTS = Limits(timeout_seconds=5, memory_mb=2048, cpus=1, pids=64, tmpfs_mb=64,
@@ -72,6 +73,7 @@ class Policy:
     escalation: bool         # whether the user may approve more than the defaults
 
     explicit_max_runs: int | None = None  # optional allowance for a user-selected sanity check
+    uses_chat_run_default: bool = False
 
     def describe(self):
         return {'policy': self.name, 'defaults': self.defaults.as_dict(), 'max_runs': self.max_runs,
@@ -106,12 +108,16 @@ def _explicit_runs(value):
     return value
 
 
-def sanity_policy(overrides=None, max_runs=3, explicit_max_runs=None):
+def sanity_policy(overrides=None, max_runs=_DEFAULT_TURN_ALLOWANCE, explicit_max_runs=None):
     """The automatic policy: never escalates, configurable only within SANITY_BOUNDS."""
+    uses_chat_run_default = max_runs is _DEFAULT_TURN_ALLOWANCE
+    if uses_chat_run_default:
+        max_runs = 3
     if type(max_runs) is not int or not 1 <= max_runs <= MAX_SANITY_RUNS:
         raise ValueError(f'sanity.max_runs must be an integer from 1 to {MAX_SANITY_RUNS}')
     limits = _limits(SANITY_DEFAULTS, overrides, SANITY_BOUNDS, 'sanity')
-    return Policy(SANITY, limits, limits, max_runs, escalation=False, explicit_max_runs=_explicit_runs(explicit_max_runs))
+    return Policy(SANITY, limits, limits, max_runs, escalation=False, explicit_max_runs=_explicit_runs(explicit_max_runs),
+                  uses_chat_run_default=uses_chat_run_default)
 
 
 def review_policy(role):
@@ -148,7 +154,7 @@ def load_policies(path=None):
     lab = config.get('lab') or {}
     if set(sanity) - {'limits', 'max_runs', 'explicit_max_runs'} or set(lab) - {'defaults', 'ceiling', 'max_runs'}:
         raise ValueError('Unknown key in Python sandbox limits; see docs/guide.md')
-    return {SANITY: sanity_policy(sanity.get('limits'), sanity.get('max_runs', 3), sanity.get('explicit_max_runs')),
+    return {SANITY: sanity_policy(sanity.get('limits'), sanity.get('max_runs', _DEFAULT_TURN_ALLOWANCE), sanity.get('explicit_max_runs')),
             LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs'))}
 
 

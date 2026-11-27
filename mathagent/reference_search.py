@@ -431,7 +431,7 @@ class StandardReferenceSearch:
                 # A recalled place is never read: the answer says so, whatever the model wrote.
                 out.append('By memory, I think it is in **' + candidate['locator'] + '** (not checked in the text).')
             if not record:
-                out.append('Unverified suggestion from model recall; no bibliographic record was confirmed' + (' by the lookup.' if self.state['settings'].get('online') else ' (online search was disabled).'))
+                out.append('Unverified suggestion from model recall; no bibliographic record was confirmed by the lookup.')
                 continue
             recalled_year = candidate.get('locator_year') or candidate.get('year')
             if candidate.get('locator') and record.get('year') and recalled_year and str(record['year']) != str(recalled_year):

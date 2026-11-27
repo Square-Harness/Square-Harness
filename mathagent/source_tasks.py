@@ -5,6 +5,7 @@
 from array import array
 from bisect import bisect_right
 from collections import Counter
+from copy import copy
 from functools import lru_cache
 from io import StringIO
 import hashlib
@@ -77,12 +78,15 @@ def access_check_source(query, files):
     return None
 
 
-def instruction_prose(query):
+def instruction_prose(query, *, keep_quoted_urls=False):
     # Quoted documents and examples cannot select a workflow. Keep contractions,
     # but omit quoted prose, fenced examples, inline code and Markdown quotes.
     value = re.sub(r'```[\s\S]*?```|~~~[\s\S]*?~~~', ' ', query)
     value = re.sub(r'(?m)^\s*>.*$', ' ', value)
-    value = re.sub(r'"[^"\n]*"|“[^”\n]*”|«[^»]*»|`[^`\n]*`', ' ', value)
+    def quoted(match):
+        content = match.group()[1:-1].strip()
+        return content if keep_quoted_urls and re.fullmatch(r'https?://[^\s<>]+', content) else ' '
+    value = re.sub(r'"[^"\n]*"|“[^”\n]*”|«[^»]*»|`[^`\n]*`', quoted, value)
     value = re.sub(r"(?<!\w)'[^'\n]*\s[^'\n]*'(?!\w)", ' ', value)
     return value
 
@@ -105,14 +109,44 @@ def requests_workspace_search(query):
     return False
 
 
+def only_assigned_sources(query):
+    """An instruction to use the supplied material exclusively, outside quotations and examples."""
+    english = r'(?:(?:the|my|our|these|those)\s+)?(?:attached|uploaded|pinned|supplied|provided|selected)\s+(?:sources?|material|texts?|documents?|files?|manuscripts?|papers?|notes|pdfs?)'
+    french = r'(?:les?|la|mes|ces)?\s*(?:sources?|documents?|fichiers?|manuscrits?|notes|articles?)\s+(?:joint\w*|fourni\w*|selectionne\w*)'
+    use = r'(?:use|using|consult|read|work\s+(?:from|with)|rely\s+on|utilis\w*|consult\w*)'
+    only = r'(?:only|solely|exclusively|uniquement|seulement|exclusivement)'
+    material = f'(?:{english}|{french})'
+    for clause in re.split(r'[.!?;\n]|\b(?:but|mais)\b', _instruction_text(query)):
+        if re.search(r'\b(?:do not|don.t|never|need not)\s+' + use, clause):
+            continue
+        if re.search(r'\b(?:' + use + r'\s+' + only + '|' + only + r'\s+' + use + r')\s+' + material + r'\b|' +
+                     r'\b' + material + r'\s+' + only + r'\b(?!\s+(?:as|for|if|when|comme|pour))', clause):
+            return True
+    return False
+
+
 def excludes_external_sources(query):
     """Detect an explicit per-turn restriction on external retrieval."""
-    return bool(re.search(
+    return only_assigned_sources(query) or bool(re.search(
         r"\b(?:(?:no|without|avoid|sans)\s+(?:(?:any|using|consulting|accessing|the|aucune?)\s+)*"
         r"(?:external (?:sources?|references?|search(?:es)?)|(?:internet|web)(?: searches?)?|"
         r"sources? externes?|recherche en ligne)|"
         r"(?:do not|don.t|never) (?:search|browse|use|consult) (?:the )?(?:web|internet|external sources))\b",
         _instruction_text(query)))
+
+
+def scoped_literature(library, *instructions, sources=()):
+    """A source-limited task can share the caller's cache and accounting without changing the next task."""
+    text = [item for item in instructions if isinstance(item, str)]
+    if library and any(excludes_external_sources(item) for item in text):
+        library = copy(library)
+        library.online = False
+        if any(only_assigned_sources(item) for item in text):
+            allowed = {value for item in sources for value in (item.get('document_id'), 'workspace:' + item['path'])
+                       if value}
+            inherited = getattr(library, 'assigned_sources', None)
+            library.assigned_sources = allowed if inherited is None else allowed & inherited
+    return library
 
 
 def automatic_source_action(query, files=()):

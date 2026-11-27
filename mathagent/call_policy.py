@@ -13,6 +13,7 @@ from .agent import AgentError
 
 
 CONTEXT_MARGIN = 512
+MIN_PROOF_REVIEW_TOKENS = 128
 POLICY_VERSION = 1
 
 

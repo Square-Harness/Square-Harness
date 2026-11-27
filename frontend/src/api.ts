@@ -99,8 +99,6 @@ export type Status = {
   host: string
   backend: 'ollama' | 'openai' | 'llamacpp'
   image_support?: boolean
-  online: boolean
-  online_locked: boolean
   allow_python: boolean
   lan: boolean
   defaults: Defaults
@@ -469,7 +467,7 @@ export type ResearchDetail = {
   stop_reason: string | null
   created_at: string
   updated_at: string
-  settings: Record<string, unknown> & { online?: boolean; model: string }
+  settings: Record<string, unknown> & { model: string }
   budget: { rounds: Budget; tokens: Budget; input_tokens: Budget; seconds: Budget; requests: Budget; chars: Budget; context?: Budget }
   progress?: WorkProgress | null
   sources: { id: string; path: string; sha256: string; lines: number }[]
@@ -605,7 +603,7 @@ export type Chat = {
   id: string
   mode: 'critic' | 'explore' | 'free'
   title: string
-  settings: { think: boolean; model: string; online?: boolean }
+  settings: { think: boolean; model: string }
   created_at: string
   updated_at: string
   transcript: TranscriptItem[]
@@ -861,8 +859,8 @@ export const api = {
   chatTitle: (id: string, title: string) => post<Chat>(`/api/chats/${id}/title`, { title }),
   chatProject: (id: string, project_id: string | null) => post<Chat>(`/api/chats/${id}/project`, { project_id }),
   deleteChat: (id: string) => request<{ deleted: string }>('DELETE', `/api/chats/${id}`),
-  createChat: (mode: string, think?: boolean, online?: boolean, project_id: string | null = null) => post<Chat>('/api/chats', { mode, think, online, project_id }),
-  chatSettings: (id: string, settings: { think?: boolean; online?: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
+  createChat: (mode: string, think?: boolean, project_id: string | null = null) => post<Chat>('/api/chats', { mode, think, project_id }),
+  chatSettings: (id: string, settings: { think: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
   send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files, queue: true }),
   review: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/review`, { queue: true }),
   feedbackConfig: () => get<FeedbackConfig>('/api/feedback/config'),

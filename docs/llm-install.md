@@ -41,9 +41,8 @@ step 1.
   and in `<gui-root>/.mathagent/gui-token` (the workspace when `--gui-root` is not
   given). Give the address to the user, but never commit it, paste it into an
   issue, or copy it anywhere else.
-- **Never pass `--online` together with a remote `--host`** unless the user agrees
-  to send their prompts and files to that machine. With an SSH tunnel, `--online`
-  is not needed for the model.
+- Use `--allow-remote-model` with a remote `--host` only when the user agrees
+  to send their prompts and files to that machine. An SSH tunnel uses a loopback host.
 - **Don't guess around a failed check.** When a check fails, use the fallback
   given here, or the matching entry in [Troubleshooting](#troubleshooting).
   Report anything you could not fix.
@@ -222,8 +221,7 @@ HTTP loopback prefix ending in `/api/feedback`; these links work only in the
 paired local browser.
 
 The isolated API launcher accepts `--workspace` for a separate acceptance
-workspace. Literature search is on by default. Pass `--offline` to use only
-local and cached literature. If the private
+workspace. Scholarly search is online. If the private
 `.local/feedback/slack-webhook` file exists, the launcher uses it for feedback
 unless `SH_FEEDBACK_WEBHOOK_FILE` was explicitly configured. For direct file
 delivery it similarly loads `.local/feedback/slack-bot-token` and the channel ID
@@ -323,11 +321,11 @@ Save the OpenRouter key at the hidden prompt, then start the interface:
 
 ```bash
 python3 scripts/setup-openrouter.py
-python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter --online
+python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter
 ```
 
 The key stays in the private, mode-0600 file `.local/openrouter/credential`.
-The launcher opens a paired browser window. Web research is on by default. Use `--offline` to turn it off.
+The launcher opens a paired browser window with online scholarly search.
 For hosted services, use `--backend openai --api-profile openrouter --allow-remote-model`
 and set `OPENROUTER_API_KEY_FILE` to the backend account's private key file outside its workspace.
 Keep each tester's existing quota path, budget and rates when changing providers.
@@ -419,7 +417,7 @@ file, then use:
 
 ```bash
 python -m mathagent --gui --backend openai --api-profile deepinfra \
-  --allow-remote-model --offline --workspace WORKSPACE
+  --allow-remote-model --workspace WORKSPACE
 ```
 
 Here `--api-profile deepinfra` selects the DS4 transport and budget profile.
@@ -441,8 +439,7 @@ launcher or a manual launch.
 The workflow time allowance is derived from the permitted calls instead of the
 old short effort-specific deadline. Explicit token and time flags remain hard
 limits; they may stop a job before its maximum pass count. The scoped API key's
-spending allowance is independent of workflow settings. Proof source lookups
-use the session's online permission. Automatic Proof calculations use the same
+spending allowance is independent of workflow settings. Proof workers can search scholarly sources online directly and during delegated reference checks. Automatic Proof calculations use the same
 optional numerical sandbox as Explore. Both roles can still work by hand when
 the sandbox is unavailable.
 
@@ -682,7 +679,7 @@ this computer                                        GPU node
 square-harness --gui ── 127.0.0.1:18020 ══ssh══▶ 127.0.0.1:18020  model server (vLLM or Ollama)
 ```
 
-The tunnel exposes a loopback model endpoint. Pass `--offline` to disable external literature searches.
+The tunnel exposes a loopback model endpoint. Scholarly searches use the configured public sources.
 
 ### B1. Inspect the GPU machine
 
@@ -936,9 +933,7 @@ Tell the user:
 1. the `Open:` address (in `$REPO/.local/gui.log`), and that it contains a
    secret token. The token stays the same across restarts; deleting
    `<gui-root>/.mathagent/gui-token` revokes it;
-2. that the web app searches scholarly sources online by default (short public
-   queries, never their files), and that launching with `--offline` turns this
-   off;
+2. that workers search scholarly sources online with public queries and respect source restrictions in the user's request;
 3. how to stop it gracefully:
    - find the PID with `pgrep -af "$REPO/.venv/bin/square-harness --gui"` and
      check that the command line is the one you started;
@@ -964,7 +959,7 @@ Tell the user:
 
 | Symptom | Fix |
 | --- | --- |
-| `Offline mode requires a localhost/loopback model --host` | The model must be reached through `127.0.0.1` (a tunnel). Use `--online` only with the user's consent to send data to that host. |
+| `A remote model host requires --allow-remote-model` | Use a loopback tunnel or pass `--allow-remote-model` with the user's consent to send data to that host. |
 | `The complete request needs N input tokens … leaves 0 output tokens` | Raise `--ctx` (16384 at least with Ollama, whose token count is a conservative byte estimate). |
 | `Use ctx >= 2048, 128 <= predict < ctx - 1024 …` | Lower `--predict`, or raise `--ctx`. |
 | `--gui-root must be a folder that contains the --workspace folder` / no such directory | `mkdir -p` the workspace; make `--gui-root` a parent of it. |
