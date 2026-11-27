@@ -460,16 +460,23 @@ one with a message.
   Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
   Mac) to add or remove one, Shift-click to select a range; sort by name, size or
   date; the search box searches every folder. Double-click a file to attach it to
-  your next message. To read a file, point at it and click **View file**, or
-  double-click a file attached above the text box or in a message: it opens in a
-  new tab, a PDF in the browser's PDF viewer, Markdown rendered with its
-  mathematics, an image as is, other text files (TeX, BibTeX, code, data) as
-  text. Archives and other files are marked as not supported, and text files over
-  4 MB are not shown. Markdown and text files can be edited there: click in the
-  text (on a Markdown page, click the rendered text or **Edit**), type, then
-  **Save** or Ctrl+S (⌘S on a Mac). The file keeps its encoding. If the file
-  changed on disk after you opened it (the model edited it, for example), it is
-  not overwritten: reload it, or copy your text first. Text files are best saved as UTF-8; older files in Latin-1 or
+  your next message. Point at a file to show **Download** and **View file**.
+  **View file**, or a double click on a file attached above the text box or in a
+  message, opens it in a new tab: a PDF in the browser's PDF viewer, Markdown
+  rendered with its mathematics, an image as is, other text files as text,
+  coloured as in VS Code for TeX, BibTeX, Python, Julia, Rust, JavaScript and
+  TypeScript, C and C++, shell, JSON, TOML and YAML. Archives and other files are
+  marked as not supported, and text files over 4 MB are not shown. The browser
+  also lists Julia, Rust and other code files (`.jl .rs .js .ts .c .cpp .h .sh .r
+  .m`, logs and `.ini`/`.cfg`) so that you can view and edit them; the model does
+  not read those, so they cannot be attached. Markdown and text files can be
+  edited in the viewer: click in the text (on a Markdown page, click the rendered
+  text or **Edit**), type, then **Save** or Ctrl+S (⌘S on a Mac); **Download**
+  saves the file as last saved. The file keeps its encoding. If the file changed
+  on disk after you opened it (the model edited it, for example), it is not
+  overwritten: reload it, or copy your text first. **Back to conversation**, at
+  the top, returns to the conversation the file was opened from, and asks first
+  if there are unsaved changes. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and
@@ -479,7 +486,7 @@ one with a message.
   if none is present. Changing a declaration to `utf8` also converts the saved
   bytes; characters unavailable in the requested encoding are refused before
   the file changes. Saved template copies use UTF-8, including UTF-16 originals.
-- **Learn my writing style**, below New conversation, teaches write-ups how you
+- **Learn my writing style**, at the top of **Personalization**, teaches write-ups how you
   write (see [Writing styles](#writing-styles)).
 - **Job pages** show live output, every attempt and review, sources, budgets and
   saved files. **Pause** saves at the next checkpoint and **Resume** continues with
@@ -521,8 +528,8 @@ one with a message.
     pauses the turn, which keeps its work.
   - **File access** sets which kinds of files the model may open by itself in
     this folder (switch a type off to hide it).
-  - **Personalization** saves standing chat instructions and LaTeX commands
-    across folders under the same GUI root. New chat turns and write-ups apply
+  - **Personalization** opens **Learn my writing style** and saves standing chat
+    instructions and LaTeX commands across folders under the same GUI root. New chat turns and write-ups apply
     these preferences alongside the current request and any project notes.
   - **About** lists the skills with their `@` commands, explains which ones the
     Assistant can call itself, and warns that forcing a skill can lead to errors.

@@ -1,0 +1,59 @@
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+/* Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors */
+
+/* Syntax colours after VS Code's Light+ and Dark+ themes. Colour only, never weight or slant: the coloured copy
+   must keep exactly the textarea's glyph widths. */
+.code-editor {
+  --tok-comment: #008000; --tok-keyword: #af00db; --tok-storage: #0000ff; --tok-constant: #0000ff;
+  --tok-string: #a31515; --tok-number: #098658; --tok-function: #795e26; --tok-type: #267f99;
+  --tok-variable: #001080; --tok-reference: #0070c1; --tok-heading: #800000;
+  --tok-math: #267f99; --tok-math-command: #0000ff;
+}
+:root[data-theme='dark'] .code-editor {
+  --tok-comment: #6a9955; --tok-keyword: #c586c0; --tok-storage: #569cd6; --tok-constant: #569cd6;
+  --tok-string: #ce9178; --tok-number: #b5cea8; --tok-function: #dcdcaa; --tok-type: #4ec9b0;
+  --tok-variable: #9cdcfe; --tok-reference: #4fc1ff; --tok-heading: #569cd6;
+  --tok-math: #4ec9b0; --tok-math-command: #569cd6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .code-editor {
+    --tok-comment: #6a9955; --tok-keyword: #c586c0; --tok-storage: #569cd6; --tok-constant: #569cd6;
+    --tok-string: #ce9178; --tok-number: #b5cea8; --tok-function: #dcdcaa; --tok-type: #4ec9b0;
+    --tok-variable: #9cdcfe; --tok-reference: #4fc1ff; --tok-heading: #569cd6;
+    --tok-math: #4ec9b0; --tok-math-command: #569cd6;
+  }
+}
+
+/* The box scrolls; inside it the textarea is exactly as tall as the coloured copy beneath it. */
+.code-editor {
+  flex: 1 1 0; min-height: 240px; display: grid; grid-template-columns: minmax(0, 1fr); overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--sheet);
+}
+.code-editor:focus-within { outline: 2px solid var(--focus); outline-offset: -1px; }
+.code-editor-layer { position: relative; min-width: 0; }
+.code-editor-highlight, .code-editor-input {
+  margin: 0; padding: 14px 16px; border: 0; border-radius: 0; box-sizing: border-box;
+  font: 13.5px/1.6 var(--font-mono); font-variant-ligatures: none; letter-spacing: normal; word-spacing: normal;
+  text-indent: 0; text-transform: none; tab-size: 4;
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
+}
+.code-editor-highlight { min-height: 100%; color: var(--text); pointer-events: none; }
+.code-editor-input {
+  position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden; outline: none;
+  background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
+}
+.code-editor-input::selection { background: color-mix(in srgb, var(--ink) 28%, transparent); }
+
+.tok-comment { color: var(--tok-comment); }
+.tok-keyword, .tok-math-delimiter { color: var(--tok-keyword); }
+.tok-storage { color: var(--tok-storage); }
+.tok-constant { color: var(--tok-constant); }
+.tok-string { color: var(--tok-string); }
+.tok-number { color: var(--tok-number); }
+.tok-function, .tok-macro { color: var(--tok-function); }
+.tok-type { color: var(--tok-type); }
+.tok-variable { color: var(--tok-variable); }
+.tok-reference { color: var(--tok-reference); }
+.tok-heading { color: var(--tok-heading); }
+.tok-math { color: var(--tok-math); }
+.tok-math-command { color: var(--tok-math-command); }

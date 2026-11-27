@@ -549,7 +549,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
     user's Save, and only if its SHA-256 still matches what the viewer loaded
     (`store.save_text`, 409 otherwise), atomically and in the file's encoding;
     `GET /api/files/raw` sends only PDFs and PNG/JPEG/WebP images, with a fixed
-    content type;
+    content type, except with `download=1`: any file the explorer lists (`store._listable`
+    with `viewable`), as an `application/octet-stream` attachment. Files only the viewer
+    opens (`store.VIEW_ONLY`, kind `other`) are never attached or copied for the model;
   - folders are confined to `--gui-root`.
 - In the terminal, the model `--host` must be loopback unless `--online`. Online
   research is opt-in in the terminal and on by default in the web app, except

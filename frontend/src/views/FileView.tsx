@@ -2,16 +2,19 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fileRawUrl, type ViewedFile } from '../api'
+import { api, fileDownloadUrl, fileRawUrl, type ViewedFile } from '../api'
+import { CodeEditor } from '../components/CodeEditor'
 import { ErrorNote, Loading } from '../components/common'
-import { FileIcon } from '../components/Icons'
+import { DownloadIcon, FileIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
 import { ago, bytes, displayPath } from '../format'
 
 /**
  * A file of the workspace, opened from the file explorer or an attached file: a PDF in the browser's viewer,
- * Markdown rendered, other text as text, an image as it is. Markdown and text files can be edited in place:
- * click in the text, write, save (Ctrl/Cmd+S). A save is refused if the file changed since it was opened.
+ * Markdown rendered, other text as text (coloured for TeX and code), an image as it is. Markdown and text files can
+ * be edited in place: click in the text, write, save (Ctrl/Cmd+S). A save is refused if the file changed since it
+ * was opened. The bar above it (JobNavigation) leads back to the conversation it was opened from; leaving with
+ * unsaved changes asks first.
  */
 export function FileView({ path }: { path: string | null }) {
   const [file, setFile] = useState<ViewedFile | null>(null)
@@ -53,6 +56,16 @@ export function FileView({ path }: { path: string | null }) {
     return () => { window.removeEventListener('keydown', keys); window.removeEventListener('beforeunload', leave) }
   }, [save, dirty, file?.editable])
   useEffect(() => { if (dirty) setSaved('') }, [dirty])
+  // Links of this page (Back to conversation, the sidebar) replace it in the same tab: unsaved changes ask first.
+  useEffect(() => {
+    if (!dirty) return
+    const guard = (event: MouseEvent) => {
+      const link = event.target instanceof Element ? event.target.closest('a[href^="#"]') : null
+      if (link && !window.confirm('Leave this file without saving your changes?')) { event.preventDefault(); event.stopPropagation() }
+    }
+    document.addEventListener('click', guard, true)
+    return () => document.removeEventListener('click', guard, true)
+  }, [dirty])
   useEffect(() => { if (editing) editor.current?.focus() }, [editing])
 
   const reload = () => {
@@ -73,6 +86,9 @@ export function FileView({ path }: { path: string | null }) {
         </div>
         {file?.kind === 'markdown' && <button type="button" className="btn btn-quiet btn-small" onClick={() => setEditing((on) => !on)}>
           {editing ? 'Preview' : 'Edit'}</button>}
+        {file && path && <a className="btn btn-quiet btn-small" href={fileDownloadUrl(path)} download={file.name}
+          title={dirty ? 'Download the file as last saved; save first to include your changes' : 'Download this file'}>
+          <DownloadIcon size={14} /> Download</a>}
         {file?.editable && <>
           <span className="muted small file-view-state" role="status">{saving ? 'Saving…' : dirty ? 'Unsaved changes' : saved}</span>
           <button type="button" className="btn btn-primary btn-small" disabled={!dirty || saving} onClick={() => void save()} title="Save (Ctrl+S)">Save</button>
@@ -90,8 +106,7 @@ export function FileView({ path }: { path: string | null }) {
             onClick={() => setEditing(true)} onKeyDown={(event) => { if (event.key === 'Enter') setEditing(true) }}>
             {draft.trim() ? <Markdown>{draft}</Markdown> : <p className="muted">This file is empty. Click to write.</p>}
           </div>)}
-      {file?.kind === 'text' && <textarea className="file-view-editor" value={draft} spellCheck={false} aria-label={`Edit ${file.name}`}
-        onChange={(event) => setDraft(event.target.value)} />}
+      {file?.kind === 'text' && <CodeEditor name={file.name} value={draft} onChange={setDraft} />}
       {file?.kind === 'too_large' && <p className="muted file-view-note">This file is too large to show here (more than 4 MB of text).</p>}
       {file?.kind === 'unsupported' && <p className="muted file-view-note">{file.note || 'This kind of file cannot be shown here.'} Only PDF, Markdown, text and image files open in the viewer.</p>}
     </div>

@@ -19,7 +19,11 @@ export function parse(hash: string): Route {
   const [path, search = ''] = hash.replace(/^#\/?/, '').split('?')
   const [first, second, third] = path.split('/')
   if (first === 'about') return { mode: 'about', id: null, tab: null, from: null }
-  if (first === 'file') return { mode: 'file', id: null, tab: null, from: null, path: new URLSearchParams(search).get('path') }
+  if (first === 'file') {
+    const params = new URLSearchParams(search)
+    const origin = params.get('from')
+    return { mode: 'file', id: null, tab: null, from: origin && UUID.test(origin) ? origin : null, path: params.get('path') }
+  }
   const requestedMode = (MODE_ORDER as string[]).includes(first) ? (first as Mode) : 'free'
   const id = second && UUID.test(second) ? second : null
   // Other notebooks open from conversations, cards and links; the Style page is opened directly.
@@ -85,12 +89,15 @@ export function notebook(mode: Route['mode']): Mode {
   return mode === 'critic' || mode === 'explore' || mode === 'about' || mode === 'file' ? 'free' : mode
 }
 
-/** The viewer page of a file, by its path relative to the interface root. */
-export function fileHref(path: string) {
-  return '#/file?' + new URLSearchParams({ path }).toString()
+/** The viewer page of a file, by its path relative to the interface root; `from`, the conversation it was opened
+ * from, gives the page its way back. */
+export function fileHref(path: string, from?: string | null) {
+  return '#/file?' + new URLSearchParams({ path, ...(from && UUID.test(from) && { from }) }).toString()
 }
 
 /** Open a file in the viewer, in a new tab: the conversation stays where it was. */
 export function openFile(path: string) {
-  window.open(window.location.pathname + window.location.search + fileHref(path), '_blank', 'noopener')
+  const route = parse(window.location.hash)
+  const from = route.id && ['free', 'critic', 'explore'].includes(route.mode) ? route.id : null
+  window.open(window.location.pathname + window.location.search + fileHref(path, from), '_blank', 'noopener')
 }

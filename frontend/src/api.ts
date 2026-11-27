@@ -648,7 +648,8 @@ export type Artifact = {
   stream?: { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; stats: Record<string, unknown> }
 }
 
-export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
+/** `other`: code or a log that only the file viewer opens; the model is not given it. */
+export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' | 'other'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
 /** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
@@ -867,3 +868,5 @@ export const api = {
 
 /** The address of a PDF or an image for the browser to display (path relative to the interface root). */
 export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)
+/** The file as it is on disk, as a download. */
+export const fileDownloadUrl = (path: string) => fileRawUrl(path) + '&download=1'

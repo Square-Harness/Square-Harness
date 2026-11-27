@@ -27,7 +27,7 @@ import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { fileHref, go, href, openFile } from '../router'
+import { fileHref, go, href, openFile, useRoute } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
@@ -922,12 +922,13 @@ function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutp
 /** An attached file (path relative to the open folder): a double click opens it in the viewer, in a new tab. */
 function AttachedChip({ path, size = 13, children }: { path: string; size?: number; children?: ReactNode }) {
   const { status } = useApp()
+  const route = useRoute()
   const fromRoot = (status?.workspace_path ? status.workspace_path + '/' : '') + path
   return (
     <span className={'chip chip-viewable' + (children ? '' : ' chip-static')} title={`${path} (double-click to view)`}
       onDoubleClick={() => openFile(fromRoot)}>
       <FileIcon size={size} /><span>{displayPath(path)}</span>
-      <a className="sr-only" href={fileHref(fromRoot)} target="_blank" rel="noopener">View {displayPath(path)}</a>
+      <a className="sr-only" href={fileHref(fromRoot, route.id)} target="_blank" rel="noopener">View {displayPath(path)}</a>
       {children}
     </span>
   )

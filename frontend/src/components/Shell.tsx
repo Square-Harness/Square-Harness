@@ -98,11 +98,6 @@ export function Sidebar({ route }: { route: Route }) {
             </button>
           </div>
           <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
-          {route.mode !== 'style' && (
-            <a className="btn btn-block side-style" href={href('style')}>
-              <span className="history-mark mode-style" aria-hidden="true"><Glyph mode="style" /></span> Learn my writing style
-            </a>
-          )}
         </header>
         <div className="side-list">
           <ErrorNote>{app.listError}</ErrorNote>

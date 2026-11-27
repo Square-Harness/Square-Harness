@@ -709,20 +709,26 @@ def research_artifact(root, job_id, name, stream_from=None):
 
 # -- workspace files that can be pinned ------------------------------------
 
-def _listable(path):
-    """A file the model can be given: text, PDF or an image."""
+# Code and logs the file viewer shows as text, although the model is not given them.
+VIEW_ONLY = {'.jl', '.rs', '.js', '.mjs', '.ts', '.c', '.h', '.cpp', '.hpp', '.sh', '.r', '.m', '.ini', '.cfg', '.log'}
+
+
+def _listable(path, viewable=False):
+    """A file the model can be given: text, PDF or an image; with `viewable`, also the files only the viewer
+    opens (VIEW_ONLY), which the file explorer lists with the kind 'other'."""
     suffix = source_suffix(path)
-    return suffix in TEXT or suffix == '.pdf' or images.is_image(path)
+    return (suffix in TEXT or suffix == '.pdf' or images.is_image(path)
+            or viewable and Path(path).suffix.lower() in VIEW_ONLY)
 
 
 def _file_record(path, root, info):
     suffix = source_suffix(path)
     return {'path': path.relative_to(root).as_posix(), 'size': info.st_size,
-            'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text',
+            'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text' if suffix in TEXT else 'other',
             'updated_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
 
 
-def list_files(root, limit=2000):
+def list_files(root, limit=2000, viewable=False):
     root = Path(root)
     found = []
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -730,7 +736,7 @@ def list_files(root, limit=2000):
                          and not (Path(folder) / d).is_symlink())
         for name in sorted(files):
             path = Path(folder) / name
-            if name.startswith('.') or path.is_symlink() or not _listable(path):
+            if name.startswith('.') or path.is_symlink() or not _listable(path, viewable):
                 continue
             try:
                 info = path.stat()
@@ -744,7 +750,7 @@ def list_files(root, limit=2000):
 
 def browse_files(root, relative='', limit=2000):
     """One folder at or below `root` (the interface root), for the file explorer: its subfolders (empty ones
-    too) and the files the model can be given, with size and modification time. A project's folder carries the project's name and
+    too) and the files the model can be given or the viewer opens, with size and modification time. A project's folder carries the project's name and
     hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
     root = Path(root).resolve(strict=True)
     target = resolve_folder(root, relative)
@@ -768,12 +774,12 @@ def browse_files(root, relative='', limit=2000):
             try:
                 inside = sum(1 for child in itertools.islice(os.scandir(path), 1000) if not child.name.startswith('.')
                              and not child.is_symlink() and (child.is_dir(follow_symlinks=False) and child.name not in SKIP
-                                                             or child.is_file(follow_symlinks=False) and _listable(child.name)))
+                                                             or child.is_file(follow_symlinks=False) and _listable(child.name, True)))
             except OSError:
                 inside = 0
             folders.append({'name': label(path) or entry.name, 'path': path.relative_to(root).as_posix(),
                             'project': bool(label(path)), 'items': inside})
-        elif entry.is_file(follow_symlinks=False) and entry.name not in notebook and _listable(path):
+        elif entry.is_file(follow_symlinks=False) and entry.name not in notebook and _listable(path, True):
             try:
                 files.append(_file_record(path, root, entry.stat(follow_symlinks=False)))
             except OSError:
@@ -1752,7 +1758,7 @@ def save_upload(workspace, name, data):
 # -- the file viewer and editor -------------------------------------------------------------------------
 
 VIEW_TEXT_BYTES = 4 * 1024 * 1024    # text shown (and edited) in the viewer
-VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser
+VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser, or a file downloaded
 MARKDOWN = {'.md', '.markdown'}
 
 
@@ -1786,7 +1792,7 @@ def view_kind(path):
         return 'image'
     if Path(path).suffix.lower() in MARKDOWN:
         return 'markdown'
-    if suffix in TEXT and not is_source_archive(path):
+    if suffix in TEXT and not is_source_archive(path) or Path(path).suffix.lower() in VIEW_ONLY:
         return 'text'
     return 'unsupported'
 
@@ -1811,14 +1817,19 @@ def view_file(base, relative):
             'editable': True}
 
 
-def raw_file(base, relative):
-    """The bytes and content type of a PDF or an image, for the browser to display."""
+def raw_file(base, relative, download=False):
+    """The bytes and content type of a PDF or an image, for the browser to display; with `download`, of any
+    file the file explorer lists, to save as it is on disk."""
     path = root_file(base, relative)
     kind = view_kind(path)
-    if kind not in ('pdf', 'image'):
+    if download and not _listable(path, viewable=True):
+        raise ValueError('Only the files the file explorer lists can be downloaded')
+    if not download and kind not in ('pdf', 'image'):
         raise ValueError('Only PDFs and images are sent as files; other files are shown as text')
     if path.stat().st_size > VIEW_RAW_BYTES:
-        raise ValueError('That file is too large to display here')
+        raise ValueError(f'That file is larger than {VIEW_RAW_BYTES // (1024 * 1024)} MB')
+    if download:
+        return path.read_bytes(), 'application/octet-stream', path.name
     types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
     return path.read_bytes(), 'application/pdf' if kind == 'pdf' else types.get(path.suffix.lower(), 'application/octet-stream'), path.name
 

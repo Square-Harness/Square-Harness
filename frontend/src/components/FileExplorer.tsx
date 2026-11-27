@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
-import { api, type FolderFiles, type WorkspaceFile, type WorkspaceFolder } from '../api'
+import { api, fileDownloadUrl, type FolderFiles, type WorkspaceFile, type WorkspaceFolder } from '../api'
 import { ago, bytes, count, displayPath } from '../format'
 import { useApp, useTick } from '../store'
 import { openFile, useRoute } from '../router'
-import { BackIcon, ChevronIcon, ExternalIcon, FileIcon, FolderIcon } from './Icons'
+import { BackIcon, ChevronIcon, DownloadIcon, ExternalIcon, FileIcon, FolderIcon } from './Icons'
 import { ErrorNote, Loading, Modal } from './common'
 import { isImagePath } from './ImageAttachments'
 
@@ -74,8 +74,9 @@ function compare(sort: Sort) {
  *
  * Folders open on a double click (or Enter); the breadcrumb and Up go back. A click selects a file; with
  * `multiple`, Ctrl/⌘-click adds or removes one file and Shift-click selects the range from the last file
- * clicked. Typing in the search box searches every folder. Hovering a file shows "View file", which opens it in
- * the viewer in a new tab. A double click (or Enter) on a file calls `onOpen`; both dialogs attach the file with it.
+ * clicked. Typing in the search box searches every folder. Hovering a file shows "Download" and "View file", which
+ * opens it in the viewer in a new tab. A double click (or Enter) on a file calls `onOpen`; both dialogs attach the
+ * file with it. Files of kind `other` (code the model is not given) are listed for the viewer only.
  */
 export function FileExplorer({ selected, onSelect, multiple = false, onOpen, unavailable, badge, startFolder, folderNote }: {
   selected: string[]
@@ -257,6 +258,9 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
                   onClick={(event) => { event.stopPropagation(); go(part.folder) }}>{part.folder ? displayPath(part.folder) : root}</button>}
               </span>
               {label && <span className="pill">{label}</span>}
+              <a className="btn btn-quiet btn-small ws-file-view" href={fileDownloadUrl(file.path)} download={part.name}
+                title="Download the file" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+                <DownloadIcon size={13} /> Download</a>
               <button type="button" className="btn btn-quiet btn-small ws-file-view" title="Open the file in the viewer, in a new tab"
                 onClick={(event) => { event.stopPropagation(); openFile(file.path) }} onDoubleClick={(event) => event.stopPropagation()}>
                 View file <ExternalIcon size={13} /></button>
@@ -294,6 +298,9 @@ async function attachable(paths: string[], prefix: string, projectId?: string | 
   return { attached, failed }
 }
 
+/** Why a file the explorer lists cannot be attached: the viewer opens it, the model is not given it. */
+const notForTheModel = (file: WorkspaceFile) => file.kind === 'other' ? 'The model cannot read this kind of file; you can view or download it' : undefined
+
 const failures = (failed: { source: string; error: string }[]) =>
   failed.map((item) => `${item.source.split('/').pop()}: ${item.error}`).join(' · ')
 
@@ -320,8 +327,8 @@ export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?:
   }
   return (
     <Modal title="My files" icon={<FileIcon />} onClose={onClose} wide>
-      <p className="modal-lede">Your folders and their text, PDF and image files, starting in the open folder, whose files the model can be given. Double-click a file to attach it to your next message; hover it to view it.</p>
-      <FileExplorer selected={selected} onSelect={setSelected} multiple onOpen={(file) => void attach(file)} />
+      <p className="modal-lede">Your folders and their files, starting in the open folder, whose files the model can be given. Double-click a file to attach it to your next message; point at it to view or download it.</p>
+      <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={notForTheModel} onOpen={(file) => void attach(file)} />
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         {onBack && <button type="button" className="btn action-start" onClick={onBack}><BackIcon size={15} /> Back to folders</button>}
@@ -353,10 +360,11 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
   const openName = status?.workspace.split('/').filter(Boolean).pop() || 'the open folder'
   const project = projects?.find((item) => item.id === projectId)
   const destination = project ? `the folder of the project ${project.name}` : openName
-  const unavailable = (file: WorkspaceFile) => fromRoot.includes(file.path) ? 'Already attached to your next message'
+  const unavailable = (file: WorkspaceFile) => notForTheModel(file)
+    || (fromRoot.includes(file.path) ? 'Already attached to your next message'
     : isImagePath(file.path) && !status?.image_support ? 'This model cannot read images'
     : inOpenFolder(file.path) === null && !COPYABLE.test(file.path) ? 'Only the kinds of files you can upload can be copied into the open folder'
-    : undefined
+    : undefined)
   const outside = selected.filter((path) => inOpenFolder(path) === null)
   const attach = async (paths: string[]) => {
     setBusy(true); setError('')

@@ -32,7 +32,7 @@ import stat
 import sys
 import threading
 import unicodedata
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 import webbrowser
 
 from .. import __version__
@@ -398,7 +398,7 @@ def files(h, body):
     # explorer's search), relative to the interface root.
     hub = h.server.hub
     everywhere = (h.query.get('scope') or [''])[0] == 'root'
-    records = store.list_files(hub.base if everywhere else hub.root, limit=2001)
+    records = store.list_files(hub.base if everywhere else hub.root, limit=2001, viewable=everywhere)
     return {'files': records[:2000], 'truncated': len(records) > 2000}
 
 
@@ -869,11 +869,14 @@ def files_view(h, body):
 
 @route('GET', '/api/files/raw')
 def files_raw(h, body):
-    """A PDF or an image for the browser to display, framed only by this interface."""
-    data, content_type, name = store.raw_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+    """A PDF or an image for the browser to display, framed only by this interface; with download=1, any file
+    the file explorer lists, as a download."""
+    download = (h.query.get('download') or [''])[0] == '1'
+    data, content_type, name = store.raw_file(h.server.hub.base, (h.query.get('path') or [''])[0], download)
     safe = re.sub(r'[^A-Za-z0-9._ -]', '_', name)[:120] or 'file'
-    h.send_bytes(200, data, content_type, [('Content-Disposition', f'inline; filename="{safe}"'),
-                                           ('Cache-Control', 'no-store')], csp=False, frame=True)
+    disposition = f"{'attachment' if download else 'inline'}; filename=\"{safe}\"; filename*=UTF-8''{quote(name)}"
+    h.send_bytes(200, data, content_type, [('Content-Disposition', disposition), ('Cache-Control', 'no-store')],
+                 csp=download, frame=not download)
     return Streamed
 
 

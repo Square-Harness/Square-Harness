@@ -11,8 +11,18 @@
   supported or too large (over 4 MB of text). Markdown and text files are edited
   in place: click, type, then **Save** or Ctrl+S. The file keeps its encoding and
   permissions; a file that changed on disk since it was opened is not
-  overwritten. `GET /api/files/view`, `GET /api/files/raw` (PDFs and images) and
+  overwritten. Text files are coloured as in VS Code's Light+ and Dark+ themes
+  (LaTeX Workshop's scopes for TeX): TeX, BibTeX, Python, Julia, Rust,
+  JavaScript/TypeScript, C/C++, shell, JSON, TOML and YAML. The explorer also
+  lists Julia, Rust and other code files for the viewer (kind `other`; the model
+  still does not read them, so they cannot be attached). **Download**, next to
+  **View file** and in the viewer, saves a file as it is on disk. **Back to
+  conversation** at the top of the viewer returns to the conversation it was
+  opened from and asks first when changes are unsaved. `GET /api/files/view`,
+  `GET /api/files/raw` (PDFs and images; any listed file with `download=1`) and
   `POST /api/files/save` (with the SHA-256 the viewer read; 409 on a change).
+- **Learn my writing style** moved from the sidebar to the top of
+  **Personalization**, above the standing instructions.
 - The notebook can be widened to 65% of the window (was 600 px). The
   conversation narrows to make room; below 620 px it uses compact margins and
   composer controls, and below 420 px the Send button shows only its arrow.
