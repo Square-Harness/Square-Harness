@@ -77,13 +77,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
 
 ### Tests
 
-- Keep the compact smoke suite. `python -m unittest discover -s tests` runs:
-  - core workflows through the HTTP API and runners with scripted model
-    servers; one of them compiles a
-    write-up with latexmk and BibTeX and skips where `latexmk` is missing;
-  - a real sandbox isolation check, which skips without
-    Docker and the sandbox image;
-  - hosted allowance and gateway integration checks. Install the optional
+- The 16 Python tests cover the workflows below. Run them with `python -m unittest discover -s tests`.
+  - The Assistant, independent proof verification and resume, literature and paper review,
+    and protection of mathematical text during proofreading. Write-Up checks exercise
+    compiled downloads and rollback after a broken revision using `latexmk` when available.
+  - A real sandbox isolation check, which skips without Docker and the sandbox image.
+  - Hosted accounting, workspace access, feedback consent and gateway identity. Install the optional
     `deployment/requirements-testers.txt` dependency to exercise the gateway
     checks rather than skip them.
 
@@ -92,7 +91,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
   it. For routine interface changes, use type-checking, a build and a manual
   browser check. Do not hide deleted tests behind a custom runner or fold them
   into a large test just to reduce the reported count.
-- Shared fakes live in `tests/test_gui.py` (`GuiCase`, `text`, `tool`, `PROOF`,
+- Shared fakes live in `tests/test_gui.py` (`GuiCase`, `text`, `PROOF`,
   `APPROVAL`) and `tests/test_research.py` (`FakeClient`, `response`, `tool`).
   Reuse them.
 - Run the whole Python suite and the frontend checks before proposing a change.

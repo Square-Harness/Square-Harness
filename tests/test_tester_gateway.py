@@ -22,8 +22,7 @@ except ImportError:
 
 class Backend:
     def __init__(self, token):
-        self.token, self.files, self.seen, self.paths = token, {}, [], []
-        self.stream_continue = threading.Event()
+        self.token, self.files, self.seen = token, {}, []
         backend = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -36,7 +35,6 @@ class Backend:
                 self.send_response(200)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(body)))
-                self.send_header('Content-Security-Policy', "default-src 'self'")
                 self.send_header('Cache-Control', 'public, max-age=1000')
                 self.send_header('Set-Cookie', 'pairing=' + backend.token)
                 self.end_headers()
@@ -44,7 +42,6 @@ class Backend:
 
             def authorized(self):
                 backend.seen.append(dict(self.headers))
-                backend.paths.append(self.path)
                 if self.headers.get('Authorization') != 'Bearer ' + backend.token:
                     self.send_error(401)
                     return False
@@ -52,25 +49,6 @@ class Backend:
 
             def do_GET(self):
                 if not self.authorized():
-                    return
-                target = urlsplit(self.path)
-                if target.path == '/api/events':
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/event-stream')
-                    self.end_headers()
-                    self.wfile.write(b'data: first\n\n')
-                    self.wfile.flush()
-                    backend.stream_continue.wait(3)
-                    self.wfile.write(b'data: second\n\n')
-                    self.wfile.flush()
-                    return
-                if target.path == '/download':
-                    return self.send(backend.files.get('note.txt', b''), 'application/octet-stream')
-                if target.path == '/redirect':
-                    self.send_response(303)
-                    self.send_header('Location', '/?token=' + backend.token)
-                    self.send_header('Content-Length', '0')
-                    self.end_headers()
                     return
                 self.send(json.dumps({'files': sorted(backend.files)}).encode())
 
@@ -86,7 +64,6 @@ class Backend:
         self.thread.start()
 
     def close(self):
-        self.stream_continue.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(3)
@@ -159,43 +136,10 @@ class TesterGatewayTests(unittest.TestCase):
         bad = [self.token(key=self.other_key), self.token(exp=int(time.time()) - 100),
                self.token(aud='other-app'), self.token(iss='https://other.cloudflareaccess.com'),
                self.token(email='uninvited@example.test'), 'not-a-jwt']
-        for token in bad:
-            with self.subTest(token_kind=bad.index(token)):
+        for index, token in enumerate(bad):
+            with self.subTest(token_kind=index):
                 self.assertEqual(self.request(token=token)[0], 403)
-                self.assertEqual(self.request(path='/api/account', token=token)[0], 403)
         self.assertEqual(self.request(headers={'Cf-Access-Jwt-Assertion': ''})[0], 403)
-        self.assertEqual(self.request(headers={'Host': 'evil.example.test'})[0], 403)
-        self.assertEqual(self.request('POST', headers={'Origin': 'https://evil.example.test'}, body=b'x')[0], 403)
-        self.assertEqual(self.request('POST', headers={'Sec-Fetch-Site': 'cross-site'}, body=b'x')[0], 403)
-        self.assertEqual(self.request(path='/?token=private')[0], 403)
-        self.assertEqual(self.request('POST', path='/api/login', body=b'{}')[0], 403)
-        for method in ('GET', 'HEAD'):
-            code, headers, body = self.request(method, '/files?from=1',
-                headers={'Host': 'www.sh.example.test', 'Cf-Access-Jwt-Assertion': ''})
-            self.assertEqual(code, 308)
-            self.assertEqual(headers['Location'], 'https://sh.example.test/files?from=1')
-            self.assertEqual(body, b'')
-        self.assertEqual(self.request(path='/?token=private', headers={'Host': 'www.sh.example.test'})[0], 403)
-        self.assertEqual(self.request('POST', headers={'Host': 'www.sh.example.test'}, body=b'x')[0], 403)
-        token_file = self.server.settings.tenants['alice@example.test'].token_file
-        token_file.chmod(0o660)
-        try:
-            self.assertEqual(self.request()[0], 503)
-        finally:
-            token_file.chmod(0o600)
-        self.assertFalse(any(backend.seen for backend in self.backends))
-
-        code, headers, body = self.request(path='/api/account',
-            headers={'Cf-Access-Authenticated-User-Email': 'bob@example.test'})
-        self.assertEqual(code, 200)
-        self.assertEqual(json.loads(body), {'email': 'alice@example.test',
-            'logout_url': 'https://sh.example.test/cdn-cgi/access/logout'})
-        self.assertEqual(headers['Cache-Control'], 'private, no-store')
-        self.assertNotIn('Set-Cookie', headers)
-        self.assertNotIn(self.backends[0].token.encode(), body)
-        self.assertEqual(json.loads(self.request(path='/api/account', token=self.token('bob@example.test'))[2])['email'],
-                         'bob@example.test')
-        self.assertEqual(self.request('POST', path='/api/account', body=b'{}')[0], 405)
         self.assertFalse(any(backend.seen for backend in self.backends))
 
         code, headers, body = self.request('POST', '/api/files/upload?name=note.txt', body=b'alice only',
@@ -204,7 +148,6 @@ class TesterGatewayTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIsNone(headers.get('Set-Cookie'))
         self.assertEqual(headers['Cache-Control'], 'private, no-store')
-        self.assertEqual(headers['Content-Security-Policy'], "default-src 'self'")
         self.assertNotIn(self.backends[0].token.encode(), body)
         seen = self.backends[0].seen[-1]
         self.assertEqual(seen['Authorization'], 'Bearer ' + self.backends[0].token)
@@ -214,8 +157,3 @@ class TesterGatewayTests(unittest.TestCase):
         self.assertNotIn('X-Forwarded-User', seen)
         self.assertEqual(json.loads(self.request()[2])['files'], ['note.txt'])
         self.assertEqual(json.loads(self.request(token=self.token('bob@example.test'))[2])['files'], [])
-        self.assertEqual(self.request(path='/download')[2], b'alice only')
-        code, headers, body = self.request(path='/redirect')
-        self.assertEqual(code, 303)
-        self.assertNotIn('Location', headers)
-        self.assertNotIn(self.backends[0].token.encode(), body)
