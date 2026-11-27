@@ -244,7 +244,7 @@ def parser():
     p.add_argument('--gui-concurrency', type=int, default=2,
                    help='Maximum active interface chats/jobs (1–8; each keeps its full token budget)')
     p.add_argument('--gui-model-concurrency', type=int, default=2,
-                   help='Maximum simultaneous model requests across interface jobs and workers (1–16)')
+                   help='Maximum simultaneous model requests across interface jobs and workers (1–200)')
     p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')

@@ -30,12 +30,12 @@ saved jobs run on the computer or server hosting SH; model prompts, selected sou
 text and tool context are sent to the provider. Its retention policy applies to that
 processing: with OpenRouter, every request asks for zero data retention and no
 data collection; also turn on Zero Data Retention for all models and keep prompt
-logging off in your OpenRouter privacy settings, and give the key a credit limit
-(an OpenRouter key has full account power). A paused job resumes only with the
-provider that started it (its data is never sent to another one implicitly); after a
-switch it stays paused and resumes once that provider is selected again, including
-inside an Assistant conversation. Keep the provider credential on the backend, never in
-the browser or a saved job.
+logging off in your OpenRouter privacy settings. You can give the key a credit limit
+for hosted use. New Assistant turns remember the provider and endpoint that
+started them. If you switch providers, select the original one again to resume
+a paused turn. An older Assistant turn without a recorded endpoint asks you to
+confirm the destination before sending its saved conversation. The provider
+credential stays on the backend.
 `--allow-remote-model --offline` permits those model calls while locking web
 research off. See the hosted-API setup in [llm-install.md](llm-install.md).
 
@@ -65,8 +65,8 @@ Each call is charged when it ends: on OpenRouter the price OpenRouter reports fo
 it, on DeepInfra its reported tokens at these rates (cached input uses the uncached
 price, so the real bill may be lower). Nothing is set aside before a call: any number
 of calls can run at once while the allowance is not spent, and a new call is refused
-only once it is. Calls already running at that moment finish and are charged, so the
-total can end slightly above the allowance. A request the provider refuses before
+only once it is. Calls already running at that moment finish and are charged.
+The overshoot depends on their combined cost. A request the provider refuses before
 streaming (HTTP 429 or 5xx) costs nothing. A stream that fails without reporting its
 usage (a silent, stalled or broken stream) is charged an estimate: its whole input
 and every streamed character plus a margin. This pilot limit is separate from each

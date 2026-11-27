@@ -59,7 +59,8 @@ SCHEMA = {
 
 POLICY = """Classify the CURRENT USER REQUEST for a mathematical research assistant.
 Return only the requested JSON decision. Do not solve the problem, write a
-proof, inspect files, or call tools. This decision selects a software workflow;
+proof, or call tools directly. Use the inspect decision below to identify a file.
+This decision selects a software workflow;
 it is not a judgment that a mathematical statement is true.
 
 Read the whole current turn before routing. For multiple requested deliverables

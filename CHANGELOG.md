@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Assistant checkpoints record the provider and endpoint. Resuming on another
+  provider leaves the turn available on its original endpoint, including turns
+  with images. Older turns can confirm their destination when it is unknown.
+- The tester ledger checks the balance again before retrying a refused request.
+  Finished and interrupted streams use the reported cost when available. Earlier
+  installations keep their ledger and charged amounts when switching providers
+  or reverting the application.
+
 - The hosted model provider is a setting: `--api-profile openrouter` (or `scripts/start-deepinfra.py --provider
   openrouter`) serves the same DeepSeek V4.1 Flash 1017 through OpenRouter, `--api-profile deepinfra` (the default)
   through DeepInfra as before. OpenRouter routes each call among a fixed list of providers that keep no data

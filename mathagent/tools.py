@@ -208,9 +208,12 @@ def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=
                 info = path.stat()
             except OSError:
                 continue
-            found.append((info.st_mtime, path, info.st_size))
-            if len(found) >= 5000:
-                break
+            if stat.S_ISREG(info.st_mode):
+                found.append((info.st_mtime, path, info.st_size))
+                if len(found) >= 5000:
+                    break
+        if len(found) >= 5000:
+            break
     total = len(found)
     found.sort(key=lambda item: -item[0])
     deadline = time.monotonic() + title_seconds
