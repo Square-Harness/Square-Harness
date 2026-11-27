@@ -6,7 +6,7 @@ import { api, type Activity, type AgentStatus, type Chat, type RouteMode } from 
 import { activeAgent, agentLabels, agentSquares, deriveAgents, skillName, stamp, type AgentLane } from '../agents'
 import { duration } from '../format'
 import { coverOf, MODE_CALLS } from '../modeCalls'
-import { openWorkPanel } from '../router'
+import { openResult, openWorkPanel } from '../router'
 import { useApp } from '../store'
 import { activityCaption } from '../workNotice'
 import { ErrorNote, useLoad } from './common'
@@ -169,14 +169,14 @@ function AgentBatch({ lanes, chatId }: { lanes: AgentLane[]; chatId?: string }) 
 /** The document of a worker that has stopped working, if it saved one. */
 const documentOf = (lane: AgentLane) => !activeAgent(lane) && lane.documents && hasDocument(lane.documents.outputs) ? lane.documents : null
 
-/** A finished write-up, summary or review in its box: View opens it in the notebook's Results, beside the
- * conversation; the downloads are the files it was saved as. */
+/** A finished write-up, summary or review in its box: View opens it in the file viewer beside the conversation;
+ * the downloads are the files it was saved as. */
 function LaneDocuments({ lane }: { lane: AgentLane }) {
   const documents = documentOf(lane)
   if (!documents) return null
   const output = lane.result.outputId
   return <div className="agent-document-actions">
-    {output && <button type="button" className="btn btn-small" onClick={() => openWorkPanel('outputs', output)}>View</button>}
+    {output && <button type="button" className="btn btn-small" onClick={() => openResult(output)}>View</button>}
     <JobDownloads job={documents.job} outputs={documents.outputs} partial={lane.status === 'stopped'} />
   </div>
 }

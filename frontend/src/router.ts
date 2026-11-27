@@ -15,7 +15,9 @@ export type Route = { mode: Mode | 'about' | 'file'; id: string | null; tab: str
   /** The file the viewer page shows (#/file?path=…), relative to the interface root. */
   path?: string | null
   /** The file the viewer panel shows beside a conversation (?file=…), in the notebook's place. */
-  file?: string }
+  file?: string
+  /** A document an agent produced (a write-up's PDF, a review), by its result id, in the same viewer (?result=…). */
+  result?: string }
 
 const CHAT_MODES = ['free', 'critic', 'explore']
 const validFile = (value: string | null) => value && value.length <= 1000 ? value : undefined
@@ -41,7 +43,8 @@ export function parse(hash: string): Route {
   const panel = id && CHAT_MODES.includes(mode) && panelTab
     ? { tab: panelTab, selected: selected && selected.length <= 400 ? selected : null } : undefined
   const file = CHAT_MODES.includes(mode) ? validFile(params.get('file')) : undefined
-  return { mode, id, tab: id && third ? third : null, from, ...(panel && { panel }), ...(file && { file }) }
+  const result = id && CHAT_MODES.includes(mode) && !file ? validFile(params.get('result')) : undefined
+  return { mode, id, tab: id && third ? third : null, from, ...(panel && { panel }), ...(file && { file }), ...(result && { result }) }
 }
 
 function subscribe(callback: () => void) {
@@ -55,7 +58,7 @@ export function useRoute(): Route {
 }
 
 export function href(mode: Route['mode'], id?: string | null, tab?: string | null, from?: string | null, panel?: WorkSelection,
-  file?: string) {
+  file?: string, result?: string) {
   const path = '#/' + [mode, id, id ? tab : null].filter(Boolean).join('/')
   const params = new URLSearchParams()
   if (id && from && UUID.test(from)) params.set('from', from)
@@ -64,6 +67,7 @@ export function href(mode: Route['mode'], id?: string | null, tab?: string | nul
     if (panel.selected) params.set('selected', panel.selected)
   }
   if (file && CHAT_MODES.includes(mode)) params.set('file', file)
+  else if (id && result && CHAT_MODES.includes(mode)) params.set('result', result)
   return path + (params.size ? '?' + params.toString() : '')
 }
 
@@ -74,7 +78,8 @@ export function openWorkPanel(tab: WorkTab, selected: string | null = null, auto
   if (!route.id || !CHAT_MODES.includes(route.mode)) return
   if (!automatic && route.file && !leaveFile()) return
   if (!automatic) rememberWorkPanel({ open: true, tab })
-  const url = href(route.mode, route.id, route.tab, route.from, { tab, selected }, automatic ? route.file : undefined)
+  const url = automatic ? href(route.mode, route.id, route.tab, route.from, { tab, selected }, route.file, route.result)
+    : href(route.mode, route.id, route.tab, route.from, { tab, selected })
   if (automatic) {
     window.history.replaceState(null, '', url)
     window.dispatchEvent(new HashChangeEvent('hashchange'))
@@ -86,7 +91,7 @@ export function openWorkPanel(tab: WorkTab, selected: string | null = null, auto
 export function closeWorkPanel() {
   const route = parse(window.location.hash)
   rememberWorkPanel({ open: false })
-  window.location.hash = href(route.mode, route.id, route.tab, route.from, undefined, route.file)
+  window.location.hash = href(route.mode, route.id, route.tab, route.from, undefined, route.file, route.result)
 }
 
 /** `file` keeps the viewer panel open on the new page (a new conversation created from the start page). */
@@ -120,10 +125,24 @@ export function openFile(path: string) {
   window.location.hash = viewHref(route, path)
 }
 
-/** Close the viewer panel: the notebook, if it was open, comes back. */
+/** Open a document an agent produced (a result of the notebook's Results) in the viewer, in the notebook's place. */
+export function openResult(result: string) {
+  const route = parse(window.location.hash)
+  if (!route.id || !CHAT_MODES.includes(route.mode) || route.result === result) return
+  if (route.file && !leaveFile()) return
+  window.location.hash = href(route.mode, route.id, route.tab, route.from, route.panel, undefined, result)
+}
+
+/** The address of a result in the viewer beside its conversation (for links). */
+export function resultHref(mode: Mode, chat: string, result: string) {
+  return href(mode, chat, null, null, undefined, undefined, result)
+}
+
+/** Close the viewer panel (a file or a result): the notebook, if it was open, comes back. */
 export function closeFile() {
   const route = parse(window.location.hash)
-  if (!route.file || !leaveFile()) return
+  if (!route.file && !route.result) return
+  if (route.file && !leaveFile()) return
   window.location.hash = href(route.mode, route.id, route.tab, route.from, route.panel)
 }
 

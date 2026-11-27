@@ -27,8 +27,9 @@ import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
 import { FilePanel } from './FileView'
+import { ResultPanel } from '../components/ResultPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { go, href, openFile, parse, useRoute, viewHref } from '../router'
+import { go, href, openFile, parse, resultHref, useRoute, viewHref } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
@@ -96,7 +97,7 @@ const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isL
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
-  const viewing = useRoute().file
+  const { file: viewing, result } = useRoute()
   const tick = useTick(id)
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
@@ -445,7 +446,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       </form>
     </div>
     {/* An open file takes the notebook's place; the notebook comes back when it closes. */}
-    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && <WorkPanel key={data.id} chat={data} />}
+    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && result ? <ResultPanel key={result} chat={data} id={result} />
+      : data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>
   )
@@ -768,7 +770,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
           )}
           {item.job_id && item.outputs && <JobDownloads job={item.job_id} outputs={item.outputs} partial={item.status === 'stopped'} />}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
-            ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
+            ? resultHref('free', chatId, item.job_id)
             : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>

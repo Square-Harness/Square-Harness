@@ -11,6 +11,8 @@ export type WorkOutput = {
   id: string; aliases: string[]; job: string; kind: OutputKind; name: string; producer: string; mode: string
   status: string; time: string; objective: string; text?: string; page?: string; url?: string; download?: string; file?: Artifact
   synthesis?: string; synthesis_steps?: string[]
+  /** The document's file name, for the file viewer's title (a write-up's .tex and .pdf, review.md, references.bib). */
+  fileName?: string
 }
 
 export function modeLabel(mode?: string) {
@@ -107,7 +109,7 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
         const id = item.experiment + ':' + file.filename
         outputs.set(id, { id, aliases: [file.artifact_id], job: item.experiment, kind: 'file', name: file.filename,
           mode: agent?.mode || 'numerics', producer: agent ? researchModeName(agent.mode) : 'Numerical experiment', status: item.run_status || 'saved',
-          time, objective: item.purpose || '', file, url, download: url })
+          time, objective: item.purpose || '', file, url, download: url, fileName: file.filename })
       }
       continue
     }
@@ -120,11 +122,17 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
     const formats = item.outputs || discovered[job]
     const page = nativeResultPage(mode, job, chat.id)
     let primary = true
+    const named = (value: unknown, fallback: string) => typeof value === 'string' && value ? value : fallback
+    const stem = named(formats?.download || formats?.tex, 'writeup.tex').replace(/\.tex$/i, '')
+    const fileNames: Partial<Record<OutputKind, string>> = {
+      pdf: stem + '.pdf', tex: named(formats?.download || formats?.tex, stem + '.tex'), body: named(formats?.body, stem + '-body.tex'),
+      bib: named(formats?.bib, 'references.bib'), report: named(formats?.review, mode === 'writeup' || mode === 'summarize' ? 'report.md' : 'review.md'),
+    }
     function add(kind: OutputKind, name: string, url?: string, download?: string, text?: string) {
       const id = primary ? job! : job + ':' + kind
       const aliases = primary ? ['card-' + card, ...(agent ? [agent.id] : []), ...(receipt?.aliases || []), job + ':' + kind] : []
       outputs.set(id, { id, aliases, job: job!, kind, name, producer, mode, status: record?.status || item.status || 'saved',
-        time: record?.updated_at || time, objective: item.request || '', page, url, download, text })
+        time: record?.updated_at || time, objective: item.request || '', page, url, download, text, fileName: fileNames[kind] })
       primary = false
     }
     if (!item.answer_id && !item.job_id && receipt) add('conversation', 'Answer in conversation', undefined, undefined, receipt.text)

@@ -38,6 +38,18 @@
   white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
 }
 .code-editor-highlight { min-height: 100%; color: var(--text); pointer-events: none; }
+/* Line numbers: each line of the copy is a block numbered in the left margin, which the textarea leaves empty
+   (the same padding on both), so a wrapped line keeps one number and the text never moves. */
+.code-editor { --gutter-room: calc(var(--gutter, 2ch) + 26px); }
+.code-editor .code-editor-highlight, .code-editor .code-editor-input { padding-left: var(--gutter-room); }
+.code-numbered { counter-reset: code-line;
+  background: linear-gradient(to right, var(--paper-2) calc(var(--gutter-room) - 10px), transparent 0); }
+.code-line { display: block; position: relative; counter-increment: code-line; }
+.code-line::before {
+  content: counter(code-line); position: absolute; right: calc(100% + 18px); width: var(--gutter, 2ch);
+  text-align: right; color: var(--text-3); font-variant-numeric: tabular-nums; user-select: none;
+}
+.code-view .code-editor-highlight { pointer-events: auto; }
 .code-editor-input {
   position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden; outline: none;
   background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);

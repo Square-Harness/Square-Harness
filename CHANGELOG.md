@@ -19,6 +19,26 @@
   with partial evidence when a reference check exhausts its own allowance.
   Pre-upgrade proofs retain their tool-free protocol and saved allowances.
 
+- Text files in the viewer (code, TeX, BibTeX, Markdown being edited) show line
+  numbers in a margin; a wrapped line keeps one number. Texts over 400,000
+  characters stay plain, without colours or numbers.
+- The notebook and the viewer can be widened to 75% of the window (was 65%).
+
+- Documents open in the file viewer beside the conversation, not inside the
+  notebook: **View** in a worker's box, **Read literature review**, and the
+  PDF, LaTeX, BibTeX, review and figure results of the notebook's **Results**
+  (`?result=<id>` in the conversation's address, `ResultPanel`). They open like
+  any file: the file name on top (`theta-scheme.pdf`, `review.md`,
+  `references.bib`), then the document alone, a PDF fitted to the width, LaTeX
+  and BibTeX coloured, a review rendered with its citations; the request and
+  the buttons stay in the notebook and the worker's box. Closing the viewer
+  brings the notebook back. Answers, proofs and experiments are still read in
+  the notebook.
+- The viewer's header is one line: the name and facts, Edit or Preview and
+  Save for a text file (the save state joins the facts), then Download and
+  Close. The row of buttons above the file is gone, so the document keeps the
+  height.
+
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook
   while looking through the workspace. Asking about a named notebook quotes
@@ -52,7 +72,7 @@
   comes from another folder), and **View file**, shown when the pointer is over
   a file, opens it in the file viewer beside the conversation; a double click on
   an attached file does the same. The viewer takes the notebook's place (the
-  notebook returns when it closes), resizes like it up to 65% of the window, and
+  notebook returns when it closes), resizes like it up to 75% of the window, and
   leaves the message box usable, so that one can write while reading
   (`?file=` in the conversation's address; on a page without a conversation,
   `#/file?path=` with a way back). The viewer shows a PDF in the browser's
@@ -87,7 +107,7 @@
   Existing workspaces keep saved file-type permissions. In folders with older
   restrictions, the new group starts disabled. `GET/POST /api/settings` and
   the `read` field of `/api/status` remain available.
-- The notebook can be widened to 65% of the window (was 600 px). The
+- The notebook can be widened to 75% of the window (was 600 px). The
   conversation narrows to make room; below 620 px it uses compact margins and
   composer controls, and below 420 px the Send button shows only its arrow.
 

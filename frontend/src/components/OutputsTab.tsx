@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, type Chat, type ProofDetail, type ResearchDetail } from '../api'
+import { api, PDF_FIT, type Chat, type ProofDetail, type ResearchDetail } from '../api'
 import { displayOf } from '../artifacts'
 import { ago, plural } from '../format'
 import type { PaperLinks } from '../mathtext'
@@ -12,10 +12,12 @@ import { InvestigationReport } from './InvestigationReading'
 import { BackIcon, FileIcon } from './Icons'
 import { reviewStatusLook, Square } from './Square'
 import { chatOutputs, type WorkOutput, type JobFormats } from '../outputs'
+import { openResult } from '../router'
 import { useApp, useTick } from '../store'
 import { Report, Passage, flaggedCitations } from '../views/ResearchView'
 import { TexSource } from '../views/WriteupView'
 import { ArtifactView } from '../views/ChatView'
+import { CodeView } from './CodeEditor'
 import { ErrorNote, useLoad } from './common'
 import { Inline, Markdown, MathMacrosProvider } from './Markdown'
 import './workTabs.css'
@@ -41,7 +43,13 @@ function ResultMark({ mode }: { mode: string }) {
   </span>
 }
 
-export function OutputsTab({ chat, selected, onSelect }: Props) {
+/** Documents (a PDF, LaTeX, BibTeX, a review, a figure) open in the viewer beside the conversation, where the
+ * notebook's header does not take their room; answers, proofs and experiments are read in the notebook. */
+export const isDocument = (output: WorkOutput) =>
+  ['pdf', 'tex', 'body', 'bib', 'file'].includes(output.kind) || (output.kind === 'report' && output.mode !== 'prove')
+
+/** Everything the agents of a conversation produced; `loaded` once the saved index has answered (or failed). */
+export function useChatOutputs(chat: Chat) {
   const { proofs, research } = useApp()
   const tick = useTick(chat.id)
   const index = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id], tick)
@@ -66,6 +74,11 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
   }, [chat.id, legacy])
   const outputs = useMemo(() => chatOutputs(chat, proofs || [], research || [], index.data?.entries, formats),
     [chat, proofs, research, index.data, formats])
+  return { outputs, loaded: !!index.data || !!index.error, error: index.error }
+}
+
+export function OutputsTab({ chat, selected, onSelect }: Props) {
+  const { outputs, loaded, error } = useChatOutputs(chat)
   const chosen = outputs.find(item => item.id === selected || item.aliases.includes(selected || ''))
   const panel = useRef<HTMLDivElement>(null)
   const restore = useRef<string | null>(null)
@@ -81,13 +94,15 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
     focusPending.current = false
   }, [selected])
   function choose(id: string | null) {
+    const document = id ? outputs.find(item => item.id === id) : undefined
+    if (document && isDocument(document)) { openResult(document.id); return }
     if (id) restore.current = id
     else if (chosen) restore.current = chosen.id
     focusPending.current = true
     onSelect(id)
   }
-  if (!outputs.length && !index.data && !index.error) return <p role="status">Loading results…</p>
-  if (!outputs.length) return <><ErrorNote>{index.error}</ErrorNote><p className="empty-note">Everything the agents produce in this conversation (answers, proofs, reviews, documents, figures) will be listed here.</p></>
+  if (!outputs.length && !loaded) return <p role="status">Loading results…</p>
+  if (!outputs.length) return <><ErrorNote>{error}</ErrorNote><p className="empty-note">Everything the agents produce in this conversation (answers, proofs, reviews, documents, figures) will be listed here.</p></>
   return <div className="work-tab-content work-results" ref={panel}>
     <MathMacrosProvider definitions={chat.math_macros}>
       {chosen ? <>
@@ -95,7 +110,7 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
         <OutputPreview key={chat.id + ':' + chosen.id} output={chosen} chat={chat.id} />
       </> : <>
         <div className="work-section-head"><h3>Results</h3><small>{plural(outputs.length, 'item')}</small></div>
-        {selected && <p role="status" className="muted">{index.data ? 'This result is unavailable in the current conversation.' : 'Loading the saved result…'}</p>}
+        {selected && <p role="status" className="muted">{loaded ? 'This result is unavailable in the current conversation.' : 'Loading the saved result…'}</p>}
         <ResultsList outputs={outputs} choose={choose} />
       </>}
     </MathMacrosProvider>
@@ -259,8 +274,9 @@ function CitedPassage({ data, cite, onClose }: { data: ResearchDetail; cite: str
     sources={sources.data?.sources || null} onClose={onClose} /></>
 }
 
-function LiteratureReading({ output, data, error }: { output: WorkOutput; data?: ResearchDetail; error: string }) {
-  const papers = useMemo(() => {
+/** The links of a review's citations to their papers. */
+function usePaperLinks(data?: ResearchDetail) {
+  return useMemo(() => {
     const links: PaperLinks = new Map()
     for (const ref of data?.references || []) {
       const url = ref.doi ? 'https://doi.org/' + ref.doi : ref.arxiv ? 'https://arxiv.org/abs/' + ref.arxiv
@@ -269,6 +285,48 @@ function LiteratureReading({ output, data, error }: { output: WorkOutput; data?:
     }
     return links
   }, [data?.references])
+}
+
+/**
+ * A document result as the file viewer shows it: the document alone (a PDF, a rendered review or report, coloured
+ * LaTeX or BibTeX, a figure), without the notebook's title, request and buttons, which the reader has in the
+ * notebook and in the worker's box. Citations still show their source passage.
+ */
+export function ResultDocument({ output, chat }: { output: WorkOutput; chat: string }) {
+  const tick = useTick(output.job)
+  const textual = ['report', 'tex', 'body', 'bib'].includes(output.kind)
+  const [value, setValue] = useState<Preview | null>(null)
+  const [error, setError] = useState('')
+  const [cite, setCite] = useState('')
+  useEffect(() => {
+    if (!textual) return
+    let active = true
+    previewText(output, chat).then(next => { if (active) { setError(''); setValue(next) } },
+      reason => { if (active) setError((reason as Error).message) })
+    return () => { active = false }
+  }, [output.id, output.status, chat, textual, tick])
+  const research = value?.research
+  const papers = usePaperLinks(research)
+  const flagged = useMemo(() => research ? flaggedCitations(research) : new Set<string>(), [research])
+  const issues = useMemo(() => research ? [...new Set([...research.citation_issues, ...research.review_context_issues, ...research.warnings])] : [], [research])
+  const display = output.file ? displayOf(output.file.mime_type) : null
+  if (output.kind === 'pdf' || display === 'document')
+    return <iframe className="file-view-frame" title={output.fileName || output.name} src={output.url + (output.kind === 'pdf' ? PDF_FIT : '')} />
+  if (output.file && output.url) return <ArtifactView artifact={{ ...output.file, url: output.url }} />
+  if (error) return <ErrorNote>{error}</ErrorNote>
+  if (!value) return <p role="status" className="muted">Loading the document…</p>
+  const passage = cite && research && <CitedPassage data={research} cite={cite} onClose={() => setCite('')} />
+  if (output.kind === 'report') return <div className="result-document">
+    {output.mode === 'literature'
+      ? <Markdown mathProse className="literature-text" papers={papers} onCite={setCite} flagged={flagged}>{research?.draft || value.text}</Markdown>
+      : research ? <Report data={research} flagged={flagged} issues={issues} onCite={setCite} /> : <Markdown>{value.text}</Markdown>}
+    {passage}
+  </div>
+  return <CodeView name={output.fileName || (output.kind === 'bib' ? 'references.bib' : 'document.tex')} text={value.text} />
+}
+
+function LiteratureReading({ output, data, error }: { output: WorkOutput; data?: ResearchDetail; error: string }) {
+  const papers = usePaperLinks(data)
   const [cite, setCite] = useState('')
   const issues = useMemo(() => data ? [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])] : [], [data])
   const flagged = useMemo(() => data ? flaggedCitations(data) : undefined, [data])
@@ -346,7 +404,8 @@ function OutputPreview({ output, chat }: { output: WorkOutput; chat: string }) {
       ['tex', 'body', 'bib'].includes(output.kind) ? <pre className="work-output-source">{text}</pre> : <Markdown>{text}</Markdown>)}
     {cite && research && <CitedPassage data={research} cite={cite} onClose={() => setCite('')} />}
     {output.file && output.url && <ArtifactView artifact={{ ...output.file, url: output.url }} purpose={output.objective} />}
-    {(output.kind === 'pdf' || display === 'document') && <iframe className="work-output-frame" title={output.name} src={output.url} />}
+    {(output.kind === 'pdf' || display === 'document') && <iframe className="work-output-frame" title={output.name}
+      src={output.url} />}
     {output.kind === 'source' && <p className="muted">Download the ZIP to inspect the source files.</p>}
   </section>
 }
