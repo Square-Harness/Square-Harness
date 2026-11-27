@@ -462,8 +462,8 @@ one with a message.
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,
   Julia, Rust, JavaScript, C and C++, shell, JSON, TOML and YAML. Archives and
-  other files are marked as not supported, and text files over 4 MB are not
-  shown. Markdown and text files can be edited in the viewer: click in the text
+  other files are marked as not supported. The viewer can open and save text
+  files up to the 20 MiB per-file upload allowance. To edit Markdown or text, click in the text
   (on a Markdown page, click the rendered text or **Edit**), type, then **Save**
   or Ctrl+S (⌘S on a Mac); **Download** saves the file as last saved. The file
   keeps its encoding. If the file changed on disk after you opened it (the model
@@ -528,9 +528,11 @@ one with a message.
   once; the phone stays paired. This is plain HTTP on your network: use it only
   on a trusted network, or through an SSH tunnel or a VPN.
 
-The model may list, search and read every supported kind of file in the open
-folder: TeX and BibTeX, PDF, Markdown and text, code (Python, Julia, Rust, C and
-C++, R, MATLAB, JavaScript, shell) and data files. Explicitly attached files stay
+In a new workspace the model may list, search and read TeX and BibTeX, PDF,
+Markdown and text, code (Python, Julia, Rust, C and C++, R, MATLAB, JavaScript,
+shell) and data files. Folders with saved file-type restrictions keep those
+choices. In an older restricted folder the new code group requires explicit
+permission through `POST /api/settings`. Explicitly attached files stay
 available to their conversation and its fresh review. Ask the
 Assistant to save text from the conversation ("save this as notes.tex") and it
 shows the file and its diff for your approval; it does not replace an existing

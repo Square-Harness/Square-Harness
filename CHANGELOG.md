@@ -36,7 +36,7 @@
   `#/file?path=` with a way back). The viewer shows a PDF in the browser's
   viewer fitted to its width, Markdown rendered with its mathematics, images,
   other text files as text, and says when a file is not supported or too large
-  (over 4 MB of text). Markdown and text files are edited
+  (over the 20 MiB upload allowance for text). Markdown and text files are edited
   in place: click, type, then **Save** or Ctrl+S. The file keeps its encoding and
   permissions; a file that changed on disk since it was opened is not
   overwritten. Text files are coloured as in VS Code's Light+ and Dark+ themes
@@ -46,7 +46,8 @@
   opening another file, opening the notebook or following a link asks first when
   changes are unsaved. `GET /api/files/view`,
   `GET /api/files/raw` (PDFs and images; any listed file with `download=1`) and
-  `POST /api/files/save` (with the SHA-256 the viewer read; 409 on a change).
+  `PUT /api/files/save` (UTF-8 text) and `POST /api/files/save` (JSON) use the SHA-256
+  the viewer read and return HTTP 409 on a change.
 - A finished write-up, summary or literature review shows **View** and its
   downloads (PDF, sources, LaTeX, review, BibTeX) in its box in the
   conversation, as its card did before the notebook: **View** opens the document
@@ -58,13 +59,12 @@
   gives `files` as a number.
 - **Learn my writing style** moved from the sidebar to the top of
   **Personalization**, above the standing instructions.
-- File access is gone: the model lists, searches and reads every supported kind
-  of file in the open folder. Code files are supported: Julia, Rust, C/C++, R,
-  MATLAB, JavaScript and shell (`.jl .rs .c .h .cpp .hpp .r .m .js .sh`) and
-  `.ini`/`.cfg`, as a new `code` group of `tools.READ_GROUPS`; the file browser
-  lists them and they can be attached and uploaded, as can `.json .yaml .toml
-  .csv`. `GET/POST /api/settings` and the status's `read` are removed; an old
-  `.mathagent/gui-settings.json` is ignored.
+- The File access control was removed from the sidebar. New workspaces include a
+  `code` group for Julia, Rust, C/C++, R, MATLAB, JavaScript, shell and
+  `.ini`/`.cfg` files. These can be browsed, uploaded and attached.
+  Existing workspaces keep saved file-type permissions. In folders with older
+  restrictions, the new group starts disabled. `GET/POST /api/settings` and
+  the `read` field of `/api/status` remain available.
 - The notebook can be widened to 65% of the window (was 600 px). The
   conversation narrows to make room; below 620 px it uses compact margins and
   composer controls, and below 420 px the Send button shows only its arrow.

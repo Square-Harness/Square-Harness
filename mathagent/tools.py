@@ -22,8 +22,8 @@ from threading import Lock
 # text. Not .ts: it is as often a video file as TypeScript.
 CODE = {'.jl', '.rs', '.c', '.h', '.cpp', '.hpp', '.r', '.m', '.js', '.sh', '.ini', '.cfg'}
 TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', '.yml', '.toml', '.csv'} | CODE
-# File groups a workspace discovers and reads. The interface allows every group; a nested workspace may allow
-# fewer (the reference checker's allows none). Pinned sources stay readable whatever is allowed.
+# File groups a workspace discovers and reads. An unrestricted workspace allows every group.
+# Explicit attachments stay readable even when their group is disabled.
 READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {'.py'},
                'text': {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv'}, 'code': CODE}
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}

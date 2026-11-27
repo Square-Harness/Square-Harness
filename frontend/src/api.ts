@@ -671,8 +671,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     response = await fetch(path, {
       method,
       credentials: 'same-origin',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: body === undefined || body instanceof Blob ? {} : { 'Content-Type': 'application/json' },
+      body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
     throw new ApiError(0, 'The harness is not reachable. Check that square-harness --gui is still running.')
@@ -714,6 +714,16 @@ export function onUnauthorized(listener: () => void) {
 
 const get = <T,>(path: string) => request<T>('GET', path)
 const post = <T,>(path: string, body: unknown = {}) => request<T>('POST', path, body)
+
+async function saveFile(path: string, content: string, sha256: string) {
+  let body = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  // Text that fits on disk in a legacy encoding can expand beyond the gateway's 32 MiB request limit in UTF-8.
+  if (body.size > 32 * 1024 * 1024) {
+    const compressed = await new Response(body.stream().pipeThrough(new CompressionStream('gzip'))).blob()
+    body = new Blob([compressed], { type: 'application/gzip' })
+  }
+  return request<{ sha256: string; size: number }>('PUT', '/api/files/save?' + new URLSearchParams({ path, sha256 }), body)
+}
 
 async function zip(path: string, body: unknown): Promise<Blob> {
   let response: Response
@@ -760,7 +770,7 @@ export const api = {
   /** One file for the viewer, by its path relative to the interface root. */
   viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
   /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
-  saveFile: (path: string, content: string, sha256: string) => post<{ sha256: string; size: number }>('/api/files/save', { path, content, sha256 }),
+  saveFile,
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 

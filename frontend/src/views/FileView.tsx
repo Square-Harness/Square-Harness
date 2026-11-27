@@ -180,7 +180,7 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
               {draft.trim() ? <Markdown>{draft}</Markdown> : <p className="muted">This file is empty. Click to write.</p>}
             </div>)}
         {file?.kind === 'text' && <CodeEditor name={file.name} value={draft} onChange={setDraft} />}
-        {file?.kind === 'too_large' && <p className="muted file-view-note">This file is too large to show here (more than 4 MB of text).</p>}
+        {file?.kind === 'too_large' && <p className="muted file-view-note">{file.note || 'This file is too large to open here.'}</p>}
         {file?.kind === 'unsupported' && <p className="muted file-view-note">{file.note || 'This kind of file cannot be shown here.'} Only PDF, Markdown, text and image files open in the viewer.</p>}
       </div>
     </>

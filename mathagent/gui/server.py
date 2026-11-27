@@ -34,6 +34,7 @@ import threading
 import unicodedata
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 import webbrowser
+import zlib
 
 from .. import __version__
 from ..agent import AgentError
@@ -61,6 +62,7 @@ def build_id():
         return ''
     return match[1] if match else ''
 MAX_BODY = 1_000_000
+VIEW_SAVE_BODY = 32 * 1024 * 1024  # Hosted gateway request limit.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -289,7 +291,7 @@ def status(h, body):
                         'research_chars': args.research_chars},
            'ollama': hub.models(), 'root': str(hub.base),
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
-           'latex': shutil.which('latexmk') is not None,
+           'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
            'recent': store.recent_folders(hub.base)}
     if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
         from ..hosted_quota import quota_status
@@ -812,6 +814,16 @@ def workspace_open(h, body):
     return {'workspace': str(h.server.hub.root)}
 
 
+@route('GET', '/api/settings')
+def settings(h, body):
+    return store.load_settings(h.server.hub.root)
+
+
+@route('POST', '/api/settings')
+def settings_save(h, body):
+    return store.save_settings(h.server.hub.root, body.get('read'))
+
+
 @route('GET', '/api/personalization')
 def preferences(h, body):
     return personalization.load(h.server.hub.base)
@@ -826,7 +838,7 @@ def preferences_save(h, body):
     return value
 
 
-@route('POST', '/api/files/upload', raw=True)
+@route('POST', '/api/files/upload', raw=True, body_limit=store.UPLOAD_BYTES)
 def upload(h, body):
     name = (h.query.get('name') or [''])[0]
     root = h.server.hub.root
@@ -871,14 +883,30 @@ def files_raw(h, body):
     return Streamed
 
 
-# A control character can occupy six bytes in JSON. The store enforces the actual text limit.
-@route('POST', '/api/files/save', body_limit=6 * store.VIEW_TEXT_BYTES + 16 * 1024)
+@route('POST', '/api/files/save', body_limit=VIEW_SAVE_BODY)
 def files_save(h, body):
     """Save the viewer's edit of a text file; refused if the file changed since the viewer read it."""
     path = body.get('path')
     result = store.save_text(h.server.hub.base, path, body.get('content'), body.get('sha256'))
     h.server.hub.bus.publish('files', path=path)
     return result
+
+
+@route('PUT', '/api/files/save', raw=True, body_limit=VIEW_SAVE_BODY)
+def files_save_bytes(h, body):
+    """The editor sends UTF-8 directly. Large decoded legacy files can arrive as gzip."""
+    if h.headers.get_content_type() == 'application/gzip':
+        # A supported single-byte source character uses at most three UTF-8 bytes.
+        limit = 3 * store.VIEW_TEXT_BYTES
+        unpack = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            body = unpack.decompress(body, limit + 1)
+        except zlib.error as exc:
+            raise ValueError('Invalid compressed text') from exc
+        if len(body) > limit or not unpack.eof or unpack.unused_data:
+            raise ValueError('Invalid or oversized compressed text')
+    return files_save(h, {'content': body.decode('utf-8'), 'path': (h.query.get('path') or [''])[0],
+                          'sha256': (h.query.get('sha256') or [''])[0]})
 
 
 @route('POST', '/api/files/copy')
@@ -1279,12 +1307,12 @@ class Handler(BaseHTTPRequestHandler):
                              'Remove it and try again.') from None
         return value
 
-    def _raw_body(self):
+    def _raw_body(self, limit):
         length = self.headers.get('Content-Length', '')
-        if not length.isdigit() or int(length) > store.UPLOAD_BYTES:
+        if not length.isdigit() or int(length) > limit:
             # Read a moderately oversized body before refusing it, so the client receives the
             # message instead of a broken connection; a much larger one is not read at all.
-            if length.isdigit() and int(length) <= 4 * store.UPLOAD_BYTES:
+            if length.isdigit() and int(length) <= 4 * limit:
                 remaining = int(length)
                 while remaining > 0:
                     chunk = self.rfile.read(min(65536, remaining))
@@ -1292,7 +1320,7 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     remaining -= len(chunk)
                 self.body_read = True
-            raise ValueError('Files are limited to 20 MB')
+            raise ValueError(f'Files are limited to {limit // (1024 * 1024)} MiB per request')
         data = self.rfile.read(int(length))
         self.body_read = True
         return data
@@ -1311,7 +1339,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._same_origin():
                 return self.error(403, 'Cross-origin request refused')
             try:
-                body = self._raw_body() if getattr(function, 'raw_body', False) else self._body(function.body_limit)
+                body = self._raw_body(function.body_limit) if function.raw_body else self._body(function.body_limit)
             except TypeError as exc:
                 return self.error(415, str(exc))
             except (ValueError, UnicodeError, RecursionError) as exc:

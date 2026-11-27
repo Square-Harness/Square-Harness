@@ -35,7 +35,7 @@ from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
 from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
-from ..tools import SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
+from ..tools import FALLBACK, READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
                      rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
@@ -1542,6 +1542,31 @@ def _private_json(path):
     return value if isinstance(value, dict) else None
 
 
+def load_settings(workspace):
+    value = _private_json(Path(workspace) / '.mathagent' / 'gui-settings.json') or {}
+    saved = value.get('read') if isinstance(value.get('read'), dict) else {}
+    read = {group: saved.get(group) is not False for group in READ_GROUPS}
+    # Older restricted folders never opted into the newly supported languages.
+    if 'code' not in saved and not all(read.values()):
+        read['code'] = False
+    return {'read': read}
+
+
+def save_settings(workspace, read):
+    if not isinstance(read, dict) or any(k not in READ_GROUPS or type(v) is not bool for k, v in read.items()):
+        raise ValueError('read must map supported file groups to true or false')
+    settings = load_settings(workspace)
+    settings['read'].update(read)
+    base = Path(workspace) / '.mathagent'
+    _directory(base, create=True)
+    _atomic_write(base / 'gui-settings.json', json.dumps(settings, indent=1).encode())
+    return settings
+
+
+def read_types(workspace):
+    return [group for group, allowed in load_settings(workspace)['read'].items() if allowed]
+
+
 def resolve_folder(root, relative=''):
     """A folder at or below the interface root: no hidden parts, no symlink escape."""
     root = Path(root).resolve(strict=True)
@@ -1728,7 +1753,7 @@ def save_upload(workspace, name, data):
 
 # -- the file viewer and editor -------------------------------------------------------------------------
 
-VIEW_TEXT_BYTES = 4 * 1024 * 1024    # text shown (and edited) in the viewer
+VIEW_TEXT_BYTES = UPLOAD_BYTES
 VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser, or a file downloaded
 MARKDOWN = {'.md', '.markdown'}
 
@@ -1778,7 +1803,7 @@ def view_file(base, relative):
     if kind not in ('text', 'markdown'):
         return result
     if size > VIEW_TEXT_BYTES:
-        return {**result, 'kind': 'too_large'}
+        return {**result, 'kind': 'too_large', 'note': f'Text files up to {VIEW_TEXT_BYTES // (1024 * 1024)} MiB can be opened here.'}
     data = path.read_bytes()
     try:
         text, encoding = decode_text(data, path.name)
@@ -1811,17 +1836,32 @@ def save_text(base, relative, content, sha256):
     path = root_file(base, relative)
     if view_kind(path) not in ('text', 'markdown'):
         raise ValueError('Only text files can be edited here')
-    if not isinstance(content, str) or len(content.encode('utf-8', 'surrogatepass')) > VIEW_TEXT_BYTES:
-        raise ValueError('The text must be at most 4 MB')
-    current = path.read_bytes()
+    too_large = f'The text file must be at most {VIEW_TEXT_BYTES // (1024 * 1024)} MiB in its saved encoding'
+    if not isinstance(content, str) or len(content) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
+    with path.open('rb') as stream:
+        current = stream.read(VIEW_TEXT_BYTES + 1)
+    if len(current) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
     if not isinstance(sha256, str) or hashlib.sha256(current).hexdigest() != sha256:
         raise FileExistsError('The file changed since it was opened; reload it before saving')
-    _, encoding = decode_text(current, path.name)
+    old, encoding = decode_text(current, path.name)
+    prefix = b''
+    if encoding == 'utf-16':
+        prefix = current[:2]
+        encoding = 'utf-16-le' if prefix == codecs.BOM_UTF16_LE else 'utf-16-be'
+    elif encoding == FALLBACK:
+        # Preserve ordinary Windows-1252 files. Mixed legacy and UTF-8 input has no single original codec.
+        encoding = 'cp1252' if current.decode('cp1252', errors='replace') == old else 'utf-8'
+    elif current.startswith(codecs.BOM_UTF8):
+        prefix = codecs.BOM_UTF8
     try:
-        data = content.encode(encoding or 'utf-8')
+        data = prefix + content.encode(encoding or 'utf-8')
     except UnicodeEncodeError:
         raise ValueError(f'The text has characters that {encoding} cannot store; '
                          'remove them or save the file as UTF-8 elsewhere') from None
+    if len(data) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
     mode = stat.S_IMODE(path.stat().st_mode)
     fd, temporary = tempfile.mkstemp(prefix='.edit-', dir=path.parent)
     try:

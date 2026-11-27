@@ -306,10 +306,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   root using a private atomic write and revision check. The Assistant captures
   the preferences at turn admission and keeps that context on resume. The
   personalization event refreshes conversation math definitions in the GUI.
-- **File tools.** The interface's workspaces read every group of `tools.READ_GROUPS`
-  (TeX, PDF, Python, other text, code); there is no per-folder setting any more
-  (the former `gui-settings.json` is ignored). A nested workspace may still allow
-  fewer groups (`read_types`, e.g. none for the reference checker). Inferred
+- **File tools.** New GUI workspaces allow each group in `tools.READ_GROUPS`
+  (TeX, PDF, Python, other text and code). The active folder's
+  `.mathagent/gui-settings.json` governs implicit discovery and reading.
+  `GET /api/settings` and `POST /api/settings` read and update those permissions.
+  When a restricted setting predates the code group, that group starts disabled.
+  A nested workspace may allow fewer groups (`read_types`, e.g. none for the reference checker). Inferred
   source names must exist locally and be of a readable kind; a URL or a missing
   filename is not an implicit attachment. File and
   directory responses expose pagination, including columns within long lines.
