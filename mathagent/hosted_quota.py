@@ -72,13 +72,13 @@ class HostedQuota:
             with self._transaction() as db:
                 if db.execute('SELECT budget, input_rate, output_rate FROM settings WHERE id=1').fetchone() != self.settings:
                     raise AgentError('Tester allowance settings changed; existing allowance was preserved')
-                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calls'").fetchone():
-                    # A ledger from the reservation design: keep what was charged, as one row. Reservations
-                    # that crashed calls left open are released (their cost was never known).
-                    db.execute(_CHARGES)
-                    db.execute('INSERT INTO charges SELECT COALESCE(SUM(charged),0), SUM(input_tokens), '
-                               'SUM(output_tokens) FROM calls')
-                    db.execute('DROP TABLE calls')
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='charges'").fetchone():
+                    # The short-lived charges-only schema. Keep every row and make the ledger readable by
+                    # earlier releases again. A reservation-era ledger already has this shape and needs no rewrite.
+                    db.execute(_CALLS)
+                    db.execute('INSERT INTO calls (id, charged, input_tokens, output_tokens) '
+                               'SELECT lower(hex(randomblob(16))), charged, input_tokens, output_tokens FROM charges')
+                    db.execute('DROP TABLE charges')
         except (OSError, sqlite3.Error):
             raise AgentError('Tester allowance storage is unavailable; no new allowance was granted') from None
 
@@ -97,7 +97,7 @@ class HostedQuota:
                 with db:
                     db.execute('CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), budget INTEGER, input_rate TEXT, output_rate TEXT)')
                     db.execute('INSERT INTO settings VALUES (1,?,?,?)', self.settings)
-                    db.execute(_CHARGES)
+                    db.execute(_CALLS)
             finally:
                 db.close()
             try:
@@ -140,7 +140,7 @@ class HostedQuota:
     def admit(self):
         """Refuse a new call once the tester has spent the whole allowance."""
         with self._transaction() as db:
-            if db.execute('SELECT COALESCE(SUM(charged),0) FROM charges').fetchone()[0] >= self.budget:
+            if db.execute('SELECT COALESCE(SUM(charged),0) FROM calls').fetchone()[0] >= self.budget:
                 raise TesterAllowanceInsufficient()
 
     def charge(self, input_tokens, output_tokens, cost_usd=None, estimated=False):
@@ -157,16 +157,18 @@ class HostedQuota:
         if not 0 <= charged <= MAX_INTEGER:
             raise AgentError('Tester allowance cost exceeds its supported range')
         with self._transaction() as db:
-            db.execute('INSERT INTO charges VALUES (?,?,?)',
-                       (charged, None if estimated else input_tokens, None if estimated else output_tokens))
+            db.execute('INSERT INTO calls (id, charged, input_tokens, output_tokens) VALUES (?,?,?,?)',
+                       (secrets.token_hex(16), charged, None if estimated else input_tokens, None if estimated else output_tokens))
 
     def status(self):
         with self._transaction() as db:
             charged, inputs, outputs = db.execute(
                 'SELECT COALESCE(SUM(charged),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) '
-                'FROM charges').fetchone()
+                'FROM calls WHERE charged IS NOT NULL').fetchone()
         return {'limit_nanos': self.budget, 'charged_nanos': charged, 'input_tokens': inputs, 'output_tokens': outputs,
                 'input_per_million': self.settings[1], 'output_per_million': self.settings[2]}
 
 
-_CHARGES = 'CREATE TABLE charges (charged INTEGER NOT NULL, input_tokens INTEGER, output_tokens INTEGER)'
+# Older releases use the cap and reserved columns. This version only inserts completed charges.
+_CALLS = ('CREATE TABLE calls (id TEXT PRIMARY KEY, input_cap INTEGER, output_cap INTEGER, reserved INTEGER, '
+          'charged INTEGER, input_tokens INTEGER, output_tokens INTEGER)')

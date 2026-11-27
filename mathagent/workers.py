@@ -724,7 +724,7 @@ def run_worker(host, parent, budget, action, child, save):
                        + '; see the saved report.')
             if result.get('stop_reason') and result['status'] in ('error', 'budget_violation'):
                 outcome = result['stop_reason']
-            worker_error = result.get('worker_error')
+            result_error = result.get('worker_error')
             answer = result['report']
             if mode in ('writeup', 'summarize') and runner.state:
                 outcome = answer = result.get('compile_answer') or runner.ready_message()
@@ -748,8 +748,8 @@ def run_worker(host, parent, budget, action, child, save):
                 result['kind'] = runner.state.get('document_kind')
                 result['needs'] = [{key: need[key] for key in ('type', 'what', 'concerns')}
                                    for need in runner.state.get('needs') or [] if need.get('blocking')]
-            if worker_error:
-                result['error'] = worker_error
+            if result_error:
+                result['error'] = result_error
         else:
             source_action = automatic_source_action(action['request'], files) if mode == 'explore' else None
             routing = parent.state.get('proof_routing') or {}

@@ -31,10 +31,11 @@ from ..format_request import can_recover_previous_markdown, compile_followup_req
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
 from ..openrouter import OpenRouter
-from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4
+from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4, ProviderChanged
 from ..ledger import LedgerError, ProofStore
 from ..literature import LiteratureTools
 from ..proof import TERMINAL as PROOF_TERMINAL, ProofRunner, budget_stop, unsettled_interrupts
+from ..research import _job_directory, _read_state
 from ..prompts import FRESH_REVIEW
 from ..litreview import ReviewRunner, review_outcome as _review_outcome
 from ..workers import REVIEW_MODES, run_worker
@@ -44,7 +45,7 @@ from ..style import StyleRunner, load_choice, style_path
 from ..source_tasks import excludes_external_sources, requests_workspace_search
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
-from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted
+from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted, assistant_transport, check_assistant_transport
 from ..numerics import PythonSandbox
 from ..tools import READ_GROUPS, Workspace, source_suffix
 from ..writeup import WriteupRunner
@@ -227,8 +228,8 @@ class Interruptible:
             except (OSError, ValueError):
                 pass
 
-    def request(self, endpoint, data=None):
-        response = super().request(endpoint, data)
+    def request(self, endpoint, data=None, **options):
+        response = super().request(endpoint, data, **options)
         if endpoint not in {'/chat/completions', '/api/chat'}:
             return response
         with self._response_lock:
@@ -238,6 +239,10 @@ class Interruptible:
                 state['accepted_at'] = time.monotonic()
         if state is not None and (self.cancel.is_set() or state['expired']):
             self._abort_response(response)
+            if options.get('before_send') is not None:
+                # The provider has accepted this billed request. Let the stream close it and record usage
+                # even when cancellation won the race with the HTTP response headers.
+                return response
             response.close()
             if self.cancel.is_set():
                 raise KeyboardInterrupt
@@ -1842,6 +1847,26 @@ class Hub:
     def resume_assistant(self, chat_id):
         return self._assistant_turn(chat_id, '', resume=True)
 
+    def _check_legacy_child_endpoints(self, state, current):
+        # A pending native child can have its own recorded destination even when its parent predates this field.
+        for child in state.get('children', ()):
+            job_id = child.get('job_id') or child.get('native_id')
+            if not job_id or child.get('status') == 'complete':
+                continue
+            mode = child.get('action', {}).get('mode')
+            try:
+                if mode == 'prove':
+                    job = ProofStore.load(self.root, job_id).state
+                else:
+                    folder = 'checks' if mode == 'check' else 'research'
+                    job = _read_state(_job_directory(self.root, job_id, folder), job_id, verify=False)
+            except (ValueError, OSError):
+                continue  # No native record to identify the parent; it still requires explicit confirmation.
+            settings = job.get('settings', {})
+            if settings.get('host'):
+                check_assistant_transport({'api_profile': settings.get('api_profile', 'default'),
+                                           'backend': settings.get('backend', 'ollama'), 'host': settings['host']}, current)
+
     def stop_investigation(self, chat_id, expected_id=None):
         """Close a paused investigation using only its saved evidence."""
         with self._lock:
@@ -1903,6 +1928,13 @@ class Hub:
         if resume:
             if saved.get('status') not in resumable:
                 raise ValueError('This Assistant turn is not paused or recoverable.')
+            current_transport = assistant_transport(self.args)
+            if 'transport' in saved:
+                check_assistant_transport(saved['transport'], current_transport)
+            else:
+                self._check_legacy_child_endpoints(saved, current_transport)
+            if saved.get('images') and not self.image_support():
+                raise ProviderChanged('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
             content, files = saved['query'], saved.get('files', ())
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters.')
@@ -1965,8 +1997,6 @@ class Hub:
             if local_conversion or compile_job:
                 image_refs, attached_images = [], []  # These local jobs use their own pinned inputs.
             elif resume:
-                if saved.get('images') and not self.image_support():
-                    raise ValueError('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
                 image_refs = [images.validate(self.root, ref) for ref in saved.get('images', [])]
                 attached_images = []
             else:
@@ -2028,6 +2058,24 @@ class Hub:
             elif excludes_external_sources(content):
                 online = False
             main, _ = self._engine(task, mode='explore', think=False, online=online)
+            if resume:
+                if previous is None or previous.get('id') != saved.get('id'):
+                    raise Busy('The paused Assistant turn changed before it could resume.')
+                destination = assistant_transport(main.client)
+                if 'transport' not in previous:
+                    # This approval belongs to the registered task and precedes even the model catalog request.
+                    message = (f'This older turn has no saved model endpoint. Resume using {destination["backend"]} '
+                               f'({destination["api_profile"]}) at {destination["host"]}? '
+                               'Its saved messages and selected source material may be sent there.')
+                    if not self._approve(task, message) or task.cancel.is_set():
+                        task.cancel.set()
+                        raise KeyboardInterrupt
+                    with self._lock:
+                        if store.load_chat(root, chat_id).get('assistant_state') != fresh['assistant_state']:
+                            raise Busy('The paused Assistant turn changed while confirming its model endpoint.')
+                        previous['transport'] = destination
+                        store.save_assistant(root, chat_id, {**fresh['assistant_state'], 'transport': destination})
+                check_assistant_transport(previous['transport'], destination)
             main.review_reference = review_reference
             main.scope_chat_id = chat_id
             main.index_view = (previous.get('index_view') if previous is not None else
@@ -2207,6 +2255,9 @@ class Hub:
             try:
                 return run_turn(task)
             except KeyboardInterrupt:
+                raise
+            except (ProviderChanged, Busy):
+                # A resume mismatch or superseded turn must never mark the saved work as failed.
                 raise
             except Exception as exc:
                 fresh = store.load_chat(root, chat_id)

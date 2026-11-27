@@ -205,8 +205,8 @@ class OpenAICompatible:
         self._token_count_cache = {}
         self.opener = build_opener(ProxyHandler({}), _NoModelRedirects())
 
-    def request(self, endpoint, data=None):
-        return self._request_url(self.base_url + endpoint, data)
+    def request(self, endpoint, data=None, **options):
+        return self._request_url(self.base_url + endpoint, data, **options)
 
     def _request_url(self, url, data=None, *, optional=False):
         request = Request(url,
@@ -364,15 +364,17 @@ class OpenAICompatible:
     def _stream_deadline(self):
         return time.monotonic() + self.timeout
 
-    def _stream(self, data, output_char_limit=None, start_seconds=None):
+    def _stream(self, data, output_char_limit=None, start_seconds=None, *, before_send=None, on_usage=None):
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
         generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = self._stream_deadline()
+        # The hosted tester ledger checks each HTTP send and charges each accepted response exactly once.
+        request_options = {'before_send': before_send} if before_send is not None else {}
         try:
-            with self.request('/chat/completions', data) as response:
+            with self.request('/chat/completions', data, **request_options) as response:
                 accepted = True
                 output = {'started': False, 'last': None}
                 lines = response if start_seconds is None else _started(response, start_seconds, output)
@@ -384,8 +386,7 @@ class OpenAICompatible:
                             raise AgentError('Model stream ended without finish reason and token usage')
                         complete_calls, ids = [], set()
                         raw_calls = [calls[index] for index in sorted(calls)]
-                        stats = {'done_reason': finish, 'eval_count': usage['completion_tokens'],
-                                 'prompt_eval_count': usage['prompt_tokens']}
+                        stats = {'done_reason': finish, **usage}
                         # A capped tool request can end inside JSON arguments.
                         # Preserve the length result/usage for controller recovery,
                         # but never expose unfinished calls to a tool executor.
@@ -404,11 +405,12 @@ class OpenAICompatible:
                         if finish == 'tool_calls' and not complete_calls:
                             raise AgentError('Model finished with tool_calls but supplied no calls')
                         event = {'message': {'tool_calls': complete_calls} if complete_calls else {},
-                                 'done': True, 'done_reason': finish,
-                                 'eval_count': usage['completion_tokens'], 'prompt_eval_count': usage['prompt_tokens']}
-                        cost = usage.get('cost')  # the call's price in USD, when the provider reports it (OpenRouter)
-                        if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
-                            event['cost_usd'] = cost
+                                 'done': True, **stats}
+                        if on_usage is not None:
+                            warning = on_usage(usage, progress)
+                            on_usage = None
+                            if warning:
+                                event['accounting_warning'] = warning
                         yield event
                         return
                     chunk = json.loads(raw)
@@ -427,21 +429,23 @@ class OpenAICompatible:
                                 self._first_model_output()
                             break
                     current = chunk.get('usage')
+                    reported = None
                     if current is not None:
                         if not isinstance(current, dict) or any(type(current.get(key)) is not int or current[key] < 0 for key in ('prompt_tokens', 'completion_tokens')):
                             if 'error' in chunk:
                                 raise ProviderStreamError(chunk['error'])
                             raise AgentError('Missing or invalid token usage in model stream')
-                        if current['completion_tokens'] > requested_cap:
-                            raise TokenBudgetError({'eval_count': current['completion_tokens'],
-                                                    'prompt_eval_count': current['prompt_tokens']},
-                                                   requested_cap)
-                        usage = current
+                        reported = {'eval_count': current['completion_tokens'], 'prompt_eval_count': current['prompt_tokens']}
+                        cost = current.get('cost')
+                        if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+                            reported['cost_usd'] = cost
+                        if reported['eval_count'] > requested_cap:
+                            final_usage = reported
+                            raise TokenBudgetError(reported, requested_cap)
+                        usage = reported
                     choices = chunk.get('choices', [])
                     if not isinstance(choices, list) or len(choices) > 1:
                         raise AgentError('Expected one streamed completion choice')
-                    reported = ({'eval_count': current['completion_tokens'], 'prompt_eval_count': current['prompt_tokens']}
-                                if current is not None else None)
                     if 'error' in chunk:
                         # An error can accompany the provider's empty-choice usage
                         # trailer or an explicit terminal choice. A prior partial
@@ -499,8 +503,6 @@ class OpenAICompatible:
                                         if output_char_limit is not None and generated_chars > output_char_limit:
                                             raise AgentError('Proof preparation exceeded its short tool-argument allowance')
                                     container[key] += value
-                        if message:
-                            yield {'message': message, 'done': False}
                         reason = choice.get('finish_reason')
                         if reason is not None:
                             if reason == 'error':
@@ -511,7 +513,11 @@ class OpenAICompatible:
                                     or finish is not None and not (repeat and reason == finish)):
                                 raise AgentError(f'Unsupported or repeated model finish reason: {reason}')
                             finish = reason
-                    if finish is not None and reported:
+                        if finish is not None and reported:
+                            final_usage = reported
+                        if message:
+                            yield {'message': message, 'done': False}
+                    if not choices and finish is not None and reported:
                         final_usage = reported
             error = AgentError('Model stream ended before [DONE]; partial output is incomplete')
         except (ToolCallError, TokenBudgetError):
@@ -530,6 +536,10 @@ class OpenAICompatible:
             error = AgentError(f'Malformed or interrupted model stream: {exc}')
             category = 'interrupted' if isinstance(exc, (OSError, HTTPException)) else 'protocol'
             raise self._stream_failure(error, category, progress, final_usage, output_started) from None
+        finally:
+            if accepted and on_usage is not None:
+                # Includes early close, local guards, model errors and cancellation before a usage trailer.
+                on_usage(final_usage, progress)
         raise self._stream_failure(error, 'interrupted', progress, final_usage, output_started)
 
 

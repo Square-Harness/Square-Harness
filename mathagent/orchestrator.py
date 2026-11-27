@@ -20,8 +20,10 @@ import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 from .agent import AgentError
+from .api_profiles import HOSTED_PROFILES
 from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
@@ -29,7 +31,7 @@ from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_b
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .tools import schema
 from .refcheck import standalone_reference_request
-from .model_limits import output_limit, input_limit, is_ds4, HOSTED_DS4
+from .model_limits import output_limit, input_limit, is_ds4, HOSTED_DS4, ProviderChanged
 
 
 # Each section keeps the earlier single POLICY's sentences unchanged. A section is sent only in a
@@ -302,6 +304,26 @@ def _delegate_schema():
     }}
 
 
+def assistant_transport(subject):
+    """Identify the same endpoint from launch arguments or a running client."""
+    profile = getattr(subject, 'profile', None) or getattr(subject, 'api_profile', None) or 'default'
+    host = getattr(subject, 'host', None)
+    if host:
+        host = host.rstrip('/')
+        if profile in HOSTED_PROFILES and not urlsplit(host).path:
+            host += HOSTED_PROFILES[profile].api_path
+    return {'backend': getattr(subject, 'backend', 'ollama'), 'api_profile': profile, 'host': host}
+
+
+def check_assistant_transport(saved, current):
+    if saved == current:
+        return
+    if not isinstance(saved, dict):
+        raise ProviderChanged('This older Assistant turn has no saved model endpoint. Confirm the destination to resume.')
+    raise ProviderChanged(f'Resume this turn with its original --backend {saved.get("backend")}, '
+                          f'--api-profile {saved.get("api_profile")} and --host {saved.get("host")}.')
+
+
 class WorkerInterrupted(AgentError):
     """The worker recorded the cause and checkpointed its open delegation."""
 
@@ -395,7 +417,7 @@ class Orchestrator:
             message['images'] = copy.deepcopy(self.agent.turn_image_refs)
         self.state = {
             'version': STATE_VERSION, 'id': 'assistant_' + uuid.uuid4().hex,
-            'status': 'running', 'query': query,
+            'status': 'running', 'query': query, 'transport': assistant_transport(self.agent.client),
             'files': list(files), 'history': original,
             'messages': self._working_history(original) + [message],
             'children': [], 'pending_calls': [], 'actions': 0, 'main_calls': 0,
@@ -470,6 +492,7 @@ class Orchestrator:
         state = copy.deepcopy(state)
         if not isinstance(state, dict) or state.get('version') != STATE_VERSION:
             raise ValueError('Unsupported assistant checkpoint')
+        check_assistant_transport(state.get('transport'), assistant_transport(self.agent.client))
         if not isinstance(state.get('id'), str) or not state['id']:
             raise ValueError('Malformed assistant checkpoint identifier')
         for key in ('messages', 'history', 'files', 'children', 'pending_calls', 'warnings'):

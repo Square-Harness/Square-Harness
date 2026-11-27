@@ -31,7 +31,7 @@ from urllib.request import Request
 
 from .agent import AgentError, ModelNotDispatched
 from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
-                       StalledStream, ToolCallError)
+                       StalledStream)
 from .model_limits import HOSTED_DS4, MODEL_OUTPUT_TOKENS
 
 
@@ -545,7 +545,7 @@ class DeepInfra(OpenAICompatible):
     def _redact(self, value):
         return str(value).replace(self._api_key, '[redacted]')
 
-    def _request_url(self, url, data=None, *, optional=False):
+    def _request_url(self, url, data=None, *, optional=False, before_send=None):
         parsed = urlsplit(url)
         origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
         if (origin != self._origin or parsed.path not in set(self.routes) or parsed.username or parsed.password
@@ -610,6 +610,8 @@ class DeepInfra(OpenAICompatible):
                     if cancel is None:
                         time.sleep(wait)
                     timeout = deadline - time.monotonic()
+            if before_send is not None:
+                before_send()  # check after any busy wait, immediately before this HTTP attempt
             try:
                 return self.opener.open(request, timeout=timeout)
             except HTTPError as exc:
@@ -848,41 +850,35 @@ class DeepInfra(OpenAICompatible):
             yield from self._generation(payload)
 
     def _generation(self, payload):
-        quota = None
-        if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
-            from .hosted_quota import HostedQuota
-            quota = HostedQuota.from_environment(self.service_tier)
-            quota.admit()  # nothing is reserved: any number of calls run while the tester is under the limit
+        from .hosted_quota import HostedQuota
+        quota = HostedQuota.from_environment(self.service_tier)
+        accounting_warning = None
+
+        def record_usage(stats, progress):
+            nonlocal accounting_warning
+            try:
+                if stats is not None:
+                    quota.charge(stats['prompt_eval_count'], stats['eval_count'], stats.get('cost_usd'))
+                else:
+                    # Never count base64 transport as input tokens. Unknown usage stays out of the measured totals.
+                    data = self._payload(payload, include_images=False)
+                    inputs = self._bytes(data['messages']) + 1024 + 128 * len(data['messages'])
+                    quota.charge(min(CONTEXT_TOKENS, inputs), min(data['max_tokens'], sum(progress.values()) + 256),
+                                 estimated=True)
+            except AgentError:
+                accounting_warning = 'The tester allowance could not record this call.'
+            return accounting_warning
+
         try:
             if quota is None:
                 yield from super().stream(payload)
             else:
-                from contextlib import closing
-                with closing(super().stream(payload)) as stream:
-                    for event in stream:
-                        if event.get('done'):
-                            try:
-                                quota.charge(event.get('prompt_eval_count'), event.get('eval_count'), event.get('cost_usd'))
-                            except AgentError:
-                                # The provider already completed: deliver the billed answer instead of losing it.
-                                event = {**event, 'accounting_warning': 'The tester allowance could not record this call.'}
-                        yield event
+                yield from self._stream(self._payload(payload), output_char_limit=payload.get('_output_char_limit'),
+                                        start_seconds=payload.get('_start_seconds'), before_send=quota.admit,
+                                        on_usage=record_usage)
         except (AgentError, MeasuredStreamCancellation, _RejectedRetryCancelled) as exc:
-            if rejected_before_inference(exc):
-                raise  # nothing was generated, nothing is charged
-            if quota is not None:
-                stats = exc.stats if isinstance(exc, (ToolCallError, DeepInfraGenerationError, MeasuredStreamCancellation)) else None
-                try:
-                    if stats:
-                        quota.charge(stats['prompt_eval_count'], stats['eval_count'])
-                    elif isinstance(exc, DeepInfraGenerationError):
-                        # Usage unknown (a silent, stalled or broken stream): the whole input (its UTF-8 bytes bound
-                        # its tokens) and every character streamed plus a margin.
-                        data = self._payload(payload, include_images=False)
-                        quota.charge(min(CONTEXT_TOKENS, self._bytes(data['messages']) + 1024 + 128 * len(data['messages'])),
-                                     min(data['max_tokens'], sum(exc.stream_progress.values()) + 256), estimated=True)
-                except AgentError:
-                    exc.args = (str(exc) + ' The tester allowance could not record this call.',)
+            if accounting_warning:
+                exc.args = (str(exc) + ' ' + accounting_warning,)
             redacted = self._redact(exc)
             if redacted != str(exc):
                 raise AgentError(redacted) from None

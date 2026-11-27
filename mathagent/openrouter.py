@@ -146,8 +146,14 @@ class OpenRouter(DeepInfra):
         # After the 200, OpenRouter sends an upstream failure as an error chunk (once every fallback has failed).
         code, kind, _ = _error_fields(detail)
         signals = _provider_signals(detail)
+        if _mentions(signals, _UNSERVABLE):
+            return 'invalid_request', _ROUTING_HINT
+        if _credit_limit(signals):
+            return 'quota', 'OpenRouter reported a credit or spending limit during generation.'
+        if code is not None and 400 <= code < 500 and code not in _BUSY_CODES:
+            return _generation_failure({'code': code}, self.display)
         busy = (code in _BUSY_CODES or kind in _BUSY_TYPES
                 or ((code is None or code >= 500) and _mentions(signals, _ROUTER_BUSY)))
-        if busy and not _credit_limit(signals) and not _mentions(signals, _UNSERVABLE):
+        if busy:
             return 'service_unavailable', 'OpenRouter reported that the provider is busy or failed before answering.'
         return _generation_failure(detail, self.display)

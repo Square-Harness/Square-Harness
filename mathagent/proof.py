@@ -479,6 +479,10 @@ class ProofRunner:
         for key in ('host', 'backend'):
             if saved.get(key) != current_provenance[key]:
                 raise ProviderChanged(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
+        if 'provider_routing' in saved and saved['provider_routing'] != current_provenance.get('provider_routing'):
+            order = ', '.join(saved['provider_routing'].get('order', ()))
+            raise ProviderChanged('Resume this proof with the original OpenRouter routing settings '
+                                  f'(SH_OPENROUTER_PROVIDERS={order}).')
         for key in ('model', 'ctx', 'seed', 'temperature', 'top_p'):
             setattr(self.agent, key, saved[key])
         images.restore(self.agent, self.state)

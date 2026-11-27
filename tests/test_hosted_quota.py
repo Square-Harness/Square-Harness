@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from mathagent.agent import Agent, AgentError
 from mathagent.assistant_budget import BudgetClient
-from mathagent.backends import MeasuredStreamCancellation
+from mathagent.backends import MeasuredStreamCancellation, TokenBudgetError, ToolCallError
 from mathagent.deepinfra import (DeepInfra, DeepInfraGenerationError, DeepInfraRateLimit, MODEL, RETRIES,
                                  TesterAllowanceInsufficient, generation_stream, rejected_before_inference)
 from mathagent.gui import store
@@ -46,7 +46,7 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual((client.snapshot()['tokens'], client.snapshot()['measured_tokens']), (4156, 60))
             self.assertEqual((len(fake.completions), quota_status()['output_tokens']), (3, 60))
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT output_tokens FROM charges ORDER BY rowid').fetchall(),
+                self.assertEqual(db.execute('SELECT output_tokens FROM calls WHERE charged IS NOT NULL ORDER BY rowid').fetchall(),
                                  [(None,), (37,), (23,)])
 
             # The worker can afford two calls, but the parent cannot. The first
@@ -296,7 +296,7 @@ class HostedQuotaTests(unittest.TestCase):
                              ['assistant_budget']['tokens'], {'used': 15, 'uncertain': 128, 'reserved': 0, 'limit': 1024})
             self.assertEqual(len(fake.completions), 3)
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT input_tokens, output_tokens FROM charges ORDER BY rowid').fetchall(),
+                self.assertEqual(db.execute('SELECT input_tokens, output_tokens FROM calls WHERE charged IS NOT NULL ORDER BY rowid').fetchall(),
                                  [(None, None), (45, 9), (200, 6)])
 
             # An error can include a terminal usage record. A cancellation after
@@ -371,7 +371,7 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertTrue(rejected_before_inference(stopped.exception))
             self.assertEqual(len(fake.completions), 9 + RETRIES)
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                rows = db.execute('SELECT input_tokens, output_tokens FROM charges ORDER BY rowid').fetchall()
+                rows = db.execute('SELECT input_tokens, output_tokens FROM calls WHERE charged IS NOT NULL ORDER BY rowid').fetchall()
             self.assertEqual(rows, [(200, 5)])  # a refusal before the stream costs nothing and records nothing
 
             # A failure in an accepted stream has unknown usage: it is charged an estimate (the whole input and
@@ -423,7 +423,7 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertIn('used up', str(refused.exception))
             self.assertEqual((parent.snapshot()['tokens'], parent.snapshot()['input_tokens']), (0, 0))
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT COUNT(*) FROM charges').fetchone()[0], 3)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM calls WHERE charged IS NOT NULL').fetchone()[0], 3)
             status = quota_status()
             # Reported usage only in the counters; the broken third stream is charged an estimate.
             self.assertEqual((status['input_tokens'], status['output_tokens']), (400, 10))
@@ -453,7 +453,7 @@ class HostedQuotaTests(unittest.TestCase):
             with self.assertRaisesRegex(AgentError, 'settings changed'):
                 HostedQuota(str(path), '5')
 
-            # A ledger from the reservation design keeps what it charged; open reservations are released.
+            # Individual legacy calls survive. Pending holds are ignored and remain settleable by the old process.
             legacy = Path(directory).resolve() / 'legacy.sqlite'
             with sqlite3.connect(legacy) as db:
                 db.execute('CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), budget INTEGER, input_rate TEXT, output_rate TEXT)')
@@ -467,3 +467,101 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual(migrated.status()['charged_nanos'], 113000)
             self.assertEqual((migrated.status()['input_tokens'], migrated.status()['output_tokens']), (200, 5))
             self.assertEqual(HostedQuota(str(legacy)).status()['charged_nanos'], 113000)  # once only
+
+            with sqlite3.connect(legacy) as db:
+                self.assertEqual(db.execute('SELECT id, charged FROM calls ORDER BY id').fetchall(),
+                                 [('a', 43000), ('b', 70000), ('c', None)])
+
+            # The interim charges-only schema can be reopened by the reservation-era binary after migration.
+            interim = Path(directory).resolve() / 'interim.sqlite'
+            with sqlite3.connect(interim) as db:
+                db.execute('CREATE TABLE settings (id INTEGER PRIMARY KEY, budget INTEGER, input_rate TEXT, output_rate TEXT)')
+                db.execute("INSERT INTO settings VALUES (1, 2500000000, '0.2', '0.6')")
+                db.execute('CREATE TABLE charges (charged INTEGER NOT NULL, input_tokens INTEGER, output_tokens INTEGER)')
+                db.executemany('INSERT INTO charges VALUES (?,?,?)', [(300, 7, 4), (500, None, None)])
+            os.chmod(interim, 0o600)
+            HostedQuota(interim).charge(10, 20, cost_usd=.000001)
+            restored = HostedQuota(interim)
+            self.assertEqual(restored.status()['charged_nanos'], 1800)
+            with sqlite3.connect(interim) as db:
+                self.assertEqual(db.execute('SELECT SUM(COALESCE(charged,reserved)), SUM(input_tokens), SUM(output_tokens), '
+                                            'COUNT(DISTINCT id) FROM calls').fetchone(), (1800, 17, 24, 3))
+
+    def test_accepted_cancellations_and_errors_settle_once(self):
+        from mathagent.openrouter import OpenRouter
+        from tests.test_openrouter import FakeOpenRouter, PAYLOAD, environment
+        fake = FakeOpenRouter()
+        self.addCleanup(fake.close)
+        with tempfile.TemporaryDirectory() as directory, environment(fake, SH_DEEPINFRA_QUOTA_FILE=str(
+                Path(directory).resolve() / 'quota.sqlite')):
+            client = OpenRouter(fake.host)
+            part = {'choices': [{'delta': {'content': 'partial'}}]}
+            terminal = {'choices': [{'delta': {'content': 'end'}, 'finish_reason': 'stop'}],
+                        'usage': {'prompt_tokens': 25, 'completion_tokens': 3, 'cost': .000127}}
+            fake.replies = [{'events': [part]}, {'events': [terminal]}, {'events': [terminal]}]
+            stream = client.stream(PAYLOAD)
+            next(stream)
+            stream.close()
+            estimate = quota_status()['charged_nanos']
+            self.assertGreater(estimate, 0)
+            self.assertEqual(quota_status()['output_tokens'], 0)
+            stream = client.stream(PAYLOAD)
+            next(stream)  # a terminal delta already carried the price
+            stream.close()
+            self.assertEqual(quota_status()['charged_nanos'], estimate + 127000)
+            stream = client.stream(PAYLOAD)
+            next(stream)
+            next(stream)  # accounting completes before the done event is delivered
+            stream.close()
+            self.assertEqual(quota_status()['charged_nanos'], estimate + 254000)
+            error = {'choices': [], 'error': {'code': 500}, 'usage': terminal['usage']}
+            too_many = {**terminal, 'usage': {**terminal['usage'], 'completion_tokens': 129}}
+            bad_call = {'choices': [{'finish_reason': 'tool_calls', 'delta': {'tool_calls': [
+                {'index': 0, 'id': 't', 'function': {'name': 'f', 'arguments': '{'}}]}}], 'usage': terminal['usage']}
+            for frame, failure in [(error, DeepInfraGenerationError), (too_many, TokenBudgetError), (bad_call, ToolCallError)]:
+                before = quota_status()['charged_nanos']
+                fake.replies = [{'events': [frame]}]
+                with self.assertRaises(failure) as stopped:
+                    list(client.stream(PAYLOAD))
+                self.assertEqual(stopped.exception.stats['cost_usd'], .000127)
+                self.assertEqual(quota_status()['charged_nanos'] - before, 127000)
+
+            read_stream = client._sse
+            def cancel_early(response, deadline):
+                for raw in read_stream(response, deadline):
+                    if raw == '[DONE]':
+                        raise KeyboardInterrupt
+                    yield raw
+            fake.replies = [{'events': [part]}]
+            before = quota_status()['charged_nanos']
+            with patch.object(client, '_sse', side_effect=cancel_early), self.assertRaises(KeyboardInterrupt):
+                list(client.stream(PAYLOAD))
+            self.assertEqual(quota_status()['charged_nanos'] - before, estimate)
+
+    def test_parallel_admission_and_busy_retry_at_threshold(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from mathagent.openrouter import OpenRouter
+        from tests.test_openrouter import FakeOpenRouter, PAYLOAD, environment
+        fake = FakeOpenRouter()
+        self.addCleanup(fake.close)
+        with tempfile.TemporaryDirectory() as directory, environment(fake, SH_DEEPINFRA_QUOTA_FILE=str(
+                Path(directory).resolve() / 'quota.sqlite'), SH_DEEPINFRA_QUOTA_USD='2'):
+            quota = HostedQuota.from_environment()
+            quota.charge(1, 1, 1.999)
+            starts = threading.Barrier(10)
+            def finish(_):
+                quota.admit()
+                starts.wait(timeout=10)
+                quota.charge(1, 1, .0004)
+            def finish_other_calls(_):
+                with ThreadPoolExecutor(max_workers=10) as pool:
+                    list(pool.map(finish, range(10)))
+
+            fake.replies = [{'http_status': 429, 'body': {'error': {'code': 429}}}, ('Unused', '', 1)]
+            with patch('mathagent.deepinfra._cooldown', {'until': 0.0}), \
+                    patch('mathagent.deepinfra._refusal_delay', return_value=0), \
+                    patch('mathagent.deepinfra.time.sleep', side_effect=finish_other_calls):
+                with self.assertRaises(TesterAllowanceInsufficient):
+                    list(OpenRouter(fake.host).stream(PAYLOAD))
+            self.assertEqual(quota.status()['charged_nanos'], 2003000000)
+            self.assertEqual(len(fake.completions), 1)

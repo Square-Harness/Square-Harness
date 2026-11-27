@@ -251,9 +251,13 @@ class OpenRouterTransportTests(unittest.TestCase):
                                'error': {'code': 429, 'message': 'Rate limit exceeded', 'metadata': {'error_type': 'rate_limit_exceeded'}}}]}
         self.fake.replies = [limited, ('Recovered', '', 4)]
         self.assertTrue(list(generation_stream(self.client(), PAYLOAD, lambda *_: None))[-1]['done'])
-        for code, category in ((400, 'invalid_request'), (401, 'auth'), (403, 'auth')):
+        for code, message, metadata, category in (
+                (400, 'Provider returned error', {}, 'invalid_request'),
+                (401, 'Provider returned error', {'error_type': 'provider_unavailable'}, 'auth'),
+                (403, 'Provider returned error', {}, 'auth'),
+                (503, 'No endpoints found matching your data policy', {}, 'invalid_request')):
             rejected = {'events': [{'choices': [{'index': 0, 'delta': {'content': ''}, 'finish_reason': 'error'}],
-                                    'error': {'code': code, 'message': 'Provider returned error'}}]}
+                                    'error': {'code': code, 'message': message, 'metadata': metadata}}]}
             self.fake.replies = [rejected]
             before = len(self.fake.completions)
             with self.assertRaises(DeepInfraGenerationError) as stopped:
@@ -310,6 +314,40 @@ class OpenRouterWorkflowTests(GuiCase):
         self.assertTrue(all(c['provider']['zdr'] and c['provider']['data_collection'] == 'deny' for c in sent))
         # The DS4 answer ceiling (384k), fitted into this test's 64k context, not the local default of --predict 1024.
         self.assertTrue(1024 < sent[-1]['max_tokens'] < MODEL_OUTPUT_TOKENS, sent[-1]['max_tokens'])
+
+        # Resume a turn paused after routing. Provider and endpoint mismatches reject before any model call,
+        # even if its images cannot be read with the selected profile; the checkpoint remains available.
+        resume = f'/api/chats/{chat}/assistant/resume'
+        transport = {'api_profile': 'openrouter', 'backend': 'openai', 'host': self.fake.host}
+        self.assertEqual(state['transport'], transport)
+        state.update(status='interrupted', messages=state['messages'][:-1], main_calls=0, last_call=None)
+        for changed in ({**transport, 'api_profile': 'deepinfra'}, {**transport, 'host': 'https://other.invalid'}):
+            paused = {**state, 'transport': changed, 'images': [{'name': 'source.png'}]}
+            store.save_assistant(self.root, chat, paused)
+            self.assertEqual(self.request('POST', resume, {})[0], 400)
+            self.assertEqual(store.load_chat(self.root, chat)['assistant_state'], paused)
+        self.assertEqual(len(self.fake.completions), 2)
+
+        # A legacy turn needs one approval, scoped to its registered task. A concurrent resume cannot reuse
+        # the approval, and declining or pausing it leaves both the saved state and the model untouched.
+        state.pop('transport')
+        store.save_assistant(self.root, chat, state)
+        for approved in (False, True):
+            task_id = self.ok('POST', resume)['task']['id']
+            consent = self.wait_for(lambda: self.ok('GET', '/api/task')['approvals'])[0]
+            self.assertEqual(consent['task'], task_id)
+            self.assertIn(self.fake.host, consent['preview'])
+            self.assertEqual(self.request('POST', resume, {})[0], 409)
+            self.assertEqual(len(self.fake.completions), 2)
+            if approved:
+                self.fake.replies = [('Welcome back.', '', 5)]
+            self.ok('POST', '/api/approvals/' + consent['id'], {'approve': approved})
+            finished = self.wait_task()
+            self.assertEqual(finished['state'], 'done' if approved else 'paused', finished)
+            if not approved:
+                self.assertEqual(store.load_chat(self.root, chat)['assistant_state'], state)
+        self.assertEqual(store.load_chat(self.root, chat)['assistant_state']['transport'], transport)
+        self.assertEqual(len(self.fake.completions), 3)
 
 
 if __name__ == '__main__':
