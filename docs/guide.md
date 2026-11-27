@@ -32,7 +32,9 @@ processing: with OpenRouter, every request asks for zero data retention and no
 data collection; also turn on Zero Data Retention for all models and keep prompt
 logging off in your OpenRouter privacy settings, and give the key a credit limit
 (an OpenRouter key has full account power). A paused job resumes only with the
-provider that started it. Keep the provider credential on the backend, never in
+provider that started it (its data is never sent to another one implicitly); after a
+switch it stays paused and resumes once that provider is selected again, including
+inside an Assistant conversation. Keep the provider credential on the backend, never in
 the browser or a saved job.
 `--allow-remote-model --offline` permits those model calls while locking web
 research off. See the hosted-API setup in [llm-install.md](llm-install.md).
@@ -59,24 +61,24 @@ Its meter counts output-equivalent tokens, including thinking, with input
 weighted by the configured input/output price ratio. At conservative Standard
 list prices of $0.20/M input and $0.60/M output, a $2 allowance is 3.333M
 output-equivalent tokens; each input token consumes one third of an output token.
-This is conservative allowance accounting, not the provider's bill: cached input
-uses the uncached price and promotional charges may be lower. Active calls reserve
-their worst-case allowance. Complete usage releases the unused part. When DeepInfra
-rejects a generation request with HTTP 429 or 5xx before streaming, the entire reservation
-is released. A stream that fails without reporting its usage (a silent, stalled or
-broken stream) is charged a conservative estimate: its whole input and every
-streamed character plus a margin, not the whole reservation.
-A small remaining balance may therefore
-be insufficient to start a full-length call. This pilot limit is separate from
-each Proof job's existing solve/review budgets.
-The account menu separates used, reserved and available amounts, with actual
-input/output counts and the same output-equivalent token meter.
+Each call is charged when it ends: on OpenRouter the price OpenRouter reports for
+it, on DeepInfra its reported tokens at these rates (cached input uses the uncached
+price, so the real bill may be lower). Nothing is set aside before a call: any number
+of calls can run at once while the allowance is not spent, and a new call is refused
+only once it is. Calls already running at that moment finish and are charged, so the
+total can end slightly above the allowance. A request the provider refuses before
+streaming (HTTP 429 or 5xx) costs nothing. A stream that fails without reporting its
+usage (a silent, stalled or broken stream) is charged an estimate: its whole input
+and every streamed character plus a margin. This pilot limit is separate from each
+Proof job's existing solve/review budgets.
+The account menu shows used and remaining amounts, with actual input/output counts
+and the same output-equivalent token meter.
 
 If DeepInfra accepts a request and takes time to produce its first output, the
 interface shows that it is waiting. If DeepInfra then reports a temporary
 internal error before producing any output, Square Harness can try the call
-once more within the remaining time and allowance. A reservation with unknown
-usage still counts toward that allowance.
+once more within the remaining time and allowance. A call with unknown usage is
+charged its estimate toward that allowance.
 
 The DS4 launcher uses Standard service by default. Add
 `--service-tier priority` to request DeepInfra's Priority service for all model
@@ -1106,8 +1108,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   the review goes on. Language typos are left to the typo check, which you can start at the
   same time on the same file.
 
-  The referees and judges run at once (up to the model-request limit in Settings:
-  set it to 16 for reviews with DS4), also when the review is started in a
+  The referees and judges run at once (up to the model-request limit in Settings,
+  200 by default with DS4), also when the review is started in a
   conversation. If the allowance runs short, the referees and readers stop first,
   so that every reported problem is still judged. A review of a 3,000-line paper took about 14 minutes in a test.
 
@@ -1193,7 +1195,7 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   across the paper need a large context (DS4). On DS4 a review of a
   3,000-line paper makes several dozen calls, each reading the whole paper; how
   long it takes depends on how many run at once (the model-request limit in
-  Settings, up to 16; with DS4, set it to 16 for reviews).
+  Settings, up to 200, DeepInfra's account limit; 200 by default with DS4).
 - **Explain**: one result and its proof, or a page, a section or a short text,
   for a mathematician from another field: what it says, the idea, a walk through
   the proof or the passage (every line of a short one), the standard facts used,

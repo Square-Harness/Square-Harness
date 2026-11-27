@@ -161,9 +161,9 @@ class OpenRouterTransportTests(unittest.TestCase):
             self.assertEqual(routing()['only'], ['deepinfra', 'cohere'])
         with patch.dict(os.environ, {'SH_OPENROUTER_PROVIDERS': 'deepinfra;rm -rf'}), self.assertRaises(AgentError):
             routing()
-        # With a tester ledger, the price cap is the ledger's rates, so its reservations stay an upper bound.
+        # A tester ledger never narrows the routing: the same providers and price cap.
         with patch.dict(os.environ, {'SH_DEEPINFRA_QUOTA_FILE': '/tmp/ledger.sqlite'}):
-            self.assertEqual(routing()['max_price'], {'prompt': '0.20', 'completion': '0.60'})
+            self.assertEqual(routing()['max_price'], MAX_PRICE)
         with self.assertRaises(AgentError):  # the legacy V4 model is not offered here
             client._payload({**PAYLOAD, 'model': 'deepseek-ai/DeepSeek-V4-Flash-0731'})
 
@@ -174,12 +174,32 @@ class OpenRouterTransportTests(unittest.TestCase):
         thinking = ''.join(e['message'].get('thinking', '') for e in events if not e.get('done'))
         self.assertEqual((text, thinking), ('The answer.', 'Some reasoning.'))
         self.assertEqual((events[-1]['done_reason'], events[-1]['eval_count'], events[-1]['prompt_eval_count']), ('stop', 7, 200))
+        self.assertEqual(events[-1]['cost_usd'], 0.000013)  # the price OpenRouter reports, charged by a tester ledger
         # Output after the finish is still refused: only an empty repeated finish frame is accepted.
         frame = {'choices': [{'index': 0, 'delta': {'content': 'late'}, 'finish_reason': 'stop'}],
                  'usage': {'prompt_tokens': 1, 'completion_tokens': 1}}
         self.fake.replies = [{'events': [{'choices': [{'index': 0, 'delta': {'content': 'x'}, 'finish_reason': 'stop'}]}, frame]}]
         with self.assertRaises(DeepInfraGenerationError):
             list(self.client().stream(PAYLOAD))
+
+    def test_a_tester_is_charged_the_reported_price_and_stopped_only_once_spent(self):
+        import tempfile
+        from pathlib import Path
+        from mathagent.deepinfra import TesterAllowanceInsufficient
+        from mathagent.hosted_quota import quota_status
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory).resolve() / 'ledger'
+            ledger.mkdir(mode=0o700)
+            with patch.dict(os.environ, {'SH_DEEPINFRA_QUOTA_FILE': str(ledger / 'quota.sqlite'),
+                                         'SH_DEEPINFRA_QUOTA_USD': '0.00002'}):
+                big = {**PAYLOAD, 'options': {'num_predict': 300000, 'num_ctx': 1048576}}
+                self.fake.replies = [('One.', '', 7), ('Two.', '', 7)]
+                for _ in range(2):  # 13,000 then 26,000 nanodollars: the second call crosses the 20,000 limit
+                    self.assertTrue(list(self.client().stream(big))[-1]['done'])
+                self.assertEqual(quota_status()['charged_nanos'], 26000)
+                with self.assertRaises(TesterAllowanceInsufficient):
+                    list(self.client().stream(big))
+                self.assertEqual(len(self.fake.completions), 2)
 
     def test_refusals_are_classified_in_openrouter_wording(self):
         notices = []
@@ -197,9 +217,15 @@ class OpenRouterTransportTests(unittest.TestCase):
             list(generation_stream(self.client(), PAYLOAD, lambda *_: None))
         self.assertNotIn('HTTP 402', str(stopped.exception))
         self.assertTrue(provider_busy(stopped.exception))
-        # Out of credit, or a request no allowed provider can serve: fatal at once.
+        # Out of credit (the stated limit_source decides, whatever the wording), or a request no allowed provider
+        # can serve (404 as documented, or 503): fatal at once.
         for body, status, text in ((
                 {'error': {'code': 402, 'message': 'Insufficient credits'}}, 402, 'OpenRouter HTTP 402'),
+                ({'error': {'code': 402, 'message': 'Weight exceeds the budget of requests in flight',
+                            'metadata': {'limit_source': 'openrouter_credits'}}}, 402, 'OpenRouter HTTP 402'),
+                ({'error': {'code': 404, 'message': 'No endpoints found that can handle the requested parameters'}}, 404, 'No allowed provider'),
+                ({'error': {'code': 404, 'message': 'No endpoints available matching your guardrail restrictions and data policy'}}, 404, 'No allowed provider'),
+                ({'error': {'code': 503, 'message': 'No endpoint meets your routing requirements'}}, 503, 'No allowed provider'),
                 ({'error': {'code': 503, 'message': 'No endpoints found matching your data policy'}}, 503, 'No allowed provider')):
             self.fake.replies = [{'http_status': status, 'body': body}]
             before = len(self.fake.completions)
@@ -219,6 +245,21 @@ class OpenRouterTransportTests(unittest.TestCase):
         events = list(generation_stream(self.client(), PAYLOAD, lambda kind, text: notices.append(text)))
         self.assertTrue(events[-1]['done'])
         self.assertIn('ended the request before producing output', notices[0])
+        # The documented mid-stream rate limit is a busy provider too; a 4xx that every provider returned keeps its
+        # meaning (sent once, not waited out), whatever OpenRouter's generic wording.
+        limited = {'events': [{'choices': [{'index': 0, 'delta': {'content': ''}, 'finish_reason': 'error'}],
+                               'error': {'code': 429, 'message': 'Rate limit exceeded', 'metadata': {'error_type': 'rate_limit_exceeded'}}}]}
+        self.fake.replies = [limited, ('Recovered', '', 4)]
+        self.assertTrue(list(generation_stream(self.client(), PAYLOAD, lambda *_: None))[-1]['done'])
+        for code, category in ((400, 'invalid_request'), (401, 'auth'), (403, 'auth')):
+            rejected = {'events': [{'choices': [{'index': 0, 'delta': {'content': ''}, 'finish_reason': 'error'}],
+                                    'error': {'code': code, 'message': 'Provider returned error'}}]}
+            self.fake.replies = [rejected]
+            before = len(self.fake.completions)
+            with self.assertRaises(DeepInfraGenerationError) as stopped:
+                list(generation_stream(self.client(), PAYLOAD, lambda *_: None))
+            self.assertEqual((stopped.exception.category, len(self.fake.completions) - before), (category, 1))
+            self.assertFalse(provider_busy(stopped.exception))
 
     def test_credentials_and_endpoints_are_pinned(self):
         with patch.dict(os.environ, {'OPENROUTER_ALLOW_LOOPBACK': ''}), self.assertRaises(AgentError) as stopped:
@@ -273,3 +314,23 @@ class OpenRouterWorkflowTests(GuiCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProviderSwitchTests(unittest.TestCase):
+    def test_work_paused_on_one_provider_stays_resumable_after_switching(self):
+        from types import SimpleNamespace
+        from mathagent.model_limits import ProviderChanged
+        from mathagent.research import ResearchRunner
+        from mathagent.workers import worker_error
+        job = SimpleNamespace(state={'settings': {'api_profile': 'deepinfra', 'reasoning_effort': 'high'}},
+                              agent=SimpleNamespace(client=SimpleNamespace(profile='openrouter')))
+        with self.assertRaises(ProviderChanged) as refused:
+            ResearchRunner._validate_transport_resume(job)
+        self.assertIn('--api-profile deepinfra', str(refused.exception))
+        # The Assistant keeps the child interrupted (resumable once DeepInfra is selected again), not failed.
+        error = worker_error(refused.exception, 'prove')
+        self.assertEqual((error['code'], error['retryable'], error['scope']), ('provider_changed', True, 'transport'))
+        self.assertFalse(worker_error(ValueError('bad input'), 'prove')['retryable'])
+        job.agent.client.profile = 'deepinfra'
+        ResearchRunner._validate_transport_resume(job)
+        self.assertEqual(job.agent.client.reasoning_effort, 'high')

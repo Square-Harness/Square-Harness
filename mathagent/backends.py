@@ -406,6 +406,9 @@ class OpenAICompatible:
                         event = {'message': {'tool_calls': complete_calls} if complete_calls else {},
                                  'done': True, 'done_reason': finish,
                                  'eval_count': usage['completion_tokens'], 'prompt_eval_count': usage['prompt_tokens']}
+                        cost = usage.get('cost')  # the call's price in USD, when the provider reports it (OpenRouter)
+                        if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+                            event['cost_usd'] = cost
                         yield event
                         return
                     chunk = json.loads(raw)

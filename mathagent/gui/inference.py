@@ -24,8 +24,9 @@ class _Waiter:
     deadline: float | None = None
 
 
-# A hosted provider (DeepInfra) serves many requests at once: a review of a whole paper runs some 60 calls.
-MAX_CAPACITY = 16
+# A hosted provider (DeepInfra) serves many requests at once: a review of a whole paper runs some 60 calls, and several
+# reviews and conversations run together. DeepInfra's default account limit is about 200 concurrent requests.
+MAX_CAPACITY = 200
 
 
 class InferencePool:

@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -58,8 +59,22 @@ def main():
     os.umask(0o077)
     runtime = RUNTIME if ds4 else ROOT / '.local' / 'qwen-test'
     key_env, credential, setup = PROVIDERS[options.provider]
+    if not ds4 and options.provider != 'deepinfra':
+        parser.error('--provider chooses who serves DS4; the Qwen profile uses its own server')
     if ds4 and not credential.is_file():
         parser.error(f'run python3 {setup} first; never paste the key into a command')
+    if ds4:
+        info = credential.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            parser.error(f'{credential} must be your own regular file with mode 600 (run python3 {setup} --replace)')
+    if ds4 and options.provider == 'openrouter':
+        sys.path.insert(0, str(ROOT))
+        from mathagent.agent import AgentError
+        from mathagent.openrouter import routing
+        try:
+            providers = routing()['order']  # SH_OPENROUTER_PROVIDERS is checked before the server starts
+        except AgentError as error:
+            parser.error(str(error))
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -96,7 +111,7 @@ def main():
                '--workspace', str(workspace), '--backend', 'openai',
                '--api-profile', options.provider if ds4 else 'default', '--online' if options.online else '--offline',
                '--gui-concurrency', '5' if ds4 else '1',
-               '--gui-model-concurrency', '5' if ds4 else '1',
+               '--gui-model-concurrency', '200' if ds4 else '1',  # DeepInfra's account limit; shared fairly
                '--assistant-concurrency', '5' if ds4 else '1']
     model = 'deepseek-ai/DeepSeek-V4.1-Flash-1017' if ds4 else options.model or 'qwen3.8-27b'
     if ds4:
@@ -140,8 +155,7 @@ def main():
     if ds4 and options.provider == 'deepinfra':
         print('DeepInfra service tier: ' + environment['SH_DEEPINFRA_SERVICE_TIER'])
     elif ds4:
-        print('Served through OpenRouter (zero data retention, fp8; providers: '
-              + (os.environ.get('SH_OPENROUTER_PROVIDERS') or 'crusoe,cohere,coreweave,deepinfra,parasail') + ').')
+        print('Served through OpenRouter (zero data retention, fp8; providers in order: ' + ', '.join(providers) + ').')
     print('Private workspace: ' + str(workspace))
     print('The authenticated Open address is in the private GUI log: ' + str(log))
     return 0

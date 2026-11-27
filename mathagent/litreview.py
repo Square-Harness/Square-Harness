@@ -52,8 +52,7 @@ VERDICTS = ('supported', 'follows', 'unsupported', 'wrong')
 CHECK_UNITS, VERIFY_UNITS = 10, 8
 # Characters of labelled source text a section check may consult (twice the writer's allowance).
 WRITE_EVIDENCE, CHECK_EVIDENCE = 24000, 40000
-# A hosted stream that the provider accepted but that stays silent this long is submitted again
-# (on a personal key; never under the tester ledger).
+# A hosted stream that the provider accepted but that stays silent this long is submitted again.
 START_SECONDS, RESUBMISSIONS = 25, 2
 LOOP = re.compile(r'(.{3,40}?)\1{12,}', re.S)
 # Fractions of the working time at which a phase stops admitting new work.
@@ -1291,8 +1290,8 @@ class ReviewRunner(ResearchRunner):
                 # A short, bounded prompt: a higher effort spends the allowance without a better answer.
                 payload['reasoning_effort'] = 'low'
             if hosted:
-                # Under the tester ledger too: a closed silent stream is charged an estimate of its input,
-                # not a full-context reservation (hosted_quota).
+                # Under the tester ledger too: a closed silent stream is charged an estimate of its input
+                # (hosted_quota).
                 payload['_start_seconds'] = START_SECONDS
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)

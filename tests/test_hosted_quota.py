@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Hosted model streams settle reported usage and retain unknown-usage reservations."""
+"""The tester ledger: calls are admitted while the allowance is not spent and charged when they end."""
 import json
 import os
 from pathlib import Path
@@ -46,7 +46,7 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual((client.snapshot()['tokens'], client.snapshot()['measured_tokens']), (4156, 60))
             self.assertEqual((len(fake.completions), quota_status()['output_tokens']), (3, 60))
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT output_tokens FROM calls ORDER BY rowid').fetchall(),
+                self.assertEqual(db.execute('SELECT output_tokens FROM charges ORDER BY rowid').fetchall(),
                                  [(None,), (37,), (23,)])
 
             # The worker can afford two calls, but the parent cannot. The first
@@ -296,7 +296,7 @@ class HostedQuotaTests(unittest.TestCase):
                              ['assistant_budget']['tokens'], {'used': 15, 'uncertain': 128, 'reserved': 0, 'limit': 1024})
             self.assertEqual(len(fake.completions), 3)
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT input_tokens, output_tokens FROM calls ORDER BY rowid').fetchall(),
+                self.assertEqual(db.execute('SELECT input_tokens, output_tokens FROM charges ORDER BY rowid').fetchall(),
                                  [(None, None), (45, 9), (200, 6)])
 
             # An error can include a terminal usage record. A cancellation after
@@ -319,7 +319,7 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertEqual(client.snapshot()['measured_tokens'], 41)
             self.assertEqual(quota_status()['output_tokens'], 41)
 
-    def test_pre_stream_rejection_retries_and_settles_only_one_reservation(self):
+    def test_pre_stream_rejection_retries_and_charges_only_the_served_call(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
         # A provider that asks for no wait (Retry-After: 0) is retried until MAX_REFUSALS; here as many as RETRIES + 1.
@@ -371,14 +371,11 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertTrue(rejected_before_inference(stopped.exception))
             self.assertEqual(len(fake.completions), 9 + RETRIES)
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                rows = db.execute('SELECT id, input_tokens, output_tokens FROM calls ORDER BY rowid').fetchall()
-            self.assertEqual([(i, o) for _, i, o in rows], [(200, 5)] + [(0, 0)] * 7)
-            quota = HostedQuota.from_environment('standard')
-            quota.settle(rows[-1][0], 0, 0)  # repeated settlement is harmless
-            self.assertEqual(quota_status()['reserved_nanos'], 0)
+                rows = db.execute('SELECT input_tokens, output_tokens FROM charges ORDER BY rowid').fetchall()
+            self.assertEqual(rows, [(200, 5)])  # a refusal before the stream costs nothing and records nothing
 
             # A failure in an accepted stream has unknown usage: it is charged an estimate (the whole input and
-            # the streamed characters plus a margin), never left holding the whole reservation.
+            # the streamed characters plus a margin).
             client.cancel.clear()
             fake.replies = [busy, {'events': [{'choices': [{'index': 0, 'delta': {'content': 'Partial'}, 'finish_reason': None}]},
                                         {'error': {'code': 429, 'message': fake.key}}]}]
@@ -388,45 +385,85 @@ class HostedQuotaTests(unittest.TestCase):
             self.assertNotIn(fake.key, str(stopped.exception))
             self.assertEqual(len(fake.completions), 11 + RETRIES)
             status = quota_status()
-            self.assertEqual(status['reserved_nanos'], 0)
-            self.assertGreater(status['charged_nanos'], 0)
+            self.assertNotIn('reserved_nanos', status)
+            self.assertGreater(status['charged_nanos'], 43000)
 
-    def test_real_http_stream_settles_reported_usage_and_estimates_unknown_usage(self):
+    def test_real_http_stream_charges_reported_usage_and_estimates_unknown_usage(self):
         fake = FakeDeepInfra()
         self.addCleanup(fake.close)
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
             'DEEPINFRA_ALLOW_LOOPBACK': '1', 'DEEPINFRA_API_KEY': fake.key,
             'DEEPINFRA_API_KEY_FILE': '', 'SH_DEEPINFRA_SERVICE_TIER': 'standard',
             'SH_DEEPINFRA_QUOTA_FILE': str(Path(directory).resolve() / 'quota.sqlite'),
-            'SH_DEEPINFRA_QUOTA_USD': '0.210',
+            'SH_DEEPINFRA_QUOTA_USD': '0.0001',
             'SH_DEEPINFRA_QUOTA_INPUT_PER_MILLION': '0.20',
             'SH_DEEPINFRA_QUOTA_OUTPUT_PER_MILLION': '0.60',
         }):
             payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Hello'}],
                        'options': {'num_predict': 128}, 'think': False}
             client = DeepInfra(fake.host)
-            # Tokenization is free and must not consume a generation reservation.
+            # Tokenization is free and is not charged.
             self.assertGreater(client.count_input_tokens(payload), 0)
             fake.replies = [('Ready', '', 5), ('Ready again', '', 5), {'events': [
                 {'choices': [{'index': 0, 'delta': {'content': 'Incomplete'}, 'finish_reason': 'stop'}]},
             ]}]
+            # Nothing is reserved: a full-context call is admitted under a $0.0001 allowance, and the calls run
+            # until the spending reaches it (43,000 then 86,000 of 100,000 nanodollars).
             for _ in range(2):
-                self.assertTrue(list(client.stream(payload))[-1]['done'])
+                self.assertTrue(list(client.stream({**payload, 'options': {'num_predict': 384000, 'num_ctx': 1048576}}))[-1]['done'])
+            self.assertEqual(quota_status()['charged_nanos'], 86000)
+            # The third call is still under the limit when it starts; its usage is unknown, so it is charged an
+            # estimate, and the total ends above the limit.
             with self.assertRaisesRegex(AgentError, 'without finish reason and token usage'):
                 list(client.stream(payload))
             parent = BudgetClient(DeepInfra(fake.host), max_tokens=1000)
             with self.assertRaises(TesterAllowanceInsufficient) as refused:
                 list(parent.stream({**payload, 'options': {**payload['options'], 'num_ctx': 16384}}))
             self.assertTrue(rejected_before_inference(refused.exception))
+            self.assertIn('used up', str(refused.exception))
             self.assertEqual((parent.snapshot()['tokens'], parent.snapshot()['input_tokens']), (0, 0))
             with sqlite3.connect(os.environ['SH_DEEPINFRA_QUOTA_FILE']) as db:
-                self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0], 3)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM charges').fetchone()[0], 3)
             status = quota_status()
             # Reported usage only in the counters; the broken third stream is charged an estimate.
             self.assertEqual((status['input_tokens'], status['output_tokens']), (400, 10))
-            self.assertEqual(status['reserved_nanos'], 0)
+            self.assertGreater(status['charged_nanos'], status['limit_nanos'])
             self.assertLess(status['charged_nanos'], 2000000)
             self.assertEqual(len(fake.completions), 3)
             os.environ['SH_DEEPINFRA_SERVICE_TIER'] = 'priority'
             with self.assertRaisesRegex(AgentError, 'Standard service tier'):
                 list(DeepInfra(fake.host).stream(payload))
+            self.assertEqual(quota_status()['limit_nanos'], 100000)  # the status page does not depend on the tier
+
+    def test_ledger_charges_prices_and_keeps_what_an_old_ledger_charged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'quota.sqlite'
+            quota = HostedQuota(str(path), '0.001')
+            quota.admit()
+            quota.charge(1000, 100, cost_usd=0.0004)  # a reported price wins over the rates
+            quota.charge(1000, 100)  # 1000 * 200 + 100 * 600 nanodollars
+            quota.charge(5000, 500, cost_usd=0.5, estimated=True)  # an estimate never takes a price
+            self.assertEqual(quota.status()['charged_nanos'], 400000 + 260000 + 1300000)
+            self.assertEqual((quota.status()['input_tokens'], quota.status()['output_tokens']), (2000, 200))
+            with self.assertRaises(TesterAllowanceInsufficient):
+                quota.admit()
+            for bad in ((-1, 0), (1, None), (True, 1)):
+                with self.assertRaises(AgentError):
+                    quota.charge(*bad)
+            with self.assertRaisesRegex(AgentError, 'settings changed'):
+                HostedQuota(str(path), '5')
+
+            # A ledger from the reservation design keeps what it charged; open reservations are released.
+            legacy = Path(directory).resolve() / 'legacy.sqlite'
+            with sqlite3.connect(legacy) as db:
+                db.execute('CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), budget INTEGER, input_rate TEXT, output_rate TEXT)')
+                db.execute("INSERT INTO settings VALUES (1, 2500000000, '0.2', '0.6')")
+                db.execute('CREATE TABLE calls (id TEXT PRIMARY KEY, input_cap INTEGER, output_cap INTEGER, reserved INTEGER, charged INTEGER, input_tokens INTEGER, output_tokens INTEGER)')
+                db.executemany('INSERT INTO calls VALUES (?,?,?,?,?,?,?)', [
+                    ('a', 9, 9, 900000, 43000, 200, 5), ('b', 9, 9, 900000, 70000, None, None), ('c', 9, 9, 900000, None, None, None)])
+            db.close()
+            os.chmod(legacy, 0o600)
+            migrated = HostedQuota(str(legacy))
+            self.assertEqual(migrated.status()['charged_nanos'], 113000)
+            self.assertEqual((migrated.status()['input_tokens'], migrated.status()['output_tokens']), (200, 5))
+            self.assertEqual(HostedQuota(str(legacy)).status()['charged_nanos'], 113000)  # once only

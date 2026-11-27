@@ -2416,7 +2416,7 @@ def _check_ctx(ctx, predict):
 def _check_proof(args, *, tokens, solve, verify, ctx, explicit_ctx=None):
     """The terminal's checks for a new proof, made before the job exists."""
     if getattr(args, 'api_profile', None) in HOSTED_DS4 and max(solve, verify) > MODEL_OUTPUT_TOKENS:
-        raise ValueError(f'DeepInfra DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
+        raise ValueError(f'DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     cap = getattr(args, 'specialist_output_tokens', None)
     if explicit_ctx is not None and getattr(args, 'api_profile', None) in HOSTED_DS4:
         # DS4 calls need their whole output allowance beside the statement; a smaller context only fails later.

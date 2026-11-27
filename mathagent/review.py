@@ -36,7 +36,7 @@ from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
-from .model_limits import input_limit, is_ds4, output_limit, substantive_output, HOSTED_DS4
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output, HOSTED_DS4, ProviderChanged
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
 from .typocheck import TypoLanes
@@ -378,7 +378,7 @@ class ReviewBase(ResearchRunner):
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
-        concurrency_limit = 16 if getattr(agent.client, 'profile', 'default') in HOSTED_DS4 else 4
+        concurrency_limit = 64 if getattr(agent.client, 'profile', 'default') in HOSTED_DS4 else 4
         self.concurrency = max(1, min(concurrency_limit, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
@@ -391,9 +391,9 @@ class ReviewBase(ResearchRunner):
         self._validate_transport_resume()
         # Reject an invalid resume before changing its saved phase or report.
         if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
-            raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
+            raise ProviderChanged('Resume with the original --host; saved source data is not implicitly sent elsewhere')
         if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
-            raise ValueError('Resume with the original --backend')
+            raise ProviderChanged('Resume with the original --backend')
         if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
             raise ValueError('Additional working time must be between 0 and 86400 seconds')
         if self.state['status'] in ('partial', 'budget_exhausted'):

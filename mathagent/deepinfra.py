@@ -277,10 +277,10 @@ class DeepInfraUnavailable(DeepInfraRateLimit):
 
 
 class TesterAllowanceInsufficient(DeepInfraGenerationError):
-    """The local tester ledger declined admission before a completion request was sent."""
+    """The tester ledger refused a new call (the allowance is spent) before any request was sent."""
 
     def __init__(self):
-        super().__init__('Tester allowance is insufficient for this call; wait for active calls or contact the administrator',
+        super().__init__('The tester allowance is used up; contact the administrator to continue',
                          category='quota')
 
 
@@ -668,7 +668,7 @@ class DeepInfra(OpenAICompatible):
         if refs:
             from . import images
             if not images.supported(self.profile, payload.get('model')):
-                raise AgentError('Native images require DS4.1 Flash 1017; the legacy V4 model cannot receive them')
+                raise AgentError('Native images require the DeepInfra DS4.1 Flash 1017 profile; this profile or model cannot receive them')
             if '_sh_bounded_title' in payload:
                 raise AgentError('A bounded conversation-title call cannot include images')
         data = super()._payload(payload)
@@ -695,7 +695,7 @@ class DeepInfra(OpenAICompatible):
             data['response_format'] = {'type': 'json_schema', 'json_schema': {
                 'name': 'square_harness', 'strict': False, 'schema': copy.deepcopy(schema)}}
         if '_sh_bounded_title' in payload:
-            self._quota_input_cap(payload, data)
+            self._bounded_input_tokens(payload, data)
         if refs and include_images:
             data['messages'] = images.materialize(self.image_root, refs, data['messages'], originals=payload['messages'])
         window = _generation_window.get()
@@ -709,8 +709,8 @@ class DeepInfra(OpenAICompatible):
     def _bytes(value):
         return len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
 
-    def _quota_input_cap(self, payload, data):
-        """Only validated nonthinking title/routing shapes use a smaller reserve."""
+    def _bounded_input_tokens(self, payload, data):
+        """The input tokens of a validated nonthinking title or routing call; CONTEXT_TOKENS for any other call."""
         # `stream` adds the transport-only start deadline before the payload is validated; it changes
         # nothing the provider receives, so it is not part of the bounded shape.
         keys = set(payload) - {'_start_seconds'}
@@ -735,7 +735,7 @@ class DeepInfra(OpenAICompatible):
                          + 2 * self._bytes({'response_format': data['response_format']}))
                 if bound <= 65_536:
                     return bound
-            # An invalid marker never reduces an ordinary call's reservation.
+            # An invalid marker never lowers an ordinary call's input bound.
             return CONTEXT_TOKENS
         if '_sh_bounded_title' not in payload:
             return CONTEXT_TOKENS
@@ -768,13 +768,13 @@ class DeepInfra(OpenAICompatible):
         # Count text and image-processing allowance, never the base64 transport encoding.
         data = self._payload(payload, include_images=False)
         if '_sh_bounded_routing' in payload:
-            bound = self._quota_input_cap(payload, data)
+            bound = self._bounded_input_tokens(payload, data)
             if bound < CONTEXT_TOKENS:
                 self.input_token_count_method = 'Bounded routing UTF-8 byte and framing/schema estimate'
                 return bound
         if '_sh_bounded_title' in payload:
             self.input_token_count_method = 'Bounded title UTF-8 byte and framing estimate'
-            return self._quota_input_cap(payload, data)
+            return self._bounded_input_tokens(payload, data)
         framing = 1024 + 128 * len(data['messages'])
         extras = {key: data[key] for key in ('tools', 'response_format') if key in data}
         # Tool schemas are rendered once into the prompt: twice their JSON bytes, one fixed tool-calling
@@ -850,55 +850,39 @@ class DeepInfra(OpenAICompatible):
     def _generation(self, payload):
         quota = None
         if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
-            from contextlib import closing
             from .hosted_quota import HostedQuota
             quota = HostedQuota.from_environment(self.service_tier)
-            data = self._payload(payload)
-            input_cap = self._quota_input_cap(payload, data)
-            reservation = quota.reserve(input_cap, data['max_tokens'])
+            quota.admit()  # nothing is reserved: any number of calls run while the tester is under the limit
         try:
             if quota is None:
                 yield from super().stream(payload)
             else:
+                from contextlib import closing
                 with closing(super().stream(payload)) as stream:
                     for event in stream:
                         if event.get('done'):
                             try:
-                                quota.settle(reservation, event.get('prompt_eval_count'), event.get('eval_count'))
+                                quota.charge(event.get('prompt_eval_count'), event.get('eval_count'), event.get('cost_usd'))
                             except AgentError:
-                                # The provider already completed. Keep the full
-                                # reservation and deliver the billed answer and
-                                # its usage instead of losing finished work.
-                                event = {**event, 'accounting_warning':
-                                    'Tester allowance settlement failed; the full reservation was retained.'}
+                                # The provider already completed: deliver the billed answer instead of losing it.
+                                event = {**event, 'accounting_warning': 'The tester allowance could not record this call.'}
                         yield event
         except (AgentError, MeasuredStreamCancellation, _RejectedRetryCancelled) as exc:
             if rejected_before_inference(exc):
-                if quota is not None:
-                    try:
-                        quota.settle(reservation, 0, 0)
-                    except AgentError:
-                        # Storage failure retains the hosted reservation; the rejection
-                        # still reaches the worker so it can checkpoint its own budget.
-                        if isinstance(exc, DeepInfraRateLimit):
-                            exc.args = (str(exc) + ' The tester allowance could not be updated.',)
-                raise
-            if quota is not None and isinstance(exc, (ToolCallError, DeepInfraGenerationError, MeasuredStreamCancellation)) and exc.stats:
+                raise  # nothing was generated, nothing is charged
+            if quota is not None:
+                stats = exc.stats if isinstance(exc, (ToolCallError, DeepInfraGenerationError, MeasuredStreamCancellation)) else None
                 try:
-                    quota.settle(reservation, exc.stats['prompt_eval_count'], exc.stats['eval_count'])
+                    if stats:
+                        quota.charge(stats['prompt_eval_count'], stats['eval_count'])
+                    elif isinstance(exc, DeepInfraGenerationError):
+                        # Usage unknown (a silent, stalled or broken stream): the whole input (its UTF-8 bytes bound
+                        # its tokens) and every character streamed plus a margin.
+                        data = self._payload(payload, include_images=False)
+                        quota.charge(min(CONTEXT_TOKENS, self._bytes(data['messages']) + 1024 + 128 * len(data['messages'])),
+                                     min(data['max_tokens'], sum(exc.stream_progress.values()) + 256), estimated=True)
                 except AgentError:
-                    exc.args = (str(exc) + ' Tester allowance settlement failed; the full reservation was retained.',)
-            elif quota is not None and isinstance(exc, DeepInfraGenerationError):
-                # Usage unknown (a silent, stalled or broken stream). Charge a conservative estimate, not the
-                # whole reservation: the whole input (its UTF-8 bytes bound its tokens) and every character
-                # streamed plus a margin. A provider failure and its replacement then cost about what the
-                # provider bills, instead of a full-context reservation each.
-                framing = 1024 + 128 * len(data['messages'])
-                try:
-                    quota.settle(reservation, min(input_cap, self._bytes(data['messages']) + framing),
-                                 min(data['max_tokens'], sum(exc.stream_progress.values()) + 256), estimated=True)
-                except AgentError:
-                    exc.args = (str(exc) + ' Tester allowance settlement failed; the full reservation was retained.',)
+                    exc.args = (str(exc) + ' The tester allowance could not record this call.',)
             redacted = self._redact(exc)
             if redacted != str(exc):
                 raise AgentError(redacted) from None

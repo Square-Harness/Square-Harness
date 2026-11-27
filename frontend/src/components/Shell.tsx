@@ -420,24 +420,22 @@ function PilotAllowance({ allowance, detailed = false }: { allowance: TesterAllo
   if (!Number.isFinite(outputUnit) || outputUnit <= 0) return null
   const inputWeight = Number(allowance.input_per_million) / Number(allowance.output_per_million)
   const inputShare = Math.abs(inputWeight - 1 / 3) < 1e-9 ? 'one third' : inputWeight.toLocaleString('en-US', { maximumFractionDigits: 3 })
-  const hint = `Across all conversations. Each input token counts as ${inputShare} of an output token; output includes thinking. This conservative pilot allowance uses Standard list prices; actual billing may be lower. The meter includes reservations.`
+  const hint = `Across all conversations. Each call is charged what the provider bills for it, or its tokens at the listed rates (each input token counts as ${inputShare} of an output token; output includes thinking). New calls stop once the allowance is spent; calls already running finish.`
   const money = (nanos: number) => '$' + (nanos / 1e9).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
   return (
     <div className={detailed ? 'account-allowance' : undefined} title={hint}>
       {detailed && <div className="account-budget-title"><strong>Pilot allowance (USD)</strong><span>{money(allowance.limit_nanos)}</span></div>}
       <Meter label={detailed ? 'Output-equivalent tokens' : 'Pilot allowance'}
-        used={(allowance.charged_nanos + allowance.reserved_nanos) / outputUnit / 1e6}
+        used={allowance.charged_nanos / outputUnit / 1e6}
         limit={allowance.limit_nanos / outputUnit / 1e6} unit="M" decimals={3} title={hint} />
       {detailed && <dl className="account-usage">
         <div><dt>Used</dt><dd>{money(allowance.charged_nanos)}</dd></div>
-        <div><dt>Reserved</dt><dd>{money(allowance.reserved_nanos)}</dd></div>
-        <div><dt>Remaining</dt><dd>{money(Math.max(0, allowance.limit_nanos - allowance.charged_nanos - allowance.reserved_nanos))}</dd></div>
+        <div><dt>Remaining</dt><dd>{money(Math.max(0, allowance.limit_nanos - allowance.charged_nanos))}</dd></div>
       </dl>}
       <p className="muted small">Output-equivalent tokens: {count(allowance.charged_nanos / outputUnit)} used.</p>
-      {allowance.reserved_nanos > 0 && <p className="muted small">{count(allowance.reserved_nanos / outputUnit)} reserved for unfinished or unreported calls.</p>}
       {detailed && <>
         <p className="muted small">{count(allowance.input_tokens)} input · {count(allowance.output_tokens)} output tokens, including thinking.</p>
-        <p className="muted small">Each input token counts as {inputShare} of an output token. Unused reservations are released when usage is known.</p>
+        <p className="muted small">Each call is charged when it ends. New calls stop once the allowance is spent; calls already running finish.</p>
       </>}
     </div>
   )
@@ -645,7 +643,7 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const active = activeTasks(app.snapshot)
   const queue = app.snapshot.queue
-  const valid = Number.isInteger(chats) && chats >= 1 && chats <= 8 && Number.isInteger(requests) && requests >= 1 && requests <= 16
+  const valid = Number.isInteger(chats) && chats >= 1 && chats <= 8 && Number.isInteger(requests) && requests >= 1 && requests <= 200
   const save = async () => {
     if (!valid || saving) return
     setSaving(true)
@@ -672,7 +670,8 @@ function ConcurrencySettings({ onClose }: { onClose: () => void }) {
       <div className="field-grid">
         <CellScale label="Conversations and jobs at once" value={chats} onChange={setChats} min={1} max={8}
           hint="One turn at a time in each conversation." />
-        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={16}
+        <CellScale label="Model requests at once" value={requests} onChange={setRequests} min={1} max={200}
+          values={[...new Set([1, 2, 4, 8, 16, 32, 64, 128, 200, requests])].sort((a, b) => a - b)}
           hint="Shared by all active conversations and their workers." />
       </div>
       <p className="muted small">Active requests share the model's throughput, so their speed depends on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>

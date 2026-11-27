@@ -27,7 +27,7 @@ from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError, interrupted_charge, streamed_characters
-from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget, HOSTED_DS4
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget, HOSTED_DS4, ProviderChanged
 from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
 
@@ -379,11 +379,11 @@ class ResearchRunner:
         self.state = _read_state(self.directory, job_id)
         if self.state['kind'] not in self.KINDS:
             raise ValueError(f'This is a {self.state["kind"]} job; resume it from its own mode')
-        if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
-            raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
-        if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
-            raise ValueError('Resume with the original --backend')
         self._validate_transport_resume()
+        if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
+            raise ProviderChanged('Resume with the original --host; saved source data is not implicitly sent elsewhere')
+        if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
+            raise ProviderChanged('Resume with the original --backend')
         if isinstance(additional_seconds, bool) or not isinstance(additional_seconds, (int, float)) or not math.isfinite(additional_seconds) or not 0 <= additional_seconds <= 86400:
             raise ValueError('Additional working time must be between 0 and 86400 seconds')
         if type(additional_tokens) is not int or not 0 <= additional_tokens <= MAX_ADD_TOKENS:
@@ -421,11 +421,12 @@ class ResearchRunner:
         settings = self.state['settings']
         profile = getattr(self.agent.client, 'profile', 'default')
         if settings.get('api_profile', 'default') != profile:
-            raise ValueError('Resume with the original --api-profile; saved work is unchanged')
+            raise ProviderChanged(f'This job was started with --api-profile {settings.get("api_profile", "default")}; '
+                                  'select it again to resume. Saved work is unchanged')
         if profile in HOSTED_DS4:
             effort = settings.get('reasoning_effort')
             if effort not in {'none', 'low', 'high', 'max'}:
-                raise ValueError('Saved DeepInfra reasoning effort is invalid; saved work is unchanged')
+                raise ValueError('Saved DS4 reasoning effort is invalid; saved work is unchanged')
             self.agent.client.reasoning_effort = effort
 
     @classmethod

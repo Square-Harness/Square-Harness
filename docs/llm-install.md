@@ -154,20 +154,21 @@ These settings are immutable for an existing ledger. Pair this with a separately
 model-restricted provider credential; reuse credentials and ledgers on restart.
 Priority is refused for a quota-enabled instance. An exhausted allowance is an
 operational stop and does not authorize another allowance automatically.
-The ledger records zero usage when DeepInfra returns HTTP 429 or 5xx before opening
-a generation stream. If an accepted stream fails, a valid final usage record
-settles the reservation. A failed stream with unknown usage is charged a
-conservative estimate (its whole input, every streamed character plus 256 output
-tokens) instead of keeping its reservation. Provider failures are retried for
-tester keys as for personal keys; each replacement needs a fresh reservation
-within the same tester allowance.
-The job and chat meters list these amounts separately from reported output.
+Nothing is reserved: a call is admitted while the amount charged is below the
+allowance, so parallel calls are never held back, and each call is charged when it
+ends (OpenRouter's reported price, or the reported tokens at the configured rates).
+Calls running when the allowance is reached finish, so a tester can end slightly
+above it. The ledger records nothing when the provider returns HTTP 429 or 5xx
+before opening a generation stream. A failed stream with unknown usage is charged
+an estimate (its whole input, every streamed character plus 256 output tokens).
+Provider failures are retried for tester keys as for personal keys; each
+replacement is admitted again under the same rule.
 
 For a $2 pilot cap, set `SH_DEEPINFRA_QUOTA_USD=2` explicitly in each new tester's
 service configuration. Keep exceptions in private operator configuration. Changing
 this variable alone does not update an existing ledger: an approved cap change
 requires an administrative migration of that same ledger and matching service
-settings, preserving all charged and reserved amounts. Never replace a ledger
+settings, preserving all charged amounts. Never replace a ledger
 or mint a new credential to simulate a cap increase.
 
 To bound heavy simulations across accounts, create a trusted shared directory

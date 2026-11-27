@@ -300,8 +300,9 @@ def main():
         p.error('Request timeout must be finite and positive')
     if not math.isfinite(args.proof_call_seconds) or args.proof_call_seconds <= 0:
         p.error('Proof call seconds must be finite and positive')
-    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 16:
-        p.error('Use gui-concurrency from 1 to 8 and gui-model-concurrency from 1 to 16')
+    from .gui.inference import MAX_CAPACITY
+    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= MAX_CAPACITY:
+        p.error(f'Use gui-concurrency from 1 to 8 and gui-model-concurrency from 1 to {MAX_CAPACITY}')
     assistant_limit = 5 if remote_profile else 4
     if (not 1 <= args.assistant_concurrency <= assistant_limit
             or args.assistant_tokens is not None and args.assistant_tokens < 4096

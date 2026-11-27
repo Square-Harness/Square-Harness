@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Optional durable allowance for a hosted tester; stores amounts, never content.
+"""Optional spending limit for a hosted tester; stores amounts, never content.
 
-Calls reserve their worst-case cost before dispatch. Complete, bounded provider
-usage releases an unused reservation. A provider failure with unknown usage (a
-silent, stalled or broken stream) is charged a conservative estimate: the whole
-input and every streamed character plus a margin. Crashes keep the reservation,
-and opening an existing ledger never grants a new allowance.
-The administrator must place this file outside every served workspace.
+A call is admitted while the tester has spent less than the limit. Nothing is reserved before a call, so any
+number of calls can run in parallel. When a call ends it is charged what it cost: the price the provider reports
+(OpenRouter), otherwise its reported tokens at the configured rates. A call whose usage the provider never
+reported (a silent, stalled or broken stream) is charged an estimate: its whole input and every streamed
+character plus 256 tokens. Calls already running when the limit is reached finish and are charged, so the total
+can end slightly above the limit; no new call starts after that. Opening an existing ledger never grants a new
+allowance. The administrator must place this file outside every served workspace.
 """
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+import math
 import os
 from pathlib import Path
 import secrets
@@ -37,17 +39,18 @@ def _decimal(value):
 
 def quota_status():
     """Return public aggregate counters, or None for ordinary installations."""
-    quota = HostedQuota.from_environment(os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard'))
+    quota = HostedQuota.from_environment()
     return quota.status() if quota is not None else None
 
 
 class HostedQuota:
     @classmethod
-    def from_environment(cls, service_tier):
+    def from_environment(cls, service_tier=None):
+        """The configured ledger, or None. A call passes its service tier: the rates are Standard prices."""
         path = os.environ.get('SH_DEEPINFRA_QUOTA_FILE')
         if not path:
             return None
-        if service_tier != 'standard':
+        if service_tier not in (None, 'standard'):
             raise AgentError('Tester allowance requires the Standard service tier')
         return cls(path, os.environ.get('SH_DEEPINFRA_QUOTA_USD', '2.50'),
                    os.environ.get('SH_DEEPINFRA_QUOTA_INPUT_PER_MILLION', '0.20'),
@@ -69,6 +72,13 @@ class HostedQuota:
             with self._transaction() as db:
                 if db.execute('SELECT budget, input_rate, output_rate FROM settings WHERE id=1').fetchone() != self.settings:
                     raise AgentError('Tester allowance settings changed; existing allowance was preserved')
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calls'").fetchone():
+                    # A ledger from the reservation design: keep what was charged, as one row. Reservations
+                    # that crashed calls left open are released (their cost was never known).
+                    db.execute(_CHARGES)
+                    db.execute('INSERT INTO charges SELECT COALESCE(SUM(charged),0), SUM(input_tokens), '
+                               'SUM(output_tokens) FROM calls')
+                    db.execute('DROP TABLE calls')
         except (OSError, sqlite3.Error):
             raise AgentError('Tester allowance storage is unavailable; no new allowance was granted') from None
 
@@ -87,7 +97,7 @@ class HostedQuota:
                 with db:
                     db.execute('CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), budget INTEGER, input_rate TEXT, output_rate TEXT)')
                     db.execute('INSERT INTO settings VALUES (1,?,?,?)', self.settings)
-                    db.execute('CREATE TABLE calls (id TEXT PRIMARY KEY, input_cap INTEGER, output_cap INTEGER, reserved INTEGER, charged INTEGER, input_tokens INTEGER, output_tokens INTEGER)')
+                    db.execute(_CHARGES)
             finally:
                 db.close()
             try:
@@ -120,58 +130,43 @@ class HostedQuota:
             with db:
                 yield db
         except (OSError, sqlite3.Error):
-            raise AgentError('Tester allowance storage is unavailable; reservation retained') from None
+            raise AgentError('Tester allowance storage is unavailable') from None
         finally:
             if db is not None:
                 db.close()
             if fd is not None:
                 os.close(fd)
 
-    def _cost(self, input_tokens, output_tokens):
-        amount = (input_tokens * self.input_rate + output_tokens * self.output_rate) * 1000
-        cost = int(amount.to_integral_value(rounding=ROUND_CEILING))
-        if not 0 <= cost <= MAX_INTEGER:
-            raise AgentError('Tester allowance cost exceeds its supported range')
-        return cost
-
-    def reserve(self, input_cap, output_cap):
-        if any(type(value) is not int or value <= 0 for value in (input_cap, output_cap)):
-            raise AgentError('Tester allowance needs explicit positive token ceilings')
-        reservation, identifier = self._cost(input_cap, output_cap), secrets.token_hex(16)
+    def admit(self):
+        """Refuse a new call once the tester has spent the whole allowance."""
         with self._transaction() as db:
-            used = db.execute('SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM calls').fetchone()[0]
-            if reservation > self.budget - used:
+            if db.execute('SELECT COALESCE(SUM(charged),0) FROM charges').fetchone()[0] >= self.budget:
                 raise TesterAllowanceInsufficient()
-            db.execute('INSERT INTO calls VALUES (?,?,?,?,NULL,NULL,NULL)', (identifier, input_cap, output_cap, reservation))
-        return identifier
 
-    def settle(self, identifier, input_tokens, output_tokens, estimated=False):
-        """Charge reported usage, or with estimated=True an upper estimate for a stream whose usage the
-        provider never reported (recorded as such)."""
+    def charge(self, input_tokens, output_tokens, cost_usd=None, estimated=False):
+        """Record a finished call: the provider's reported price in USD when it gives one, otherwise the tokens at
+        the configured rates. With estimated=True the tokens are an upper estimate for a stream whose usage the
+        provider never reported; they are charged but left out of the token counters."""
+        if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
+            raise AgentError('Tester allowance received invalid usage')
+        if (type(cost_usd) in (int, float) and math.isfinite(cost_usd) and cost_usd >= 0 and not estimated):
+            amount = Decimal(repr(cost_usd)) * NANODOLLARS
+        else:
+            amount = (input_tokens * self.input_rate + output_tokens * self.output_rate) * 1000
+        charged = int(amount.to_integral_value(rounding=ROUND_CEILING))
+        if not 0 <= charged <= MAX_INTEGER:
+            raise AgentError('Tester allowance cost exceeds its supported range')
         with self._transaction() as db:
-            row = db.execute('SELECT input_cap, output_cap, reserved, charged, input_tokens, output_tokens FROM calls WHERE id=?',
-                             (identifier,)).fetchone()
-            if row is None:
-                raise AgentError('Tester allowance reservation is missing')
-            if any(type(value) is not int or not 0 <= value <= cap
-                   for value, cap in zip((input_tokens, output_tokens), row[:2])):
-                raise AgentError('Tester allowance received invalid usage; reservation retained')
-            if row[3] is not None:
-                if row[4:] == (input_tokens, output_tokens):
-                    return
-                raise AgentError('Tester allowance reservation already settled with different usage')
-            charged = self._cost(input_tokens, output_tokens)
-            if charged > row[2]:
-                raise AgentError('Tester allowance usage exceeded its reservation; reservation retained')
-            db.execute('UPDATE calls SET charged=?, input_tokens=?, output_tokens=? WHERE id=?',
-                       (charged, None if estimated else input_tokens, None if estimated else output_tokens, identifier))
+            db.execute('INSERT INTO charges VALUES (?,?,?)',
+                       (charged, None if estimated else input_tokens, None if estimated else output_tokens))
 
     def status(self):
         with self._transaction() as db:
-            charged, reserved, inputs, outputs = db.execute(
-                'SELECT COALESCE(SUM(charged),0), '
-                'COALESCE(SUM(CASE WHEN charged IS NULL THEN reserved ELSE 0 END),0), '
-                'COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM calls').fetchone()
-        return {'limit_nanos': self.budget, 'charged_nanos': charged, 'reserved_nanos': reserved,
-                'input_tokens': inputs, 'output_tokens': outputs,
+            charged, inputs, outputs = db.execute(
+                'SELECT COALESCE(SUM(charged),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) '
+                'FROM charges').fetchone()
+        return {'limit_nanos': self.budget, 'charged_nanos': charged, 'input_tokens': inputs, 'output_tokens': outputs,
                 'input_per_million': self.settings[1], 'output_per_million': self.settings[2]}
+
+
+_CHARGES = 'CREATE TABLE charges (charged INTEGER NOT NULL, input_tokens INTEGER, output_tokens INTEGER)'

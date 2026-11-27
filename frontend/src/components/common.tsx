@@ -130,19 +130,22 @@ export function NumberField({ label, value, onChange, min, max, step = 1, hint, 
 }
 
 /** A small whole number chosen on a row of cells, like squares filled on grid paper. */
-export function CellScale({ label, value, onChange, min = 1, max, hint }: {
+export function CellScale({ label, value, onChange, min = 1, max, hint, values }: {
   label: string; value: number; onChange: (value: number) => void; min?: number; max: number; hint?: string
+  /** The values offered, when not every integer from min to max (a long range). */
+  values?: number[]
 }) {
   const id = useId()
-  const cells = Array.from({ length: max - min + 1 }, (_, index) => min + index)
+  const cells = values ?? Array.from({ length: max - min + 1 }, (_, index) => min + index)
   const row = useRef<HTMLDivElement>(null)
   const keys = (event: ReactKeyboardEvent) => {
     const step = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0
     if (!step) return
     event.preventDefault()
-    const next = Math.min(max, Math.max(min, value + step))
-    onChange(next)
-    row.current?.querySelectorAll<HTMLButtonElement>('button')[next - min]?.focus()
+    const at = Math.max(0, cells.findIndex((cell) => cell >= value))
+    const index = Math.min(cells.length - 1, Math.max(0, at + step))
+    onChange(cells[index])
+    row.current?.querySelectorAll<HTMLButtonElement>('button')[index]?.focus()
   }
   return (
     <div className="field">

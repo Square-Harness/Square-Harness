@@ -21,7 +21,7 @@ from .deepinfra import DeepInfraGenerationError, TesterAllowanceInsufficient
 from .ledger import ProofStore, _ID, _atomic_write, _bytes, _directory, _now, _read, _regular
 from .litreview import ReviewRunner, review_outcome
 from .mode_calls import USER_MODES, routed_python_task
-from .model_limits import input_limit as model_input_limit, output_limit, is_ds4, HOSTED_DS4
+from .model_limits import input_limit as model_input_limit, output_limit, is_ds4, HOSTED_DS4, ProviderChanged
 from .numerics import SandboxUnavailable
 from .orchestrator import CUT_MARK, FINAL_PREDICT, PROOF_OUTCOMES
 from .proof import ProofRunner
@@ -224,6 +224,28 @@ def _sandbox_observations(session, child, room):
             lines.append('Saved files: ' + ', '.join(item['path'] for item in record['artifacts']))
         observations.append('\n'.join(lines))
     return '\n\n'.join(observations)
+
+
+def worker_error(exc, mode):
+    """The structured error of a failed worker; a retryable one leaves its child interrupted and resumable."""
+    if isinstance(exc, WorkerInputError):
+        return exc.as_dict()
+    if isinstance(exc, ProviderChanged):
+        # Started on another provider or endpoint: resumable once the original one is selected again.
+        return {'code': 'provider_changed', 'message': str(exc), 'retryable': True,
+                'scope': 'transport', 'details': {'mode': mode}}
+    if isinstance(exc, ValueError):
+        return WorkerInputError(str(exc), details={'mode': mode}).as_dict()
+    if isinstance(exc, (AssistantBudget, TokenBudgetError, TesterAllowanceInsufficient)):
+        return {'code': 'worker_budget_exhausted', 'message': str(exc), 'retryable': False,
+                'scope': 'budget', 'details': {'mode': mode}}
+    if isinstance(exc, DeepInfraGenerationError):
+        return dict(code=exc.category, message=str(exc), retryable=exc.retryable, scope='provider', details={'mode': mode})
+    if isinstance(exc, CallContextError):
+        return {'code': 'context_overflow', 'message': str(exc), 'retryable': False,
+                'scope': 'context', 'details': exc.details}
+    return {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
+            'scope': 'operation', 'details': {'mode': mode}}
 
 
 def run_worker(host, parent, budget, action, child, save):
@@ -871,21 +893,7 @@ def run_worker(host, parent, budget, action, child, save):
                 host.update_card(child, mode='explore', job_id=None)
                 save()
             return run_worker(host, parent, budget, fallback, child, save)
-        if isinstance(exc, WorkerInputError):
-            error = exc.as_dict()
-        elif isinstance(exc, ValueError):
-            error = WorkerInputError(str(exc), details={'mode': mode}).as_dict()
-        elif isinstance(exc, (AssistantBudget, TokenBudgetError, TesterAllowanceInsufficient)):
-            error = {'code': 'worker_budget_exhausted', 'message': str(exc), 'retryable': False,
-                     'scope': 'budget', 'details': {'mode': mode}}
-        elif isinstance(exc, DeepInfraGenerationError):
-            error = dict(code=exc.category, message=str(exc), retryable=exc.retryable, scope='provider', details={'mode': mode})
-        elif isinstance(exc, CallContextError):
-            error = {'code': 'context_overflow', 'message': str(exc), 'retryable': False,
-                     'scope': 'context', 'details': exc.details}
-        else:
-            error = {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
-                     'scope': 'operation', 'details': {'mode': mode}}
+        error = worker_error(exc, mode)
         host.update_card(child, status='stopped' if error['retryable'] else 'failed',
                           outcome=str(exc), error=str(exc), error_code=error['code'],
                           agent_error={k: error[k] for k in ('code', 'message', 'scope', 'retryable') if k in error})

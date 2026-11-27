@@ -434,7 +434,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
   An accepted model stream can fail before returning its first token. The worker
   records the phase, affected units, sanitized provider category and any known
   usage. Recovery happens at the unit boundary under a fresh reservation.
-  On a personal key (no tester ledger), a hosted stream that carries no model
+  A hosted stream that carries no model
   output `START_SECONDS` after it was accepted is closed by the transport (the
   payload key `_start_seconds`, `backends._started`, `DeepInfraSilentStart`)
   instead of waiting minutes for the provider's own error. The review submits
@@ -731,12 +731,11 @@ bytes of the message are sent only when there is nothing else. The title is in
 the language the user writes in, English when there is none (code, LaTeX,
 formulas). Title
 updates use the existing chat lock and cannot overwrite a manual rename or
-transcript. The DeepInfra adapter
-validates a strict internal bounded-title payload before reducing its hosted
-input reservation; ordinary calls retain their previous full-context reserve.
+transcript. The hosted adapter
+validates a strict internal bounded-title payload before counting its input with
+the smaller bound (`_bounded_input_tokens`); ordinary calls keep the full count.
 The transport-only `_start_seconds` that `DeepInfra.stream` adds is not part of
-the bounded title or routing shape. An interrupted title must not hold a
-full-context tester allowance. A failed title is printed to stderr.
+the bounded title or routing shape. A failed title is printed to stderr.
 
 `images.py` freezes explicitly attached PNG/JPEG/static WebP bytes in the private
 workspace's content-addressed `.mathagent/images` cache. JSON histories and job
@@ -1285,10 +1284,9 @@ the caller restarts the whole call (`replay=True`, the worker wrapper
 `retry_generation_call`) and at most `REPLAYS` times. Conversation streams
 (`generation_stream`, the orchestrator, investigations) pass `replay=False`. Every
 replacement's first message starts with one more space (measured to start silent
-requests more often). The tester ledger settles a failed stream with unknown usage
-at an estimate (`HostedQuota.settle(..., estimated=True)`: input bytes plus framing,
-streamed characters plus 256), so retries do not drain allowances with
-full-context reservations. Proof gives every replacement a fresh dispatch key.
+requests more often). The tester ledger charges a failed stream with unknown usage
+an estimate (`HostedQuota.charge(..., estimated=True)`: input bytes plus framing,
+streamed characters plus 256). Proof gives every replacement a fresh dispatch key.
 
 The Review (mode `referee`) is `referee.RefereeRunner`, pipeline `review-v4`, when
 the whole manuscript fits the model's context with room for tool loops
@@ -1858,12 +1856,18 @@ after a restored browser-cache entry or an identity change, and lose their old
 content before browser caching; signing out does not mutate server history.
 
 `hosted_quota.py` is opt-in through `SH_DEEPINFRA_QUOTA_FILE`. It reserves
-the full context input ceiling plus configured output before model dispatch,
-using an atomic SQLite transaction and integer nanodollars. Settle only complete,
-bounded reported usage; failed or unknown calls retain their reservation. Existing
-files and immutable settings never silently grant a new allowance. Store the
-ledger outside every served workspace. This is conservative allowance accounting,
-not exact provider billing; do not change Proof budgets to fit a depleted quota.
+nothing: `HostedQuota.admit()` refuses a call only once the charged total has
+reached the allowance (so parallel calls are never held back), and `charge()`
+records each finished call in integer nanodollars, in an atomic SQLite
+transaction: the provider's reported price (`usage.cost`, OpenRouter, carried as
+`cost_usd` on the done event) or the reported tokens at the configured rates; a
+stream with unknown usage is charged an estimate (`estimated=True`). Calls running
+when the limit is reached finish, so the total can end slightly above it; this is
+intended (do not reintroduce reservations or a ledger-driven price cap). A ledger
+from the earlier reservation design is migrated on open: its charged amounts are
+kept, open reservations released. Immutable settings never silently grant a new
+allowance. Store the ledger outside every served workspace. Do not change Proof
+budgets to fit a depleted quota.
 
 `numerics/admission.py` optionally shares heavy-run capacity across processes and
 Linux accounts. `SH_NUMERICS_SLOTS_DIR` and `SH_NUMERICS_SLOTS` point to administrator-
@@ -1883,10 +1887,17 @@ model name to the wire name, `tolerate_repeated_finish`) and its provider wordin
 unavailable, rate_limit or fatal), `_stream_error` (errors inside an accepted stream) and `_read_service_tier`.
 `openrouter.OpenRouter` overrides them: wire model `deepseek/deepseek-v4.1-flash-1017`; no tokenizer (byte
 estimate); `_payload` adds `provider` (`routing()`: order/only from `SH_OPENROUTER_PROVIDERS`, default
-`DEFAULT_PROVIDERS`; allow_fallbacks, require_parameters, data_collection deny, zdr, fp8, `max_price` = `MAX_PRICE`
-or the tester ledger rates when `SH_DEEPINFRA_QUOTA_FILE` is set), `service_tier: default`, `usage: {include}`,
-and the context-compression plugin disabled; an in-flight budget 402 (`error.metadata.limit_source`) is a transient
-rate limit whose message omits the status (referee.provider_refused stops a review on `HTTP 402`); its stream
+`DEFAULT_PROVIDERS`; allow_fallbacks, require_parameters, data_collection deny, zdr, fp8, `max_price` = `MAX_PRICE`,
+also under the tester ledger), `service_tier: default`, `usage: {include}`,
+and the context-compression plugin disabled. A 402 is a transient rate limit (its message omits the status, since
+referee.provider_refused stops a review on `HTTP 402`) only when `error.metadata.limit_source` is
+`openrouter_in_flight_budget` (the wording decides only when no source is given); a 403/404/503 naming routing
+rules, data policy or guardrails is fatal with a routing hint. Inside an accepted stream, an error chunk is a busy
+provider (replaced like DeepInfra's) only for codes 408/429/5xx or a busy `metadata.error_type`
+(`_BUSY_CODES`, `_BUSY_TYPES`; generic wording such as "Provider returned error" counts only without a 4xx code);
+any other 4xx keeps its meaning (invalid request, auth, credit) and is not resent. A resume on another provider or
+endpoint raises `model_limits.ProviderChanged` (a ValueError), which `workers.worker_error` maps to a retryable
+`provider_changed`, so an Assistant child stays interrupted instead of failing. Its stream
 repeats an empty finish frame carrying usage, which `backends._stream` accepts only for such a class. DeepInfra's
 requests and messages are byte-for-byte those of the single-provider version. `start-deepinfra.py --provider`
 picks the profile and key file (`.local/<provider>/credential`); the runtime folder stays `.local/deepinfra`. Tests:
@@ -1920,13 +1931,11 @@ message after twelve seconds without model output. A terminal transient
 provider error before any reasoning, text or tool output permits one new
 attempt within the original deadline. Each new attempt goes through budget
 admission again. Keep unknown usage reserved. A heartbeat alone never starts
-another request, with one exception: Literature Review on a personal key. There
+another request, with one exception: Literature Review. There
 a stream that carries no model output `START_SECONDS` (25 s) after it was
 accepted is closed and submitted again, at most `RESUBMISSIONS` times per
 attempt; each submission passes budget admission and a closed stream keeps its
-reservation. Under the tester ledger (`SH_DEEPINFRA_QUOTA_FILE`) the exception
-is off, because each closed stream would hold a full-context reservation that
-is never settled. Literature Review can defer an independent unit to another
+reservation (under the tester ledger it is charged an estimate). Literature Review can defer an independent unit to another
 wave. That unit still uses its saved phase and job allowances.
 A stream that has started to answer and then carries no model output for
 `DeepInfra.stall_seconds` (180 s; keep-alive comments do not count) is ended by

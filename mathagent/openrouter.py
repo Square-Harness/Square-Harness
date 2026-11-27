@@ -11,8 +11,10 @@ request:
   fallback to the next one when a provider is down or busy;
 - zero data retention and no data collection, fp8 quantization, required parameters (a request with tools or a
   JSON schema never goes where they would be dropped), the standard service tier (priority copies of a model match
-  the same provider slug and cost more), a price cap (the tester ledger's rates when a ledger is configured, so its
-  reservations stay an upper bound), and OpenRouter's context compression off (a prompt is never silently cut).
+  the same provider slug and cost more), a price cap that keeps every listed provider but leaves out the "fast"
+  tiers, and OpenRouter's context compression off (a prompt is never silently cut).
+
+Under the tester ledger each call is charged the price OpenRouter reports for it (`usage.cost`).
 
 Measured 2026-11-27: reasoning streams as `delta.reasoning`, which the shared parser reads; the finish frame comes
 twice (the second one carries usage and cost), which tolerate_repeated_finish accepts; each chunk names the upstream
@@ -37,9 +39,31 @@ _SLUG = re.compile(r'^[a-z0-9][a-z0-9._-]*(/[a-z0-9._-]+)*$')
 # OpenRouter's wording of a refusal that is worth waiting out, matched inside its fields.
 _ROUTER_BUSY = _BUSY + ('rate limited upstream', 'temporarily rate limited', 'retry shortly', 'provider returned error',
                         'no available model provider', 'overloaded')
-# A request no allowed provider can ever serve (routing rules, parameters): waiting does not help.
-_UNSERVABLE = ('no endpoints found', 'no allowed providers', 'data policy', 'require_parameters', 'requires parameters')
+# Inside an accepted stream, an upstream failure worth replacing: these codes, or these metadata.error_type values
+# (OpenRouter's stable field). Any other 4xx keeps its own meaning (invalid request, authorization, credit).
+_BUSY_CODES = {408, 429, 500, 502, 503, 504, 524, 529}
+_BUSY_TYPES = {'rate_limit_exceeded', 'provider_overloaded', 'provider_unavailable', 'timeout'}
+# A request no allowed provider can ever serve (routing rules, parameters): waiting does not help. Matched in the
+# normalized signals (underscores and hyphens read as spaces).
+_UNSERVABLE = ('no endpoints found', 'no allowed providers', 'data policy', 'require parameters', 'requires parameters',
+               'routing requirements', 'guardrail')
+_ROUTING_HINT = ('No allowed provider can serve this request: check SH_OPENROUTER_PROVIDERS and the routing rules '
+                 '(zero data retention, fp8, price cap) and the key\'s guardrails.')
 
+
+def _error_fields(value):
+    """The numeric code, metadata.error_type and metadata.limit_source of an OpenRouter error body or stream error."""
+    error = value.get('error') if isinstance(value, dict) and isinstance(value.get('error'), dict) else value
+    if not isinstance(error, dict):
+        return None, None, None
+    code = error.get('code')
+    try:
+        code = int(code) if not isinstance(code, bool) else None
+    except (TypeError, ValueError):
+        code = None
+    metadata = error.get('metadata') if isinstance(error.get('metadata'), dict) else {}
+    kind, source = metadata.get('error_type'), metadata.get('limit_source')
+    return code, kind if isinstance(kind, str) else None, source if isinstance(source, str) else None
 
 def routing():
     """The provider routing object sent with every request (see the module docstring)."""
@@ -47,13 +71,8 @@ def routing():
     providers = [item.strip() for item in raw.split(',') if item.strip()] if raw.strip() else list(DEFAULT_PROVIDERS)
     if not 1 <= len(providers) <= 16 or any(not _SLUG.match(item) for item in providers):
         raise AgentError('SH_OPENROUTER_PROVIDERS must list 1 to 16 OpenRouter provider slugs, such as deepinfra,cohere')
-    if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
-        price = {'prompt': os.environ.get('SH_DEEPINFRA_QUOTA_INPUT_PER_MILLION', '0.20'),
-                 'completion': os.environ.get('SH_DEEPINFRA_QUOTA_OUTPUT_PER_MILLION', '0.60')}
-    else:
-        price = dict(MAX_PRICE)
     return {'order': providers, 'only': providers, 'allow_fallbacks': True, 'require_parameters': True,
-            'data_collection': 'deny', 'zdr': True, 'quantizations': ['fp8'], 'max_price': price}
+            'data_collection': 'deny', 'zdr': True, 'quantizations': ['fp8'], 'max_price': dict(MAX_PRICE)}
 
 
 class OpenRouter(DeepInfra):
@@ -93,17 +112,22 @@ class OpenRouter(DeepInfra):
 
     def _refusal(self, exc, deadline):
         code = exc.code
-        if code in {400, 401, 403, 404, 405, 422}:
+        if code in {400, 401, 405, 422}:
             return 'fatal', HINTS[code], False
         value = _read_error_body(exc, deadline)
-        error = value.get('error') if isinstance(value, dict) else None
-        metadata = error.get('metadata') if isinstance(error, dict) else None
-        source = metadata.get('limit_source') if isinstance(metadata, dict) else None
+        _, _, source = _error_fields(value)
         signals = _provider_signals(value)
+        if code in {403, 404}:
+            if _mentions(signals, _UNSERVABLE):
+                return 'fatal', _ROUTING_HINT, False
+            if source or _credit_limit(signals):
+                return 'fatal', 'Check the OpenRouter credit balance and the key\'s credit limit.', False
+            return 'fatal', HINTS[code], False
         if code == 402:
             # OpenRouter's in-flight budget: the spending of calls still running is counted against the credit
-            # balance; it frees up as they finish. Any other 402 is out of credit.
-            if source == 'openrouter_in_flight_budget' or _mentions(signals, ('in flight',)):
+            # balance; it frees up as they finish. Any other 402 is out of credit. The stated source decides; the
+            # wording only when there is none.
+            if source == 'openrouter_in_flight_budget' or (source is None and _mentions(signals, ('in flight',))):
                 return 'rate_limit', 'the in-flight spending budget is full; waiting for running calls to finish.', True
             return 'fatal', 'Check the OpenRouter credit balance and the key\'s credit limit.', False
         if code == 429:
@@ -113,14 +137,17 @@ class OpenRouter(DeepInfra):
                 return 'rate_limit', 'The model is temporarily at capacity.', True
             return 'rate_limit', 'The provider is temporarily limiting requests.', True
         if code == 503 and _mentions(signals, _UNSERVABLE):
-            return 'fatal', ('No allowed provider can serve this request: check SH_OPENROUTER_PROVIDERS and the '
-                             'routing rules (zero data retention, fp8, price cap).'), False
+            return 'fatal', _ROUTING_HINT, False
         if code in {408, 500, 502, 503, 504, 524, 529}:
             return 'unavailable', None, True
         return 'fatal', 'The provider request failed; check its service status.', False
 
     def _stream_error(self, detail):
+        # After the 200, OpenRouter sends an upstream failure as an error chunk (once every fallback has failed).
+        code, kind, _ = _error_fields(detail)
         signals = _provider_signals(detail)
-        if not _credit_limit(signals) and _mentions(signals, _ROUTER_BUSY):
+        busy = (code in _BUSY_CODES or kind in _BUSY_TYPES
+                or ((code is None or code >= 500) and _mentions(signals, _ROUTER_BUSY)))
+        if busy and not _credit_limit(signals) and not _mentions(signals, _UNSERVABLE):
             return 'service_unavailable', 'OpenRouter reported that the provider is busy or failed before answering.'
         return _generation_failure(detail, self.display)

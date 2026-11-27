@@ -11,6 +11,25 @@
   `scripts/setup-openrouter.py`. Everything built for DeepInfra (busy waits, retries, silent-start detection, the
   tester ledger) applies to both; DeepInfra's requests are unchanged. Native images stay DeepInfra-only for now.
 
+- The tester allowance no longer reserves anything before a call. A tester can run any number of calls at once
+  while the allowance is not spent; a new call is refused only once it is, and calls already running finish (so a
+  tester can end a few cents above the allowance). Each call is charged when it ends: on OpenRouter the price
+  OpenRouter reports, on DeepInfra its tokens at the configured rates. A ledger from the earlier design keeps its
+  charged amounts; reservations that crashed calls left open are released. OpenRouter's price cap no longer
+  drops to the ledger rates under a tester ledger, so testers use the same providers as everyone else. The
+  account menu shows used and remaining amounts (no "Reserved" line).
+
+- Model requests at once: up to 200 (DeepInfra's account limit), 200 by default with DS4 (was 5, at most 16),
+  shared by every conversation; one review may run 64 calls at once on a hosted provider. The Parallel work dialog
+  offers 1, 2, 4 ... 200.
+
+- OpenRouter fixes: an error inside a stream is waited out only when its code or error type says the provider is
+  busy (a request every provider rejects is no longer resent five times); a 402 is waited out only when OpenRouter
+  says it is the in-flight budget; routing refusals (404) name the routing rules. Work paused on one provider stays
+  paused, not failed, when an Assistant conversation is resumed on the other; it resumes once that provider is
+  selected again. `setup-openrouter.py` refuses to read the key without a hidden prompt and always saves it with
+  mode 600; the launcher checks the key file and `SH_OPENROUTER_PROVIDERS` before starting.
+
 - DeepInfra overloads no longer stop a conversation after a minute, and are no longer silent.
   DeepInfra's "Model busy" refusal (about a third of calls on 26 November 2026, whatever the
   request size, reasoning or service tier) is waited out for up to five minutes per call, and

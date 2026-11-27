@@ -233,7 +233,8 @@ def feedback_submit(h, body):
     hub = h.server.hub
     metadata = {'version': VERSION, 'build': build_id(), 'model': hub.args.model,
                 'api_profile': getattr(hub.args, 'api_profile', 'default'),
-                'service_tier': os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')}
+                'service_tier': (os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
+                                 if getattr(hub.args, 'api_profile', 'default') == 'deepinfra' else 'standard')}
     # Hosted gateways overwrite this header with the verified Access identity.
     # A local backend is a single trusted workspace and has no account identity.
     email = h.headers.get('X-SH-User-Email', '')

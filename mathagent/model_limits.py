@@ -41,7 +41,7 @@ DEFAULTS = {
     'research_tokens': 15 * MODEL_OUTPUT_TOKENS, 'research_input_tokens': 33_554_432,
     'research_seconds': 15 * PROOF_CALL_SECONDS, 'research_chars': 200_000,
     'assistant_tokens': 12_568_576, 'assistant_input_tokens': 33_554_432,
-    'gui_model_concurrency': 5, 'gui_concurrency': 5, 'assistant_concurrency': 5,
+    'gui_model_concurrency': 200, 'gui_concurrency': 5, 'assistant_concurrency': 5,
 }
 EFFORTS = {
     'low': dict(tries=1, minutes=3 * PROOF_CALL_SECONDS // 60, tokens=3 * MODEL_OUTPUT_TOKENS, research_tokens=3 * MODEL_OUTPUT_TOKENS,
@@ -114,6 +114,11 @@ def effort_presets(args):
 # The hosted API profiles that serve DS4.1 Flash with the robust transport (mathagent.deepinfra.DeepInfra and its
 # subclasses): every DS4 limit, preset and hosted behaviour keys on this set, never on one provider's name.
 HOSTED_DS4 = frozenset({'deepinfra', 'openrouter'})
+
+
+class ProviderChanged(ValueError):
+    """A saved job resumed with another model provider or endpoint. Its data is never sent elsewhere implicitly:
+    the resume is refused, and the job stays resumable once the original provider is selected again."""
 
 
 def hosted_profile(profile):

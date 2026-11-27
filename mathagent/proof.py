@@ -26,7 +26,7 @@ from .call_policy import (CONTEXT_MARGIN, CallContextError, allocate_call, count
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
 from .ledger import LedgerError, ProofStore
-from .model_limits import is_ds4, HOSTED_DS4
+from .model_limits import is_ds4, HOSTED_DS4, ProviderChanged
 from .proof_policy import (
     CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
     VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request, review_request,
@@ -474,10 +474,11 @@ class ProofRunner:
         saved = self.state['settings']
         current_provenance = self._provenance()
         if saved.get('api_profile', 'default') != current_provenance.get('api_profile', 'default'):
-            raise ValueError('Cannot resume with changed api_profile; select the original --api-profile. Saved artifacts remain readable.')
+            raise ProviderChanged(f'This proof was started with --api-profile {saved.get("api_profile", "default")}; '
+                                  'select it again to resume. Saved artifacts remain readable.')
         for key in ('host', 'backend'):
             if saved.get(key) != current_provenance[key]:
-                raise ValueError(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
+                raise ProviderChanged(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')
         for key in ('model', 'ctx', 'seed', 'temperature', 'top_p'):
             setattr(self.agent, key, saved[key])
         images.restore(self.agent, self.state)
