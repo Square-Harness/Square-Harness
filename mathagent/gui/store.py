@@ -1176,7 +1176,7 @@ def save_direct_reading(root, chat_id, record):
 
 @_locked_chat
 def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
-                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None):
+                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None, display_answer=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -1202,6 +1202,9 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
+            if display_answer is not None and message is history[-1]:
+                item['content'] = display_answer
+                item['notebook_display'] = True
             if source_coverage is not None and message is history[-1]:
                 item['source_coverage'] = source_coverage
             if job_id and mode == 'check':
@@ -2367,7 +2370,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
             delegated.setdefault(value.get('mode') or arguments.get('mode'), []).append(value)
     parts, results = [], set()
     for index, item in enumerate(chat['transcript'][:before]):
-        if index == skip:
+        if index == skip or item.get('notebook_display'):
             continue
         role, content = item.get('role'), (item.get('content') or '').strip()
         if role == 'user' and content:

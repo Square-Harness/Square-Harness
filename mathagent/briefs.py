@@ -265,7 +265,8 @@ def proof_reference(context):
     tool traffic, hidden reasoning and a reply that reports an earlier proof or
     review are strategy: they reach the solver alone, as leads.
     """
-    clean = {k: v for k, v in context.items() if k in ('query', 'files', 'images', 'project_snapshot', 'project_note_status')}
+    clean = {k: v for k, v in context.items() if k in
+             ('query', 'files', 'images', 'project_snapshot', 'project_note_status', 'notebook_source')}
     clean['history'] = [message for turn in _turns(context.get('history', []))
                         for message in _shared(turn, replies=not _reports_verdict(turn))]
     clean['messages'] = list(_shared(context.get('messages', []), replies=False, current=True))

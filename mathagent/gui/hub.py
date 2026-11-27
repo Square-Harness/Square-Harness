@@ -47,7 +47,7 @@ from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted, assistant_transport, check_assistant_transport
 from ..numerics import PythonSandbox
-from ..tools import Workspace, source_suffix
+from ..tools import Workspace, is_project_notebook, source_suffix
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from .. import bibcheck, briefs, images
@@ -1198,7 +1198,8 @@ class Hub:
         return [images.validate(self.root, ref) for ref in refs.values()], attached
 
     def _turn_sources(self, content, supplied, chat, *, mode=None):
-        selected = conversation_sources(content, list(supplied), chat['transcript'], mode=mode)
+        selected = [name for name in conversation_sources(content, list(supplied), chat['transcript'], mode=mode)
+                    if not is_project_notebook(name)]
         workspace = Workspace(self.root, read_types=store.read_types(self.root))
         allowed = workspace.allowed_types
         if not supplied:
@@ -1206,7 +1207,10 @@ class Hub:
                 return selected
             attached = {name for row in chat['transcript'] if row.get('role') == 'user'
                         for name in row.get('attached_files', row.get('files', []))}
-            return [name for name in selected if name in attached or images.is_image(name) or source_suffix(name) in allowed]
+            # A bare PROJECT.md can refer to the active notebook. Keep it as an ordinary
+            # source only when the user actually has such a file at the workspace root.
+            return [name for name in selected if (name in attached or images.is_image(name) or source_suffix(name) in allowed)
+                    and (name != 'PROJECT.md' or (self.root / name).is_file())]
         # Naming a second document alongside an attachment selects that document
         # among the readable kinds. Never discover sibling files.
         suffixes = tuple(allowed) + (('.tgz', '.tar', '.gz') if '.tex' in allowed else ())
@@ -1218,12 +1222,14 @@ class Hub:
         if not named:
             return selected
         for name in named:
-            if name in attached_names or source_suffix(name) not in allowed:
+            if name in attached_names or is_project_notebook(name) or source_suffix(name) not in allowed:
                 continue
             paths = [name]
             if chat.get('project_id') and not name.startswith('projects/'):
                 paths.insert(0, f"projects/{chat['project_id']}/{name}")
             for candidate in paths:
+                if is_project_notebook(candidate):
+                    continue
                 path = workspace.path(candidate, pdf=True)
                 if path.is_file() and source_suffix(path) in allowed:
                     selected.append(path.relative_to(self.root).as_posix())
@@ -1692,6 +1698,7 @@ class Hub:
         if not legacy:
             files = [*text_files, *(name for name in files if images.is_image(name))]
         project_snapshot = projects.snapshot(self.root, session.get('project_id'))
+        inspection = projects.inspection_source(self.root, content, attached_files, project_snapshot)
         personal_context = personalization.context(personalization.load(self.base))
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(text_files)) if text_files else '')
 
@@ -1706,6 +1713,8 @@ class Hub:
             agent.turn_image_refs = attached_images
             agent.personal_context = personal_context
             agent.project_context = projects.context(project_snapshot)
+            agent.notebook_source = projects.quoted_inspection(inspection)
+            agent.notebook_answer = projects.verbatim_inspection(content, inspection) if not files else None
             images.bind(agent, image_refs)
             for name in excluded:
                 try:
@@ -1713,7 +1722,6 @@ class Hub:
                 except ValueError:
                     pass
             agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
-            self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
             self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
             if agent.workspace.literature.online:
@@ -1724,6 +1732,8 @@ class Hub:
                          'history_length': len(agent.history), 'images': [ref['sha256'] for ref in image_refs]}
             previous = previous if previous.get('signature') == signature else {}
             try:
+                if not agent.notebook_answer or previous:
+                    self._ensure_model(agent)
                 if not legacy and (text_files or previous):
                     if previous:
                         check_assistant_transport(previous['transport'], assistant_transport(agent.client))
@@ -1749,7 +1759,7 @@ class Hub:
                 raise
             store.commit_turn(self.root, chat_id, agent.history, capture.calls[-1:] if coverage is not None else capture.calls, capture.notices,
                               echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files, source_coverage=coverage,
-                              user_content=content,
+                              user_content=content, display_answer=agent.notebook_answer if coverage is None else None,
                               project_snapshot=project_snapshot, image_refs=attached_images)
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': answer}
@@ -1819,8 +1829,7 @@ class Hub:
             return next(m['content'] for m in reversed(history) if m['role'] == 'user'), history[-1]['content']
         session = store.load_chat(self.root, chat_id)
         last_user, _ = last_exchange(session)
-        project_snapshot = next((item.get('project_snapshot') for item in reversed(session['transcript'])
-                                 if item.get('role') == 'user'), None)
+        project_snapshot = projects.snapshot(self.root, session.get('project_id'))
         image_refs = store.chat_images(session)
 
         def work(task):
@@ -2020,7 +2029,8 @@ class Hub:
                     snapshot = None
             previous_markdown = snapshot
         attached_files = list(files) if not resume else []
-        selected = (list(files) if resume else [] if review_reference or previous_markdown or previous_experiments or compile_job else
+        selected = ([name for name in files if not is_project_notebook(name)] if resume else
+                    [] if review_reference or previous_markdown or previous_experiments or compile_job else
                     self._turn_sources(content, files, chat, mode=required_mode))
         unavailable_sources = saved.get('unavailable_source_files', []) if resume else []
         if not files and not resume:
@@ -2056,6 +2066,12 @@ class Hub:
             latest = current.get('assistant_state') or {}
             project_snapshot = (copy.deepcopy(latest.get('project_snapshot')) if resume else
                                 projects.snapshot(self.root, current.get('project_id')))
+            if resume:
+                notebook_source, notebook_answer = latest.get('notebook_source', ''), latest.get('notebook_answer')
+            else:
+                inspection = projects.inspection_source(self.root, content, attached_files, project_snapshot)
+                notebook_source = projects.quoted_inspection(inspection)
+                notebook_answer = projects.verbatim_inspection(content, inspection) if not files and selected_mode is None else None
             set_aside = not resume and latest.get('status') in resumable
             self.routing[chat_id] = time.time()
             try:
@@ -2121,6 +2137,8 @@ class Hub:
             main.unavailable_source_files = unavailable_sources
             main.personal_context = personal_context
             main.project_context = projects.context(project_snapshot)
+            main.notebook_source = notebook_source
+            main.notebook_answer = notebook_answer
             images.bind(main, image_refs)
             main.turn_image_refs = attached_images
             text_files = [name for name in files if not images.is_image(name)]
@@ -2139,7 +2157,7 @@ class Hub:
             main.conversion_style_mode = initial_style if local_conversion else None
             # The investigation records its framing checkpoint before contacting
             # the provider, so an unavailable endpoint leaves a paused run to resume.
-            if not local_conversion and not compile_job and selected_mode != 'investigate':
+            if not main.notebook_answer and not local_conversion and not compile_job and selected_mode != 'investigate':
                 self._ensure_model(main)
             checkpoint_lock = threading.RLock()
             parent = None
@@ -2271,7 +2289,8 @@ class Hub:
                     if WRITEUP_NEEDS in notices and WRITEUP_NEEDS not in parent.state.get('warnings', []):
                         notices = [n for n in notices if n != WRITEUP_NEEDS]  # a later write-up delivered its document
                     store.commit_turn(root, chat_id, parent.conversation_history(), capture.calls, notices,
-                                      echo_user=False, mode='free')
+                                      echo_user=False, mode='free', display_answer=(result['answer'] if
+                                          (parent.state.get('answer_source') or {}).get('kind') == 'notebook_display' else None))
                 suggestion = parent.state.get('open_problem_suggestion')
                 if suggestion:
                     store.append_items(root, chat_id, [self._open_problem_card(suggestion)])

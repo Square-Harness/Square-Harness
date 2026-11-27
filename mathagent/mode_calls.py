@@ -800,6 +800,10 @@ class ModeOrchestrator(Orchestrator):
         if self.required_effort or self.required_mode:
             self.required_effort = 'high'
         super()._new_state(query, files, history)
+        if not self.required_mode and not files and getattr(self.agent, 'notebook_answer', None):
+            self.state.pop('notebook_source', None)
+            self.state['notebook_answer'] = self.agent.notebook_answer
+            return
         previous = getattr(self.agent, 'previous_markdown', None)
         compile_job = getattr(self.agent, 'compile_job', None)
         experiments = getattr(self.agent, 'previous_experiments', None)
@@ -917,6 +921,7 @@ class ModeOrchestrator(Orchestrator):
                                              current_images=current.get('images'),
                                              suggested_mode=(state.get('suggested_specialist') or {}).get('mode'),
                                              overview=state.get('workspace_overview', ''),
+                                             notebook_inspection=bool(state.get('notebook_source')),
                                              known_files=state.get('workspace_paths', ()), inspect=self._routing_inspect)
             except AgentError as exc:
                 if not provider_busy(exc):

@@ -503,7 +503,7 @@ def _inspection(inspect, request):
 
 
 def route_request(client, model, query, history=(), files=(), ctx=1_048_576, current_images=None, suggested_mode=None,
-                  overview='', known_files=(), inspect=None):
+                  overview='', known_files=(), inspect=None, notebook_inspection=False):
     """Return a validated route, reasoning, usage and request-allocation record.
 
 No worker is executed here. Failures are raised to the controller, which must
@@ -532,6 +532,9 @@ it asks to look at files before deciding (route "inspect"), while inspections su
     material = {'current_user_request': query, 'attachment_references': list(files), 'recognized_source_objectives': reading,
                 'prior_reference_excerpts': prior, 'suggested_specialist': suggested_mode,
                 'workspace_files': overview or '(no listing)'}
+    if notebook_inspection:
+        material['notebook_inspection'] = ('The answerer already has the turn-specific result of the requested '
+                                           'project notebook lookup. No workspace read is needed for it.')
     messages = [{'role': 'system', 'content': POLICY}]
     for item in history:
         if item.get('role') == 'user' and item.get('images'):

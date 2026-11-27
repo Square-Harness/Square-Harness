@@ -11,7 +11,7 @@ from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
-from .prompts import SYSTEM, MODES
+from .prompts import SYSTEM, MODES, PROJECT_SCOPE, NOTEBOOK_DISPLAY_RECEIPT, with_notebook_evidence
 from .model_limits import input_limit
 
 
@@ -188,7 +188,7 @@ class Agent:
         if hasattr(self, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.turn_image_refs)
         instruction = MODES[self.mode] if instruction is None else instruction
-        system = {'role': 'system', 'content': SYSTEM + ('\nMODE: ' + instruction if instruction else '')}
+        system = {'role': 'system', 'content': SYSTEM + '\n' + PROJECT_SCOPE + ('\nMODE: ' + instruction if instruction else '')}
         context = [{'role': 'user', 'content': value} for value in
                    (getattr(self, 'personal_context', ''), getattr(self, 'project_context', '')) if value]
         return system, context, message
@@ -201,7 +201,8 @@ class Agent:
         if desired < minimum:
             return False
         prior = [{key: value for key, value in row.items() if key not in ('thinking', 'reasoning', 'reasoning_content')} for row in history]
-        payload = self._payload([system, *context, *prior, message], self.workspace.schemas() if tools else [],
+        turn = with_notebook_evidence([*prior, message], getattr(self, 'notebook_source', ''), len(prior))
+        payload = self._payload([system, *context, *turn], self.workspace.schemas() if tools else [],
                                 self.think, desired, 0)
         try:
             _, fit = allocate_call(self.client, payload, desired, minimum=minimum)
@@ -230,7 +231,16 @@ class Agent:
         self.last_stop_reason = ''
         recovery_notes = ''
         system, context, message = self._turn_messages(query, instruction)
+        user_index = len(messages)
         messages.append(message)
+        if getattr(self, 'notebook_answer', None):
+            self.history = [*messages, {'role': 'assistant', 'content': NOTEBOOK_DISPLAY_RECEIPT}]
+            if on_first_response is not None:
+                on_first_response()
+            emit('start', '')
+            emit('text', self.notebook_answer)
+            emit('end', '')
+            return self.notebook_answer
         schemas = self.workspace.schemas()
         seen_tools, stalled_rounds = set(), 0
         projected, seen_messages = {}, len(messages) - 1
@@ -256,7 +266,8 @@ class Agent:
             from .call_policy import allocate_call, CallContextError
             while True:
                 visible = [dict(item, content=projected[i]) if i in projected else item for i, item in enumerate(messages)]
-                payload['messages'] = [system, *context, *visible]
+                payload['messages'] = [system, *context,
+                                       *with_notebook_evidence(visible, getattr(self, 'notebook_source', ''), user_index)]
                 if recovery_notes:
                     payload['messages'] = copy.deepcopy(payload['messages'])
                     payload['messages'][-1]['content'] += ('\n\nUNVERIFIED WORKING NOTES (final excerpt of generated reasoning):\n'

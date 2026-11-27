@@ -29,7 +29,8 @@ from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
-from .tools import schema
+from .prompts import NOTEBOOK_DISPLAY_RECEIPT, PROJECT_SCOPE, with_notebook_evidence
+from .tools import is_project_notebook, schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4, HOSTED_DS4, ProviderChanged
 
@@ -443,6 +444,8 @@ class Orchestrator:
         project = getattr(self.agent, 'project_snapshot', None)
         if project is not None:
             self.state['project_snapshot'] = copy.deepcopy(project)
+        if getattr(self.agent, 'notebook_source', ''):
+            self.state['notebook_source'] = self.agent.notebook_source
         workspace = getattr(self.agent, 'workspace', None)
         if workspace is not None and hasattr(workspace, 'allowed_types'):
             # The planners' view of the open folder (the routing step and this agent), frozen for the turn.
@@ -510,7 +513,10 @@ class Orchestrator:
         for key in ('messages', 'history', 'files', 'children', 'pending_calls', 'warnings'):
             if not isinstance(state.get(key), list):
                 raise ValueError('Malformed assistant checkpoint: ' + key)
-        if query != state.get('query') or list(files) != state['files']:
+        # Historical checkpoints could also pin a managed notebook as an ordinary source.
+        # Keep the native conversation intact, but do not re-open such a pin on resume.
+        state['files'] = [p for p in state['files'] if not is_project_notebook(p)]
+        if query != state.get('query') or [p for p in files if not is_project_notebook(p)] != state['files']:
             raise ValueError('Resume must use the original query and attached sources')
         if any(type(state.get(key)) is not int or state[key] < 0 for key in ('actions', 'main_calls')):
             raise ValueError('Malformed assistant checkpoint accounting')
@@ -518,6 +524,13 @@ class Orchestrator:
         if limits.get('actions') != self.max_actions or limits.get('children') != self.max_children:
             raise ValueError('Resume must preserve the assistant action and child limits')
         state['limits']['concurrency'] = self.concurrency
+        # Older checkpoints listed project notebooks alongside ordinary papers. Keep the
+        # original frozen inventory for the turn, excluding those entries and their titles.
+        if 'workspace_paths' in state:
+            state['workspace_paths'] = [p for p in state['workspace_paths'] if not is_project_notebook(p)]
+            state['workspace_overview'] = '\n'.join(
+                row for row in state.get('workspace_overview', '').splitlines()
+                if not is_project_notebook(row.partition(' · ')[0]))
         self.state = state
         self.state['resumed_checkpoint'] = True
         from . import images
@@ -548,6 +561,8 @@ class Orchestrator:
         material = {key: self.state[key] for key in ('query', 'history', 'files')}
         if self.state.get('project_snapshot') is not None:
             material['project_snapshot'] = self.state['project_snapshot']
+        if self.state.get('notebook_source'):
+            material['notebook_source'] = self.state['notebook_source']
         if self.state.get('images'):
             material['images'] = self.state['images']
         material.update(ctx=self.agent.ctx, online=bool(library and library.online))
@@ -739,7 +754,7 @@ class Orchestrator:
             system = self._policy(tools) + instruction
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
-            'messages': [{'role': 'system', 'content': system + self._numerics_policy(tools) + (
+            'messages': [{'role': 'system', 'content': system + '\n' + PROJECT_SCOPE + '\n' + self._numerics_policy(tools) + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
                 'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (
@@ -760,7 +775,8 @@ class Orchestrator:
                    (getattr(self.agent, 'personal_context', ''), getattr(self.agent, 'project_context', ''),
                     WORKSPACE_FILES + self.state['workspace_overview'] if self.state.get('workspace_overview') else '')
                    if value]
-                + copy.deepcopy(self.state['messages']),
+                + with_notebook_evidence(copy.deepcopy(self.state['messages']), self.state.get('notebook_source'),
+                                         self.state.get('history_prefix_count', 0)),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
         }
@@ -1187,6 +1203,8 @@ class Orchestrator:
             child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
                 project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
                                     'Preserve assumptions and conjectures; verify mathematical claims when needed.')
+        if self.state.get('notebook_source'):
+            child['context']['notebook_source'] = self.state['notebook_source']
         if shared_proof_objective:
             child['shared_proof_objective'] = shared_proof_objective
         child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
@@ -1817,6 +1835,16 @@ class Orchestrator:
         self.state['status'] = 'running'
         self._save()
         try:
+            answer = self.state.pop('notebook_answer', None)
+            if answer:
+                self.state['answer_source'] = {'kind': 'notebook_display'}
+                self.state['messages'].append({'role': 'assistant', 'content': NOTEBOOK_DISPLAY_RECEIPT})
+                self.agent.history = self.conversation_history()
+                self.agent.last_stats = {}
+                self.emit('start', '')
+                self.emit('text', answer)
+                self.emit('end', '')
+                return self._finish('complete', answer)
             last = self.state.get('last_call') or {}
             # Recover checkpoints written by versions that paused on malformed
             # JSON before saving transport details. Do not reset their budgets.

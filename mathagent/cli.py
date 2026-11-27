@@ -580,9 +580,18 @@ def main():
         else:
             if args.output:
                 raise ValueError('--output is for literature/referee reports')
-            ensure_model()
-            workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
-            chat(agent, query)
+            from .gui import projects
+            inspection = projects.inspection_source(workspace.root, query)
+            agent.notebook_source = projects.quoted_inspection(inspection)
+            agent.notebook_answer = projects.verbatim_inspection(query, inspection)
+            try:
+                if not agent.notebook_answer:
+                    ensure_model()
+                workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
+                chat(agent, query)
+            finally:
+                agent.notebook_source = ''
+                agent.notebook_answer = None
 
     while True:
         try:

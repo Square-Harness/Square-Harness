@@ -244,7 +244,12 @@ Deleting a conversation keeps its saved proofs, reports and runs in its
 project's research record; only its short worker answers are deleted with it.
 
 New turns receive a bounded copy of the selected project's notes; their workers
-receive that same context. Switching projects or editing notes does not alter
+receive that same context. In a chat with no project, no project instructions
+apply. You can ask “What does the Fourier series notebook say?” to display
+another project's notes verbatim. If you ask for a summary, the Assistant
+receives those notes as source material for that turn.
+Its file tools skip project notebooks during ordinary searches and can still
+read papers in project folders. Switching projects or editing notes does not alter
 work already running. Resume uses the original saved copy. Project notes are
 user-maintained working context and are never updated
 automatically from model answers. The Assistant can also consult a bounded index

@@ -18,6 +18,8 @@ import tempfile
 import time
 from threading import Lock
 
+from .ledger import _ID
+
 # Code in other languages than Python (Julia, Rust, C/C++, R, MATLAB, JavaScript, shell) and settings, read as
 # text. Not .ts: it is as often a video file as TypeScript.
 CODE = {'.jl', '.rs', '.c', '.h', '.cpp', '.hpp', '.r', '.m', '.js', '.sh', '.ini', '.cfg'}
@@ -59,6 +61,14 @@ def is_source_archive(path):
 def source_suffix(path):
     """Source archives belong to the existing TeX read permission."""
     return '.tex' if is_source_archive(path) else Path(path).suffix.lower()
+
+
+def is_project_notebook(path):
+    """Recognize the managed notebook path, including in a nested workspace."""
+    parts = Path(path).parts
+    return (len(parts) >= 3 and parts[-3].casefold() == 'projects'
+            and parts[-1].casefold() in ('project.md', 'project-deleted.md')
+            and _ID.fullmatch(parts[-2].lower()) is not None)
 
 # Reading user files. UTF-8 first; otherwise the 8-bit encoding the file declares; otherwise UTF-8
 # with Windows-1252 for the bytes that are not UTF-8 (French accents saved by an older editor).
@@ -205,7 +215,8 @@ def workspace_overview(workspace, max_files=None, max_chars=None, title_seconds=
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP and not (Path(folder) / d).is_symlink())
         for name in names:
             path = Path(folder) / name
-            if name.startswith('.') or path.is_symlink() or (source_suffix(path) not in allowed and path not in workspace.pinned):
+            if (name.startswith('.') or path.is_symlink() or is_project_notebook(path)
+                    or (source_suffix(path) not in allowed and path not in workspace.pinned)):
                 continue
             try:
                 info = path.stat()
@@ -287,11 +298,14 @@ class Workspace:
         rel = Path(filename)
         if rel.is_absolute() or '..' in rel.parts or any(p.startswith('.') for p in rel.parts):
             raise ValueError('Use a relative path; parent traversal and hidden paths are excluded')
-        p = (self.root / rel).resolve()
+        requested = self.root / rel
+        p = requested.resolve()
         if not p.is_relative_to(self.root):
             raise ValueError('Path escapes workspace, possibly through a symlink')
         if any(part.startswith('.') for part in p.relative_to(self.root).parts):
             raise ValueError('Hidden paths are excluded, including symlink targets')
+        if is_project_notebook(requested) or is_project_notebook(p):
+            raise ValueError('Project notebooks are supplied through the chat’s project or an explicit request to inspect one.')
         if source_suffix(p) not in TEXT and not (pdf and p.suffix.lower() == '.pdf'):
             raise ValueError('Unsupported extension; use text, LaTeX, Markdown or code files, or a TeX source archive (.tar.gz/.tgz/.tar/.gz)')
         return p
@@ -356,7 +370,8 @@ class Workspace:
                              and not (Path(folder) / d).is_symlink())
             for name in sorted(files):
                 p = Path(folder) / name
-                if name.startswith('.') or source_suffix(p) not in allowed or p.is_symlink() or p in self.excluded_files:
+                if (name.startswith('.') or source_suffix(p) not in allowed or p.is_symlink()
+                        or p in self.excluded_files or is_project_notebook(p)):
                     continue
                 yield p
 

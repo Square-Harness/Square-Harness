@@ -699,7 +699,14 @@ turns, and persist it in the Assistant checkpoint and child context. Resume
 must use that saved snapshot rather than rereading the current notebook.
 Keep project notes separate from Proof policy and source evidence. New turns
 see newly saved revisions; model answers do not update the notebook. Notebook
-changes never grant tool permissions.
+changes never grant tool permissions. Keep managed project notebooks, including
+retired ones, out of workspace inventories, title extraction and generic file
+tools, including worker pins. Only the saved project assignment supplies standing
+instructions. A plain contents request displays a literal quotation directly.
+Keep the quotation in the visible transcript and a receipt in model history.
+For an interpretation, supply the explicitly selected notebook as a separate
+tool result, frozen for the turn and its workers. Later turns do not inherit
+the notebook as an attachment or as project preferences.
 
 Task slots (`--gui-concurrency`) bound running jobs and worker turns. An
 Assistant turn starts at once without a slot (`Hub._begin(light=True)`): its

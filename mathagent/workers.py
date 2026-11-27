@@ -372,6 +372,7 @@ def run_worker(host, parent, budget, action, child, save):
                 host.update_card(child, job_id=native)
                 save()
     agent = host.engine(mode)
+    agent.notebook_source = context.get('notebook_source', '')
     if mode in ('explore', 'writeup'):
         # A write-up keeps the user's Personalization (standing instructions, macros) in its saved state.
         agent.personal_context = getattr(parent.agent, 'personal_context', '')
@@ -709,15 +710,15 @@ def run_worker(host, parent, budget, action, child, save):
                                                    if key != 'review_reference'}
                     if mode == 'referee' and context.get('review_reference'):
                         kwargs['review_reference'] = context['review_reference']
-                elif context.get('project_snapshot') is not None or context.get('images'):
+                elif context.get('project_snapshot') is not None or context.get('images') or context.get('notebook_source'):
                     # The bounded visible conversation above is the writer's
                     # source. Pin its notebook separately without duplicating
                     # the parent's full native history in the job state.
                     kwargs['reference_context'] = {
                         'query': context['query'], 'messages': [], 'files': [],
                         'images': copy.deepcopy(context.get('images', [])),
-                        **({key: copy.deepcopy(context[key]) for key in ('project_snapshot', 'project_note_status')}
-                           if context.get('project_snapshot') is not None else {})}
+                        **{key: copy.deepcopy(context[key]) for key in
+                           ('project_snapshot', 'project_note_status', 'notebook_source') if key in context}}
                 start = runner.start_companion if review_companion else runner.start
                 result = start(native_request, job_id=native, **kwargs)
             verdict = (runner.state or {}).get('verdict')

@@ -1800,6 +1800,8 @@ class ReviewRunner(ResearchRunner):
             if context.get('project_snapshot'):
                 from .gui import projects
                 background.append(projects.context(context['project_snapshot']))
+            if context.get('notebook_source'):
+                background.append(context['notebook_source'])
             if background:
                 material += '\nCONVERSATION FOR SCOPE (claims require primary evidence):\n' + '\n'.join(background)
         instruction = (

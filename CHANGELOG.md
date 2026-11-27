@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Project instructions apply only to chats assigned to that project and their
+  workers. An unassigned chat no longer discovers another project's notebook
+  while looking through the workspace. Asking about a named notebook quotes
+  its contents for that turn.
+
 - A write-up whose text uses `\C` (or another command the harness redefines) no
   longer fails to compile: the preamble wrote `\renewcommand{\C}{\mathbb{C}}`,
   and `\C` exists only with a Cyrillic font encoding, so LaTeX stopped with

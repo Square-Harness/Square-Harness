@@ -28,6 +28,7 @@ from .deepinfra import generation_attempts
 from .ledger import MAX_FILE_BYTES, _atomic_write, _directory, _read
 from .investigation_writing import ProgressiveAnswer, exact_review, writer_output_limit
 from .orchestrator import Orchestrator, WorkerInterrupted
+from .prompts import with_notebook_evidence
 from .source_tasks import _instruction_text, excludes_external_sources
 from .tools import schema
 
@@ -649,7 +650,9 @@ class Investigation(Orchestrator):
 
     def _framing_messages(self, policy, tools):
         history = self.state.get('history', [])
-        current = self.state['messages']
+        current = with_notebook_evidence(self.state['messages'], self.state.get('notebook_source'), 0)
+        if getattr(self.agent, 'project_context', ''):
+            current = [{'role': 'user', 'content': self.agent.project_context}, *current]
         records = [{'index': i, 'role': row['role'], 'text': row['content']}
                    for i, row in enumerate(history) if row.get('role') in ('user', 'assistant') and row.get('content')]
         if not records:
@@ -809,6 +812,8 @@ class Investigation(Orchestrator):
                    'files': files, 'images': copy.deepcopy(self.state.get('images', []))}
         if self.state.get('project_snapshot') is not None:
             context['project_snapshot'] = copy.deepcopy(self.state['project_snapshot'])
+        if self.state.get('notebook_source'):
+            context['notebook_source'] = self.state['notebook_source']
         limits = self.inv['allowances'][task['id']]
         child = {'id': slot.get('child_id') or 'child_' + uuid.uuid4().hex, 'native_id': str(uuid.uuid4()),
                  'turn_id': self.state['id'], 'batch_id': slot.get('batch_id') or self.state['id'],
