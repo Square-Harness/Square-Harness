@@ -30,12 +30,12 @@ saved jobs run on the computer or server hosting SH; model prompts, selected sou
 text and tool context are sent to the provider. Its retention policy applies to that
 processing: with OpenRouter, every request asks for zero data retention and no
 data collection; also turn on Zero Data Retention for all models and keep prompt
-logging off in your OpenRouter privacy settings, and give the key a credit limit
-(an OpenRouter key has full account power). A paused job resumes only with the
-provider that started it (its data is never sent to another one implicitly); after a
-switch it stays paused and resumes once that provider is selected again, including
-inside an Assistant conversation. Keep the provider credential on the backend, never in
-the browser or a saved job.
+logging off in your OpenRouter privacy settings. You can give the key a credit limit
+for hosted use. New Assistant turns remember the provider and endpoint that
+started them. If you switch providers, select the original one again to resume
+a paused turn. An older Assistant turn without a recorded endpoint asks you to
+confirm the destination before sending its saved conversation. The provider
+credential stays on the backend.
 `--allow-remote-model --offline` permits those model calls while locking web
 research off. See the hosted-API setup in [llm-install.md](llm-install.md).
 
@@ -65,8 +65,8 @@ Each call is charged when it ends: on OpenRouter the price OpenRouter reports fo
 it, on DeepInfra its reported tokens at these rates (cached input uses the uncached
 price, so the real bill may be lower). Nothing is set aside before a call: any number
 of calls can run at once while the allowance is not spent, and a new call is refused
-only once it is. Calls already running at that moment finish and are charged, so the
-total can end slightly above the allowance. A request the provider refuses before
+only once it is. Calls already running at that moment finish and are charged.
+The overshoot depends on their combined cost. A request the provider refuses before
 streaming (HTTP 429 or 5xx) costs nothing. A stream that fails without reporting its
 usage (a silent, stalled or broken stream) is charged an estimate: its whole input
 and every streamed character plus a margin. This pilot limit is separate from each
@@ -445,7 +445,21 @@ one with a message.
   `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Empty files are refused, and so is a `.pdf`
   that is not a PDF (a LaTeX file named `.pdf`) or is cut short. Dropped files
-  are attached to your next message. Text files are best saved as UTF-8; older files in Latin-1 or
+  are attached to your next message. **Attach files** opens a menu: **From my
+  device** uploads files the same way, and **From the workspace** opens a file
+  browser on the files already in the folder, to attach some of them. **See my
+  files**, at the bottom of the folder window, opens the same browser on all your
+  folders (everything below `--gui-root`) and their text, PDF and image files,
+  with their extension, size and modification date. Both open in the open folder
+  and can go up to the others. The model reads only the open folder, so a file
+  attached from another folder is first copied into the open folder (into the
+  project's folder in a project's conversation), with the upload rules: same
+  types and size limit, an existing file is never replaced, and attaching the
+  same file again reuses its copy. The browser works like a desktop file
+  manager: double-click a folder (or press Enter) to open it, go back with **Up**,
+  Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
+  Mac) to add or remove one, Shift-click to select a range; sort by name, size or
+  date; the search box searches every folder. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and

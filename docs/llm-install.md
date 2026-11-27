@@ -19,7 +19,7 @@ step 1.
   team's tested setup (Qwen 3.8 27B with 4-bit weights and speculative
   decoding), with fallbacks.
 - **Plan C, API trial only:** the harness and web app run on this computer, and
-  DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
+  OpenRouter or DeepInfra serves DeepSeek V4.1 Flash 1017. Use only when the user explicitly
   agrees to send model prompts and selected source text to the provider. No
   GPU, SSH tunnel or Cloudflare account is needed for this local interface test.
   Follow the hosted-API section below after installing the harness.
@@ -76,7 +76,7 @@ shadows the system's. Use Python by absolute path (for example
 
 Decide (ask the user only what you cannot tell):
 
-1. **Plan.** Choose C if the user requested the hosted DeepInfra API. Otherwise
+1. **Plan.** Choose C if the user requested OpenRouter or DeepInfra. Otherwise
    choose B if the user mentioned a cluster, Slurm, SSH or a remote GPU.
    Choose A otherwise. In Plan A, on Linux with an NVIDIA GPU of 24 GB or more,
    ask whether the user wants HyperQwen
@@ -239,7 +239,7 @@ and preserve a private backup of workspaces, image caches and configuration,
 plus a consistent SQLite backup of each quota database. Use an idle window or
 explicitly pause affected work before
 restarting a backend. An in-flight generation can be interrupted by a restart;
-its unfinished output may be lost and its unreported-usage reservation retained.
+its unfinished output and any usage the provider has yet to report may be lost.
 Do not automatically replay a request to hide that interruption.
 
 For a Git-backed installation, inspect local changes and the incoming release
@@ -313,7 +313,28 @@ If this fails with `ModuleNotFoundError: mathagent`, run the harness as
 `PYTHONPATH=$REPO .venv/bin/python -m mathagent` from the repository instead.
 Every command below accepts that form in place of `.venv/bin/square-harness`.
 
-## Plan C: DeepInfra API with a local interface
+## Plan C: Hosted DS4 with a local interface
+
+Choose the provider that will receive the model requests. Each provider uses its own key.
+
+### OpenRouter
+
+Save the OpenRouter key at the hidden prompt, then start the interface:
+
+```bash
+python3 scripts/setup-openrouter.py
+python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter --online
+```
+
+The key stays in the private, mode-0600 file `.local/openrouter/credential`.
+The launcher opens a paired browser window. The `--online` flag enables web research.
+For hosted services, use `--backend openai --api-profile openrouter --allow-remote-model`
+and set `OPENROUTER_API_KEY_FILE` to the backend account's private key file outside its workspace.
+Keep each tester's existing quota path, budget and rates when changing providers.
+A service that explicitly sets `--gui-model-concurrency` keeps that value; set it
+to 200 or omit the override to use the hosted default on a fresh workspace.
+
+### DeepInfra
 
 Create an account at https://deepinfra.com/login, then create a named key at
 https://deepinfra.com/dash/keys. The setup helper defaults to the key name
@@ -356,9 +377,9 @@ python3 scripts/start-deepinfra.py --profile ds4
 
 This opens the local GUI on port 8780, uses the private workspace
 `.local/deepinfra/workspace`, keeps web research off and selects the DS4
-budgets. It allows five active jobs, five simultaneous model requests across
-all jobs, and up to five independent workers within one Assistant turn.
-Those workers share the global five-request capacity. A Proof run still
+budgets. Both hosted profiles allow five active jobs and share a pool of up to
+200 model requests. A standard manuscript Review can use 64 of those slots.
+An Assistant turn can coordinate five independent workers. A Proof run still
 solves and reviews in sequence. Logs and the PID stay under
 `.local/deepinfra/`. The browser receives
 the local GUI session token, never the DeepInfra key. Existing workspaces and

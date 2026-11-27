@@ -106,6 +106,18 @@ class Agent:
         from . import images
         images.bind(self, copy.deepcopy(getattr(client, 'image_refs', [])))
 
+    @property
+    def ctx(self):
+        return self._ctx
+
+    @ctx.setter
+    def ctx(self, value):
+        # The workspace tools size their results from the model's context (tools.result_budget).
+        self._ctx = value
+        if hasattr(self.workspace, 'result_chars'):
+            from .tools import result_budget
+            self.workspace.result_chars = result_budget(value)
+
     def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None, recover_empty_tool_answer=False):
         # Only commit history when a full turn completes; interruptions cannot
         # leave a dangling assistant tool call in the next API request.

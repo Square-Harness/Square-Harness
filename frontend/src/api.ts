@@ -648,7 +648,10 @@ export type Artifact = {
   stream?: { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; stats: Record<string, unknown> }
 }
 
-export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' }
+export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
+/** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
+export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
+export type FolderFiles = { path: string; crumbs: { name: string; path: string }[]; folders: WorkspaceFolder[]; files: WorkspaceFile[]; truncated: boolean }
 export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
 /** An explicit extra allowance for resuming a job: recorded in its state and report. */
 export type AllowanceAdditions = { add_tokens?: number; add_seconds?: number; add_rounds?: number }
@@ -745,6 +748,14 @@ export const api = {
   concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files'),
+  /** Every listed file below the interface root, with paths relative to it (the explorer's search). */
+  filesEverywhere: () => get<{ files: WorkspaceFile[]; truncated?: boolean }>('/api/files?scope=root'),
+  /** Copy files of other folders (paths relative to the interface root) into the open folder, or a project's folder,
+   *  to attach them; each result gives the copy's path relative to the open folder, or an error. */
+  copyFiles: (paths: string[], project_id?: string) =>
+    post<{ files: { source: string; path?: string; copied?: boolean; error?: string }[] }>('/api/files/copy', { paths, project_id }),
+  /** One folder below the interface root; paths are relative to the root, not to the open folder. */
+  browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 

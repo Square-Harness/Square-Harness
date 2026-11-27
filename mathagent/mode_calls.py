@@ -323,6 +323,11 @@ def validated_mode_call(content, selection, files=()):
     return query, mode
 
 
+# The file tools a routed turn's planner may use to find the files of its waiting tasks, and how many calls a turn.
+FILE_TOOLS = frozenset({'list_files', 'search_text', 'read_file'})
+FILE_LOOKUPS = 8
+
+
 class ModeOrchestrator(Orchestrator):
     """Resolve selected workflows through durable native delegations.
 
@@ -623,6 +628,15 @@ class ModeOrchestrator(Orchestrator):
                                         else NO_POSITION_NOTE.format(reason=fan.get('reason'))})
         return payload
 
+    def _routing_inspect(self, tool, arguments):
+        """A search or read the routing step asks for, through this turn's workspace (File access and the
+        message's attachments still apply)."""
+        workspace = getattr(self.agent, 'workspace', None)
+        if workspace is None or tool not in ('search_text', 'read_file'):
+            return 'Tool error: file inspection is unavailable here'
+        self.emit('progress', 'Looking at the workspace files…')
+        return workspace.execute(tool, arguments)
+
     def _mode_payload(self, tools):
         if not self._proof_pending():
             decision = self.state.get('proof_routing', {})
@@ -643,6 +657,12 @@ class ModeOrchestrator(Orchestrator):
                                'When a document could not be extracted, request a readable copy of that document. '
                                'Do not use another file as a substitute or infer pagination from extracted lines.')
                 instruction += ' ' + NAMING
+                if decision.get('inspected'):
+                    # Why the routing step gave these tasks their files: what it saw, so that the answer does not
+                    # doubt or misname a file only the routing step looked at.
+                    instruction += ('\nThe routing step identified the files of these tasks from these searches and reads '
+                                    '(excerpts):\n' + '\n'.join(f'- {item["tool"]} {item["target"]!r}: {item.get("excerpt", "")}'
+                                                                  for item in decision['inspected']))
                 if decision.get('chat_recap'):
                     instruction += ' ' + recap
                 if decision.get('question'):
@@ -674,6 +694,13 @@ class ModeOrchestrator(Orchestrator):
                     # Every branch that could start has run. The parent reads full results for
                     # synthesis and can start a deferred objective or retry a write-up that asked for material.
                     allowed = {'read_result', 'read_experiment'} | ({'delegate'} if modes_to_start else set())
+                    # While it still has waiting tasks to delegate, it may find the files they need (FILE_LOOKUPS
+                    # calls a turn). It never gets them to wait for running workers or to write the answer: a live
+                    # test showed it then redoes the worker's reading (110 reads beside a quick review).
+                    looked = sum(message.get('role') == 'tool' and message.get('tool_name') in FILE_TOOLS
+                                 for message in self.state['messages'])
+                    if modes_to_start and looked < FILE_LOOKUPS:
+                        allowed |= FILE_TOOLS
                     if retry:
                         allowed.add('read_conversation')
                     if decision.get('chat_recap'):
@@ -899,7 +926,9 @@ class ModeOrchestrator(Orchestrator):
                     decision = route_request(self.agent.client, self.agent.model, state['query'],
                                              history=state['history'], files=state['files'], ctx=self.agent.ctx,
                                              current_images=current.get('images'),
-                                             suggested_mode=(state.get('suggested_specialist') or {}).get('mode'))
+                                             suggested_mode=(state.get('suggested_specialist') or {}).get('mode'),
+                                             overview=state.get('workspace_overview', ''),
+                                             known_files=state.get('workspace_paths', ()), inspect=self._routing_inspect)
             except AgentError as exc:
                 if not provider_busy(exc):
                     state['proof_routing'] = {'status': 'error', 'error': str(exc)}

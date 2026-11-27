@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Assistant checkpoints record the provider and endpoint. Resuming on another
+  provider leaves the turn available on its original endpoint, including turns
+  with images. Older turns can confirm their destination when it is unknown.
+- The tester ledger checks the balance again before retrying a refused request.
+  Finished and interrupted streams use the reported cost when available. Earlier
+  installations keep their ledger and charged amounts when switching providers
+  or reverting the application.
+
 - The hosted model provider is a setting: `--api-profile openrouter` (or `scripts/start-deepinfra.py --provider
   openrouter`) serves the same DeepSeek V4.1 Flash 1017 through OpenRouter, `--api-profile deepinfra` (the default)
   through DeepInfra as before. OpenRouter routes each call among a fixed list of providers that keep no data
@@ -40,6 +48,48 @@
   is sent again too. Refusals no longer use up the four replacements kept for silent starts
   and broken streams; a plain HTTP 500 keeps its four counted retries. A notice shown while a
   call waits no longer hides the live answer that follows.
+
+- See and reuse the workspace's files. **See my files**, at the bottom of the
+  folder window, opens a file browser on every folder below the interface root,
+  starting in the open folder: subfolders and text, PDF and image files, with
+  their extension, size and modification date.
+  It works like a desktop file manager (double-click a folder to open it, Up,
+  Backspace or the folder path to go back, Ctrl/⌘-click and Shift-click to select
+  several files, sorting, a search across every folder). Opening a file on a
+  double click is not decided yet: `FileExplorer` takes an `onOpen` callback for
+  it. **Attach files** is now a menu: **From my device** uploads as before, and
+  **From the workspace** attaches files already uploaded, for example in an
+  earlier conversation, to the next message. The model still reads only the
+  open folder: a file attached from another folder is copied into it first (or
+  into the project's folder), with the upload rules, and attaching it again
+  reuses that copy (`POST /api/files/copy`). `GET /api/files/browse?path=` lists
+  one folder below the interface root, and `GET /api/files?scope=root` lists
+  every folder's files for the search.
+
+- The planners see the workspace's files. The routing step and the main agent
+  get an overview of the open folder (path, kind, size, date, and a title or a
+  PDF's first line), files uploaded in earlier conversations included. The
+  routing step may search or read a few files before deciding (2 rounds of 3,
+  short excerpts) and assign any listed file to a task; the main agent is told
+  what it found. In a routed turn the main agent may use the file tools only to
+  find the files of tasks it still has to delegate (8 calls), never while
+  workers run: given them throughout, it redid a quick review's reading itself
+  (110 reads). A question about the user's own files goes to Explore or a
+  direct answer, never to a literature review. A review, explanation or
+  write-up may take a file the user did not name once the planners identified
+  it in the turn.
+
+- The workspace tools return results sized to the model's context instead of a
+  fixed 6,000 characters and 200 lines (a limit set for the earlier local
+  model): a `read_file` excerpt, a `list_files` page, `search_text` matches and
+  a `read_index` excerpt may hold 3% of the context, at about 3 characters a
+  token, and never less than 6,000 characters. A 65k-token model keeps 6,000
+  characters; DS4 gets about 94,000, so a 79-page paper takes three reads
+  instead of about forty. Without `end_line`, `read_file` reads as far as that
+  budget allows; `list_files` pages hold up to 1,000 names. Conversation titles
+  keep their own limits.
+
+
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.

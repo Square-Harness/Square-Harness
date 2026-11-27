@@ -1864,9 +1864,12 @@ transaction: the provider's reported price (`usage.cost`, OpenRouter, carried as
 stream with unknown usage is charged an estimate (`estimated=True`). Calls running
 when the limit is reached finish, so the total can end slightly above it; this is
 intended (do not reintroduce reservations or a ledger-driven price cap). A ledger
-from the earlier reservation design is migrated on open: its charged amounts are
-kept, open reservations released. Immutable settings never silently grant a new
-allowance. Store the ledger outside every served workspace. Do not change Proof
+keeps the original `calls` table; new rows record finished charges and old
+unsettled holds do not count toward admission. A ledger created by the interim
+`charges` schema is converted on open. Keep the settings and the ledger file
+when changing providers or rolling back. Check admission after any HTTP backoff
+and immediately before each completion dispatch. Settle accepted streams on
+completion, error or cancellation using a reported price when available. Store the ledger outside every served workspace. Do not change Proof
 budgets to fit a depleted quota.
 
 `numerics/admission.py` optionally shares heavy-run capacity across processes and
@@ -1985,11 +1988,11 @@ authoritative and saved jobs retain their original allowances on resume.
 short-lived, model-restricted, capped credential under ignored `.local/`.
 `scripts/start-deepinfra.py` launches an isolated loopback GUI. Its
 `--profile ds4` default sets `--gui-concurrency`, `--gui-model-concurrency`
-and `--assistant-concurrency` to five and uses the private API credential
+and `--assistant-concurrency` to 5, 200 and 5 respectively and uses the private API credential
 and `.local/deepinfra/` runtime on port 8780; `--profile qwen` uses an already
 running local server, the original Qwen budgets and a separate
 `.local/qwen-test/` runtime on port 8781, with all three concurrency settings
-kept at one. The global inference pool shares five DS4 model-request slots
+kept at one. The global inference pool shares 200 DS4 model-request slots
 across active chats and their workers; one Proof runner still performs solve
 and review calls sequentially. Increasing concurrency must not increase any
 saved job's token or time allowance or mint a replacement API credential.
