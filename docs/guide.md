@@ -190,7 +190,7 @@ text remains available offline.
 
 ## Images
 
-With the DeepInfra **DS4.1 Flash 1017** profile, attach PNG, JPEG or static WebP
+With **DS4.1 Flash 1017** on DeepInfra or OpenRouter, attach PNG, JPEG or static WebP
 images using **Attach files**, paste a screenshot, or drop files into the work
 pane. Check the thumbnails before sending; Send/Start waits for uploads to
 finish. Images work in conversations and all specialist modes, including Proof,

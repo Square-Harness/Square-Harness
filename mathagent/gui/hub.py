@@ -1186,7 +1186,7 @@ class Hub:
         known = copy.deepcopy(saved if saved is not None else store.chat_images(chat))
         paths = [name for name in selected if images.is_image(name)]
         if (known or paths) and not self.image_support():
-            raise ValueError('Images require the DeepInfra DS4.1 Flash 1017 profile; the current model cannot receive images.')
+            raise ValueError(images.UNSUPPORTED)
         by_name = {ref['name']: ref for ref in known}
         fresh = images.snapshot(self.root, [name for name in paths
                                            if name in explicit or name not in by_name])
@@ -1245,7 +1245,7 @@ class Hub:
         for name in files:
             if images.is_image(name):
                 if not self.image_support():
-                    raise ValueError('Images require the DeepInfra DS4.1 Flash 1017 profile; the current model cannot receive images.')
+                    raise ValueError(images.UNSUPPORTED)
                 cached = next((ref for ref in image_refs if ref['name'] == name), None)
                 ref = images.validate(self.root, cached) if cached else images.snapshot(self.root, [name])[0]
                 checked.append(ref['name'])
@@ -1775,7 +1775,7 @@ class Hub:
         root = self.root
         image_refs = store.chat_images(session)
         if image_refs and not self.image_support():
-            raise ValueError('Image-based checks require the original DeepInfra DS4.1 Flash 1017 profile.')
+            raise ValueError(images.UNSUPPORTED)
 
         def work(task):
             fresh = store.load_chat(root, chat_id)
@@ -1978,7 +1978,7 @@ class Hub:
             else:
                 self._check_legacy_child_endpoints(saved, current_transport)
             if saved.get('images') and not self.image_support():
-                raise ProviderChanged('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
+                raise ProviderChanged(images.UNSUPPORTED)
             content, files = saved['query'], saved.get('files', ())
         if not isinstance(content, str) or not content.strip():
             raise ValueError('Write a nonempty message.')

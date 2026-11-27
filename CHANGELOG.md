@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Restored image attachments and screenshot paste for DS4.1 Flash 1017 on
+  OpenRouter. The chat and workers send the original images through the
+  configured provider route, including when a follow-up refers to an earlier
+  attachment.
+
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook
   while looking through the workspace. Asking about a named notebook quotes
@@ -89,7 +94,7 @@
   replaced by the next one; every request asks for zero data retention, no data collection, 8-bit (fp8) serving,
   the standard tier and a price cap, and turns OpenRouter's context compression off. Its key is saved by
   `scripts/setup-openrouter.py`. Everything built for DeepInfra (busy waits, retries, silent-start detection, the
-  tester ledger) applies to both; DeepInfra's requests are unchanged. Native images stay DeepInfra-only for now.
+  tester ledger) applies to both; DeepInfra's requests are unchanged.
 
 - The tester allowance no longer reserves anything before a call. A tester can run any number of calls at once
   while the allowance is not spent; a new call is refused only once it is, and calls already running finish (so a

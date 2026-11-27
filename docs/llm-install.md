@@ -359,9 +359,10 @@ The provider's spending limit is distinct from workflow token limits; ongoing
 requests may settle after admission. Changing parallel work does not mint a
 new credential or increase its existing spending allowance.
 
-Native image input needs this pinned **DS4.1 Flash 1017** DeepInfra profile;
-there is no extra dependency or vision service to install. Keep the private
-`.mathagent/images` cache when moving or backing up a workspace, alongside its
+Both the DeepInfra and OpenRouter profiles accept native images with the pinned
+**DS4.1 Flash 1017** model. Image input uses the configured provider and needs
+no additional service or dependency. Keep the private `.mathagent/images`
+cache when moving or backing up a workspace, alongside its
 saved job state. The GUI uses authenticated same-origin thumbnail requests.
 PNG, JPEG and static WebP are accepted, with eight images per conversation/job,
 8 MiB per image and 24 MiB combined, at most 8,192 pixels per side and 32

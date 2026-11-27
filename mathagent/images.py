@@ -20,6 +20,7 @@ MAX_SIDE = 8192
 MAX_PIXELS = 32_000_000
 # DeepSeek documents <=1024 tokens/image after resizing. Keep extra provider/framing room.
 VISION_TOKEN_ESTIMATE = 4096
+UNSUPPORTED = 'Image attachments require DS4.1 Flash 1017 through DeepInfra or OpenRouter.'
 VISUAL_SOURCE_NOTICE = (
     'These attachments contain the original frozen image bytes in native image_url blocks, not a text '
     'transcription or rendered description. Visually inspect them directly: no read_file call or tool result '
@@ -39,7 +40,7 @@ def _fail(message):
 
 
 def supported(profile, model):
-    return profile == 'deepinfra' and model == 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
+    return profile in ('deepinfra', 'openrouter') and model == 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
 
 
 def is_image(path):
@@ -304,7 +305,7 @@ def bind(agent, refs):
         _fail('A task may contain at most eight image snapshots')
     client = _transport(agent.client)
     if refs and not supported(getattr(client, 'profile', None), agent.model):
-        _fail('Native images require the DeepInfra DS4.1 Flash 1017 profile; this model/backend cannot receive images')
+        _fail(UNSUPPORTED)
     root = _root(agent.workspace.root) if refs else getattr(agent.workspace, 'root', None)
     frozen = [validate(root, ref) for ref in refs]
     if sum(ref['bytes'] for ref in frozen) > MAX_TOTAL_BYTES:
@@ -376,6 +377,12 @@ def message_images(refs, messages):
     if len(occurrences) > MAX_IMAGES or sum(ref['bytes'] for ref in occurrences) > MAX_TOTAL_BYTES:
         _fail('Conversation image inputs exceed eight attachments or 24 MiB; start a new conversation')
     return result
+
+
+def input_allowance(refs, messages):
+    """Estimated image and framing tokens at their original message positions."""
+    return sum(len(attached) * VISION_TOKEN_ESTIMATE + prompt_overhead(attached)
+               for _, attached in message_images(refs, messages))
 
 
 def materialize(root, refs, messages, *, originals=None):

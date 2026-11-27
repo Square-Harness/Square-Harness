@@ -771,8 +771,10 @@ the bounded title or routing shape. A failed title is printed to stderr.
 workspace's content-addressed `.mathagent/images` cache. JSON histories and job
 state carry only validated image references, never base64. Freeze before queue
 admission; subsequent turns, child workers and resume use those same snapshots.
-The DeepInfra adapter inserts user-role native image blocks only into transport
-copies. Input preflight counts text plus a labelled conservative vision
+The DeepInfra and OpenRouter adapters insert user-role native image blocks only
+into transport copies for DS4.1 Flash 1017. OpenRouter sends the same provider
+allow-list, privacy filters and price caps for image and text requests.
+Input preflight counts text plus a labelled conservative vision
 allowance, never base64 as text. Provider-reported usage settles ordinary
 accounting. Unsupported model/backend combinations fail explicitly.
 Native conversation user messages carry their own `images` references, including
