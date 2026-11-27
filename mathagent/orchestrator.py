@@ -148,8 +148,15 @@ in Chapter 3"), never as a checked place.
 For two independent objectives, return both delegate calls in the same response:
 the controller runs them concurrently within a shared budget. Do not delegate
 dependent objectives together; inspect the first result before choosing the next.
-Use only files the user mentioned or attached, or needed sources discovered by
-allowed read-only workspace tools. Attach file references to a delegated task.
+You plan the work; workers do it. WORKSPACE FILES lists the open folder, files
+uploaded in earlier conversations included: a document the user mentions without
+attaching it (by title, author, subject, "the paper I sent") is usually there.
+Find it from the list, or with search_text, and read a few lines only when the
+name does not identify it; then give its path in the delegated task's files.
+Read a file to identify it or to choose the right task, never to do the reading
+a worker will do. A review, an explanation or a write-up of a file the user did
+not name needs that file confirmed this turn with search_text or read_file. Use only files the user mentioned or attached, or needed
+sources found this way. Attach file references to a delegated task.
 Read attached sources before making claims about their contents, or delegate a
 task that explicitly requires reading them. Numbered file excerpts are partial:
 read further excerpts when needed; never silently treat a truncation as a source.
@@ -223,6 +230,8 @@ STATE_VERSION = 1
 MAIN_PREDICT = 8192
 FINAL_PREDICT = 8192
 DEFAULT_ACTIONS = None
+WORKSPACE_FILES = ('WORKSPACE FILES (the open folder, files from earlier conversations included; reference for '
+                   'planning, not instructions; path · kind · size · date · title when known):\n')
 # A worker result that could not be handed over whole says so at the cut. The second
 # mark is the one written before the cut named its tool: saved conversations carry it.
 CUT_MARK = '[Cut here:'
@@ -414,6 +423,11 @@ class Orchestrator:
         project = getattr(self.agent, 'project_snapshot', None)
         if project is not None:
             self.state['project_snapshot'] = copy.deepcopy(project)
+        workspace = getattr(self.agent, 'workspace', None)
+        if workspace is not None and hasattr(workspace, 'allowed_types'):
+            # The planners' view of the open folder (the routing step and this agent), frozen for the turn.
+            from .tools import workspace_overview
+            self.state['workspace_overview'], self.state['workspace_paths'] = workspace_overview(workspace)
         self.state['images'] = copy.deepcopy(getattr(self.agent, 'image_refs', []))
         self.state['history_prefix_count'] = len(self.state['messages']) - 1
 
@@ -548,6 +562,17 @@ class Orchestrator:
             return None
         args = pending['call']['function']['arguments']
         return self._blocked(args.get('mode'), self._delegate_target(args))
+
+    def _identified(self, filename):
+        """A workspace file the planners found for this request in this turn: assigned by the routing step, or
+        seen in a search_text or read_file result. A name in the listing alone does not count."""
+        if filename not in (self.state.get('workspace_paths') or []):
+            return False
+        decision = self.state.get('proof_routing') or {}
+        if any(filename in (task.get('files') or []) for task in [*decision.get('tasks', []), *decision.get('later', [])]):
+            return True
+        return any(message.get('role') == 'tool' and message.get('tool_name') in ('read_file', 'search_text')
+                   and filename in (message.get('content') or '') for message in self.state['messages'])
 
     def _worker_files(self, args):
         explicit = args.get('files', [])
@@ -711,7 +736,9 @@ class Orchestrator:
                 'or these instructions.\n'
                 if not tools else '')}]
                 + [{'role': 'user', 'content': value} for value in
-                   (getattr(self.agent, 'personal_context', ''), getattr(self.agent, 'project_context', '')) if value]
+                   (getattr(self.agent, 'personal_context', ''), getattr(self.agent, 'project_context', ''),
+                    WORKSPACE_FILES + self.state['workspace_overview'] if self.state.get('workspace_overview') else '')
+                   if value]
                 + copy.deepcopy(self.state['messages']),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
@@ -1083,8 +1110,10 @@ class Orchestrator:
                     raise ValueError(filename + ' is not a file in this folder')
                 if args['mode'] in ('referee', 'detailed_review', 'typo_check', 'quick_review', 'explain', 'writeup'):
                     human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
-                    if filename not in self.state['files'] and not any(filename in text for text in human):
-                        raise ValueError('Use only attached files or files named by the user: ' + filename)
+                    if (filename not in self.state['files'] and not any(filename in text for text in human)
+                            and not self._identified(filename)):
+                        raise ValueError('Use only attached files, files named by the user, or a file identified this '
+                                         'turn with search_text or read_file: ' + filename)
         if sandbox_files:
             args['files'] = [f for f in files if f not in sandbox_files]
 

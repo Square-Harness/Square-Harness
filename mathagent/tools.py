@@ -26,6 +26,18 @@ READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
+# A workspace tool result (a read_file excerpt, a list_files page, search_text matches) may take this share of the
+# model's context, at about 3 characters a token (LaTeX and extracted PDF text run close to that), and never less
+# than MAX_RESULT: a 65k-token model keeps 6000 characters, DS4's 1M tokens give about 94,000 (a 79-page paper in
+# three reads). Each result stays in the conversation for the rest of the turn and is sent again with every
+# call, so a larger share makes long reading turns expensive. Conversation titles have their own limits.
+RESULT_SHARE = 0.03
+CHARS_PER_TOKEN = 3
+
+
+def result_budget(ctx):
+    """Characters one workspace tool result may hold for a model with `ctx` tokens of context."""
+    return max(MAX_RESULT, int(ctx * RESULT_SHARE * CHARS_PER_TOKEN)) if type(ctx) is int and ctx > 0 else MAX_RESULT
 _WRITE_LOCK = Lock()
 SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
 
@@ -142,6 +154,87 @@ def schema(name, description, properties, required=()):
                        'required': list(required), 'additionalProperties': False}}}
 
 
+_TEX_TITLE = re.compile(r'\\title\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{[^{}]*\})*)\}', re.S)
+
+
+def _file_title(path, deadline):
+    """(label, words) naming a document when it is cheap to read: \\title{} of a .tex, the first heading of a
+    Markdown file, the title in a PDF's metadata, else the first line of its first page ("first line": not a
+    checked title). ('', '') otherwise, and once `deadline` (time.monotonic) has passed."""
+    if time.monotonic() >= deadline:
+        return '', ''
+    suffix = path.suffix.lower()
+    label = 'title'
+    try:
+        if suffix == '.pdf':
+            from pypdf import PdfReader
+            reader = PdfReader(str(path))
+            title = str((reader.metadata or {}).get('/Title') or '')
+            if len(title.strip()) < 8 and reader.pages:
+                text = reader.pages[0].extract_text() or ''
+                title, label = next((line for line in text.splitlines() if len(line.strip()) > 12), ''), 'first line'
+
+        elif suffix in ('.tex', '.md', '.txt'):
+            with open(path, 'rb') as stream:
+                head = stream.read(20000).decode('utf-8', 'replace')
+            match = _TEX_TITLE.search(head) if suffix == '.tex' else re.search(r'^#\s+(.+)$', head, re.M)
+            title = match.group(1) if match else ''
+        else:
+            return '', ''
+    except Exception:  # an unreadable or malformed file simply has no title here
+        return '', ''
+    greek = ('alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi rho sigma '
+             'tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Phi Psi Omega').split()
+    title = re.sub(r'\\([a-zA-Z]+)\*?', lambda m: f' {m.group(1)} ' if m.group(1) in greek else ' ', title)
+    title = re.sub(r'[{}$\\~]', ' ', title)
+    words = ' '.join(title.split())[:160]
+    return (label, words) if words else ('', '')
+
+
+def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=2.0):
+    """What the open folder holds, for the planners (the routing step and the main agent): one line per file the
+    model may be given (the kinds File access allows, plus the attachments), with its kind, size, date and a
+    title when cheap. Files from earlier conversations are there too. With more files than fit, the most
+    recently modified are kept. Returns (text, paths)."""
+    root, allowed = workspace.root, workspace.allowed_types | {'.png', '.jpg', '.jpeg', '.webp'}
+    found = []
+    for folder, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP and not (Path(folder) / d).is_symlink())
+        for name in names:
+            path = Path(folder) / name
+            if name.startswith('.') or path.is_symlink() or (source_suffix(path) not in allowed and path not in workspace.pinned):
+                continue
+            try:
+                info = path.stat()
+            except OSError:
+                continue
+            found.append((info.st_mtime, path, info.st_size))
+            if len(found) >= 5000:
+                break
+    total = len(found)
+    found.sort(key=lambda item: -item[0])
+    deadline = time.monotonic() + title_seconds
+    lines, paths, size = [], [], 0
+    for mtime, path, nbytes in found[:max_files]:
+        rel = path.relative_to(root).as_posix()
+        kind = 'PDF' if path.suffix.lower() == '.pdf' else 'image' if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') \
+            else source_suffix(path).lstrip('.') or 'file'
+        amount = f'{nbytes / 1e6:.1f} MB' if nbytes >= 1e6 else f'{max(1, round(nbytes / 1e3))} kB'
+        label, title = _file_title(path, deadline)
+        line = (f'{rel} · {kind} · {amount} · {time.strftime("%Y-%m-%d", time.localtime(mtime))}'
+                + (f' · {label}: {title}' if title else '') + (' · attached to this message' if path in workspace.pinned else ''))
+        if size + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        paths.append(rel)
+        size += len(line) + 1
+    order = sorted(range(len(lines)), key=lambda i: paths[i])
+    text = '\n'.join(lines[i] for i in order)
+    if total > len(lines):
+        text += f'\n[{total - len(lines)} older files not listed: use list_files or search_text]'
+    return text, sorted(paths)
+
+
 class Workspace:
     def __init__(self, root, approve=lambda preview: False, allow_python=False, literature=None, read_types=None,
                  numerics=None):
@@ -164,7 +257,11 @@ class Workspace:
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
+        # The kinds of files File access allows, kept when a message's attachments narrow `readable`:
+        # the workspace overview (workspace_overview) lists those, never more.
+        self.allowed_types = set(self.readable)
         self.index = None
+        self.result_chars = MAX_RESULT  # set from the model's context by its Agent (result_budget)
         self.pinned = set()
         self.selected_files_only = False
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
@@ -262,13 +359,13 @@ class Workspace:
                     return
 
     def list_files(self, offset=0, limit=100):
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
-            raise ValueError('Use a nonnegative file offset and a limit from 1 to 200')
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError('Use a nonnegative file offset and a limit from 1 to 1000')
         paths = sorted(self.pinned) if self.selected_files_only else self.files(self.readable)
         names = [str(p.relative_to(self.root)) for p in paths]
         selected, size = [], 0
         for name in names[offset:offset + limit]:
-            if selected and size + len(name) + 1 > MAX_RESULT - 300:
+            if selected and size + len(name) + 1 > self.result_chars - 300:
                 break
             selected.append(name)
             size += len(name) + 1
@@ -277,8 +374,10 @@ class Workspace:
         return ('\n'.join(selected) or '(no readable files at this offset)') + suffix
 
     def read_file(self, path, start_line=1, end_line=None, start_column=1):
+        # Without end_line, the excerpt runs as far as the result budget allows (result_chars, a share of the
+        # model's context); a cut excerpt says where to continue.
         if end_line is None:
-            end_line = start_line + 99 if type(start_line) is int else 100
+            end_line = start_line + 10 ** 9 if type(start_line) is int else 1
         if type(start_column) is not int or start_column < 1:
             raise ValueError('start_column must be a positive character position on the first line')
         if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
@@ -295,9 +394,9 @@ class Workspace:
                 pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
         else:
             lines = self.text(p).splitlines()
-        end = min(end_line, start_line + 199, len(lines))
+        end = min(end_line, len(lines))
         result = f'{path}: {pagination}{len(lines)} total lines; requested excerpt {start_line}-{end}\n'
-        remaining = MAX_RESULT - len(result) - 250
+        remaining = self.result_chars - len(result) - 250
         selected = []
         for index in range(start_line - 1, end):
             column = start_column if index == start_line - 1 else 1
@@ -486,7 +585,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
                    + (', including extracted PDF text' if self.literature is not None else '')
                    + '; TeX source archives are read as a labelled, read-only source bundle; members are never executed or written to disk'
-                   + '. At most 200 lines / 6000 characters.',
+                   + f'. At most {self.result_chars:,} characters a call; a longer excerpt says where to continue.',
                    {'path': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['path']))
         result += [
             schema('write_file', 'Create/replace a text file ONLY when requested by the user; shows a diff for approval.',
@@ -528,7 +627,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
             if self.index is not None and name in self.index.names:
-                return self.index.execute(name, arguments)
+                return self.index.execute(name, arguments, budget=self.result_chars)
             if self.numerics is not None and name in self.numerics.tool_names:
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:
@@ -539,6 +638,6 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 # its own offline gate. Do not split citation JSON mid-record.
                 return self.literature.execute(name, arguments)
             value = str(getattr(self, name)(**arguments))
-            return value if len(value) <= MAX_RESULT else value[:MAX_RESULT] + '\n[TRUNCATED: request a smaller excerpt]'
+            return value if len(value) <= self.result_chars else value[:self.result_chars] + '\n[TRUNCATED: request a smaller excerpt]'
         except (OSError, ValueError, TypeError, UnicodeError) as e:
             return f'Tool error: {e}'

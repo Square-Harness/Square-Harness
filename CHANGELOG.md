@@ -58,6 +58,30 @@
   one folder below the interface root, and `GET /api/files?scope=root` lists
   every folder's files for the search.
 
+- The planners see the workspace's files. The routing step and the main agent
+  get an overview of the open folder (path, kind, size, date, and a title or a
+  PDF's first line), files uploaded in earlier conversations included. The
+  routing step may search or read a few files before deciding (2 rounds of 3,
+  short excerpts) and assign any listed file to a task; the main agent is told
+  what it found. In a routed turn the main agent may use the file tools only to
+  find the files of tasks it still has to delegate (8 calls), never while
+  workers run: given them throughout, it redid a quick review's reading itself
+  (110 reads). A question about the user's own files goes to Explore or a
+  direct answer, never to a literature review. A review, explanation or
+  write-up may take a file the user did not name once the planners identified
+  it in the turn.
+
+- The workspace tools return results sized to the model's context instead of a
+  fixed 6,000 characters and 200 lines (a limit set for the earlier local
+  model): a `read_file` excerpt, a `list_files` page, `search_text` matches and
+  a `read_index` excerpt may hold 3% of the context, at about 3 characters a
+  token, and never less than 6,000 characters. A 65k-token model keeps 6,000
+  characters; DS4 gets about 94,000, so a 79-page paper takes three reads
+  instead of about forty. Without `end_line`, `read_file` reads as far as that
+  budget allows; `list_files` pages hold up to 1,000 names. Conversation titles
+  keep their own limits.
+
+
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.
