@@ -322,6 +322,11 @@ def validated_mode_call(content, selection, files=()):
     return query, mode
 
 
+# The file tools a routed turn's planner may use to find the files of its waiting tasks, and how many calls a turn.
+FILE_TOOLS = frozenset({'list_files', 'search_text', 'read_file'})
+FILE_LOOKUPS = 8
+
+
 class ModeOrchestrator(Orchestrator):
     """Resolve selected workflows through durable native delegations.
 
@@ -651,6 +656,12 @@ class ModeOrchestrator(Orchestrator):
                                'When a document could not be extracted, request a readable copy of that document. '
                                'Do not use another file as a substitute or infer pagination from extracted lines.')
                 instruction += ' ' + NAMING
+                if decision.get('inspected'):
+                    # Why the routing step gave these tasks their files: what it saw, so that the answer does not
+                    # doubt or misname a file only the routing step looked at.
+                    instruction += ('\nThe routing step identified the files of these tasks from these searches and reads '
+                                    '(excerpts):\n' + '\n'.join(f'- {item["tool"]} {item["target"]!r}: {item.get("excerpt", "")}'
+                                                                  for item in decision['inspected']))
                 if decision.get('chat_recap'):
                     instruction += ' ' + recap
                 if decision.get('question'):
@@ -681,9 +692,14 @@ class ModeOrchestrator(Orchestrator):
                 if narrowed:
                     # Every branch that could start has run. The parent reads full results for
                     # synthesis and can start a deferred objective or retry a write-up that asked for material.
-                    # The file tools stay: planning the waiting tasks may need to find which file a task needs.
-                    allowed = ({'read_result', 'read_experiment', 'list_files', 'search_text', 'read_file'}
-                               | ({'delegate'} if modes_to_start else set()))
+                    allowed = {'read_result', 'read_experiment'} | ({'delegate'} if modes_to_start else set())
+                    # While it still has waiting tasks to delegate, it may find the files they need (FILE_LOOKUPS
+                    # calls a turn). It never gets them to wait for running workers or to write the answer: a live
+                    # test showed it then redoes the worker's reading (110 reads beside a quick review).
+                    looked = sum(message.get('role') == 'tool' and message.get('tool_name') in FILE_TOOLS
+                                 for message in self.state['messages'])
+                    if modes_to_start and looked < FILE_LOOKUPS:
+                        allowed |= FILE_TOOLS
                     if retry:
                         allowed.add('read_conversation')
                     if decision.get('chat_recap'):

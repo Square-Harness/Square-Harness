@@ -158,30 +158,37 @@ _TEX_TITLE = re.compile(r'\\title\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{[^{}]*\})*)\
 
 
 def _file_title(path, deadline):
-    """A document's title when it is cheap to read: \\title{} of a .tex, the first heading of a Markdown file,
-    the title in a PDF's metadata. Empty otherwise, and once `deadline` (time.monotonic) has passed."""
+    """(label, words) naming a document when it is cheap to read: \\title{} of a .tex, the first heading of a
+    Markdown file, the title in a PDF's metadata, else the first line of its first page ("first line": not a
+    checked title). ('', '') otherwise, and once `deadline` (time.monotonic) has passed."""
     if time.monotonic() >= deadline:
-        return ''
+        return '', ''
     suffix = path.suffix.lower()
+    label = 'title'
     try:
         if suffix == '.pdf':
             from pypdf import PdfReader
-            title = (PdfReader(str(path)).metadata or {}).get('/Title') or ''
-            title = str(title)
+            reader = PdfReader(str(path))
+            title = str((reader.metadata or {}).get('/Title') or '')
+            if len(title.strip()) < 8 and reader.pages:
+                text = reader.pages[0].extract_text() or ''
+                title, label = next((line for line in text.splitlines() if len(line.strip()) > 12), ''), 'first line'
+
         elif suffix in ('.tex', '.md', '.txt'):
             with open(path, 'rb') as stream:
                 head = stream.read(20000).decode('utf-8', 'replace')
             match = _TEX_TITLE.search(head) if suffix == '.tex' else re.search(r'^#\s+(.+)$', head, re.M)
             title = match.group(1) if match else ''
         else:
-            return ''
+            return '', ''
     except Exception:  # an unreadable or malformed file simply has no title here
-        return ''
+        return '', ''
     greek = ('alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi rho sigma '
              'tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Phi Psi Omega').split()
     title = re.sub(r'\\([a-zA-Z]+)\*?', lambda m: f' {m.group(1)} ' if m.group(1) in greek else ' ', title)
     title = re.sub(r'[{}$\\~]', ' ', title)
-    return ' '.join(title.split())[:160]
+    words = ' '.join(title.split())[:160]
+    return (label, words) if words else ('', '')
 
 
 def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=2.0):
@@ -213,9 +220,9 @@ def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=
         kind = 'PDF' if path.suffix.lower() == '.pdf' else 'image' if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') \
             else source_suffix(path).lstrip('.') or 'file'
         amount = f'{nbytes / 1e6:.1f} MB' if nbytes >= 1e6 else f'{max(1, round(nbytes / 1e3))} kB'
-        title = _file_title(path, deadline)
+        label, title = _file_title(path, deadline)
         line = (f'{rel} · {kind} · {amount} · {time.strftime("%Y-%m-%d", time.localtime(mtime))}'
-                + (f' · title: {title}' if title else '') + (' · attached to this message' if path in workspace.pinned else ''))
+                + (f' · {label}: {title}' if title else '') + (' · attached to this message' if path in workspace.pinned else ''))
         if size + len(line) + 1 > max_chars:
             break
         lines.append(line)
