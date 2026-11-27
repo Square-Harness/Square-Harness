@@ -40,6 +40,24 @@
   is sent again too. Refusals no longer use up the four replacements kept for silent starts
   and broken streams; a plain HTTP 500 keeps its four counted retries. A notice shown while a
   call waits no longer hides the live answer that follows.
+
+- See and reuse the workspace's files. **See my files**, at the bottom of the
+  folder window, opens a file browser on every folder below the interface root,
+  starting in the open folder: subfolders and text, PDF and image files, with
+  their extension, size and modification date.
+  It works like a desktop file manager (double-click a folder to open it, Up,
+  Backspace or the folder path to go back, Ctrl/⌘-click and Shift-click to select
+  several files, sorting, a search across every folder). Opening a file on a
+  double click is not decided yet: `FileExplorer` takes an `onOpen` callback for
+  it. **Attach files** is now a menu: **From my device** uploads as before, and
+  **From the workspace** attaches files already uploaded, for example in an
+  earlier conversation, to the next message. The model still reads only the
+  open folder: a file attached from another folder is copied into it first (or
+  into the project's folder), with the upload rules, and attaching it again
+  reuses that copy (`POST /api/files/copy`). `GET /api/files/browse?path=` lists
+  one folder below the interface root, and `GET /api/files?scope=root` lists
+  every folder's files for the search.
+
 - Hosted Explore and other DeepInfra workflows now retry the provider's
   `engine_overloaded` response. If the model stays busy, Explore pauses and
   **Resume** restarts its unfinished worker with the remaining budget.

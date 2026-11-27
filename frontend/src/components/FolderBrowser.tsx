@@ -6,6 +6,7 @@ import { api, type FolderListing, type ReadSettings } from '../api'
 import { workspaceBusy } from '../concurrency'
 import { markOwnFolderSwitch, refreshStatus, useApp } from '../store'
 import { ErrorNote, Loading, Modal, Toggle } from './common'
+import { FilesDialog } from './FileExplorer'
 import { ChevronIcon, FileIcon, FolderIcon } from './Icons'
 
 function counts(files: { tex: number; pdf: number; py: number }) {
@@ -19,6 +20,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const [listing, setListing] = useState<FolderListing | null>(null)
   const [error, setError] = useState('')
   const [name, setName] = useState('')
+  const [seeing, setSeeing] = useState(false)
   const busy = workspaceBusy(app.snapshot)
 
   useEffect(() => {
@@ -51,6 +53,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const crumbs = path ? path.split('/') : []
   const isCurrent = listing && listing.path === (app.status?.workspace_path || '')
   const recent = listing ? (listing.recent.includes('') ? listing.recent : [...listing.recent, '']) : []
+  if (seeing) return <FilesDialog onClose={onClose} onBack={() => setSeeing(false)} />
   return (
     <Modal title="Open a folder" icon={<FolderIcon />} onClose={onClose} wide>
       <nav className="crumbs" aria-label="Folder path">
@@ -106,6 +109,9 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
           <p className="muted small">Only folders inside {listing.root} can be opened. Hidden folders are not shown.</p>
         </>
       )}
+      <div className="modal-actions folder-actions">
+        <button type="button" className="btn" onClick={() => setSeeing(true)}><FileIcon size={15} /> See my files</button>
+      </div>
     </Modal>
   )
 }

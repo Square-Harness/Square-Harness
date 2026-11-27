@@ -445,7 +445,21 @@ one with a message.
   `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Empty files are refused, and so is a `.pdf`
   that is not a PDF (a LaTeX file named `.pdf`) or is cut short. Dropped files
-  are attached to your next message. Text files are best saved as UTF-8; older files in Latin-1 or
+  are attached to your next message. **Attach files** opens a menu: **From my
+  device** uploads files the same way, and **From the workspace** opens a file
+  browser on the files already in the folder, to attach some of them. **See my
+  files**, at the bottom of the folder window, opens the same browser on all your
+  folders (everything below `--gui-root`) and their text, PDF and image files,
+  with their extension, size and modification date. Both open in the open folder
+  and can go up to the others. The model reads only the open folder, so a file
+  attached from another folder is first copied into the open folder (into the
+  project's folder in a project's conversation), with the upload rules: same
+  types and size limit, an existing file is never replaced, and attaching the
+  same file again reuses its copy. The browser works like a desktop file
+  manager: double-click a folder (or press Enter) to open it, go back with **Up**,
+  Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
+  Mac) to add or remove one, Shift-click to select a range; sort by name, size or
+  date; the search box searches every folder. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and

@@ -616,3 +616,60 @@ select {
 .job-navigation .btn { gap: 8px; }
 .job-navigation .back-link { min-height: 40px; padding: 0 12px; font-size: 16.5px; }
 @media (max-width: 760px) { .job-navigation { padding: 4px 10px; } }
+
+/* Workspace files: the explorer ("See my files", "Attach from the workspace") and the composer's attach menu. */
+.folder-actions { justify-content: flex-start; }
+.ws-file-explorer { display: grid; gap: 8px; }
+.ws-file-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ws-file-up { display: inline-grid; transform: rotate(90deg); }
+.ws-file-crumbs { flex: 1 1 260px; min-width: 0; margin: 0; }
+.ws-file-crumbs .crumb[aria-current="page"] { background: var(--ink-soft); }
+.ws-file-search { flex: 0 1 230px; min-width: 160px; }
+.ws-file-home { flex: none; }
+.ws-file-note { margin: 0; }
+.ws-open-pill { border-color: var(--ink); color: var(--ink); }
+.ws-file-head { display: flex; align-items: center; gap: 10px; padding: 0 12px 0 40px; }
+.ws-file-head button { padding: 2px 0; border: 0; background: none; color: var(--text-3); font: 700 12px var(--font-ui); text-align: left; cursor: pointer; }
+.ws-file-head button:hover { color: var(--ink); }
+.ws-file-head button:first-child { flex: 1; }
+.ws-file-head .ws-file-col-size { width: 78px; text-align: right; }
+.ws-file-head .ws-file-col-date { width: 92px; margin-right: 26px; text-align: right; }
+.ws-file-list { height: min(52vh, 460px); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--sheet); }
+.ws-file-list > .ws-file-empty { margin: 0; padding: 14px 12px; }
+.ws-file-row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 14px; cursor: default; user-select: none; }
+.ws-file-row:first-child { border-top: 0; }
+.ws-file-row > svg { flex: none; color: var(--text-3); }
+.ws-file-row:hover { background: var(--hover); }
+.ws-file-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.ws-folder-row > svg { color: var(--ink); }
+.ws-folder-row .ws-file-name { font-weight: 700; }
+.ws-folder-active { background: var(--hover); }
+.ws-folder-go { display: inline-grid; flex: none; width: 16px; color: var(--text-3); }
+.ws-file-row-selected, .ws-file-row-selected:hover { background: var(--ink-soft); box-shadow: inset 3px 0 0 var(--ink); }
+.ws-file-row-selected > svg { color: var(--ink); }
+.ws-file-row-unavailable { opacity: 0.55; }
+.ws-file-row-unavailable:hover { background: none; }
+.ws-file-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ws-file-where { display: block; margin-top: 1px; font-size: 12px; color: var(--text-3); text-align: left; }
+.ws-file-ext { flex: none; padding: 1px 7px; border-radius: 5px; background: var(--ink-soft); color: var(--ink); font: 12px var(--font-mono); }
+.ws-file-ext-pdf { background: var(--red-soft); color: var(--red); }
+.ws-file-ext-image { background: var(--green-soft); color: var(--green-text); }
+.ws-file-size { flex: none; width: 78px; text-align: right; color: var(--text-3); font-size: 12.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ws-file-date { flex: none; width: 92px; text-align: right; color: var(--text-3); font-size: 12.5px; white-space: nowrap; }
+.ws-file-status { min-height: 1.5em; margin: 0; overflow-wrap: anywhere; }
+.attach-menu { position: relative; }
+.attach-chevron { display: inline-grid; margin-left: 2px; transform: rotate(90deg); }
+.attach-menu-list { position: absolute; z-index: 20; left: 0; bottom: calc(100% + 6px); min-width: 270px; padding: 5px;
+  background: var(--sheet); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: var(--shadow-sm), 0 8px 24px rgba(30, 34, 51, 0.12); }
+.attach-menu-item { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px;
+  background: none; color: var(--text); text-align: left; font: inherit; font-size: 14px; cursor: pointer; }
+.attach-menu-item > svg { flex: none; margin-top: 2px; color: var(--ink); }
+.attach-menu-item:hover, .attach-menu-item:focus-visible { background: var(--hover); outline: none; }
+.attach-menu-item > span { display: grid; gap: 2px; }
+.attach-menu-hint { color: var(--text-3); font-size: 12.5px; }
+@media (max-width: 560px) {
+  .ws-file-date, .ws-file-head .ws-file-col-date { display: none; }
+  .ws-file-head { padding-left: 38px; }
+  .ws-file-search { flex: 1 1 100%; }
+  .attach-menu-list { min-width: min(270px, calc(100vw - 32px)); }
+}
