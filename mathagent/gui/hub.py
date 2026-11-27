@@ -1202,8 +1202,8 @@ class Hub:
         if not supplied:
             return selected
         # Naming a second document alongside an attachment selects that document
-        # within the normal file-type permissions. Never discover sibling files.
-        allowed = set().union(*(READ_GROUPS[group] for group in store.read_types(self.root)))
+        # among the readable kinds. Never discover sibling files.
+        allowed = set().union(*READ_GROUPS.values())
         suffixes = tuple(allowed) + (('.tgz', '.tar', '.gz') if '.tex' in allowed else ())
         # Include the displayed basenames as well as their stored relative paths:
         # the last word of "draft notes.tex" does not also select "notes.tex".
@@ -1279,8 +1279,7 @@ class Hub:
         numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
                     if mode == 'explore' else None)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
-                              args.allow_python, literature=library, read_types=store.read_types(self.root),
-                              numerics=numerics)
+                              args.allow_python, literature=library, numerics=numerics)
         workspace.cancelled = library.cancelled = task.cancel.is_set
         client_class = INTERRUPTIBLE[args.backend]
         if args.backend == 'openai':
@@ -1679,7 +1678,7 @@ class Hub:
         files = self.check_files(selected, image_refs=image_refs)
         files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         text_files = [name for name in files if not images.is_image(name)]
-        source_scope = Workspace(self.root, read_types=store.read_types(self.root))
+        source_scope = Workspace(self.root)
         attached = set(attached_files) | {name for row in session['transcript'] if row.get('role') == 'user'
                                           for name in row.get('attached_files', row.get('files', []))}
         authorized = [name for name in text_files if name in attached or source_suffix(name) in source_scope.allowed_types]
@@ -1783,7 +1782,7 @@ class Hub:
                     limits = dict(max_tokens=work_limit['tokens'], max_seconds=work_limit['seconds'],
                                   max_input_tokens=self.args.research_input_tokens)
                 # An attached .bib (or reference list) is checked entry by entry.
-                material = bibcheck.attached_material(Workspace(root, read_types=store.read_types(root)), files)
+                material = bibcheck.attached_material(Workspace(root), files)
                 result = runner.start(question, effort='high', **limits, material=material,
                                       max_requests=self.args.research_requests, max_chars=self.args.research_chars,
                     lookup='precise' if precise_reference_request(question) else 'standard')

@@ -7,8 +7,8 @@ import { BackIcon } from './Icons'
 
 export function JobNavigation({ route }: { route: Route }) {
   const app = useApp()
-  if (!['prove', 'literature', 'referee', 'writeup', 'style', 'about'].includes(route.mode)) return null
-  const origin = route.id && route.from && (!app.chats || app.chats.some((chat) => chat.id === route.from))
+  if (!['prove', 'literature', 'referee', 'writeup', 'style', 'about', 'file'].includes(route.mode)) return null
+  const origin = (route.id || route.mode === 'file') && route.from && (!app.chats || app.chats.some((chat) => chat.id === route.from))
     ? route.from : null
   return (
     <nav className="job-navigation" aria-label="Return to the conversations">

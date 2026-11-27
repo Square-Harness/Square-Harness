@@ -49,6 +49,9 @@ export const FlaskIcon = (p: IconProps) => <Icon {...p}><path d="M8.5 3h7" /><pa
 // A magnifying glass: the Literature notebook's cover.
 export const SearchIcon = (p: IconProps) => <Icon {...p}><circle cx="10.5" cy="10.5" r="6" /><path d="M15 15l5.5 5.5" /></Icon>
 export const BackIcon = (p: IconProps) => <Icon {...p}><path d="M15 6l-6 6 6 6" /></Icon>
+/** A box with an arrow leaving it: opens in a new tab. */
+export const DownloadIcon = (p: IconProps) => <Icon {...p}><path d="M12 4v11M7 10l5 5 5-5M5 19h14" /></Icon>
+export const ExternalIcon = (p: IconProps) => <Icon {...p}><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></Icon>
 // A panel with its edge: the side a panel slides to (left list, right overview).
 export const PanelLeftIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M9.5 4.5v15" /><path d="M16 10l-2 2 2 2" /></Icon>
 export const PanelRightIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M14.5 4.5v15" /><path d="M8 10l2 2-2 2" /></Icon>

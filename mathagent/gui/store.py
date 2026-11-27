@@ -13,7 +13,6 @@ import copy
 import errno
 import fcntl
 import hashlib
-import itertools
 import json
 import os
 from pathlib import Path
@@ -36,7 +35,7 @@ from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
 from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
-from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
+from ..tools import SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
                      rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
@@ -97,7 +96,7 @@ def _tool_experiment(message):
         return None
     return experiment_item(value.get('experiment_id'), value.get('status'),
                            list(value.get('figures') or []) + list(value.get('files') or []))
-UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg', '.webp'}
+UPLOAD_SUFFIXES = TEXT | {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # what the model reads (archives apart)
 BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # figures and visual inputs, and PDFs to read
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -710,7 +709,7 @@ def research_artifact(root, job_id, name, stream_from=None):
 # -- workspace files that can be pinned ------------------------------------
 
 def _listable(path):
-    """A file the model can be given: text, PDF or an image."""
+    """A file the model can be given: text (code included), PDF or an image."""
     suffix = source_suffix(path)
     return suffix in TEXT or suffix == '.pdf' or images.is_image(path)
 
@@ -1543,27 +1542,6 @@ def _private_json(path):
     return value if isinstance(value, dict) else None
 
 
-def load_settings(workspace):
-    value = _private_json(Path(workspace) / '.mathagent' / 'gui-settings.json') or {}
-    saved = value.get('read') if isinstance(value.get('read'), dict) else {}
-    return {'read': {group: saved.get(group) is not False for group in READ_GROUPS}}
-
-
-def save_settings(workspace, read):
-    if not isinstance(read, dict) or any(k not in READ_GROUPS or type(v) is not bool for k, v in read.items()):
-        raise ValueError('read must map tex, pdf, py and text to true or false')
-    settings = load_settings(workspace)
-    settings['read'].update(read)
-    base = Path(workspace) / '.mathagent'
-    _directory(base, create=True)
-    _atomic_write(base / 'gui-settings.json', json.dumps(settings, indent=1).encode())
-    return settings
-
-
-def read_types(workspace):
-    return [group for group, allowed in load_settings(workspace)['read'].items() if allowed]
-
-
 def resolve_folder(root, relative=''):
     """A folder at or below the interface root: no hidden parts, no symlink escape."""
     root = Path(root).resolve(strict=True)
@@ -1581,23 +1559,12 @@ def resolve_folder(root, relative=''):
 
 
 def _counts(folder):
-    counts = {'tex': 0, 'pdf': 0, 'py': 0}
+    """Count the visible regular files directly in a folder, including unsupported file types."""
     try:
-        entries = list(os.scandir(folder))
+        with os.scandir(folder) as found:
+            return sum(1 for entry in found if not entry.name.startswith('.') and entry.is_file(follow_symlinks=False))
     except OSError:
-        return counts
-    for entry in entries:
-        if entry.name.startswith('.') or not entry.is_file(follow_symlinks=False):
-            continue
-        suffix = source_suffix(entry.name)
-        key = 'tex' if suffix in READ_GROUPS['tex'] else 'pdf' if suffix == '.pdf' else 'py' if suffix == '.py' else None
-        if key:
-            counts[key] += 1
-    return counts
-
-
-def _add_counts(total, more):
-    return {key: total[key] + more[key] for key in total}
+        return 0
 
 
 def list_folders(root, relative=''):
@@ -1616,7 +1583,7 @@ def list_folders(root, relative=''):
         if projects.holds_projects(path):
             for child in path.iterdir():
                 if projects.folder_label(child):
-                    counts = _add_counts(counts, _counts(child))
+                    counts += _counts(child)
         folders.append({'name': project['name'] if project else entry.name, 'path': path.relative_to(root).as_posix(),
                         'files': counts, 'project': project,
                         'jobs': (path / '.mathagent' / 'proofs').is_dir() or (path / '.mathagent' / 'research').is_dir()})
@@ -1708,7 +1675,7 @@ def save_upload(workspace, name, data):
     archive = is_source_archive(base)
     suffix = next((ext for ext in ('.tar.gz', '.tgz', '.tar', '.gz') if base.lower().endswith(ext)), '') if archive else Path(base).suffix.lower()
     if not base or base.startswith('.') or not archive and suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop text/LaTeX, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDF, Python or PNG/JPEG/WebP image files')
+        raise ValueError('Drop text, LaTeX, Markdown or code files, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDFs or PNG/JPEG/WebP images')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
     if not data:
@@ -1757,6 +1724,115 @@ def save_upload(workspace, name, data):
     finally:
         os.unlink(temporary)
     return target.name
+
+
+# -- the file viewer and editor -------------------------------------------------------------------------
+
+VIEW_TEXT_BYTES = 4 * 1024 * 1024    # text shown (and edited) in the viewer
+VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser, or a file downloaded
+MARKDOWN = {'.md', '.markdown'}
+
+
+def root_file(base, relative):
+    """A regular file at or below the interface root: no hidden part, no symlink, nothing outside the root."""
+    base = Path(base).resolve(strict=True)
+    if not isinstance(relative, str) or not relative.strip('/') or len(relative) > 1000:
+        raise ValueError('Give the file path relative to the interface root')
+    parts = Path(relative.strip('/')).parts
+    if Path(relative).is_absolute() or any(part in ('', '.', '..') or part.startswith('.') for part in parts):
+        raise ValueError('Files are relative to the interface root; hidden files and folders are excluded')
+    folder = base.joinpath(*parts[:-1]).resolve(strict=True)
+    if not folder.is_relative_to(base) or any(part.startswith('.') for part in folder.relative_to(base).parts):
+        raise ValueError('That file is outside the interface root')
+    path = folder / parts[-1]
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise NotFound('No such file') from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Only regular files can be opened')
+    return path
+
+
+def view_kind(path):
+    """How the viewer shows a file: pdf, markdown, text (TeX, code, data...), image, or unsupported."""
+    suffix = source_suffix(path)
+    if Path(path).suffix.lower() == '.pdf':
+        return 'pdf'
+    if images.is_image(path):
+        return 'image'
+    if Path(path).suffix.lower() in MARKDOWN:
+        return 'markdown'
+    if suffix in TEXT and not is_source_archive(path):
+        return 'text'
+    return 'unsupported'
+
+
+def view_file(base, relative):
+    """What the viewer needs: the file's kind and size, and for text its content, encoding and digest (the
+    digest guards a save against a change made meanwhile, by the user elsewhere or by the model)."""
+    path = root_file(base, relative)
+    kind, size = view_kind(path), path.stat().st_size
+    result = {'path': relative.strip('/'), 'name': path.name, 'kind': kind, 'size': size,
+              'updated_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
+    if kind not in ('text', 'markdown'):
+        return result
+    if size > VIEW_TEXT_BYTES:
+        return {**result, 'kind': 'too_large'}
+    data = path.read_bytes()
+    try:
+        text, encoding = decode_text(data, path.name)
+    except ValueError as exc:  # a file named .txt that holds binary data
+        return {**result, 'kind': 'unsupported', 'note': str(exc)}
+    return {**result, 'text': text, 'encoding': encoding or 'utf-8', 'sha256': hashlib.sha256(data).hexdigest(),
+            'editable': True}
+
+
+def raw_file(base, relative, download=False):
+    """The bytes and content type of a PDF or an image, for the browser to display; with `download`, of any
+    file the file explorer lists, to save as it is on disk."""
+    path = root_file(base, relative)
+    kind = view_kind(path)
+    if download and not _listable(path):
+        raise ValueError('Only the files the file explorer lists can be downloaded')
+    if not download and kind not in ('pdf', 'image'):
+        raise ValueError('Only PDFs and images are sent as files; other files are shown as text')
+    if path.stat().st_size > VIEW_RAW_BYTES:
+        raise ValueError(f'That file is larger than {VIEW_RAW_BYTES // (1024 * 1024)} MB')
+    if download:
+        return path.read_bytes(), 'application/octet-stream', path.name
+    types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+    return path.read_bytes(), 'application/pdf' if kind == 'pdf' else types.get(path.suffix.lower(), 'application/octet-stream'), path.name
+
+
+def save_text(base, relative, content, sha256):
+    """Save the viewer's edit of a text file, in the encoding it was read in, if nobody changed it since
+    (`sha256` is the digest the viewer read). The replacement is atomic and keeps the file's permissions."""
+    path = root_file(base, relative)
+    if view_kind(path) not in ('text', 'markdown'):
+        raise ValueError('Only text files can be edited here')
+    if not isinstance(content, str) or len(content.encode('utf-8', 'surrogatepass')) > VIEW_TEXT_BYTES:
+        raise ValueError('The text must be at most 4 MB')
+    current = path.read_bytes()
+    if not isinstance(sha256, str) or hashlib.sha256(current).hexdigest() != sha256:
+        raise FileExistsError('The file changed since it was opened; reload it before saving')
+    _, encoding = decode_text(current, path.name)
+    try:
+        data = content.encode(encoding or 'utf-8')
+    except UnicodeEncodeError:
+        raise ValueError(f'The text has characters that {encoding} cannot store; '
+                         'remove them or save the file as UTF-8 elsewhere') from None
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix='.edit-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
 
 
 def copy_into(base, workspace, destination, relative):

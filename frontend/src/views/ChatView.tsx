@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement, type ReactNode } from 'react'
 import { api, ApiError, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
@@ -26,13 +26,15 @@ import { MODES } from '../modes'
 import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
+import { FilePanel } from './FileView'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { go, href } from '../router'
+import { go, href, openFile, parse, useRoute, viewHref } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
+import { JobDownloads } from '../components/JobDownloads'
 import { AttachMenu } from '../components/FileExplorer'
 
 type ChatMode = 'critic' | 'explore' | 'free'
@@ -94,6 +96,7 @@ const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isL
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
+  const viewing = useRoute().file
   const tick = useTick(id)
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
@@ -249,7 +252,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       setSelectedCall(null)
       setAttachments([])
       pinned.current = true
-      if (!id) go(mode, chatId)
+      if (!id) go(mode, chatId, undefined, undefined, parse(window.location.hash).file)  // an open file stays open
     } catch (reason) {
       setSendError((reason as Error).message)
       setBusyError(reason instanceof ApiError && reason.status === 409)
@@ -378,11 +381,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])}
             startFolder={app.projects?.find((item) => item.id === currentProject)?.folder} projectId={currentProject} />
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
-            <span key={path} className="chip" title={path}>
-              <FileIcon size={14} /><span>{displayPath(path)}</span>
+            <AttachedChip key={path} path={path} size={14}>
               <button type="button" className="chip-remove" aria-label={`Remove ${displayPath(path)}`}
                 onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
-            </span>
+            </AttachedChip>
           ))}
         </div>
         <PinnedImages paths={attachments} onRemove={(path) => setAttachments((items) => items.filter((item) => item !== path))} />
@@ -417,7 +419,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </button>
           ) : (
             <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
-              <SendIcon size={16} /> {uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}
+              <SendIcon size={16} /> <span className="composer-send-label">{uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}</span>
             </button>
           )}
         </div>
@@ -448,7 +450,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
     </div>
-    {data && <WorkPanel key={data.id} chat={data} />}
+    {/* An open file takes the notebook's place; the notebook comes back when it closes. */}
+    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>
   )
@@ -585,7 +588,7 @@ function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptIt
         <Markdown quiet>{literalUnderscores(item.content)}</Markdown>
         {attached.length > 0 && (
           <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
-            <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>
+            <AttachedChip key={path} path={path} />
           )}</div>
         )}
         {available.length > 0 && (
@@ -769,14 +772,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && <>
-            {item.outputs?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
-            {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
-            {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
-            {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
-            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
-            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={item.outputs.review ? api.reviewBibtexUrl(item.job_id) : api.researchBibDownloadUrl(item.job_id)} download>BibTeX (.bib)</a>}
-          </>}
+          {item.job_id && item.outputs && <JobDownloads job={item.job_id} outputs={item.outputs} partial={item.status === 'stopped'} />}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
             ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
             : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
@@ -788,7 +784,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
           <Collapse className="route-details" summary={(kind === 'answer' || kind === 'check') && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
             <div className="route-summary"><Inline mathProse limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
-              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>)}</div>
+              <div className="attachments">{item.files.map((path) => <AttachedChip key={path} path={path} />)}</div>
             )}
             {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
@@ -908,5 +904,20 @@ function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutp
         </div>
       </div>
     </div>
+  )
+}
+
+/** An attached file (path relative to the open folder): a double click opens it in the viewer, beside the conversation. */
+function AttachedChip({ path, size = 13, children }: { path: string; size?: number; children?: ReactNode }) {
+  const { status } = useApp()
+  const route = useRoute()
+  const fromRoot = (status?.workspace_path ? status.workspace_path + '/' : '') + path
+  return (
+    <span className={'chip chip-viewable' + (children ? '' : ' chip-static')} title={`${path} (double-click to view)`}
+      onDoubleClick={() => openFile(fromRoot)}>
+      <FileIcon size={size} /><span>{displayPath(path)}</span>
+      <a className="sr-only" href={viewHref(route, fromRoot)}>View {displayPath(path)}</a>
+      {children}
+    </span>
   )
 }

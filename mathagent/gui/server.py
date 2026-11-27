@@ -32,7 +32,7 @@ import stat
 import sys
 import threading
 import unicodedata
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 import webbrowser
 
 from .. import __version__
@@ -289,7 +289,7 @@ def status(h, body):
                         'research_chars': args.research_chars},
            'ollama': hub.models(), 'root': str(hub.base),
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
-           'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
+           'latex': shutil.which('latexmk') is not None,
            'recent': store.recent_folders(hub.base)}
     if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
         from ..hosted_quota import quota_status
@@ -812,16 +812,6 @@ def workspace_open(h, body):
     return {'workspace': str(h.server.hub.root)}
 
 
-@route('GET', '/api/settings')
-def settings(h, body):
-    return store.load_settings(h.server.hub.root)
-
-
-@route('POST', '/api/settings')
-def settings_save(h, body):
-    return store.save_settings(h.server.hub.root, body.get('read'))
-
-
 @route('GET', '/api/personalization')
 def preferences(h, body):
     return personalization.load(h.server.hub.base)
@@ -859,6 +849,35 @@ def upload(h, body):
             (root / saved).unlink(missing_ok=True)
             raise
     h.server.hub.bus.publish('files', path=saved)
+    return result
+
+
+@route('GET', '/api/files/view')
+def files_view(h, body):
+    """A file for the viewer (path relative to the interface root): its kind, and the text of a text file."""
+    return store.view_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+
+
+@route('GET', '/api/files/raw')
+def files_raw(h, body):
+    """A PDF or an image for the browser to display, framed only by this interface; with download=1, any file
+    the file explorer lists, as a download."""
+    download = (h.query.get('download') or [''])[0] == '1'
+    data, content_type, name = store.raw_file(h.server.hub.base, (h.query.get('path') or [''])[0], download)
+    safe = re.sub(r'[^A-Za-z0-9._ -]', '_', name)[:120] or 'file'
+    disposition = f"{'attachment' if download else 'inline'}; filename=\"{safe}\"; filename*=UTF-8''{quote(name)}"
+    h.send_bytes(200, data, content_type, [('Content-Disposition', disposition), ('Cache-Control', 'no-store')],
+                 csp=download, frame=not download)
+    return Streamed
+
+
+# A control character can occupy six bytes in JSON. The store enforces the actual text limit.
+@route('POST', '/api/files/save', body_limit=6 * store.VIEW_TEXT_BYTES + 16 * 1024)
+def files_save(h, body):
+    """Save the viewer's edit of a text file; refused if the file changed since the viewer read it."""
+    path = body.get('path')
+    result = store.save_text(h.server.hub.base, path, body.get('content'), body.get('sha256'))
+    h.server.hub.bus.publish('files', path=path)
     return result
 
 

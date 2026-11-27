@@ -110,12 +110,9 @@ export type Status = {
   pair_urls?: string[]
   root: string
   workspace_path: string
-  read: ReadSettings
   latex: boolean
   recent: string[]
 }
-
-export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
 
 export type FolderProject = { id: string; name: string; deleted?: boolean }
 export type FolderListing = {
@@ -123,8 +120,9 @@ export type FolderListing = {
   path: string
   current: string
   recent: string[]
-  files: { tex: number; pdf: number; py: number }
-  folders: { name: string; path: string; files: { tex: number; pdf: number; py: number }; jobs: boolean
+  /** How many files the folder holds directly, of any type. */
+  files: number
+  folders: { name: string; path: string; files: number; jobs: boolean
     /** A project's own file folder: shown by its name, never opened as a workspace. */
     project?: FolderProject | null }[]
   /** Set when the listed folder itself is a project's file folder. */
@@ -650,6 +648,9 @@ export type Artifact = {
 
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
+/** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
+export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
+  size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
 export type FolderFiles = { path: string; crumbs: { name: string; path: string }[]; folders: WorkspaceFolder[]; files: WorkspaceFile[]; truncated: boolean }
 export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
@@ -756,6 +757,10 @@ export const api = {
     post<{ files: { source: string; path?: string; copied?: boolean; error?: string }[] }>('/api/files/copy', { paths, project_id }),
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
+  /** One file for the viewer, by its path relative to the interface root. */
+  viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
+  /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
+  saveFile: (path: string, content: string, sha256: string) => post<{ sha256: string; size: number }>('/api/files/save', { path, content, sha256 }),
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 
@@ -781,7 +786,6 @@ export const api = {
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
   openFolder: (path: string) => post<{ workspace: string }>('/api/workspace', { path }),
-  saveSettings: (read: Partial<ReadSettings>) => post<{ read: ReadSettings }>('/api/settings', { read }),
   personalization: () => get<Personalization>('/api/personalization'),
   savePersonalization: (value: Personalization) => post<Personalization>('/api/personalization', value),
   upload: async (file: File, project_id?: string | null) => {
@@ -857,3 +861,8 @@ export const api = {
     post<FeedbackResult>('/api/feedback', { ...value, chat_id: value.include_trace ? value.chat_id : null }),
   feedbackArchiveUrl: (id: string) => `/api/feedback/${encodeURIComponent(id)}/archive`,
 }
+
+/** The address of a PDF or an image for the browser to display (path relative to the interface root). */
+export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)
+/** The file as it is on disk, as a download. */
+export const fileDownloadUrl = (path: string) => fileRawUrl(path) + '&download=1'

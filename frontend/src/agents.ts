@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import type { Agent, AgentStatus, Chat, ProofListItem, ResearchListItem } from './api'
+import type { Agent, AgentStatus, Chat, ProofListItem, ResearchListItem, TranscriptItem } from './api'
 import { proofLook, researchLook, type Variant } from './components/Square'
 import { conversationAnswers, researchModeName } from './outputs'
 import { href } from './router'
@@ -27,13 +27,16 @@ export type AgentLane = Agent & {
   stateLabel: string
   notebook: { url: string; label: string } | null
   result: { label: string; variant: Variant; outputId: string | null }
+  /** The document a write-up, summary or literature review produced (its card's downloads), once saved. */
+  documents: { job: string; outputs: NonNullable<TranscriptItem['outputs']> } | null
 }
 
 /** The durable child identity survives card creation, resume and chat reload. */
 export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research: ResearchListItem[] = []): AgentLane[] {
   const oldAnswers = conversationAnswers(chat)
   return (chat.agents || []).map(agent => {
-    const item = agent.card_index == null ? undefined : chat.transcript[agent.card_index]
+    const item = agent.card_index == null ? chat.transcript.find(card => card.role === 'route' && card.child_id === agent.id)
+      : chat.transcript[agent.card_index]
     const proof = proofs.find(p => p.id === agent.job_id)
     const job = research.find(j => j.id === agent.job_id)
     const status = agent.status
@@ -71,7 +74,9 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
         : href(book, agent.job_id, null, chat.id),
       label: book === 'literature' ? 'Read literature review' : 'Open ' + skillName(agent.mode).toLowerCase(),
     } : null
-    return { ...agent, step, notebook, stateLabel: look.label, result: { ...look, outputId } }
+    const documentJob = agent.job_id || item?.job_id
+    const documents = documentJob && item?.outputs ? { job: documentJob, outputs: item.outputs } : null
+    return { ...agent, step, notebook, stateLabel: look.label, result: { ...look, outputId }, documents }
   })
 }
 

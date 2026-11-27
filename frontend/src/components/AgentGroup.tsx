@@ -12,6 +12,7 @@ import { activityCaption } from '../workNotice'
 import { ErrorNote, useLoad } from './common'
 import { BackIcon, ChevronIcon } from './Icons'
 import { Glyph } from './Glyph'
+import { hasDocument, JobDownloads } from './JobDownloads'
 import { Inline, Markdown } from './Markdown'
 import { Square, type Variant } from './Square'
 import '../agentGroups.css'
@@ -141,6 +142,7 @@ function AgentBatch({ lanes, chatId }: { lanes: AgentLane[]; chatId?: string }) 
           {lane.step && lane.step !== lane.result.label && activeAgent(lane) && lane.status !== 'waiting' &&
             <span className="agent-step">{lane.step}</span>}
           {lane.notebook && <NotebookAction lane={lane} />}
+          <LaneDocuments lane={lane} />
           {active && chatId && lane.status === 'finished' && lane.answer_id && <EarlyAnswer chat={chatId} lane={lane} />}
         </div>
         <span className="agent-state"><Square variant={lane.result.variant} size={13} />
@@ -155,12 +157,28 @@ function AgentBatch({ lanes, chatId }: { lanes: AgentLane[]; chatId?: string }) 
     })}</ul> : <ul id={id} className="agent-results">{lanes.map(lane => {
       const content = <><SkillCover mode={lane.mode} /><span className="agent-chip-name">{skillName(lane.mode)}</span>
         <span className="agent-chip-outcome"><Square variant={lane.result.variant} size={12} />{lane.result.label}</span></>
-      return <li key={lane.id}>{lane.notebook
+      return <li key={lane.id} className={documentOf(lane) ? 'agent-result-document' : undefined}>{lane.notebook
         ? <a className="agent-chip" href={lane.notebook.url}>{content}</a>
         : <button type="button" className="agent-chip" onClick={() =>
-          openWorkPanel(lane.result.outputId ? 'outputs' : 'agents', lane.result.outputId || lane.id)}>{content}</button>}</li>
+          openWorkPanel(lane.result.outputId ? 'outputs' : 'agents', lane.result.outputId || lane.id)}>{content}</button>}
+        <LaneDocuments lane={lane} /></li>
     })}</ul>}
   </section>
+}
+
+/** The document of a worker that has stopped working, if it saved one. */
+const documentOf = (lane: AgentLane) => !activeAgent(lane) && lane.documents && hasDocument(lane.documents.outputs) ? lane.documents : null
+
+/** A finished write-up, summary or review in its box: View opens it in the notebook's Results, beside the
+ * conversation; the downloads are the files it was saved as. */
+function LaneDocuments({ lane }: { lane: AgentLane }) {
+  const documents = documentOf(lane)
+  if (!documents) return null
+  const output = lane.result.outputId
+  return <div className="agent-document-actions">
+    {output && <button type="button" className="btn btn-small" onClick={() => openWorkPanel('outputs', output)}>View</button>}
+    <JobDownloads job={documents.job} outputs={documents.outputs} partial={lane.status === 'stopped'} />
+  </div>
 }
 
 function NotebookAction({ lane, primary = false }: { lane: AgentLane; primary?: boolean }) {

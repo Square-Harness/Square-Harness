@@ -429,11 +429,13 @@ one with a message.
   A skill forced onto a larger task can fail in unexpected ways (for example,
   `@writeup` on a whole 80-page paper). The start page therefore does not list
   the skills; it points to **About**, which does.
-- **Your folder** is shown above the text box. Click it to open another folder
-  (below `--gui-root`; by default only the workspace itself). Other open tabs
-  follow the new folder and say so. Drop files onto the
-  window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf .py`, and
-  `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
+- **Your workspace** is shown above the text box: the agent has access to the
+  files in the active workspace. Click it to select another workspace, a folder
+  below `--gui-root` (by default only the workspace itself). Other open tabs
+  follow the new workspace and say so. Drop files onto the
+  window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf`, code
+  such as `.py .jl .rs .c .cpp .r .m .js .sh`, data in `.json .yaml .toml .csv`,
+  and `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
   replaced: the new one is renamed. Empty files are refused, and so is a `.pdf`
   that is not a PDF (a LaTeX file named `.pdf`) or is cut short. Dropped files
   are attached to your next message. **Attach files** opens a menu: **From my
@@ -450,7 +452,24 @@ one with a message.
   manager: double-click a folder (or press Enter) to open it, go back with **Up**,
   Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
   Mac) to add or remove one, Shift-click to select a range; sort by name, size or
-  date; the search box searches every folder. Text files are best saved as UTF-8; older files in Latin-1 or
+  date; the search box searches every folder. Double-click a file to attach it to
+  your next message. Point at a file to show **Download** and **View file**.
+  **View file**, or a double click on a file attached above the text box or in a
+  message, opens the file viewer beside the conversation, in the notebook's
+  place (the notebook comes back when you close the file). Resize it by its left
+  edge like the notebook, up to 65% of the window, and keep writing your message
+  while you read. It shows a PDF in the browser's PDF viewer, fitted to the
+  viewer's width, Markdown rendered with its mathematics, an image as is, and
+  other text files as text, coloured as in VS Code for TeX, BibTeX, Python,
+  Julia, Rust, JavaScript, C and C++, shell, JSON, TOML and YAML. Archives and
+  other files are marked as not supported, and text files over 4 MB are not
+  shown. Markdown and text files can be edited in the viewer: click in the text
+  (on a Markdown page, click the rendered text or **Edit**), type, then **Save**
+  or Ctrl+S (⌘S on a Mac); **Download** saves the file as last saved. The file
+  keeps its encoding. If the file changed on disk after you opened it (the model
+  edited it, for example), it is not overwritten: reload it, or copy your text
+  first. Closing the viewer, opening another file or leaving the conversation
+  with unsaved changes asks first. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and
@@ -460,7 +479,7 @@ one with a message.
   if none is present. Changing a declaration to `utf8` also converts the saved
   bytes; characters unavailable in the requested encoding are refused before
   the file changes. Saved template copies use UTF-8, including UTF-16 originals.
-- **Learn my writing style**, below New conversation, teaches write-ups how you
+- **Learn my writing style**, at the top of **Personalization**, teaches write-ups how you
   write (see [Writing styles](#writing-styles)).
 - **Job pages** show live output, every attempt and review, sources, budgets and
   saved files. **Pause** saves at the next checkpoint and **Resume** continues with
@@ -500,10 +519,8 @@ one with a message.
     a turn that needs a worker waits in the queue (in order of request) for a
     place; a turn you resume goes ahead of new work. Cancelling that wait
     pauses the turn, which keeps its work.
-  - **File access** sets which kinds of files the model may open by itself in
-    this folder (switch a type off to hide it).
-  - **Personalization** saves standing chat instructions and LaTeX commands
-    across folders under the same GUI root. New chat turns and write-ups apply
+  - **Personalization** opens **Learn my writing style** and saves standing chat
+    instructions and LaTeX commands across folders under the same GUI root. New chat turns and write-ups apply
     these preferences alongside the current request and any project notes.
   - **About** lists the skills with their `@` commands, explains which ones the
     Assistant can call itself, and warns that forcing a skill can lead to errors.
@@ -511,8 +528,10 @@ one with a message.
   once; the phone stays paired. This is plain HTTP on your network: use it only
   on a trusted network, or through an SSH tunnel or a VPN.
 
-Explicitly attached files stay available to their conversation and its fresh
-review even when that file type is hidden from general discovery. Ask the
+The model may list, search and read every supported kind of file in the open
+folder: TeX and BibTeX, PDF, Markdown and text, code (Python, Julia, Rust, C and
+C++, R, MATLAB, JavaScript, shell) and data files. Explicitly attached files stay
+available to their conversation and its fresh review. Ask the
 Assistant to save text from the conversation ("save this as notes.tex") and it
 shows the file and its diff for your approval; it does not replace an existing
 file unless your message names it, and it never writes because a document or web
@@ -538,7 +557,11 @@ conversation. Select a specialist to follow its work or open its result. Timing
 bars share a scale so you can see when two tasks overlapped. A dependent task
 appears as waiting until its prerequisite returns. A finished agent’s answer
 can be opened while the other agents continue. If an answer reached its output
-limit, the agent shows the failure and its partial text remains readable.
+limit, the agent shows the failure and its partial text remains readable. A
+worker that produced a document (a write-up, a summary, a literature review)
+shows **View** and its downloads in its box once it is done: **View** opens the
+document in the notebook's **Results**, and the downloads are the PDF, the
+sources, the LaTeX file, the review or the BibTeX file it saved.
 
 - **Agents** shows what each specialist is doing. From a Literature task,
   **Open literature review** takes you into the review itself.
@@ -553,8 +576,11 @@ limit, the agent shows the failure and its partial text remains readable.
 - **Plan** lists the research question, the steps and their dependencies in
   mathematical notation. Open **Time and usage** for the resource figures.
 
-On a wide screen the notebook opens beside the conversation. Drag its divider
-or focus the divider and use the arrow keys to resize it. On a smaller screen
+On a wide screen the notebook opens beside the conversation. A file opened in
+the viewer takes its place until you close the file. Drag its divider
+or focus the divider and use the arrow keys to resize it (End widens it fully).
+It can cover up to 65% of the window; the conversation narrows to make room and
+switches to compact margins and controls. On a smaller screen
 the panel overlays the page. On a phone it fills the screen. Close it with
 Escape or its close button. The URL identifies the tab and selected item, so
 you can reload or share a link within the same authorized workspace.
@@ -1759,8 +1785,7 @@ Everything is saved in your folder under `.mathagent/`:
 | `experiments/` | Sandbox runs |
 | `literature/` | Cache of downloaded sources |
 
-Each folder keeps its file-access choices in its own
-`.mathagent/gui-settings.json`. The web app's access token is in the
+The web app's access token is in the
 `.mathagent/` folder of `--gui-root` (the workspace by default). Git ignores
 `.mathagent/`, but a backup or a copied folder still contains your unpublished
 work.
