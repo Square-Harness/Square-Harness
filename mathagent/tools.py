@@ -154,6 +154,80 @@ def schema(name, description, properties, required=()):
                        'required': list(required), 'additionalProperties': False}}}
 
 
+_TEX_TITLE = re.compile(r'\\title\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{[^{}]*\})*)\}', re.S)
+
+
+def _file_title(path, deadline):
+    """A document's title when it is cheap to read: \\title{} of a .tex, the first heading of a Markdown file,
+    the title in a PDF's metadata. Empty otherwise, and once `deadline` (time.monotonic) has passed."""
+    if time.monotonic() >= deadline:
+        return ''
+    suffix = path.suffix.lower()
+    try:
+        if suffix == '.pdf':
+            from pypdf import PdfReader
+            title = (PdfReader(str(path)).metadata or {}).get('/Title') or ''
+            title = str(title)
+        elif suffix in ('.tex', '.md', '.txt'):
+            with open(path, 'rb') as stream:
+                head = stream.read(20000).decode('utf-8', 'replace')
+            match = _TEX_TITLE.search(head) if suffix == '.tex' else re.search(r'^#\s+(.+)$', head, re.M)
+            title = match.group(1) if match else ''
+        else:
+            return ''
+    except Exception:  # an unreadable or malformed file simply has no title here
+        return ''
+    greek = ('alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi rho sigma '
+             'tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Phi Psi Omega').split()
+    title = re.sub(r'\\([a-zA-Z]+)\*?', lambda m: f' {m.group(1)} ' if m.group(1) in greek else ' ', title)
+    title = re.sub(r'[{}$\\~]', ' ', title)
+    return ' '.join(title.split())[:160]
+
+
+def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=2.0):
+    """What the open folder holds, for the planners (the routing step and the main agent): one line per file the
+    model may be given (the kinds File access allows, plus the attachments), with its kind, size, date and a
+    title when cheap. Files from earlier conversations are there too. With more files than fit, the most
+    recently modified are kept. Returns (text, paths)."""
+    root, allowed = workspace.root, workspace.allowed_types | {'.png', '.jpg', '.jpeg', '.webp'}
+    found = []
+    for folder, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP and not (Path(folder) / d).is_symlink())
+        for name in names:
+            path = Path(folder) / name
+            if name.startswith('.') or path.is_symlink() or (source_suffix(path) not in allowed and path not in workspace.pinned):
+                continue
+            try:
+                info = path.stat()
+            except OSError:
+                continue
+            found.append((info.st_mtime, path, info.st_size))
+            if len(found) >= 5000:
+                break
+    total = len(found)
+    found.sort(key=lambda item: -item[0])
+    deadline = time.monotonic() + title_seconds
+    lines, paths, size = [], [], 0
+    for mtime, path, nbytes in found[:max_files]:
+        rel = path.relative_to(root).as_posix()
+        kind = 'PDF' if path.suffix.lower() == '.pdf' else 'image' if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') \
+            else source_suffix(path).lstrip('.') or 'file'
+        amount = f'{nbytes / 1e6:.1f} MB' if nbytes >= 1e6 else f'{max(1, round(nbytes / 1e3))} kB'
+        title = _file_title(path, deadline)
+        line = (f'{rel} · {kind} · {amount} · {time.strftime("%Y-%m-%d", time.localtime(mtime))}'
+                + (f' · title: {title}' if title else '') + (' · attached to this message' if path in workspace.pinned else ''))
+        if size + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        paths.append(rel)
+        size += len(line) + 1
+    order = sorted(range(len(lines)), key=lambda i: paths[i])
+    text = '\n'.join(lines[i] for i in order)
+    if total > len(lines):
+        text += f'\n[{total - len(lines)} older files not listed: use list_files or search_text]'
+    return text, sorted(paths)
+
+
 class Workspace:
     def __init__(self, root, approve=lambda preview: False, allow_python=False, literature=None, read_types=None,
                  numerics=None):
@@ -176,6 +250,9 @@ class Workspace:
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
+        # The kinds of files File access allows, kept when a message's attachments narrow `readable`:
+        # the workspace overview (workspace_overview) lists those, never more.
+        self.allowed_types = set(self.readable)
         self.index = None
         self.result_chars = MAX_RESULT  # set from the model's context by its Agent (result_budget)
         self.pinned = set()
