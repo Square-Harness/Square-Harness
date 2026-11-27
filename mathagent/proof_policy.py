@@ -96,14 +96,12 @@ steps rather than an exhaustive checklist. For each give claim, provenance and a
 short mathematical check: given (identify the supplied fact), proved (locate and
 check the argument), standard (state the applicable result and check its hypotheses),
 or unverified (identify the essential unresolved point). Do not promote a claim to
-standard merely because the candidate calls it standard. Within this same review,
-before checking its downstream consequences, challenge ONE weakest essential premise
-that is neither given nor routine. Try one concrete falsification test (such as a small
-example, limiting case or direct calculation), or independently check the exact
-theorem's truth and status. Matching its name and hypotheses alone is not a check of
-its truth; a stronger theorem that assumes or restates the target cannot supply an
-independent proof. Record the actual test and outcome in that dependency's existing
-check field. Do not invent a vulnerability when all essential steps are given or
+standard merely because the candidate calls it standard. Identify the essential
+premises whose failure would change the outcome and choose how to check them.
+For example, test a limiting case, recompute an inference or read the theorem
+that supplies the estimate. A theorem that assumes or restates the target cannot
+supply an independent proof. Record what you actually checked and what it established
+in the corresponding dependency's check field. Do not invent a vulnerability when all essential steps are given or
 routine, or reprove established routine results. Do not silently add missing
 hypotheses. Use uncertain when an essential point cannot be decided; unfamiliarity
 alone is not a mathematical refutation.
@@ -131,6 +129,22 @@ essential point, not an unsupported refutation. Give this single task_status ass
 do not add a verdict or another status field. Nonblocking notes are compatible with
 proved/refuted. Your assessment is not a formal certificate. Keep the individual issues, dependencies and notes concise.
 Keep the explanation concise and put no prose outside the JSON object."""
+
+
+def evidence_policy(role):
+    """Adds optional evidence-gathering instructions only to tool-enabled role calls."""
+    finish = ('Give the proof, a rigorous refutation, or the precise remaining gap.' if role == 'solver' else
+              'Assess the exact candidate independently. You may reopen a cited passage or recompute a result. '
+              'For a critical dependency supported by a calculation, record its experiment ID and check the '
+              'observed output. When ready, use submit_review if offered or return the required review JSON directly.')
+    return (finish + ' Use the available tools when they help. You can answer immediately. '
+            'When request_evidence is available, you may ask for a separate source check or literature survey. '
+            'Give a standalone mathematical question and the relevant hypotheses. Use public search terms and avoid copying private '
+            'text into a query. Cite the source passage or experiment ID for evidence you used. Verify theorem '
+            'hypotheses and explain what a computation establishes. A numerical observation can suggest a '
+            'counterexample; a rigorous refutation also checks exact failure and admissibility.')
+
+
 REPAIR_POLICY = """Assess the review below as fallible allegations, not established facts.
 Repair any valid objection in the SAME proof; rebut an invalid objection with a precise
 mathematical explanation. Preserve valid arguments. Nonblocking notes do not require

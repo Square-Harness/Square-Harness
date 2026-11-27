@@ -37,8 +37,11 @@ def main():
                         help='DS4 common per-call working-time allowance (default: 10800 seconds)')
     parser.add_argument('--workspace', type=Path,
                         help='Research workspace (default: the existing private profile workspace)')
-    parser.add_argument('--online', action='store_true',
-                        help='Enable online literature tools for the local test (off by default)')
+    network = parser.add_mutually_exclusive_group()
+    network.add_argument('--online', dest='online', action='store_true', default=True,
+                         help='Enable online literature searches (default)')
+    network.add_argument('--offline', dest='online', action='store_false',
+                         help='Use local and cached literature only')
     parser.add_argument('--no-browser', action='store_true')
     options = parser.parse_args()
     ds4 = options.profile == 'ds4'

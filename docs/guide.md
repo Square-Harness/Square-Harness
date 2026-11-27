@@ -361,9 +361,10 @@ working time, tokens and external requests. Saved jobs retain their original all
 answers cannot change what the harness is allowed to do:
 
 - writing a file needs your approval;
-- online search sends short public queries, never your manuscript;
+- research tools can search online by default. Launch with `--offline` to restrict them to
+  local and cached sources. Referees use public bibliographic queries to look up cited papers;
 - generated Python runs in a locked-down sandbox. Unsandboxed Python exists
-  only as an opt-in launch option (`--allow-python`, with `--online`): the
+  only as an opt-in launch option (`--allow-python`, incompatible with `--offline`): the
   Assistant and Explore chats may then propose `run_python`, and you approve
   each call after reading its code. Approved code runs with your account's
   permissions and the server's environment.
@@ -600,7 +601,7 @@ a statement, or `/prove <statement>`. Other commands:
 | Command | Purpose |
 | --- | --- |
 | `/explore` | Switch to exploration chat |
-| `/check <result>` | Find or verify a reference (needs `--online`) |
+| `/check <result>` | Find or verify a reference. Uses cached sources when launched with `--offline`. |
 | `/literature <topic>` | Write a literature review of a topic |
 | `/quick_review`, `/referee`, `/typo_check`, `/explain` | The review kinds (the manuscript comes from `--research-file`; `/detailed_review` is `/referee`) |
 | `/writeup <instructions>` | LaTeX write-up of `--research-file` notes in the `--template-file` style |
@@ -818,7 +819,7 @@ workspace writer lock shared with the web interface.
 ### Prove
 
 Use it for a statement you want proved, with all its hypotheses. Pin the files
-it depends on: proof jobs read nothing by themselves.
+it depends on. These pins identify the workspace files the proof may use.
 
 For a delegated proof, the solver and verifier receive the same pinned source
 passages, including pages read during that turn. Earlier attempts and numerical
@@ -828,10 +829,12 @@ a candidate and its review before starting the solver.
 
 How it works: **solve → verify → repair**.
 
-1. The solver makes one full attempt, thinking first, with no tools. It explains
-   the main argument and concentrates detail
-   on the essential steps. If the statement is false, it may give a rigorous
-   counterexample.
+1. The solver may give a proof, construct a rigorous counterexample or identify
+   the precise step it could not justify. It chooses how to investigate the
+   statement. Either role can read cached papers, search public sources when
+   online access is enabled, and run an isolated Python experiment when the
+   automatic numerical sandbox is available. A straightforward proof can finish
+   in one solve and one review without using any of these tools.
 2. A fresh verifier, which has not seen the solver's reasoning, reads the whole
    written proof. It
    avoids unnecessary repeated derivation of routine steps and
@@ -839,9 +842,9 @@ How it works: **solve → verify → repair**.
    domains, constant dependence and limits. It records the essential
    dependencies, distinguishing supplied facts, checked deductions, standard
    results and unresolved claims. A theorem name alone does not establish an
-   essential input. For the weakest nonroutine dependency, it attempts one short
-   independent check of the claim itself, such as a small example, limiting
-   regime or precise known result. Routine standard deductions are not re-proved.
+   essential input. The verifier chooses how to check the dependencies that
+   determine validity. It can inspect a cited passage itself or reproduce a
+   calculation.
    For a counterexample it first checks admissibility under all supplied
    relations, endpoints and constant quantifiers; an ambiguous hypothesis is
    flagged rather than silently reinterpreted. Acceptance requires checking the
@@ -863,6 +866,15 @@ How it works: **solve → verify → repair**.
    objection, the uncertain repaired answer becomes the export; the original
    and both reviews remain available.
 
+Either role can request help with a specific reference or a broader literature
+question. Proof saves the request and continues the same attempt when the
+evidence returns. A missing reference can still leave the proof unresolved.
+The time and output spent on this work count toward the job allowance.
+
+Online paper searches are enabled by default. Turn off **Search papers online**
+on the Proof form or launch with `--offline` to use cached sources only. A delegated Proof inherits the conversation’s
+setting. In offline mode, previously cached papers remain available.
+
 Every version is kept, and the first answer is never lost. The default is five solver attempts. You can change the attempt and time limits. “Response reviewed” means the verifier found
 no blocking mathematical issue in the selected response; any nonblocking notes
 remain visible in its review and report. The response can prove the statement or
@@ -883,10 +895,10 @@ does reuse saved reasoning notes, or a labelled ending excerpt when necessary.
 
 Square Harness checks a passing review in code before calling the response a
 model-reviewed proof or refutation. A response that says the target is missing,
-open or out of reach (and the review says so too), or that rests on the stated
-output of a program, is not accepted, even if the verifier raised no objection: Proof runs no code, so such
-an output was never computed. The job then stops as uncertain and says why; check a
-computation with Python Lab. A proof request with no statement at all (only
+open or out of reach and whose review agrees is recorded as uncertain. A
+claim that relies on executing code must be backed by the recorded experiment.
+The verifier still has to check what the calculation establishes. Sampling a
+range of values alone cannot prove a universal bound. A proof request with no statement at all (only
 "@prove", with no earlier message or file) is refused before any solve. When the
 Assistant prepares the task, the deliverable stays a proof or refutation of your
 statement. If an explicit or routed Proof stops without a reviewed answer, the
@@ -910,7 +922,7 @@ conversation is using: pause the conversation first.
 `.mathagent/trash/proofs/` in the workspace, named by its id and the deletion
 time; to restore it, move it back into `.mathagent/proofs/` under its id alone. A running or queued proof cannot be deleted.
 
-Paused jobs using recognized Proof policies 7 through 11 are upgraded to policy 12
+Paused jobs using recognized Proof policies 7 through 12 are upgraded to policy 13
 on resume. The report records the old and new policy hashes; completed calls,
 candidate versions and saved allowances are retained. Completed old jobs remain
 readable without an upgrade.
@@ -1102,9 +1114,10 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   on most, and a referee that stops without finishing is asked once to go on. They
   have tools: they read and search the manuscript, **run Python** in the sandbox
   to recompute a constant or test a counterexample, and find and read cited
-  papers to check a theorem's hypotheses (with online search on; a search query
-  that copies eight words of your manuscript is refused, so its text is never
-  sent to a search engine). Each problem is reported as soon as it is found, with
+  papers to check a theorem's hypotheses. Cited-paper lookup is on by default.
+  The review rejects public queries that repeat eight consecutive manuscript words.
+  Turn off **Look up cited papers online** in the review form to use the manuscript
+  and cached papers only. Each problem is reported as soon as it is found, with
   its lines and an exact quote that the code checks, and every result of a
   referee's group must get a status (no error found, issue, not checked) before
   it can finish. A referee's first two rounds are short, so it starts with its
@@ -1802,14 +1815,18 @@ What leaves your computer:
 - **Search requests**: short public queries to arXiv, Semantic Scholar, zbMATH,
   Crossref, OpenCitations and Open Library (book metadata); downloads of open-access papers; web pages you ask
   the Assistant to open; and, only with a `BRAVE_SEARCH_API_KEY`, general web
-  search. In the web app this is on unless you launch with `--offline`; the
-  reading-list and review form can also turn it off for one job. Turning it off
-  in a conversation also applies to that conversation's running jobs: they make
-  no further web request and finish from cached sources. In the terminal
-  it is off unless you launch with `--online`. Proofs and write-ups never search.
-- **Your prompts and files**, only if you choose a model server on another
-  machine with `--online`. A model on a cluster reached through an SSH tunnel
-  counts as local.
+  search. New conversations and research-capable jobs in both the web app and
+  terminal can search online by default. Launch with `--offline` to use local
+  and cached sources throughout the session. The web app also has a **Search
+  online** switch in the conversation and search settings on the Proof, Literature
+  review and manuscript review forms. Turning search off in a conversation stops
+  further web requests from its running jobs. Reopening an offline conversation
+  or resuming an offline job preserves that choice. Source-only tasks such as a
+  typo check or a write-up use their supplied material.
+- **Prompts and selected file contents** go to the model server you configure.
+  A non-loopback endpoint requires `--allow-remote-model` or an explicit
+  `--online`. A model reached through an SSH tunnel receives its inputs on the
+  remote machine even though the harness connects to a local address.
 
 Nothing else leaves your computer. The web app listens on `127.0.0.1` only by
 default. Each request needs the token, and the interface loads nothing from the

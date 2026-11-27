@@ -93,7 +93,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
-  const [online, setOnline] = useState(false)
+  const [online, setOnline] = useState<boolean>()
 
   const uploading = useDropTarget(!review ? 'Pinned as sources for the report' : manuscript ? 'Pinned as the manuscript' : 'Pinned as the source',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
@@ -114,9 +114,6 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     // Only when the launch defaults arrive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d])
-  // Literature uses the launch setting. Cited-paper lookup in a standalone manuscript review is opt-in.
-  useEffect(() => { setOnline(!review && !!status?.online) }, [review, status?.online])
-
   const chooseVariant = (next: ReviewVariant) => {
     setVariant(next)
     applyLimits(next)
@@ -125,7 +122,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   }
   const paperReview = manuscript && variant !== 'typos'
   const offline = review && !paperReview
-  const searching = online && !status?.online_locked && !offline
+  const searching = (online ?? !!status?.online) && !status?.online_locked && !offline
 
   const running = capacityFull(snapshot, status)
   const noun = copy.noun

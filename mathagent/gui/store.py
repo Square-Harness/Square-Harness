@@ -126,14 +126,14 @@ def _cached(path, load, revision=None):
     return value
 
 
-def locked(directory):
+def locked(directory, filename='run.lock'):
     """True while an engine process holds the job's run lock.
 
     Probing takes a shared lock for microseconds and is only used for jobs whose
     saved status says running, to tell live work from an interrupted process.
     """
     try:
-        fd = os.open(directory / 'run.lock', os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(directory / filename, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return False
     try:
@@ -278,6 +278,13 @@ def proof_request_text(state):
     return request_text(state)
 
 
+def _proof_active(state, directory, active):
+    status = state['status']
+    if status not in ('running', 'waiting_for_evidence'):
+        return False
+    return state['id'] == active or locked(directory, 'evidence-service.lock' if status == 'waiting_for_evidence' else 'run.lock')
+
+
 def list_proofs(root, active=None):
     root = Path(root)
     base = root / '.mathagent' / 'proofs'
@@ -291,7 +298,7 @@ def list_proofs(root, active=None):
             state = _cached(path / 'state.json', lambda: ProofStore.load(root, path.name).state)
         except (OSError, ValueError):
             continue
-        running = state['status'] == 'running' and (path.name == active or locked(path))
+        running = _proof_active(state, path, active)
         jobs.append({'id': state['id'], 'kind': 'proof', 'version': state['version'], 'status': state['status'],
                      'title': one_line(proof_request_text(state), 140), 'updated_at': state['updated_at'],
                      'created_at': state['created_at'], 'running': running,
@@ -306,7 +313,7 @@ def proof_detail(root, proof_id, active=None):
     directory = _proof_directory(root, proof_id)
     store = ProofStore.load(root, proof_id)
     s = store.state
-    running = s['status'] == 'running' and (proof_id == active or locked(directory))
+    running = _proof_active(s, directory, active)
     call = next((c for c in reversed(s['calls']) if c.get('status') == 'running'), None) if running else None
     settings = s['settings']
     detail = {
@@ -315,6 +322,7 @@ def proof_detail(root, proof_id, active=None):
         'recovery_notice': s.get('recovery_notice'),
         'created_at': s['created_at'], 'updated_at': s['updated_at'], 'revision': s['revision'],
         'settings': settings,
+        'evidence_request': s.get('evidence_request'),
         'images': s.get('images', []),
         'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
                    'tokens': job_output_budget(s, running),
@@ -357,7 +365,8 @@ def trash_proof(root, proof_id):
     target = trash / 'proofs' / f'{proof_id}-{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}'
     if target.exists() or target.is_symlink():
         target = target.with_name(target.name + '-' + uuid.uuid4().hex[:6])
-    with ProofStore.load(root, proof_id).lock():
+    store = ProofStore.load(root, proof_id)
+    with store._file_lock('evidence-service.lock'), store.lock():
         os.rename(directory, target)
     _sync_directory(directory.parent)
     return target
@@ -624,7 +633,7 @@ def _legacy_review_passages(root, record, document, results):
     if not document.get('document_id') or not results:
         return []
     try:
-        meta, lines = LiteratureTools(root)._document(document['document_id'])
+        meta, lines = LiteratureTools(root, online=False)._document(document['document_id'])
     except (OSError, ValueError, TypeError):
         return []
     canon = str(meta.get('canonical_identifier') or '')
@@ -823,7 +832,7 @@ def _save_chat(root, chat):
     _atomic_write(_chats(root, create=True) / (chat['id'] + '.json'), data)
 
 
-def create_chat(root, mode, think=True, model='', online=False, project_id=None):
+def create_chat(root, mode, think=True, model='', online=True, project_id=None):
     if mode not in CHAT_MODES:
         raise ValueError('Chat mode must be explore or free')
     if project_id is not None:

@@ -569,7 +569,7 @@ class _HTMLText(HTMLParser):
 
 
 class LiteratureTools:
-    def __init__(self, root, *, online=False, max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE, timeout=15):
+    def __init__(self, root, *, online=True, max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE, timeout=15):
         self.root = Path(root).resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError('Literature workspace must be a directory')
@@ -2061,6 +2061,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 if delay > 0:
                     self._pause(delay)
                 self._remaining_timeout()
+                if not self.online:
+                    raise LiteratureError('Offline mode: internet access is disabled')
                 if self.stats['requests'] >= self.max_requests:
                     raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
                 self.stats['requests'] += 1

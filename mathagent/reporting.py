@@ -22,7 +22,8 @@ def job_output_budget(state, running):
     reserved = sum(call.get('reserved_tokens', 0) for call in calls
                    if running and call.get('status') == 'running' and 'charged_tokens' not in call)
     return output_totals(state.get('tokens_charged', 0), state['settings'].get('max_tokens'), reserved,
-                         sum(map(reported_output, calls)))
+                         sum(map(reported_output, calls)) + sum(entry.get('measured_tokens', 0)
+                             for entry in state.get('evidence', []) if isinstance(entry, dict)))
 
 
 def output_summary(state):

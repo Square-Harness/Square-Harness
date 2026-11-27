@@ -25,6 +25,7 @@ from .model_limits import input_limit as model_input_limit, output_limit, is_ds4
 from .numerics import SandboxUnavailable
 from .orchestrator import CUT_MARK, FINAL_PREDICT, PROOF_OUTCOMES
 from .proof import ProofRunner
+from .proof_support import complete_proof_evidence
 from .refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from .research import _read_state, _job_directory
 from .review import ReviewBase, runner_class as review_runner, runner_for_state
@@ -581,7 +582,7 @@ def run_worker(host, parent, budget, action, child, save):
         if sandbox_error:
             raise ValueError(sandbox_error)
         if mode == 'prove':
-            runner = ProofRunner(agent, emit)
+            runner = ProofRunner(agent, emit, evidence_coordinator=True)
             if child.get('job_id'):
                 result = runner.resume(child['job_id'])
             else:
@@ -606,6 +607,7 @@ def run_worker(host, parent, budget, action, child, save):
                     max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
                     verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
                     verify_temperature=host.args.proof_verify_temperature)
+            result = complete_proof_evidence(runner, result, view=local_view if scoped is not None else None)
             # The direction of a no-issue review (proved or refuted) words the card and the parent's result.
             claim = result.get('claim_outcome') or 'unclassified'
             reviewed = PROOF_OUTCOMES.get(claim) if result['status'] == 'candidate_complete' else None

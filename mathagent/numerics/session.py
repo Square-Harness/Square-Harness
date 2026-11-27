@@ -164,14 +164,18 @@ class NumericsSession:
                        {'name': {'type': 'string', 'enum': ['skill', *self.skill.references]},
                         'offset': {'type': 'integer'}}, ['name'])]
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, experiment_id=None):
         """One tool call as bounded JSON text; model errors are returned, never raised."""
         try:
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict) or name not in TOOL_NAMES:
                 raise ValueError('Unknown sandbox tool or arguments')
-            value = getattr(self, name)(**arguments)
+            if name == 'execute_python':
+                # Only the controller may preallocate the receipt used to recover an interrupted job.
+                value = self.execute_python(**arguments, _experiment_id=experiment_id)
+            else:
+                value = getattr(self, name)(**arguments)
         except PolicyError as exc:
             value = {'status': 'refused', 'message': str(exc)}
         except (TypeError, ValueError, OSError) as exc:
@@ -179,7 +183,7 @@ class NumericsSession:
         return self._render(value)
 
     def execute_python(self, code, purpose='', seed=None, parameters=None, timeout_seconds=None,
-                       memory_mb=None, cpus=None):
+                       memory_mb=None, cpus=None, *, _experiment_id=None):
         if not isinstance(purpose, str) or len(purpose.encode('utf-8')) > PROTOCOL_BYTES:
             raise ValueError(f'purpose must be text within {PROTOCOL_BYTES} bytes')
         if not isinstance(code, str) or not code.strip():
@@ -220,7 +224,7 @@ class NumericsSession:
                     'message': f'{exc} Continue without numerical evidence and say that no computation was run.'}
         record = self.store.save(code=code, result=result, limits=limits, policy=self.policy.name, image=image,
                                  seed=seed, parameters=parameters, purpose=purpose, invocation=self.invocation,
-                                 harness_version=__version__)
+                                 harness_version=__version__, experiment_id=_experiment_id)
         hit = {'timeout': 'timeout_seconds', 'memory': 'memory_mb'}.get(result.status)
         if hit:
             with self._lock:

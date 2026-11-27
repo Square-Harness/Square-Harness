@@ -142,6 +142,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
           resume it: start a new proof to continue the work.
         </p>
       )}
+      {data.evidence_request && <p className="muted small">The {data.evidence_request.role} requested evidence for this question. {data.evidence_request.question}</p>}
       {data.recovery_notice && <p className="warning-note">{data.recovery_notice}</p>}
       {ceiling && <p className="muted small">The last solve stopped at its {count(ceiling)}-token ceiling before finishing its answer. Resume with more budget to continue it from where it stopped.</p>}
       <div className="job-actions">

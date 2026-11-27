@@ -222,8 +222,8 @@ HTTP loopback prefix ending in `/api/feedback`; these links work only in the
 paired local browser.
 
 The isolated API launcher accepts `--workspace` for a separate acceptance
-workspace and `--online` to enable literature tools. Without `--online` it keeps
-its previous locked-offline behavior. If the private
+workspace. Literature search is on by default. Pass `--offline` to use only
+local and cached literature. If the private
 `.local/feedback/slack-webhook` file exists, the launcher uses it for feedback
 unless `SH_FEEDBACK_WEBHOOK_FILE` was explicitly configured. For direct file
 delivery it similarly loads `.local/feedback/slack-bot-token` and the channel ID
@@ -327,7 +327,7 @@ python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter --online
 ```
 
 The key stays in the private, mode-0600 file `.local/openrouter/credential`.
-The launcher opens a paired browser window. The `--online` flag enables web research.
+The launcher opens a paired browser window. Web research is on by default. Use `--offline` to turn it off.
 For hosted services, use `--backend openai --api-profile openrouter --allow-remote-model`
 and set `OPENROUTER_API_KEY_FILE` to the backend account's private key file outside its workspace.
 Keep each tester's existing quota path, budget and rates when changing providers.
@@ -441,7 +441,10 @@ launcher or a manual launch.
 The workflow time allowance is derived from the permitted calls instead of the
 old short effort-specific deadline. Explicit token and time flags remain hard
 limits; they may stop a job before its maximum pass count. The scoped API key's
-spending allowance is independent of workflow settings.
+spending allowance is independent of workflow settings. Proof source lookups
+use the session's online permission. Automatic Proof calculations use the same
+optional numerical sandbox as Explore. Both roles can still work by hand when
+the sandbox is unavailable.
 
 The profile pins `deepseek-ai/DeepSeek-V4.1-Flash-1017` at
 `https://api.deepinfra.com/v1/openai`. It uses ordinary streamed Chat
@@ -679,8 +682,7 @@ this computer                                        GPU node
 square-harness --gui ── 127.0.0.1:18020 ══ssh══▶ 127.0.0.1:18020  model server (vLLM or Ollama)
 ```
 
-Because the tunnel ends on `127.0.0.1`, the harness keeps its default offline
-mode for the model.
+The tunnel exposes a loopback model endpoint. Pass `--offline` to disable external literature searches.
 
 ### B1. Inspect the GPU machine
 

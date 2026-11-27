@@ -7,6 +7,13 @@
   configured provider route, including when a follow-up refers to an earlier
   attachment.
 
+- New jobs, the terminal and the hosted-model launcher enable online literature
+  search by default. An explicit offline setting restricts searches to the cache.
+- The Proof solver and verifier can consult papers, use the automatic numerical
+  sandbox and request a focused reference check or a literature review during
+  an attempt. The verifier independently assesses the whole candidate. Saved
+  jobs retain their original tool access and allowances.
+
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook
   while looking through the workspace. Asking about a named notebook quotes

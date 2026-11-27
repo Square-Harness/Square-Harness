@@ -478,13 +478,14 @@ def proofs(h, body):
 
 @route('POST', '/api/proofs')
 def proof_start(h, body):
-    unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'literature'}
+    unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'online', 'literature'}
     if unknown:
         raise ValueError('Unknown proof options: ' + ', '.join(sorted(unknown)))
-    if _flag(body, 'literature'):
-        raise ValueError('Proof jobs use the pinned text only, with no tools: pin the sources the proof needs')
+    online, literature = _flag(body, 'online'), _flag(body, 'literature')
+    if online is not None and literature is not None and online != literature:
+        raise ValueError('Conflicting online and literature settings')
     task = h.server.hub.start_proof(
-        _text(body, 'goal'), source_files=_files(body),
+        _text(body, 'goal'), source_files=_files(body), online=literature if online is None else online,
         rounds=_int(body, 'rounds', 1, MAX_ADD_ROUNDS), tokens=_int(body, 'tokens', 512),
         seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, MAX_ADD_TOKENS),
         verify_tokens=_int(body, 'verify_tokens', 128, MAX_ADD_TOKENS), ctx=_int(body, 'ctx', 2048),

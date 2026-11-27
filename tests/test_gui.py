@@ -176,6 +176,21 @@ class GuiCase(unittest.TestCase):
 
 
 class SecurityTests(GuiCase):
+    def test_new_work_defaults_online_and_an_explicit_offline_choice_is_saved(self):
+        self.assertTrue(cli.parser().parse_args([]).online)
+        self.assertTrue(cli.parser().parse_args(['--online']).online)
+        self.assertFalse(cli.parser().parse_args(['--offline']).online)
+        for options, expected in (({}, True), ({'online': False}, False)):
+            chat = self.ok('POST', '/api/chats', {'mode': 'free', **options})
+            self.assertEqual(store.load_chat(self.root, chat['id'])['settings']['online'], expected)
+            self.fake.replies = [text(PROOF), text(json.dumps(APPROVAL))]
+            started = self.ok('POST', '/api/proofs', {'goal': 'Prove x=x for every real x.', **options})
+            self.assertEqual(self.wait_task()['result_status'], 'candidate_complete')
+            saved = ProofStore.load(self.root, started['id']).state
+            self.assertEqual(saved['settings']['evidence_online'], expected)
+            self.assertEqual(len(saved['calls']), 2)
+            self.assertFalse(saved.get('evidence_request'))
+
     def test_api_requires_the_workspace_token(self):
         status, value, headers = self.request('GET', '/api/status', auth=False)
         self.assertEqual(status, 401)
@@ -656,6 +671,47 @@ class DeepInfraWorkflowTests(GuiCase):
         for field in ('calls', 'tokens', 'input_tokens'):
             self.assertEqual(parent['proof_preparation'][field], 0)
 
+    def test_proof_roles_use_sources_in_the_same_attempt_with_one_model_slot(self):
+        from mathagent.literature import LiteratureTools
+
+        source = self.root / 'definitions.txt'
+        source.write_text('Equality is reflexive on the real numbers.\n')
+        document = LiteratureTools(self.root, online=False).import_local(source.name)['document_id']
+        private_query = 'solver-only search phrase'
+        self.fake.replies = [
+            deepinfra_tool('search_paper', {'document_id': document, 'query': private_query}, 'solver-search'),
+            deepinfra_tool('read_paper', {'document_id': document, 'start_line': 1}, 'solver-read'),
+            (PROOF, 'private solver strategy', 20),
+            deepinfra_tool('read_paper', {'document_id': document, 'start_line': 1}, 'verifier-read'),
+            deepinfra_tool('submit_review', APPROVAL, 'independent-review'),
+        ]
+        started = self.ok('POST', '/api/proofs', {
+            'goal': 'Prove x=x for real x.', 'source_files': [source.name],
+            'online': False, 'rounds': 1, 'tokens': 12000, 'seconds': 120})
+        task = self.wait_task(timeout=20)
+        self.assertEqual(task['result_status'], 'candidate_complete', task)
+        state = ProofStore.load(self.root, started['id']).state
+        self.assertEqual(state['rounds_started'], 1)
+        self.assertEqual(len(state['candidates']), 1)
+        self.assertEqual(len(state['reviews']), 1)
+        self.assertEqual(state['tokens_charged'], 4 * 31 + 20)
+        calls = self.fake.completions
+        self.assertEqual(len(calls), 5)
+        for call in calls:
+            names = {schema['function']['name'] for schema in call['tools']}
+            self.assertTrue({'search_paper', 'read_paper', 'request_evidence'} <= names)
+            self.assertTrue({'run_python', 'write_file', 'list_files'}.isdisjoint(names))
+        self.assertIn('submit_review', {t['function']['name'] for t in calls[-1]['tools']})
+        for followup, expected_id in ((calls[1], 'solver-search'), (calls[2], 'solver-read'), (calls[4], 'verifier-read')):
+            result = next(m for m in followup['messages'] if m.get('tool_call_id') == expected_id and m['role'] == 'tool')
+            self.assertIn(document, result['content'])
+        for call in calls[3:]:
+            messages = json.dumps(call['messages'])
+            self.assertNotIn(private_query, messages)
+            self.assertNotIn('private solver strategy', messages)
+            self.assertIn(PROOF, messages)
+        self.assertEqual(self.request('POST', '/api/proofs', {'goal': 'Prove x=x.', 'online': True})[0], 400)
+
     def test_api_key_gui_proof_preserves_reasoning_usage_and_private_credentials(self):
         approval = copy.deepcopy(APPROVAL)
         approval['notes'] = ['A harmless notation typo does not affect reflexivity.']
@@ -704,7 +760,8 @@ class DeepInfraWorkflowTests(GuiCase):
             self.assertIn('max_tokens', call)
             self.assertNotIn('max_completion_tokens', call)
             self.assertNotIn('chat_template_kwargs', call)
-        self.assertEqual(self.fake.completions[1]['response_format']['type'], 'json_schema')
+        self.assertEqual(next(t['function']['parameters'] for t in self.fake.completions[1]['tools']
+                              if t['function']['name'] == 'submit_review'), proof.VERIFIER_SCHEMA)
         # Explicit small test ceilings survive the larger DS4 effort presets.
         self.assertEqual([call['max_tokens'] for call in self.fake.completions], [4096, 2048])
         self.assertTrue(all(auth is None if path == '/v1/openai/models' else auth == 'Bearer ' + self.fake.key
@@ -713,12 +770,13 @@ class DeepInfraWorkflowTests(GuiCase):
         normalized = proof.validate_review(json.dumps(approval))
         self.assertEqual(stored.state['reviews'][0]['response'], normalized)
         self.assertEqual(normalized['verdict_source'], 'controller_task_status_v3')
-        self.assertNotIn('verdict', self.fake.completions[1]['response_format']['json_schema']['schema']['properties'])
         report = (stored.directory / 'report.md').read_text()
         self.assertIn('Whole-task assessment: proved', report)
         self.assertIn('Dependency (standard)', report)
         self.assertIn('Nonblocking note:', report)
-        self.assertEqual(self.fake.completions[0]['messages'], initial_request(stored.state['goal']))
+        original = initial_request(stored.state['goal'])
+        self.assertTrue(self.fake.completions[0]['messages'][0]['content'].startswith(original[0]['content']))
+        self.assertEqual(self.fake.completions[0]['messages'][1:], original[1:])
         self.assertTrue(all('estimate' in call['context']['method'] for call in stored.state['calls']))
         streams = [self.ok('GET', f'/api/proofs/{started["id"]}/stream/{call["stream"]}?from=0')
                    for call in stored.state['calls']]

@@ -22,6 +22,7 @@ from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import IMAGE, PythonSandbox, SandboxUnavailable
 from . import skill_catalog
 from .proof import ProofRunner
+from .proof_support import complete_proof_evidence
 from .ledger import ProofStore
 from .tools import Workspace
 from .literature import LiteratureTools, UNLIMITED_SOURCE
@@ -143,12 +144,12 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in Explore and /review.
+Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in Explore, Proof and /review.
 Unsandboxed Python is opt-in (--allow-python) and approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
-Offline is the default: a loopback model server and cached/local sources only.
-External research requires --online. Proof mode uses pinned text and no tools.
+Literature search is online by default. Use --offline to restrict all jobs to local and cached sources.
+Proof can consult papers and request evidence.
 Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
 
@@ -203,8 +204,9 @@ def parser():
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
                    help='Pin a workspace theorem source, PDF or cached doc-ID; repeat for multiple sources')
     network = p.add_mutually_exclusive_group()
-    network.add_argument('--online', action='store_true', help='Allow external literature/search requests; queries leave this computer')
-    network.add_argument('--offline', action='store_true', help='Use local/cached research sources only; model stays loopback unless --allow-remote-model (default)')
+    network.add_argument('--online', dest='online', action='store_true', default=True,
+                         help='Allow external literature searches (default); search queries leave this computer')
+    network.add_argument('--offline', dest='online', action='store_false', help='Restrict research to local and cached sources')
     p.add_argument('--allow-remote-model', action='store_true',
                    help='Allow prompts, attached source text and tool context to be sent to the remote model --host; does not enable web research')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
@@ -260,7 +262,7 @@ def select_proof(workspace_root, proof_id=''):
     jobs = sorted(ProofStore.list(workspace_root), key=lambda job: job.get('updated_at', ''), reverse=True)
     if not jobs:
         raise ValueError('No saved proof jobs in this workspace. Start one with /prove <goal>.')
-    active = [job for job in jobs if job.get('status') in {'ready', 'active', 'running', 'paused', 'interrupted', 'error', 'pending'}]
+    active = [job for job in jobs if job.get('status') in {'ready', 'active', 'running', 'waiting_for_evidence', 'paused', 'interrupted', 'error', 'pending'}]
     return ProofStore.load(workspace_root, (active or jobs)[0]['id'])
 
 
@@ -344,13 +346,13 @@ def main():
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         p.error('--host must be an http(s) model URL without credentials, query or fragment')
-    if not args.online and not args.allow_remote_model:
+    if not args.allow_remote_model and '--online' not in sys.argv[1:]:
         try:
             local_host = host.hostname == 'localhost' or ipaddress.ip_address(host.hostname).is_loopback
         except ValueError:
             local_host = False
         if not local_host:
-            p.error('Offline mode requires a localhost/loopback model --host; use --allow-remote-model explicitly, or --online for model and web research')
+            p.error('A remote model host requires --allow-remote-model (or an explicit --online for model and web research)')
     if not 1 <= args.python_concurrency <= 8:
         p.error('Use python-concurrency from 1 to 8')
     if not args.online and args.allow_python:
@@ -438,7 +440,7 @@ def main():
             ui.say(result['report'])
         ui.say('A model review is not a mathematical certificate. See the report for unresolved issues.')
         ui.say(f'Report: {Path(result["directory"]) / "report.md"}')
-        if result['status'] in {'ready', 'running', 'paused', 'interrupted', 'error'}:
+        if result['status'] in {'ready', 'running', 'waiting_for_evidence', 'paused', 'interrupted', 'error'}:
             ui.say(f'Saved job: /resume {result["id"]} (uses the remaining original budget)')
         else:
             ui.say(f'Inspect: /proof-report {result["id"]}. A new /prove starts a separate job.')
@@ -481,7 +483,7 @@ def main():
                 return sandbox.bind(skill, workspace.root, explicit=True, approve=ui.approve)
             except SandboxUnavailable as exc:
                 raise ValueError(f'{skill} needs the Python sandbox. {exc}') from None
-        if mode != 'explore':
+        if mode not in ('explore', 'prove'):
             return None
         session = sandbox.automatic_session(workspace.root, ctx=agent.ctx)
         if session is None and sandbox.enabled and sandbox.automatic and not sandbox_noted:
@@ -504,22 +506,23 @@ def main():
         if agent.mode == 'prove':
             if args.output:
                 raise ValueError('--output is for literature/referee reports; proof reports save automatically')
-            proof_allowance = sum(min(limit, args.specialist_output_tokens or limit)
-                                  for limit in (args.proof_solve_tokens, args.proof_verify_tokens))
-            if args.proof_tokens is not None and args.proof_tokens < proof_allowance:
-                raise ValueError('--proof-tokens must cover one full solve and verification; reduce their explicit limits or raise the total')
+            if args.proof_tokens is not None and args.proof_tokens < (args.proof_min_solve_tokens or 128) + 128:
+                raise ValueError('The proof token allowance must cover the solver and verifier minimums.')
             unpinned = unpinned_files(query)
             if unpinned:
-                ui.say('Note: proof mode has no file tools; the model sees only pinned text. Not pinned: '
+                ui.say('These workspace files are mentioned but have not been pinned: '
                        + ', '.join(unpinned) + '. Relaunch with --proof-file to include them.')
             ensure_model()
             last_proof_id = ''
             proof_running = True
-            result = ProofRunner(agent, ui.emit).start(query, max_rounds=args.proof_rounds,
+            workspace.numerics = bind_numerics('prove')
+            runner = ProofRunner(agent, ui.emit, evidence_coordinator=True)
+            result = runner.start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
                 min_solve_tokens=args.proof_min_solve_tokens, repair_tokens=args.proof_repair_tokens,
                 verify_temperature=args.proof_verify_temperature, source_files=args.proof_file)
+            result = complete_proof_evidence(runner, result)
             proof_running = False
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
@@ -619,7 +622,7 @@ def main():
                     for name in ('check', 'literature', 'review', 'typo-check', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
-                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore and /review, or /sanity-check'
+                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore, Proof and /review, or /sanity-check'
                         ui.say(f'{skill.name} ({how}): {Path(__file__).parent / "skills" / skill.name / "SKILL.md"}')
                 elif command == '/experiments':
                     from .numerics.artifacts import ExperimentStore
@@ -703,9 +706,12 @@ def main():
                     # validate an unrelated CLI default model before resuming.
                     resume_agent = copy.copy(agent)
                     resume_agent.client = copy.copy(agent.client)
-                    result = ProofRunner(resume_agent, ui.emit).resume(
+                    workspace.numerics = bind_numerics('prove')
+                    runner = ProofRunner(resume_agent, ui.emit, evidence_coordinator=True)
+                    result = runner.resume(
                         last_proof_id, add_tokens=args.resume_add_tokens, add_seconds=args.resume_add_seconds,
                         add_rounds=args.resume_add_rounds)
+                    result = complete_proof_evidence(runner, result)
                     proof_running = False
                     model_checked = False
                     proof_result(result)

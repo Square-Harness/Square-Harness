@@ -130,7 +130,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
   and continuation instructions. Its SHA-256 is saved in every proof job.
   Resume refuses an unrecognized changed hash (`proof.py`, `_provenance`/`resume`).
   Change the file only deliberately, together with `proof.POLICY_VERSION` and a
-  migration rule. Policy 12 accepts saved policies 7 through 11 only with their exact recognized
+  migration rule. Policy 13 accepts saved policies 7 through 12 only with their exact recognized
   hashes (`RECOGNIZED_POLICY_HASHES`), records old/new versions and hashes
   in `policy_migrations` and the report, and updates the active policy version
   and hash. Keep all numeric allowances, sources, candidates and completed calls;
@@ -147,6 +147,15 @@ Version 1.1.0. The source of truth for the machine-readable version is
   These are consistency checks on a model judgment, not mathematical certification.
   A completed pre-upgrade verifier call is validated against the legacy schema
   in its immutable request; new calls cannot fall back to the old contract.
+- **Proof tools and evidence.** The solver and fresh verifier each have their
+  own tool conversation. Both can read sources, run the enabled numerical
+  sandbox or request evidence. Journal tool requests and results before
+  continuing the same attempt. A verifier sees the exact candidate and
+  attributable source or experiment evidence. Solver deliberation and previous
+  verdicts stay in their original contexts. For a higher-level request, leave
+  the proof lock and model slot before servicing the check or review. Settle
+  the child’s usage once against the original allowance. The benchmark with
+  fixed call budgets and pre-upgrade saved jobs keep their tool-free protocol.
 - **Proof recovery and exports.** Transport interruptions do not consume solver
   passes or verifier protocol retries. Redispatch uses a new journal key. An
   interrupted call with no provider usage (pause, shutdown, crash, our own deadline)
@@ -167,7 +176,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
   `allowance_additions` and the report. A passing review is accepted as a proof or
   refutation only if `proof.not_a_proof` finds no non-attempt (target missing, open,
   out of reach, said by both the response and the reviewer's own words) and no
-  explicit claim about the output of a program written in the response; otherwise the
+  unsubstantiated claim about the output of a program written in the response; otherwise the
   candidate is `uncertain` with `controller_override` on the review (the model's
   response is kept as written). These are demotion-only text checks: they never
   promote a review. A job with no statement (`missing_statement`) is refused

@@ -35,6 +35,7 @@ from ..model_limits import MODEL_OUTPUT_TOKENS, substantive_output, output_limit
 from ..ledger import LedgerError, ProofStore
 from ..literature import LiteratureTools, UNLIMITED_SOURCE
 from ..proof import TERMINAL as PROOF_TERMINAL, ProofRunner, budget_stop, unsettled_interrupts
+from ..proof_support import complete_proof_evidence
 from ..research import _job_directory, _read_state
 from ..prompts import FRESH_REVIEW
 from ..litreview import ReviewRunner, review_outcome as _review_outcome
@@ -537,7 +538,7 @@ class Hub:
         self.bus = bus or EventBus()
         # An explicit --offline at launch is a hard guarantee (for unaided work);
         # otherwise online search is on, and the user may turn it off per conversation or job.
-        self.online_locked = bool(getattr(args, 'offline', False))
+        self.online_locked = not args.online
         self._lock = threading.Lock()
         self.task = None
         self._tasks = collections.OrderedDict()
@@ -1284,10 +1285,13 @@ class Hub:
         library.offline_locked = self.online_locked  # launched --offline: online search cannot be turned on
         if isinstance(getattr(task, 'libraries', None), list):
             task.libraries.append(library)
-        # Conversational engines (chats, the Assistant and its Explore workers) may run
-        # automatic sanity checks; the @python_lab and @sanity_check workers bind explicitly.
+            # Register first so a concurrent offline switch also reaches a worker
+            # created after the parent took its original permissions snapshot.
+            if task.origin_chat and not store.load_chat(self.root, task.origin_chat)['settings'].get('online'):
+                library.online = False
+        # Proof and Explore can use the configured automatic numerical sandbox.
         numerics = (self.sandbox.automatic_session(self.root, cancel=task.cancel, ctx=ctx or args.ctx)
-                    if mode == 'explore' else None)
+                    if mode in ('explore', 'prove') else None)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root),
                               numerics=numerics)
@@ -1412,9 +1416,8 @@ class Hub:
     # -- proofs --------------------------------------------------------
 
     def start_proof(self, goal, *, source_files=(), rounds=None, tokens=None, seconds=None,
-                    solve_tokens=None, verify_tokens=None, ctx=None, queue=False, on_update=None):
-        # Proof work always thinks and has no tools: the model sees the goal and
-        # the pinned text only, exactly as with the terminal's /prove.
+                    solve_tokens=None, verify_tokens=None, ctx=None, online=None, queue=False, on_update=None):
+        online = self.online(online)
         args = self.args
         rounds = args.proof_rounds if rounds is None else rounds
         tokens = args.proof_tokens if tokens is None else tokens
@@ -1432,15 +1435,16 @@ class Hub:
         job_id = str(uuid.uuid4())  # known at once, so a queued proof can be followed by its id
 
         def work(task):
-            agent, _ = self._engine(task, mode='prove', ctx=ctx, online=False)
+            agent, _ = self._engine(task, mode='prove', ctx=ctx, online=online)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
-            runner = ProofRunner(agent)
+            runner = ProofRunner(agent, evidence_coordinator=True)
             runner.emit = self._job_emit(task, runner, 'proof')
-            return runner.start(goal, max_rounds=rounds, max_tokens=tokens, max_seconds=seconds,
+            result = runner.start(goal, max_rounds=rounds, max_tokens=tokens, max_seconds=seconds,
                                 max_predict=solve, verify_tokens=verify, min_solve_tokens=args.proof_min_solve_tokens,
                                 repair_tokens=repair, verify_temperature=args.proof_verify_temperature,
                                 source_files=list(source_files), job_id=job_id)
+            return complete_proof_evidence(runner, result)
         return self._started(self._reserve_id(self._begin('proof', None, 'Proof', goal, work, queue=queue,
                                                           on_update=on_update), job_id))
 
@@ -1490,10 +1494,12 @@ class Hub:
             ProofRunner.check_additions(state, additions)
 
         def work(task):
-            agent, _ = self._engine(task, online=False)
-            runner = ProofRunner(agent)
+            online = bool(state['settings'].get('evidence_online')) and not self.online_locked
+            agent, _ = self._engine(task, mode='prove', online=online)
+            runner = ProofRunner(agent, evidence_coordinator=True)
             runner.emit = self._job_emit(task, runner, 'proof')
-            return runner.resume(proof_id, add_tokens=add_tokens, add_seconds=add_seconds, add_rounds=add_rounds)
+            result = runner.resume(proof_id, add_tokens=add_tokens, add_seconds=add_seconds, add_rounds=add_rounds)
+            return complete_proof_evidence(runner, result)
         task = self._begin('proof', proof_id, 'Proof', state['goal'], work, queue=queue)
         task.ready.set()
         return task
@@ -2461,7 +2467,7 @@ class Hub:
                           previous_downloads=downloads, job_id=None, outputs=None, outcome='')
         try:
             if mode == 'prove':
-                task = self.start_proof(request, source_files=files, queue=True, on_update=on_update,
+                task = self.start_proof(request, source_files=files, online=online, queue=True, on_update=on_update,
                                         **{k: v for k, v in limits.items()
                                            if k in ('rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens')})
             elif mode == 'literature' or mode in REVIEW_MODES:

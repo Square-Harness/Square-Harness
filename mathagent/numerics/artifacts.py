@@ -57,15 +57,20 @@ class ExperimentStore:
             raise ValueError('Invalid experiment file name')
         return folder / name
 
+    @staticmethod
+    def new_id():
+        return f'exp-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
+
     def save(self, *, code, result, limits, policy, image, seed=None, parameters=None, purpose='',
-             explicit=False, invocation=None, harness_version=''):
+             explicit=False, invocation=None, harness_version='', experiment_id=None):
         """Persist one run and return its record (with relative artifact paths)."""
         if invocation is None:
             invocation = 'explicit' if explicit else 'automatic'
         if invocation not in ('explicit', 'routed', 'automatic'):
             raise ValueError('Unknown experiment invocation')
         now = datetime.now(timezone.utc)
-        experiment_id = f'exp-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
+        if experiment_id is None:
+            experiment_id = self.new_id()
         with self._lock:
             self._ensure()
             folder = self.path(experiment_id)

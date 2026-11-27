@@ -384,7 +384,7 @@ class ResearchRunner:
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
 
-    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0, caller_output_cap=None):
         """Continue a saved job. ``additional_*`` is an explicit extra allowance, recorded in the job and its report."""
         self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
@@ -424,7 +424,10 @@ class ResearchRunner:
         for key in ('model', 'ctx', 'predict'):
             setattr(self.agent, key, self.state['settings'][key])
         self.agent.seed = self.state['settings'].get('seed')
-        self.agent.document_output_cap = self.state['settings'].get('document_output_cap')
+        saved_cap = self.state['settings'].get('document_output_cap')
+        self.agent.document_output_cap = saved_cap
+        if caller_output_cap is not None:
+            self.agent.document_output_cap = min(saved_cap, caller_output_cap) if saved_cap is not None else caller_output_cap
         return self._run()
 
     def _validate_transport_resume(self):

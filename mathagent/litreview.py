@@ -952,7 +952,7 @@ class ReviewRunner(ResearchRunner):
     # The run loop's deadline check would stop before assembling; these phases check time themselves (_step).
     UNTIMED_PHASES = ('search', 'screen', 'expand', 'rank', 'read', 'outline', 'write', 'check', 'assemble')
 
-    def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
+    def __init__(self, agent, emit=lambda kind, value: None, concurrency=1, *, shared_source_budget=False):
         self._mutex = threading.RLock()
         self._budget_changed = threading.Condition(self._mutex)
         super().__init__(agent, emit)
@@ -962,6 +962,7 @@ class ReviewRunner(ResearchRunner):
         self._companion = False
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
         self._generation_failure_streak, self._provider_pause = 0, None
+        self.shared_source_budget = shared_source_budget
         self._side, self._lane, self._repository_down, self._unavailable = None, [], False, False
 
     @property
@@ -1029,13 +1030,14 @@ class ReviewRunner(ResearchRunner):
                 return state.get('id')
         return None
 
-    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0):
+    def resume(self, job_id, *, additional_seconds=0, additional_tokens=0, caller_output_cap=None):
         saved = _read_state(_job_directory(self.agent.workspace.root, job_id, self.FOLDER), job_id)
         if saved.get('pipeline') == LEGACY_PIPELINE:
             raise ValueError('This reading list was made by an earlier version of Square Harness. It stays readable, '
                              'but it cannot be resumed: start a new literature review instead.')
         self._companion = saved.get('companion', saved.get('settings', {}).get('max_rounds') == 1)
-        return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens)
+        return super().resume(job_id, additional_seconds=additional_seconds, additional_tokens=additional_tokens,
+                              caller_output_cap=caller_output_cap)
 
     def _extra_state(self):
         return {**({'earlier_review': self._earlier} if getattr(self, '_earlier', None) else {}),
@@ -1520,22 +1522,29 @@ class ReviewRunner(ResearchRunner):
     def _apart(self, lane, call):
         """Start call(side tools) in the helper lane; _joined returns its result."""
         lit = self.literature
-        if self._side is None:
+        if self._side is None and not self.shared_source_budget:
             self._side = type(lit)(lit.root, online=lit.online, max_requests=0, max_chars=lit.max_chars,
                                    timeout=lit.timeout)
-        side = self._side
+        side = lit if self.shared_source_budget else self._side
 
         def run():
-            # One request, with the retries and the redirect or fallback its transport may need.
-            side.reset_budget(max_requests=min(4, max(0, lit.max_requests - lit.stats['requests'])), max_chars=lit.max_chars)
-            side.deadline = lit.deadline
+            if not self.shared_source_budget:
+                # One request, with the retries and the redirect or fallback its transport may need.
+                side.reset_budget(max_requests=min(4, max(0, lit.max_requests - lit.stats['requests'])), max_chars=lit.max_chars)
+                side.deadline = lit.deadline
             began = time.monotonic()
             try:
-                return call(side), None, side.stats['requests'], time.monotonic() - began
+                result, error = call(side), None
             except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
-                return None, exc, side.stats['requests'], time.monotonic() - began
+                result, error = None, exc
+            used = 0 if self.shared_source_budget else side.stats['requests']
+            return result, error, used, time.monotonic() - began
         future = lane.submit(run)
         self._lane.append(future)
+        if self.shared_source_budget:
+            # Charge each HTTP dispatch on its native ledger before the next registry starts.
+            # A pause between lookups retains the counts and a live offline switch reaches both lanes.
+            future.result()
         return future
 
     def _counted(self, future):

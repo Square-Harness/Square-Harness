@@ -345,6 +345,7 @@ export type ProofDetail = {
   status: string
   stop_reason: string | null
   recovery_notice: string | null
+  evidence_request?: { question: string; role: string } | null
   created_at: string
   updated_at: string
   revision: number
