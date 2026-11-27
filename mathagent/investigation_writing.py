@@ -154,7 +154,7 @@ def _writing_payload(agent, client, context, cap, input_cap):
         return {'model': agent.model, 'messages': [{'role': 'system', 'content': POLICY},
                     {'role': 'user', 'content': json.dumps(value, ensure_ascii=False)}],
                 'stream': True, 'think': False,
-                'options': {'num_ctx': agent.ctx, 'temperature': 0, 'num_predict': cap}}
+                'options': {'num_ctx': agent.ctx, 'temperature': agent.temperature, 'num_predict': cap}}
 
     def fit(value):
         try:

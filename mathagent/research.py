@@ -1001,7 +1001,7 @@ class ResearchRunner:
 
     @retry_generation_call
     def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
-              sampling=None):
+              top_p=None):
         self._check_time()
         settings = self.state['settings']
         cap = self._call_cap(role, cap)
@@ -1017,7 +1017,9 @@ class ResearchRunner:
             raise ResearchBudget('Generated-token budget exhausted (including review and recovery calls)')
         fixed, optional = (('', []) if role == 'image_read' else self._material(role))
         payload = {'model': self.agent.model, 'stream': True, 'think': think,
-                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0.2, **(sampling or {})}}
+                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+        if top_p is not None:
+            payload['options']['top_p'] = top_p
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
         if tools:

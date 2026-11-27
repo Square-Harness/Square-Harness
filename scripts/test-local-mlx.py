@@ -11,6 +11,7 @@ import secrets
 import time
 
 from mathagent.api_profiles import MLX
+from mathagent.model_limits import DEFAULT_TEMPERATURE
 
 
 def main():
@@ -27,7 +28,8 @@ def main():
 
     def payload(text, think=False, cap=1024, **fields):
         return {'model': args.model, 'messages': [{'role': 'user', 'content': text}],
-                'think': think, 'options': {'num_ctx': 32768, 'num_predict': cap, 'temperature': 0.6}, **fields}
+                'think': think, 'options': {'num_ctx': 32768, 'num_predict': cap, 'temperature': DEFAULT_TEMPERATURE},
+                **fields}
 
     def collect(body):
         out = {'text': '', 'thinking': '', 'calls': []}

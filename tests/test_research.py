@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Shared scripted model responses for the reference-check smoke test."""
+"""Shared model responses for scripted worker tests."""
 import copy
-import unittest
 
 
 def response(text='', calls=(), *, complete=True, count=20, input_count=100):
@@ -30,7 +29,3 @@ class FakeClient:
             if isinstance(event, BaseException):
                 raise event
             yield event
-
-
-if __name__ == '__main__':
-    unittest.main()

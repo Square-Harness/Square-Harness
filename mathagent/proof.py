@@ -846,6 +846,7 @@ class ProofRunner:
             if pending.get(role + '_turns'):
                 progress = self.turns.resource_note(role, tools=bool(schemas))
                 messages = [*messages, {'role': 'user', 'content': progress}]
+        # Proofs saved before verifier sampling was configurable used greedy verification.
         payload = {'model': self.agent.model, 'messages': messages, 'stream': True, 'think': True,
                    'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
                                'temperature': self.agent.temperature if role == 'solver' or not self.store

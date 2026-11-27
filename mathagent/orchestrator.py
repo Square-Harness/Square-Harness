@@ -772,7 +772,7 @@ class Orchestrator:
                 + with_notebook_evidence(copy.deepcopy(self.state['messages']), self.state.get('notebook_source'),
                                          self.state.get('history_prefix_count', 0)),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
-                        'temperature': 0, 'top_p': self.agent.top_p},
+                        'temperature': self.agent.temperature, 'top_p': self.agent.top_p},
         }
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + self.state['main_calls']) % (2 ** 31)
@@ -834,9 +834,6 @@ class Orchestrator:
                 'It writes with what there is and marks what is still missing.'}
             payload['messages'].append(waiting_notice)
         if self.state.get('tool_call_recovery_pending'):
-            # Greedy decoding can reproduce the same malformed repetition.
-            # Keep the exact premises and give one explicit correction request.
-            payload['options']['temperature'] = 0.6
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER TOOL-CALL RECOVERY: the previous tool call contained malformed JSON '
                 'and was rejected before execution. No tools ran from that response. Choose the '

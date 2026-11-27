@@ -19,9 +19,9 @@ python -m pip install -e '.[research]'
 python -m unittest discover -s tests -v
 ```
 
-Tests use scripted model servers and temporary workspaces; they do not need a
-real model. The suite is deliberately small: add a test only when it drives real
-entry points and would catch a genuine regression. For inference-dependent
+Tests use scripted model servers and temporary workspaces. Keep the suite focused
+on essential user workflows and isolation guarantees. Add a test case only at a
+maintainer's explicit request. For inference-dependent
 changes, record the model/weights revision, server version, settings, exact
 source revision and the manual check performed.
 

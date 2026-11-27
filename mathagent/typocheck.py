@@ -6,7 +6,7 @@
 One reader that does everything misses half of the slips and "corrects" correct formulas. Measured on a 3,000-line
 paper (Nov 2026), three lanes do better, each with the check that suits it:
 - rules (typolint): no model, right almost always, so their findings need no second opinion;
-- language: small units with no paper in front, read twice (two unit sizes, two temperatures); the model returns
+- language: small units with no paper in front, read twice with different unit sizes; the model returns
   corrected lines and the edits come from a word diff, which gives fewer junk remarks than a list of remarks. A quick
   second look sorts the edits into error / style / wrong; an edit both readings made is never dropped (the second
   look called one such key edit wrong);
@@ -28,7 +28,7 @@ from . import typolint
 
 # -- the language lane ---------------------------------------------------------------------------------------
 
-LANGUAGE_SAMPLES = ((60, 0.2), (40, 0.5))  # (unit lines, temperature): two readings cut in different places
+LANGUAGE_UNIT_SIZES = (60, 40)  # lines per unit in each reading
 LANGUAGE_CAP = 3000
 CONTEXT = 4  # lines shown around a unit
 MERGE_GAP = 3  # edits of one line this many words apart are one edit ("aims at proving" → "aims to prove")
@@ -322,12 +322,12 @@ class TypoLanes:
         if getattr(self, '_units_cache', None) is None:
             reads = self._reads()
             lines = self._lines(self._lane_source()[0])
-            self._units_cache = [units(lines, size, reads[0][0], reads[-1][1]) for size, _ in LANGUAGE_SAMPLES]
+            self._units_cache = [units(lines, size, reads[0][0], reads[-1][1]) for size in LANGUAGE_UNIT_SIZES]
             self._lane_pending = set()
         return self._units_cache
 
     def _language_keys(self):
-        return [(f'W{sample}:{a}', sample, a, b) for sample, found in enumerate(self._lane_units()) for a, b in found]
+        return [(f'W{sample}:{a}', a, b) for sample, found in enumerate(self._lane_units()) for a, b in found]
 
     def _lane_jobs(self):
         """Formula and notation calls first (the longest), then the language units, then the second looks at the
@@ -338,9 +338,9 @@ class TypoLanes:
         if not lanes['notation']:
             jobs.append((0, 'N', self._notation_job(reads[0][0], reads[-1][1])))
         keys = self._language_keys()
-        for key, sample, a, b in keys:
+        for key, a, b in keys:
             if not (lanes['units'].get(key) or {}).get('answered'):
-                jobs.append((1, key, self._language_job(key, a, b, LANGUAGE_SAMPLES[sample][1])))
+                jobs.append((1, key, self._language_job(key, a, b)))
         if not lanes['aggregated'] and all(key in lanes['units'] for key, *_ in keys):
             self._aggregate()
         waiting = [i for i, e in enumerate(lanes['edits']) if not e.get('judged') and i not in self._lane_pending]
@@ -368,7 +368,7 @@ class TypoLanes:
         for e in lanes['edits']:
             if not e.get('judged'):
                 e['judged'], e['verdict'] = True, None
-                self.state['presentation'].append(self._language_comment(e, importance_of(None, e['votes'] >= len(LANGUAGE_SAMPLES))))
+                self.state['presentation'].append(self._language_comment(e, importance_of(None, e['votes'] >= len(LANGUAGE_UNIT_SIZES))))
         for r in lanes['math']:
             if r.get('triage') in ('correction', 'look') and not r.get('checked'):
                 self._show_place(r)
@@ -391,13 +391,13 @@ class TypoLanes:
 
     # -- lane B: language
 
-    def _language_job(self, key, a, b, temperature):
+    def _language_job(self, key, a, b):
         def run():
             sid = self._lane_source()[0]
             lines = self._lines(sid)
             self.emit('notice', f'Proofreading the English of lines {a}-{b}')
             result = self._ask('read', FIX + '\n\n' + numbered(lines, a, b), cap=self._analysis_cap(LANGUAGE_CAP), schema=FIX_SCHEMA,
-                               key=key, temperature=temperature, reference=False)
+                               key=key, reference=False)
             value = result['value'] if isinstance(result['value'], dict) else {}
             answered = bool(result['complete']) and isinstance(value.get('lines'), list)
             masked = self._masked()
@@ -461,14 +461,14 @@ class TypoLanes:
                 rows.append(f'PROPOSAL {i} (line {n})\n{context}\noriginal: "{e["quote"]}"\nproposed: "{e["suggestion"]}"')
             self.emit('notice', f'Second look at {len(rows)} language corrections')
             result = self._ask('typo-check', VERDICT + '\n\nPROPOSALS:\n\n' + '\n\n'.join(rows), cap=self._analysis_cap(VERDICT_CAP),
-                               schema=VERDICT_SCHEMA, key=f'V{batch[0]}', temperature=0, reference=False)
+                               schema=VERDICT_SCHEMA, key=f'V{batch[0]}', reference=False)
             value = result['value'] if isinstance(result['value'], dict) else {}
             verdicts = {v.get('id'): v.get('verdict') for v in value.get('items') or [] if isinstance(v, dict)}
             with self._mutex:
                 for i in batch:
                     e = self.state['typo_lanes']['edits'][i]
                     e['judged'], e['verdict'] = True, verdicts.get(i)
-                    importance = importance_of(e['verdict'], e['votes'] >= len(LANGUAGE_SAMPLES))
+                    importance = importance_of(e['verdict'], e['votes'] >= len(LANGUAGE_UNIT_SIZES))
                     if importance:
                         self.state['presentation'].append(self._language_comment(e, importance))
                 self._typo_counts()
@@ -575,7 +575,7 @@ class TypoLanes:
         def run():
             r = self.state['typo_lanes']['math'][i]
             result = self._ask('typo-check', self._excerpt(r) + '\n\n' + TRIAGE + '\n\n' + self._row(r), cap=self._analysis_cap(TRIAGE_CAP),
-                               schema=CHECK1_SCHEMA, key=f'T{i}', temperature=0)
+                               schema=CHECK1_SCHEMA, key=f'T{i}')
             value = result['value'] if isinstance(result['value'], dict) else {}
             with self._mutex:
                 r['triage'] = value.get('verdict') if value.get('verdict') in ('correction', 'look', 'drop') else 'look'
@@ -639,7 +639,7 @@ class TypoLanes:
         lanes = self._lanes_state()
         shown = self.state['presentation']
         count = lambda lane, test=lambda c: True: sum(bool(c.get('lane') == lane and test(c)) for c in shown)
-        wrong = sum(bool(e.get('judged')) and not importance_of(e.get('verdict'), e['votes'] >= len(LANGUAGE_SAMPLES))
+        wrong = sum(bool(e.get('judged')) and not importance_of(e.get('verdict'), e['votes'] >= len(LANGUAGE_UNIT_SIZES))
                     for e in lanes['edits'])
         how = (f' Rules (no model): {count("rule")} finding(s). Language: the paper read twice in small units with no '
                f'paper in front, {len(lanes["edits"])} proposed correction(s) given a second look, {wrong} left out as wrong. '
