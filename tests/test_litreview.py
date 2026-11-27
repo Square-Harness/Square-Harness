@@ -69,7 +69,7 @@ class LiteratureReviewTests(unittest.TestCase):
                                         stats={'eval_count': 0, 'prompt_eval_count': 130})
         transport = FakeClient([[measured], response(fact[:-1] + ' [@1].\n\n' + unsupported[:-1] + ' [@1].'),
                                 [empty], response(json.dumps(located)), response(json.dumps(compared))])
-        runner = ReviewRunner(Agent(transport, Workspace(self.root)))
+        runner = ReviewRunner(Agent(transport, Workspace(self.root), temperature=0.75))
         default_step = runner._step
         def step(phase):
             if phase == 'plan':
@@ -93,6 +93,7 @@ class LiteratureReviewTests(unittest.TestCase):
         self.assertEqual([(row['role'], row['status']) for row in runner.state['calls']],
                          [('outline', 'generation_failed'), ('write', 'complete'), ('check', 'generation_failed'),
                           ('check', 'complete'), ('verify', 'complete')])
+        self.assertEqual({request['options']['temperature'] for request in transport.requests}, {0.75})
         self.assertEqual((runner.state['tokens_charged'], runner.state['input_tokens_charged']), (72, 560))
 
     def test_outage_stops_before_a_fourth_unknown_charge_and_resume_keeps_the_failed_units(self):

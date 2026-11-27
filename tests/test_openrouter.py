@@ -348,6 +348,7 @@ class OpenRouterWorkflowTests(GuiCase):
         self.assertIn('Hello! How can I help?', state['answer'])
         sent = self.fake.completions
         self.assertEqual({c['model'] for c in sent}, {WIRE_MODEL})
+        self.assertEqual([c['temperature'] for c in sent], [1.0, 1.0])
         self.assertTrue(all(c['provider']['zdr'] and c['provider']['data_collection'] == 'deny' for c in sent))
         # The DS4 answer ceiling (384k), fitted into this test's 64k context, not the local default of --predict 1024.
         self.assertTrue(1024 < sent[-1]['max_tokens'] < MODEL_OUTPUT_TOKENS, sent[-1]['max_tokens'])

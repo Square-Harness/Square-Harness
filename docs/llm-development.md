@@ -8,6 +8,11 @@ setting up a machine, [llm-install.md](llm-install.md).
 
 ## Worker limits
 
+The CLI, Agent and benchmark use `model_limits.DEFAULT_TEMPERATURE` (1.0).
+Build model requests with the agent's configured temperature and pass it to nested
+workers, routers, retries and synthesis. Proof records the solver and verifier
+settings for resume. Historical benchmark launchers pin their original settings.
+
 Fit model calls to the active model’s context, provider output capacity and
 the user's configured allowances. A token, character or item count in an
 older prompt, test fixture or benchmark is not a production default. Page

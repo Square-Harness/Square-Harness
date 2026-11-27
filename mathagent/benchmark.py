@@ -23,7 +23,7 @@ from .api_profiles import create_profile_client, profile_class
 from .deepinfra import (BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL,
                         CONTEXT_TOKENS as DEEPINFRA_CONTEXT, MAX_OUTPUT_TOKENS as DEEPINFRA_OUTPUT)
 from .ledger import MAX_FILE_BYTES
-from .model_limits import DEFAULTS as DS4_DEFAULTS, HOSTED_DS4
+from .model_limits import DEFAULTS as DS4_DEFAULTS, DEFAULT_TEMPERATURE, HOSTED_DS4
 from .proof import ProofRunner, ProofContext, check_context
 from .proof_policy import COMMON_INSTRUCTION, initial_request
 from .tools import Workspace
@@ -114,7 +114,7 @@ def parser():
     p.add_argument('--rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve')
     p.add_argument('--replicates', type=int, default=1)
     p.add_argument('--seed', type=int, default=20260927)
-    p.add_argument('--temperature', type=float, default=0.6)
+    p.add_argument('--temperature', type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument('--top-p', type=float, default=0.95)
     p.add_argument('--seconds', type=float, default=1800, help='Wall-time guard per job')
     p.add_argument('--raw-seconds', type=float, default=None, help='Optional different time guard for raw-single')
@@ -616,7 +616,6 @@ def main(argv=None):
             defaults = {'host': profile_class(args.api_profile).default_base_url(), 'model': DEEPINFRA_MODEL,
                         'ctx': DS4_DEFAULTS['ctx'], 'predict': DS4_DEFAULTS['proof_solve_tokens'],
                         'verify_tokens': DS4_DEFAULTS['proof_verify_tokens'],
-                        'temperature': DS4_DEFAULTS['temperature'],
                         'request_timeout': DS4_DEFAULTS['proof_call_seconds']}
             for name, value in defaults.items():
                 if '--' + name.replace('_', '-') not in explicit:

@@ -910,7 +910,7 @@ class Hub:
                         'Do not solve the task. Use the language the user writes in; when there is no clear language '
                         '(code, LaTeX, formulas), English. No quotes or formatting.'},
                         {'role': 'user', 'content': excerpt}],
-                    'options': {'num_ctx': agent.ctx, 'num_predict': 64, 'temperature': 0}}
+                    'options': {'num_ctx': agent.ctx, 'num_predict': 64, 'temperature': agent.temperature}}
                 parts, done = [], False
                 for event in client.stream(payload):
                     parts.append(event.get('message', {}).get('content', ''))

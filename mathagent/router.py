@@ -11,7 +11,7 @@ several separate jobs; each becomes its own suggestion with a suggested effort.
 from .jsonutil import loads, repair_latex
 import json
 import re
-from .model_limits import output_limit
+from .model_limits import DEFAULT_TEMPERATURE, output_limit
 
 JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'typo_check', 'quick_review', 'explain',
              'writeup', 'summarize')
@@ -144,7 +144,7 @@ def parse(text, message, files=()):
     return tasks
 
 
-def classify(client, model, message, *, context='', files=(), available=(), ctx=8192):
+def classify(client, model, message, *, context='', files=(), available=(), ctx=8192, temperature=DEFAULT_TEMPERATURE):
     """One bounded structured call with thinking off, returning suggestions."""
     predict = output_limit(client, 'router', ROUTE_PREDICT)
     parts = []
@@ -157,7 +157,7 @@ def classify(client, model, message, *, context='', files=(), available=(), ctx=
         parts.append('ATTACHED BY THE USER:\n' + '\n'.join(files))
     parts.append('MESSAGE:\n' + message)
     payload = {'model': model, 'stream': True, 'think': False, 'format': ROUTE_SCHEMA,
-               'options': {'num_ctx': ctx, 'num_predict': predict, 'temperature': 0},
+               'options': {'num_ctx': ctx, 'num_predict': predict, 'temperature': temperature},
                'messages': [{'role': 'system', 'content': ROUTER_POLICY},
                             {'role': 'user', 'content': '\n\n'.join(parts)}]}
     from .call_policy import allocate_call

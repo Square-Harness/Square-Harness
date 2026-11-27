@@ -26,6 +26,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from mathagent.agent import AgentError, _NoModelRedirects
 from mathagent.backends import create_client
+from mathagent.model_limits import DEFAULT_TEMPERATURE
 
 _PROTOCOL = runpy.run_path(str(Path(__file__).with_name('smoke-vllm.py')))
 SmokeFailure = _PROTOCOL['SmokeFailure']
@@ -158,7 +159,7 @@ def capacity_payload(model, context, cap, seed, filler):
             + '\n</records>\nWrite the integers from 1 to 10000, separated by spaces. '
               'Do not summarize or explain. Keep writing until the output limit.')
     return {'model': model, 'messages': [{'role': 'user', 'content': text}], 'think': False,
-            'options': {'num_ctx': context, 'num_predict': cap, 'temperature': 0,
+            'options': {'num_ctx': context, 'num_predict': cap, 'temperature': DEFAULT_TEMPERATURE,
                         'top_p': .95, 'top_k': 20, 'min_p': 0, 'repeat_penalty': 1, 'seed': seed}}
 
 

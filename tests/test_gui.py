@@ -563,6 +563,7 @@ class DeepInfraWorkflowTests(GuiCase):
                 sent = self.fake.completions[offset:]
                 count = len(preparation)
                 self.assertEqual(len(sent), count + 2)
+                self.assertEqual({call['temperature'] for call in sent}, {1.0})
                 self.assertEqual([call['max_tokens'] for call in sent[:count]], [2048] * count)
                 self.assertEqual([call['reasoning_effort'] for call in sent[:count]], ['none'] * count)
                 self.assertEqual(sent[0]['tool_choice'], 'required')
@@ -707,6 +708,8 @@ class DeepInfraWorkflowTests(GuiCase):
     def test_proof_roles_use_sources_in_the_same_attempt_with_one_model_slot(self):
         from mathagent.literature import LiteratureTools
 
+        self.hub.args.temperature = 0.75
+        self.hub.args.proof_verify_temperature = 0.0
         source = self.root / 'definitions.txt'
         source.write_text('Equality is reflexive on the real numbers.\n')
         document = LiteratureTools(self.root).import_local(source.name)['document_id']
@@ -730,6 +733,7 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertEqual(state['tokens_charged'], 4 * 31 + 20)
         calls = self.fake.completions
         self.assertEqual(len(calls), 5)
+        self.assertEqual([call['temperature'] for call in calls], [0.75] * 3 + [0.0] * 2)
         for call in calls:
             names = {schema['function']['name'] for schema in call['tools']}
             self.assertTrue({'search_paper', 'read_paper', 'request_evidence'} <= names)

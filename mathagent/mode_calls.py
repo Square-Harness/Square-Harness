@@ -451,7 +451,8 @@ class ModeOrchestrator(Orchestrator):
             head = manuscript_head(text, self.agent.workspace.result_chars)
             self.emit('progress', 'Writing the question of the literature review…')
             user = 'TITLE, ABSTRACT AND INTRODUCTION OF THE MANUSCRIPT:\n' + head
-            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user, BRIEF_SCHEMA, BRIEF_OUTPUT)
+            value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user,
+                                 BRIEF_SCHEMA, BRIEF_OUTPUT, temperature=self.agent.temperature)
             goal = literature_goal(value, text)
             copied = copied_phrases(value, text) if goal is None else []
             if copied:
@@ -460,7 +461,7 @@ class ModeOrchestrator(Orchestrator):
                 value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user
                                      + '\n\nYOUR PREVIOUS ANSWER COPIED THESE PHRASES OF THE MANUSCRIPT WORD FOR WORD; restate '
                                      'every sentence in your own words:\n' + '\n'.join('- ' + c for c in copied[:8]),
-                                     BRIEF_SCHEMA, BRIEF_OUTPUT)
+                                     BRIEF_SCHEMA, BRIEF_OUTPUT, temperature=self.agent.temperature)
                 goal = literature_goal(value, text)
         except (AgentError, CallContextError, ValueError, TypeError, OSError, IndexError, UnicodeError) as exc:
             return None, ('the question of the literature review could not be written from the manuscript '
@@ -523,7 +524,8 @@ class ModeOrchestrator(Orchestrator):
         try:
             self.emit('progress', 'Placing the results in the literature…')
             value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, POSITION_POLICY,
-                                 position_prompt(report, text, references, marks, self.agent.workspace.result_chars), POSITION_SCHEMA, POSITION_OUTPUT)
+                                 position_prompt(report, text, references, marks, self.agent.workspace.result_chars),
+                                 POSITION_SCHEMA, POSITION_OUTPUT, temperature=self.agent.temperature)
         except (AgentError, CallContextError) as exc:
             return missing_position('the position could not be written from the literature review '
                                     f'({str(exc)[:160] or type(exc).__name__}); that review is on its own card')
@@ -918,7 +920,7 @@ class ModeOrchestrator(Orchestrator):
                 with busy_patience(ROUTING_PATIENCE):
                     decision = route_request(self.agent.client, self.agent.model, state['query'],
                                              history=state['history'], files=state['files'], ctx=self.agent.ctx,
-                                             current_images=current.get('images'),
+                                             current_images=current.get('images'), temperature=self.agent.temperature,
                                              suggested_mode=(state.get('suggested_specialist') or {}).get('mode'),
                                              overview=state.get('workspace_overview', ''),
                                              notebook_inspection=bool(state.get('notebook_source')),

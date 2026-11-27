@@ -1570,7 +1570,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
                     parent.on_budget_change()
             literature.on_budget_change = charge
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())
-        inner = Agent(agent.client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
+        inner = Agent(agent.client, workspace, agent.model, agent.ctx, agent.predict, False, 'check',
+                      seed=agent.seed, temperature=agent.temperature)
         inner.document_output_cap = getattr(agent, 'document_output_cap', None)
 
         def relay(kind, value):

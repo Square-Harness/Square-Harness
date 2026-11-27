@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from mathagent.backends import OpenAICompatible
+from mathagent.model_limits import DEFAULT_TEMPERATURE
 
 
 class SmokeFailure(Exception):
@@ -58,7 +59,7 @@ def run_smoke(client_factory, model, *, context=32768, plain_tokens=512, thinkin
     def payload(text, *, think=False, cap=None, **extra):
         request = {'model': model, 'messages': [{'role': 'user', 'content': text}], 'think': think,
                    'options': {'num_ctx': context, 'num_predict': plain_tokens if cap is None else cap,
-                               'temperature': 1.0 if think else 0, 'top_p': .95, 'top_k': 20,
+                               'temperature': DEFAULT_TEMPERATURE, 'top_p': .95, 'top_k': 20,
                                'min_p': 0, 'repeat_penalty': 1, 'seed': 20260926}}
         request.update(extra)
         return request

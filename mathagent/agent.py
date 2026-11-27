@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .prompts import SYSTEM, MODES, PROJECT_SCOPE, NOTEBOOK_DISPLAY_RECEIPT, with_notebook_evidence
-from .model_limits import input_limit
+from .model_limits import DEFAULT_TEMPERATURE, input_limit
 
 
 class AgentError(Exception):
@@ -154,7 +154,7 @@ def _fit_read_history(messages, projected, seen):
 class Agent:
     def __init__(self, client, workspace, model='qwen3.8:27b', ctx=8192,
                  predict=4096, think=True, mode='prove', max_rounds=None,
-                 seed=None, temperature=0.6, top_p=0.95):
+                 seed=None, temperature=DEFAULT_TEMPERATURE, top_p=0.95):
         self.client, self.workspace = client, workspace
         self.model, self.ctx, self.predict = model, ctx, predict
         self.think, self.mode, self.max_rounds = think, mode, max_rounds

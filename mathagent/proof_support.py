@@ -167,7 +167,8 @@ def _evidence(runner, request, view):
     child_library.outbound_guard = desk.check_outbound
     workspace = Workspace(library.root, literature=child_library, read_types=())
     agent = Agent(runner.agent.client, workspace, runner.agent.model, runner.agent.ctx, runner.agent.predict,
-                  runner.agent.think, 'check' if kind == 'check' else 'literature', seed=runner.agent.seed)
+                  runner.agent.think, 'check' if kind == 'check' else 'literature', seed=runner.agent.seed,
+                  temperature=runner.agent.temperature)
     explicit_caps = (runner.state['settings'].get('specialist_output_cap'),
                      getattr(runner.agent, 'document_output_cap', None))
     agent.document_output_cap = min((cap for cap in explicit_caps if cap is not None), default=None)

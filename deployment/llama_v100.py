@@ -150,7 +150,7 @@ def server_arguments(lock: dict, context: int, parallel: int,
         "--cache-ram", "0", "--threads", "15", "--threads-http", "8",
         "--jinja", "--reasoning-format", "deepseek",
         "--chat-template-kwargs", '{"enable_thinking":true,"reasoning_effort":"xhigh","preserve_thinking":true}',
-        "--temp", "0.6", "--top-p", "0.95", "--top-k", "0", "--min-p", "0",
+        "--temp", "1.0", "--top-p", "0.95", "--top-k", "0", "--min-p", "0",
         "--repeat-penalty", "1", "--presence-penalty", "0", "--frequency-penalty", "0",
         "--slots", "--metrics", "--no-webui", "--timeout", "7200",
     ]

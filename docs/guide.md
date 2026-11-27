@@ -654,6 +654,11 @@ app and the other way round: both use the same saved files.
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
 | Sanity check | An attempt to falsify a claim numerically | `@sanity_check`, automatic | `/sanity-check` |
 
+The Assistant and all workers use a sampling temperature of 1 by default, including
+on retries. To run an experiment at a different temperature, pass `--temperature`
+when starting Square Harness. Proof also accepts `--proof-verify-temperature` for
+its verifier and restores its saved settings when resumed.
+
 ### Conversation (the Assistant)
 
 Use it for anything: a question, a doubt about a step, a request mixing several

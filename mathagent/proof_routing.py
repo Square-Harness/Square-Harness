@@ -16,7 +16,7 @@ import re
 
 from .agent import AgentError
 from .call_policy import allocate_call, CallContextError
-from .model_limits import MODEL_OUTPUT_TOKENS
+from .model_limits import DEFAULT_TEMPERATURE, MODEL_OUTPUT_TOKENS
 from .jsonutil import loads_single
 from .router import JOB_MODES
 from .refcheck import standalone_reference_request, precise_reference_request
@@ -503,7 +503,7 @@ def _inspection(inspect, request):
 
 
 def route_request(client, model, query, history=(), files=(), ctx=1_048_576, current_images=None, suggested_mode=None,
-                  overview='', known_files=(), inspect=None, notebook_inspection=False):
+                  overview='', known_files=(), inspect=None, notebook_inspection=False, *, temperature=DEFAULT_TEMPERATURE):
     """Return a validated route, reasoning, usage and request-allocation record.
 
 No worker is executed here. Failures are raised to the controller, which must
@@ -548,7 +548,7 @@ it asks to look at files before deciding (route "inspect"), while inspections su
         payload = {'model': model, 'stream': True, 'think': False, 'format': SCHEMA,
                    '_sh_bounded_routing': True,
                    'messages': messages,
-                   'options': {'num_ctx': ctx, 'num_predict': OUTPUT_TOKENS, 'temperature': 0}}
+                   'options': {'num_ctx': ctx, 'num_predict': OUTPUT_TOKENS, 'temperature': temperature}}
         remaining = getattr(client, 'remaining_tokens', None)
         explicit_cap = (max(0, int(remaining)) if isinstance(remaining, (int, float))
                         and not isinstance(remaining, bool) and math.isfinite(remaining) else None)

@@ -365,8 +365,7 @@ class FanOutCase(unittest.TestCase):
         workspace = Workspace(self.root)
         workspace.literature = SimpleNamespace(online=online)
         self.client = FakeClient([response(json.dumps(reply) if isinstance(reply, dict) else reply) for reply in replies])
-        agent = SimpleNamespace(client=self.client, model='model', ctx=200_000, workspace=workspace, top_p=.95, seed=None,
-                                think=False, history=[], last_stats={})
+        agent = Agent(self.client, workspace, model='model', ctx=200_000, think=False)
         self.parent = ModeOrchestrator(agent, self.delegate, required_mode=required_mode, concurrency=concurrency)
         return self.parent
 

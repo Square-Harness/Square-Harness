@@ -10,6 +10,7 @@ Call allocation and each job's saved explicit limits still take precedence.
 
 PROFILE = 'ds4.1-flash-1017'
 PROFILE_VERSION = 3
+DEFAULT_TEMPERATURE = 1.0
 MODEL_OUTPUT_TOKENS = 384_000
 PROOF_CALL_SECONDS = 10_800
 
@@ -34,7 +35,7 @@ INPUTS = {
     'router_context': 32_768,
 }
 DEFAULTS = {
-    'ctx': 1_048_576, 'predict': MODEL_OUTPUT_TOKENS, 'temperature': 1.0,
+    'ctx': 1_048_576, 'predict': MODEL_OUTPUT_TOKENS,
     'proof_solve_tokens': MODEL_OUTPUT_TOKENS, 'proof_verify_tokens': MODEL_OUTPUT_TOKENS,
     'proof_call_seconds': PROOF_CALL_SECONDS,
     'proof_tokens': 5_760_000, 'proof_seconds': 15 * PROOF_CALL_SECONDS,
@@ -148,10 +149,6 @@ def output_limit(subject, name, fallback):
 
 def input_limit(subject, name, fallback):
     return INPUTS.get(name, fallback) if is_ds4(subject) else fallback
-
-
-def sampling(subject, fallback):
-    return {'temperature': 1.0, 'top_p': 0.95} if is_ds4(subject) else dict(fallback)
 
 
 def apply_defaults(args, arguments):

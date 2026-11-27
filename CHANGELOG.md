@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The Assistant and all workers now use temperature 1 by default, including routing,
+  retries, and final answers. `--temperature` applies throughout a run. Proof retains
+  its separate verifier override and restores saved sampling settings on resume.
+
 - Paper citations in conversation answers now show the document name and line
   range. Click one to open the cited passage beside the conversation. The
   viewer highlights TeX formulas in saved arXiv passages just as it does in
