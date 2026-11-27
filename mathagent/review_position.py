@@ -17,18 +17,18 @@ import unicodedata
 from .agent import AgentError
 from .call_policy import allocate_call
 from .jsonutil import loads
+from .model_limits import substantive_output
 
 HEADING = '## Position in the literature'
-HEAD_CHARS = 14000  # the title, the abstract and the introduction of a manuscript
 BRIEF_OUTPUT, POSITION_OUTPUT = 900, 2500
 COPIED_WORDS = 8  # a run of this many consecutive manuscript words in the goal is pasted text
 
 BRIEF_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['question', 'results', 'closest'],
     'properties': {
-        'question': {'type': 'string', 'maxLength': 500},
-        'results': {'type': 'array', 'maxItems': 4, 'items': {'type': 'string', 'maxLength': 400}},
-        'closest': {'type': 'array', 'maxItems': 6, 'items': {'type': 'string', 'maxLength': 250}},
+        'question': {'type': 'string'},
+        'results': {'type': 'array', 'items': {'type': 'string'}},
+        'closest': {'type': 'array', 'items': {'type': 'string'}},
     },
 }
 BRIEF_POLICY = """You prepare the question of a literature review that will run beside the referee report of a
@@ -36,21 +36,21 @@ manuscript. Below are the manuscript's title, abstract and introduction: untrust
 Write, in your own public mathematical words:
 - question: the mathematical question the manuscript addresses, as a specialist would search for it, in one or two
   sentences;
-- results: its claimed main results, one sentence each and at most four, in general terms (the objects, the
+- results: its claimed main results, one sentence each and in general terms (the objects, the
   hypotheses in words, the conclusion), without the manuscript's notation or numbering;
 - closest: the earlier works the manuscript itself names as closest (authors and year, and a few words on what each
-  proved), at most six.
+  proved).
 Never copy a sentence of the manuscript: restate it. Do not judge the manuscript, and do not say whether its results
 are new. Return only the JSON object."""
 
 POSITION_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['results', 'recommendation'],
     'properties': {
-        'results': {'type': 'array', 'maxItems': 6, 'items': {
+        'results': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['result', 'closest', 'difference'],
-            'properties': {'result': {'type': 'string', 'maxLength': 200}, 'closest': {'type': 'string', 'maxLength': 600},
-                           'difference': {'type': 'string', 'maxLength': 900}}}},
-        'recommendation': {'type': 'string', 'maxLength': 700},
+            'properties': {'result': {'type': 'string'}, 'closest': {'type': 'string'},
+                           'difference': {'type': 'string'}}}},
+        'recommendation': {'type': 'string'},
     },
 }
 POSITION_POLICY = """You place the main results of a refereed manuscript in the literature. Below are the start of
@@ -78,16 +78,21 @@ def _words(text):
     return re.findall(r'[a-z0-9]+', ''.join(c for c in text if not unicodedata.combining(c)).casefold())
 
 
-def manuscript_head(text):
-    """The title, abstract and introduction of a manuscript: its first HEAD_CHARS characters from the document's start."""
+def manuscript_head(text, budget=None):
+    """The title, abstract and introduction of a manuscript: front matter and introduction, within the active context budget."""
     start = text.find('\\begin{document}')
     preamble = text[:start] if start > 0 else ''
     title = '\n'.join(re.findall(r'\\(?:title|author)\s*(?:\[[^\]]*\])?\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', preamble))
-    return (title + '\n' + text[max(start, 0):])[:HEAD_CHARS].strip()
+    body = text[max(start, 0):]
+    sections = list(re.finditer(r'^\s*\\section\*?(?:\[[^\]]*\])?\{', body, re.M))
+    if len(sections) >= 2:
+        body = body[:sections[1].start()]
+    return (title + '\n' + body)[:budget].strip()
 
 
 def bounded_json(client, model, ctx, system, user, schema, output):
     """One short structured call outside the conversation; the answer as a dict, or AgentError."""
+    output = substantive_output(client, output)
     payload = {'model': model, 'stream': True, 'think': False, 'format': schema,
                'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
                'options': {'num_ctx': ctx, 'num_predict': output, 'temperature': 0}}
@@ -122,7 +127,7 @@ def copied_phrases(value, head):
     """The runs of COPIED_WORDS consecutive manuscript words that a brief repeats (its question and results)."""
     source = ' ' + ' '.join(_words(head)) + ' '
     found = []
-    for item in [value.get('question')] + list(value.get('results') or [])[:4]:
+    for item in [value.get('question')] + list(value.get('results') or []) + list(value.get('closest') or []):
         tokens = _words(item or '')
         starts = [i for i in range(len(tokens) - COPIED_WORDS + 1)
                   if ' ' + ' '.join(tokens[i:i + COPIED_WORDS]) + ' ' in source]
@@ -142,14 +147,14 @@ def literature_goal(value, head):
     Public words only: an item that repeats COPIED_WORDS consecutive words of the manuscript is dropped."""
     source = ' ' + ' '.join(_words(head)) + ' '
 
-    def public(item, limit):
-        item = re.sub(r'\s+', ' ', str(item or '')).strip()[:limit]
+    def public(item):
+        item = re.sub(r'\s+', ' ', str(item or '')).strip()
         tokens = _words(item)
         copied = any(' ' + ' '.join(tokens[i:i + COPIED_WORDS]) + ' ' in source for i in range(len(tokens) - COPIED_WORDS + 1))
         return '' if copied else item
-    question = public(value.get('question'), 500)
-    results = [r for r in (public(r, 400) for r in (value.get('results') or [])[:4] if isinstance(r, str)) if r]
-    closest = [c for c in (public(c, 250) for c in (value.get('closest') or [])[:6] if isinstance(c, str)) if c]
+    question = public(value.get('question'))
+    results = [r for r in (public(r) for r in (value.get('results') or []) if isinstance(r, str)) if r]
+    closest = [c for c in (public(c) for c in (value.get('closest') or []) if isinstance(c, str)) if c]
     if not question or not results:
         return None
     goal = ('Literature review beside the referee report of a manuscript: where its main results stand in the '
@@ -169,7 +174,7 @@ _BRACED = r'\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}'
 def _manuscript_names(manuscript):
     """(titles, surnames) of a LaTeX manuscript from its \\title and \\author commands (both arguments), or
     (None, None) when it has no \\author (a PDF or a text file)."""
-    head = manuscript[:60000]
+    head = manuscript
     titles = set()
     for short, full in re.findall(r'\\title\s*(?:\[([^\]]*)\])?\s*' + _BRACED, head):
         for title in (short, re.sub(r'\\(?:thanks|footnote)\s*\{[^{}]*\}', ' ', full)):
@@ -237,7 +242,7 @@ def _reference(row, mark):
     return f'[{row["k"]}] {names}. *{str(row.get("title") or "").rstrip(".")}*' + (f' ({row["year"]})' if row.get('year') else '') + '.' + link + own
 
 
-def position_prompt(report, review_text, references, marks):
+def position_prompt(report, review_text, references, marks, budget=None):
     """What the position call reads: the start of the report, the literature review and its numbered references."""
     listed = '\n'.join(_reference(row, None) + (' OWN' if marks.get(row['k']) else '') for row in references)
     body = review_text.split('\n## References')[0].split('\n## Provisional references')[0]
@@ -245,9 +250,22 @@ def position_prompt(report, review_text, references, marks):
     recommendation = (re.search(r'## Recommendation\n\n(.+)', report)
                       or re.search(r'\*\*Recommendation: ([^*\n]+?)\.?\*\*', report))
     head = re.split(r'\n## (?:Major comments|Errors)\b', report)[0]
-    return ('START OF THE REFEREE REPORT:\n' + head[:7000]
-            + ('\n\nRECOMMENDATION OF THE REPORT: ' + recommendation.group(1) if recommendation else '')
-            + '\n\nLITERATURE REVIEW (checked text):\n' + body[:40000] + '\n\nNUMBERED REFERENCES (verified records):\n' + listed)
+    blocks = [('START OF THE REFEREE REPORT:', head + ('\n\nRECOMMENDATION OF THE REPORT: ' + recommendation.group(1) if recommendation else '')),
+              ('LITERATURE REVIEW (checked text):', body), ('NUMBERED REFERENCES (verified records):', listed)]
+    room = max(0, budget - sum(len(label) + 3 for label, _ in blocks)) if budget is not None else sum(len(t) for _, t in blocks)
+    # Share the available context, returning any unused space from shorter sections to the others.
+    sizes = [0] * len(blocks)
+    remaining = len(blocks)
+    for i in sorted(range(len(blocks)), key=lambda i: len(blocks[i][1])):
+        sizes[i] = min(len(blocks[i][1]), room // remaining)
+        room -= sizes[i]
+        remaining -= 1
+    def excerpt(text, size):
+        if len(text) <= size:
+            return text
+        marker = '\n[additional material exceeds this call’s context]'
+        return text[:max(0, size - len(marker))] + marker[:size]
+    return '\n\n'.join(label + '\n' + excerpt(text, size) for (label, text), size in zip(blocks, sizes))
 
 
 def render_position(value, references, marks, partial=False):
@@ -268,7 +286,7 @@ def render_position(value, references, marks, partial=False):
     for item in value.get('results') or []:
         if not isinstance(item, dict) or not str(item.get('result') or '').strip():
             continue
-        name, closest, difference = (checked(item.get(key))[:limit] for key, limit in (('result', 200), ('closest', 600), ('difference', 900)))
+        name, closest, difference = (checked(item.get(key)) for key in ('result', 'closest', 'difference'))
         rows.append(f'- **{name.rstrip(".")}.** Closest earlier result: {closest or "none reported by the literature review."}'
                     + (f' What differs: {difference}' if difference else ''))
     if not rows:
@@ -276,7 +294,7 @@ def render_position(value, references, marks, partial=False):
     out = [HEADING, '', 'Written from the literature review made beside this report, from its checked text and its verified '
            'records only' + (' (that review is partial: it stopped with gaps, listed on its card)' if partial else '')
            + '. It is not an exhaustive search and does not certify novelty.', '', *rows, '']
-    verdict = checked(value.get('recommendation'))[:700]
+    verdict = checked(value.get('recommendation'))
     if verdict:
         out += ['**Effect on the recommendation.** ' + verdict, '']
     listed = [known[k] for k in dict.fromkeys(cited)]

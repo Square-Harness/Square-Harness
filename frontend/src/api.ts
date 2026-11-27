@@ -47,7 +47,7 @@ export type Defaults = {
   research_tokens: number | null
   research_input_tokens: number | null
   research_seconds: number
-  research_requests: number
+  research_requests: number | null
   research_chars: number
 }
 

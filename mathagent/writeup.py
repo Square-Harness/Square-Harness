@@ -42,7 +42,7 @@ from .format_request import can_recover_previous_markdown, conversion_source
 from .ledger import _atomic_write, _bytes, _directory, _now, _regular
 from . import texcheck
 from .texcheck import POSITIONAL as _POSITIONAL
-from .research import ResearchBudget, ResearchRunner, _job_directory, _read_state, remaining_limit
+from .research import PINNED_SOURCE_BYTES, ResearchBudget, ResearchRunner, _job_directory, _read_state, remaining_limit
 from .style import (_group, annotated, definition_body, departure_line, environment_definitions, grouped,
                     list_profiles, macro_definitions, needed_macros, settable, style_digest, uses)
 from .worker_errors import WorkerInputError
@@ -861,11 +861,11 @@ def template_vocabulary(sources):
                 macros.append(name)
                 start = source['content'].rfind('\n', 0, match.start()) + 1
                 end = source['content'].find('\n', match.end())
-                definitions.append(source['content'][start:end if end != -1 else None].strip()[:200])
+                definitions.append(source['content'][start:end if end != -1 else None].strip())
         for name in THEOREM.findall(source['content']):
             if name not in theorems:
                 theorems.append(name)
-    return macros[:80], theorems[:30], definitions[:80]
+    return macros, theorems, definitions
 
 
 def _compile_files(tex, files, assets):
@@ -1420,26 +1420,26 @@ def skeleton_label(kind, proposed, fallback, taken, material=()):
 
 def _cycle(uses):
     """One cycle of a graph {node: [nodes]}, as a list of nodes whose last is its first, or None."""
-    colour, stack = {}, []
-
-    def visit(node):
-        colour[node] = 1
-        stack.append(node)
-        for nxt in uses.get(node, []):
-            if colour.get(nxt) == 1:
-                return stack[stack.index(nxt):] + [nxt]
-            if colour.get(nxt) is None:
-                found = visit(nxt)
-                if found:
-                    return found
-        colour[node] = 2
-        stack.pop()
-        return None
-    for node in list(uses):
-        if colour.get(node) is None:
-            found = visit(node)
-            if found:
-                return found
+    visited = set()
+    for root in uses:
+        if root in visited:
+            continue
+        path = [root]
+        active = {root: 0}
+        todo = [iter(uses[root])]
+        visited.add(root)
+        while todo:
+            child = next(todo[-1], None)
+            if child is None:
+                todo.pop()
+                del active[path.pop()]
+            elif child in active:
+                return path[active[child]:] + [child]
+            elif child not in visited:
+                visited.add(child)
+                active[child] = len(path)
+                path.append(child)
+                todo.append(iter(uses.get(child, ())))
     return None
 
 
@@ -1452,7 +1452,7 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
     A section's `file` is kept only when it names one of `files` (the texts of an assembly). Without a usable answer:
     the sections with labels made from their headings, no items, and `warning`."""
     raw = raw if isinstance(raw, dict) else {}
-    text = lambda value, limit=200: ' '.join(str(value or '').split())[:limit]
+    text = lambda value: ' '.join(str(value or '').split())
     listed = lambda key: [x for x in raw.get(key) or [] if isinstance(x, dict)] if isinstance(raw.get(key), list) else []
     material, taken, renamed = set(material_labels), set(), {}
     # Level-1 sections only (a subsection's items belong to its section); the abstract is front matter.
@@ -1474,7 +1474,7 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
         if match.get('label'):
             renamed[text(match['label'])] = label
         sections.append({'heading': section['heading'], 'label': label, 'role': section.get('role', 'body'),
-                         'opens': text(match.get('opens'), 300), 'closes': text(match.get('closes'), 300),
+                         'opens': text(match.get('opens')), 'closes': text(match.get('closes')),
                          'file': next((f for f in files if Path(f).name == Path(text(match.get('file'))).name), '')
                          if match.get('file') else ''})
     where = {}
@@ -1489,8 +1489,8 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
         if id(s) in parent:
             covered.update({item: label_of[id(parent[id(s)])] for item in s.get('covers') or [] if item not in covered})
     items, ids = [], set()
-    for item in listed('items')[:60]:
-        ident = text(item.get('id'), 20)
+    for item in listed('items'):
+        ident = text(item.get('id'))
         environment = item.get('environment') if item.get('environment') in SKELETON_ENVIRONMENTS else None
         if not ident or ident in ids or not environment:
             continue
@@ -1498,10 +1498,10 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
         label = skeleton_label(environment, item.get('label'), item.get('name') or ident, taken, material)
         if item.get('label'):
             renamed[text(item['label'])] = label
-        items.append({'id': ident, 'environment': environment, 'label': label, 'name': text(item.get('name'), 120),
+        items.append({'id': ident, 'environment': environment, 'label': label, 'name': text(item.get('name')),
                       'section': covered.get(ident) or place(item.get('section')),
                       'role': item.get('role') if item.get('role') in SKELETON_ROLES else 'auxiliary',
-                      'uses': [text(u, 20) for u in item.get('uses') or [] if isinstance(u, str)]})
+                      'uses': [text(u) for u in item.get('uses') or [] if isinstance(u, str)]})
     order = {item['id']: ([s['label'] for s in sections].index(item['section']) if item['section'] in
                           [s['label'] for s in sections] else len(sections), n) for n, item in enumerate(items)}
     uses = {item['id']: list(dict.fromkeys(u for u in item['uses'] if u in ids and u != item['id'])) for item in items}
@@ -1513,22 +1513,22 @@ def settle_skeleton(raw, outline, material_labels=(), dangling=(), files=()):
         item['uses'] = uses[item['id']]
         item['used_by'] = [other['id'] for other in items if item['id'] in uses[other['id']]]
     equations, floats = [], []
-    for equation in listed('equations')[:30]:
+    for equation in listed('equations'):
         label = skeleton_label('equation', equation.get('label'), equation.get('what'), taken, material)
         if equation.get('label'):
             renamed[text(equation['label'])] = label
-        equations.append({'label': label, 'what': text(equation.get('what'), 120), 'section': place(equation.get('section'))})
-    for figure in listed('floats')[:30]:
+        equations.append({'label': label, 'what': text(equation.get('what')), 'section': place(equation.get('section'))})
+    for figure in listed('floats'):
         kind = figure.get('kind') if figure.get('kind') in ('figure', 'table') else 'figure'
         label = skeleton_label(kind, figure.get('label'), figure.get('what'), taken, material)
         if figure.get('label'):
             renamed[text(figure['label'])] = label
-        floats.append({'label': label, 'kind': kind, 'what': text(figure.get('what'), 120), 'file': text(figure.get('file'), 120),
+        floats.append({'label': label, 'kind': kind, 'what': text(figure.get('what')), 'file': text(figure.get('file')),
                        'section': place(figure.get('section'))})
     labels = taken
     aliases = []
     for alias in listed('aliases'):
-        source, target = text(alias.get('from'), 80), renamed.get(text(alias.get('to'), 80), text(alias.get('to'), 80))
+        source, target = text(alias.get('from')), renamed.get(text(alias.get('to')), text(alias.get('to')))
         if source in dangling and target in labels and source not in [a['from'] for a in aliases]:
             aliases.append({'from': source, 'to': target})
     usable = bool(proposed or items)
@@ -2828,16 +2828,12 @@ class WriteupRunner(ResearchRunner):
             raise ValueError('Unknown write-up variant')
         if deliver not in ('folder', 'download'):
             raise ValueError('A write-up is saved in the folder or kept for download')
-        if not isinstance(notes, str) or len(notes) > 200_000:
-            raise ValueError('Typed notes are limited to 200000 characters; pin a file instead')
+        if not isinstance(notes, str):
+            raise ValueError('Typed notes must be text')
         if not isinstance(conversation, str):
             raise ValueError('The conversation must be text')
         if notes.strip() and conversation.strip():
             raise ValueError('Give typed notes or a conversation, not both')
-        conversation_limit = input_limit(self.agent, 'writeup_conversation', 200_000)
-        if len(conversation) > conversation_limit:  # the most recent part matters most
-            cut = conversation.find('\n## ', len(conversation) - conversation_limit)
-            conversation = '[Earlier conversation omitted.]\n\n' + conversation[cut + 1 if cut != -1 else -conversation_limit:]
         texts = [(str(name), content) for name, content in template_texts]
         self._reference_bib = ''
         if reference_records and not any(Path(name).suffix.lower() == '.bib' for name in [*map(str, template_files), *(n for n, _ in texts)]):
@@ -2848,8 +2844,10 @@ class WriteupRunner(ResearchRunner):
         for name in [*map(str, template_files), *(name for name, _ in texts)]:
             if Path(name).suffix.lower() not in TEMPLATE_SUFFIXES:
                 raise ValueError('Template files must be .sty, .cls, .tex or .bib')
-        if any(not isinstance(content, str) or len(content) > 500_000 for _, content in texts):
-            raise ValueError('Each template file must be text of at most 500 KB')
+        if any(not isinstance(content, str) for _, content in texts):
+            raise ValueError('Each template must be text')
+        if sum(len(content.encode()) for _, content in texts) > PINNED_SOURCE_BYTES:
+            raise ValueError('The templates exceed the pinned-source storage allowance')
         if output:
             path = self.agent.workspace.path(output)
             if path.suffix.lower() != '.tex':
@@ -3152,7 +3150,7 @@ class WriteupRunner(ResearchRunner):
 
     def _planning_material(self, role, head, schema, cap, suffix=''):
         """Fit the source beside the actual instruction, schema, images, notebook and output.
-        Reserve two thirds of the available job input for later calls. With native tokenization try
+        Preserve the job’s report reservation. With native tokenization try
         the complete document first; when it cannot fit, size a prefix locally in JSON bytes."""
         material = self._whole_material()
         total = len(material)
@@ -3175,11 +3173,11 @@ class WriteupRunner(ResearchRunner):
 
             full = count(material)
             context = min(self.agent.ctx, getattr(self.agent.client, 'observed_context_tokens', None) or self.agent.ctx)
-            output = min(cap, getattr(self.agent, 'document_output_cap', None) or cap)
+            output = min(cap, self._minimum_output(), getattr(self.agent, 'document_output_cap', None) or cap)
             remaining = remaining_limit(self.state['settings'], 'max_input_tokens', self.state['input_tokens_charged'])
             if role == 'plan':
                 remaining -= self._report_reserves()[1]
-            limit = min(context - output - CONTEXT_MARGIN, remaining / 3)
+            limit = min(context - output - CONTEXT_MARGIN, remaining)
             shown = total
             if full > limit:
                 # Use the longest possible omission marker when measuring the fixed part. No further
@@ -3602,11 +3600,10 @@ class WriteupRunner(ResearchRunner):
                 + ('\n\n' + self._personal_instructions() if self._personal_instructions() else '')
                 + '\n\n' + given)
         raw = None
-        cap = int(min(16384, output_limit(self.agent, 'writeup', self.WRITE_TOKENS)))
-        compact = ('\n\nThe material is long: keep the plan compact. At most forty inventory items (group routine steps), '
-                   'each text in one line of at most 120 characters; one thread line per section; write the JSON '
-                   'without indentation.')
-        for hint in ((compact,) if len(self._whole_material()) > 20_000 else ('', compact)):
+        cap = output_limit(self.agent, 'writeup', self.WRITE_TOKENS)
+        compact = ('\n\nKeep the plan compact. Group routine steps without losing distinct mathematical results '
+                   'or requested deliverables. Write compact JSON.')
+        for hint in ('', compact):
             material, shown, total = self._planning_material('plan', head, OUTLINE_SCHEMA, cap, hint)
             # Only this attempt's actual view can establish coverage, including after a format retry.
             self.state['outline_cut'] = {'shown': shown, 'total': total} if shown < total else None
@@ -3685,17 +3682,18 @@ class WriteupRunner(ResearchRunner):
         folders = [Path(self.agent.workspace.root, folder) for folder in self._figure_folders()]
         figures = list(dict.fromkeys(_GRAPHIC.findall(_uncommented(self._whole_material())) + sorted(
             p.name for folder in folders if folder.is_dir() for p in folder.iterdir()
-            if p.suffix.lower() in GRAPHIC_SUFFIXES and not p.name.startswith('.'))))[:20]
+            if p.suffix.lower() in GRAPHIC_SUFFIXES and not p.name.startswith('.'))))
         keys = [key for key, *_ in self._bibliography()] + [e['key'] for e in self.state.get('bibliography') or []]
         head = ('Fix the skeleton of the document the outline plans, as the system message says.\n\nOUTLINE:\n'
                 + self._outline_text()
                 + '\n\nLABELS THE MATERIAL ALREADY HAS (keep them exactly): ' + (', '.join(sorted(self._material_labels())) or 'none')
                 + '\nREFERENCES OF THE MATERIAL THAT POINT TO NO LABEL: ' + (', '.join(dangling) or 'none')
-                + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys[:60]) or 'none')
+                + '\nBIBLIOGRAPHY KEYS: ' + (', '.join(keys) or 'none')
                 + '\nFIGURE FILES: ' + (', '.join(figures) or 'none')
                 + '\n\nMATERIAL:\n')
-        material, shown, total = self._planning_material('skeleton', head, SKELETON_SCHEMA, 8192)
-        raw = self._structured('skeleton', head + material, 8192, SKELETON_SCHEMA) if shown or not total else None
+        cap = output_limit(self.agent, 'writeup', self.WRITE_TOKENS)
+        material, shown, total = self._planning_material('skeleton', head, SKELETON_SCHEMA, cap)
+        raw = self._structured('skeleton', head + material, cap, SKELETON_SCHEMA) if shown or not total else None
         skeleton = settle_skeleton(raw, outline, self._material_labels(), dangling)
         if skeleton['warning']:
             self.state['warnings'].append(skeleton['warning'])
@@ -3740,7 +3738,7 @@ class WriteupRunner(ResearchRunner):
             if not only:
                 elsewhere = [i for i in items.values() if i['section'] not in [s['label'] for s in skeleton['sections']]]
                 lines += [f'- {i["id"]} {i["environment"].capitalize()} "{i["name"]}" [{i["label"]}], {i["role"]}' for i in elsewhere]
-                keys = [f'{key} ({author} {year})' for key, author, _, year in self._bibliography()][:20]
+                keys = [f'{key} ({author} {year})' for key, author, _, year in self._bibliography()]
                 if keys:
                     lines.append('Citations available: ' + '; '.join(keys))
                 notation = '; '.join(f'{n["object"]}: {n["symbol"]}' for n in (self.state.get('outline') or {}).get('notation') or [])
@@ -3900,29 +3898,28 @@ class WriteupRunner(ResearchRunner):
         """The controller's reading of the model's outline; each rule comes from a probe that went wrong. Kind and
         language are normalised; a section's parts are only required rules of the kind's sheets; a composed section is
         kept only when a requirement (R1, R2...) or a required part asks for it; a need blocks only when the model says
-        so and a section depends on it (a decision: when it settles a problem of the material), and at most three
-        decisions are put to the author (see composed_asked). Returns (outline, the rules of the applicable guideline
+        so and a section depends on it (a decision: when it settles a problem of the material) (see composed_asked). Returns (outline, the rules of the applicable guideline
         sheets)."""
-        text = lambda value, limit=2000: ' '.join(str(value or '').split())[:limit]
+        text = lambda value: ' '.join(str(value or '').split())
         items = lambda value: [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
-        strings = lambda value: [text(v, 200) for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
+        strings = lambda value: [text(v) for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
         pick = lambda value, allowed, default: value if value in allowed else default
         kind = 'summary' if self.state.get('variant') == 'summary' else pick(raw.get('kind'), KINDS, 'notes')
-        requirements = [re.sub(r'^R\d+\s*[:.)]\s*', '', r) for r in strings(raw.get('requirements'))][:20]
-        inventory = [{'id': text(i.get('id'), 20), 'type': text(i.get('type'), 20), 'text': text(i.get('text'), 400),
+        requirements = [re.sub(r'^R\d+\s*[:.)]\s*', '', r) for r in strings(raw.get('requirements'))]
+        inventory = [{'id': text(i.get('id')), 'type': text(i.get('type')), 'text': text(i.get('text')),
                       'status': pick(i.get('status'), ('proved', 'sketched', 'stated', 'uncertain', 'withdrawn'), 'stated')}
-                     for i in items(raw.get('inventory'))][:200]
-        problems = [{'inventory_id': text(p.get('inventory_id'), 20), 'what': text(p.get('what'), 600),
-                     'as_written': text(p.get('as_written'), 300), 'alternative': text(p.get('alternative'), 300)}
-                    for p in items(raw.get('problems'))][:30]
-        notation = [{'object': text(n.get('object'), 200), 'symbol': text(n.get('symbol'), 200),
-                     'also_written': text(n.get('also_written'), 200)} for n in items(raw.get('notation'))][:50]
-        sections = [{'heading': text(s.get('heading'), 200), 'role': pick(s.get('role'), ROLES, 'other'),
-                     'source': pick(s.get('source'), ('material', 'composed'), 'material'), 'covers': strings(s.get('covers'))[:50],
-                     'parts': strings(s.get('parts')), 'requested_by': text(s.get('requested_by'), 20),
-                     'purpose': text(s.get('purpose'), 400), 'thread': [text(t, 400) for t in strings(s.get('thread'))][:40],
+                     for i in items(raw.get('inventory'))]
+        problems = [{'inventory_id': text(p.get('inventory_id')), 'what': text(p.get('what')),
+                     'as_written': text(p.get('as_written')), 'alternative': text(p.get('alternative'))}
+                    for p in items(raw.get('problems'))]
+        notation = [{'object': text(n.get('object')), 'symbol': text(n.get('symbol')),
+                     'also_written': text(n.get('also_written'))} for n in items(raw.get('notation'))]
+        sections = [{'heading': text(s.get('heading')), 'role': pick(s.get('role'), ROLES, 'other'),
+                     'source': pick(s.get('source'), ('material', 'composed'), 'material'), 'covers': strings(s.get('covers')),
+                     'parts': strings(s.get('parts')), 'requested_by': text(s.get('requested_by')),
+                     'purpose': text(s.get('purpose')), 'thread': [text(t) for t in strings(s.get('thread'))],
                      'level': 2 if s.get('level') == 2 else 1}
-                    for s in items(raw.get('sections'))][:30]
+                    for s in items(raw.get('sections'))]
         if sections:
             sections[0]['level'] = 1  # a subsection needs a section before it
         merged = []
@@ -3931,20 +3928,20 @@ class WriteupRunner(ResearchRunner):
                 last = merged[-1]
                 last.update(heading='Introduction', covers=list(dict.fromkeys(last['covers'] + section['covers'])),
                             parts=last['parts'] + section['parts'], thread=last['thread'] + section['thread'],
-                            purpose=(last['purpose'] + ' Then: ' + section['heading'] + ' (' + section['purpose'] + ')')[:1500],
+                            purpose=(last['purpose'] + ' Then: ' + section['heading'] + ' (' + section['purpose'] + ')'),
                             requested_by=last['requested_by'] or section['requested_by'],
                             source='composed' if 'composed' in (last['source'], section['source']) else 'material')
             else:
                 merged.append(section)
         sections = merged
         number = lambda value: float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
-        questions = [{'exercise': text(q.get('exercise'), 200), 'asks': text(q.get('asks'), 500), 'given': text(q.get('given'), 300),
-                      'uses': strings(q.get('uses'))[:10], 'proves': strings(q.get('proves'))[:10], 'points': number(q.get('points'))}
-                     for q in items(raw.get('questions'))][:60] if kind in ('exam', 'exercise_sheet') else []
+        questions = [{'exercise': text(q.get('exercise')), 'asks': text(q.get('asks')), 'given': text(q.get('given')),
+                      'uses': strings(q.get('uses')), 'proves': strings(q.get('proves')), 'points': number(q.get('points'))}
+                     for q in items(raw.get('questions'))] if kind in ('exam', 'exercise_sheet') else []
         asked = {i for q in questions for i in q['proves']}
         used = {i for q in questions for i in q['uses']}
         # Printed for the students: only a result some question applies, never one a question asks for.
-        recalled = [i for i in strings(raw.get('recalled')) if i in used and i not in asked][:20] if kind == 'exam' else []
+        recalled = [i for i in strings(raw.get('recalled')) if i in used and i not in asked] if kind == 'exam' else []
         total = self._points_total({'requirements': requirements, 'instruction': text(raw.get('instruction'))}) if kind == 'exam' else None
         given = sum(q['points'] for q in questions)
         if total and given and abs(given - total) > 1e-9:
@@ -3960,8 +3957,8 @@ class WriteupRunner(ResearchRunner):
                     q['points'] += 0.5 if rest > 0 else -0.5
                     rest += -1 if rest > 0 else 1
                 turn += 1
-        experiments = [{key: text(e.get(key), 500) for key in ('what', 'metric', 'comparison', 'conclusion')}
-                       for e in items(raw.get('experiments'))][:12]
+        experiments = [{key: text(e.get(key)) for key in ('what', 'metric', 'comparison', 'conclusion')}
+                       for e in items(raw.get('experiments'))]
         # A whole article and an introduction follow the paper's rules; other kinds have their own sheets.
         size = ('paper' if kind == 'article' or any(s['role'] == 'introduction' for s in sections)
                 else pick(raw.get('size'), SIZES, 'section'))
@@ -3978,37 +3975,36 @@ class WriteupRunner(ResearchRunner):
         key = lambda value: ' '.join(value.casefold().split())
         headings = {key(s['heading']) for s in kept} | {key(part) for s in kept for part in s['parts']}
         problem_ids = {key(p['inventory_id']) for p in problems}
-        needs, decisions = [], 0
+        needs = []
         advisory = bool(self.state.get('outline_cut')) or self._attached_material()
-        for item in items(raw.get('needs'))[:20]:
-            need = {'type': pick(item.get('type'), NEED_TYPES, 'decision'), 'what': text(item.get('what'), 600),
-                    'concerns': strings(item.get('concerns'))[:10], 'model_blocking': bool(item.get('blocking'))}
+        for item in items(raw.get('needs')):
+            need = {'type': pick(item.get('type'), NEED_TYPES, 'decision'), 'what': text(item.get('what')),
+                    'concerns': strings(item.get('concerns')), 'model_blocking': bool(item.get('blocking'))}
             concerns = {key(c) for c in need['concerns']}
             depends = (bool(concerns & problem_ids) if need['type'] == 'decision' else
                        need['type'] != 'figure' and any(c and (c in h or h in c) for c in concerns for h in headings))
-            need['blocking'] = need['model_blocking'] and depends and (need['type'] != 'decision' or decisions < 3)
+            need['blocking'] = need['model_blocking'] and depends
             if need['type'] == 'literature' and any(not s.get('catalog') for s in self._templates_in(('.bib',))):
                 need['blocking'] = False  # the author gave their bibliography: the text cites it and nothing else
             if advisory:
                 # The writer checks the source. A planner's guess cannot stop drafting or fail the final readiness gate.
                 need['blocking'] = False
-            decisions += need['blocking'] and need['type'] == 'decision'
             needs.append(need)
         given = {part for s in kept for part in s['parts']}
         outline = {'kind': kind, 'scope': pick(raw.get('scope'), ('document', 'part'), 'document'),
-                   'language': language_name(raw.get('language')), 'title': text(raw.get('title'), 300),
-                   'short_title': text(raw.get('short_title'), 60), 'instruction': text(raw.get('instruction')),
+                   'language': language_name(raw.get('language')), 'title': text(raw.get('title')),
+                   'short_title': text(raw.get('short_title')), 'instruction': text(raw.get('instruction')),
                    'requirements': requirements, 'rule_requests': requests, 'set_aside': set_aside,
                    'inventory': inventory, 'problems': problems, 'notation': notation,
                    'sections': kept, 'needs': needs, 'dropped_sections': dropped, 'code': bool(raw.get('code')),
                    'keep_latex': raw.get('keep_latex', False) is True, 'assemble': raw.get('assemble', False) is True,
                    'pages': (float(raw['pages']) if isinstance(raw.get('pages'), (int, float)) and not isinstance(raw.get('pages'), bool)
                              and raw['pages'] > 0 else max(1.0, round(len(self._whole_material()) / 3000))),
-                   'files': [{'file': text(f.get('file'), 200), 'heading': text(f.get('heading'), 200), 'flat': f.get('flat') is True}
-                             for f in items(raw.get('files'))][:12],
-                   'storyline': text(raw.get('storyline'), 1500), 'questions': questions, 'recalled': recalled,
-                   'size': size, 'central': strings(raw.get('central'))[:4], 'informal': text(raw.get('informal'), 600),
-                   'obstacle': text(raw.get('obstacle'), 600), 'example': text(raw.get('example'), 600),
+                   'files': [{'file': text(f.get('file')), 'heading': text(f.get('heading')), 'flat': f.get('flat') is True}
+                             for f in items(raw.get('files'))],
+                   'storyline': text(raw.get('storyline')), 'questions': questions, 'recalled': recalled,
+                   'size': size, 'central': strings(raw.get('central')), 'informal': text(raw.get('informal')),
+                   'obstacle': text(raw.get('obstacle')), 'example': text(raw.get('example')),
                    'experiments': experiments,
                    'unassigned_parts': sorted(required - given)}
         if dropped:
@@ -4933,7 +4929,7 @@ class WriteupRunner(ResearchRunner):
                 old, new = part['spliced_text'].split('\n'), part['body'].split('\n')
                 hunks += [{'file': part['file'], 'before': '\n'.join(old[a:b]), 'after': '\n'.join(new[c:d])}
                           for tag, a, b, c, d in SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if tag != 'equal']
-            self.state['splice']['hunks'] = hunks[:60]
+            self.state['splice']['hunks'] = hunks
         body = self._take_bibtex('\n\n'.join(p['body'] for p in self.state['parts']))
         if len(self.state['parts']) > 1:
             # Written in several calls: a later part may cite a label under a slightly different name
@@ -5633,8 +5629,8 @@ class WriteupRunner(ResearchRunner):
         called = False
         if left and self._affordable():
             called = True
-            new, answers = self._resolve_references(body, left[:12])
-            tidy['asked'] = (tidy['asked'] + left[:12])[-60:]
+            new, answers = self._resolve_references(body, left)
+            tidy['asked'] = tidy['asked'] + left
             for key, label in answers.items():
                 fixed.append({'what': f'reference {key} pointed at {label} (chosen from the sentence around it; check it)',
                               'where': None, 'before': key, 'after': label})
@@ -5736,7 +5732,7 @@ class WriteupRunner(ResearchRunner):
             self.state['phase'] = 'export'
         elif self._should_revise(digest):
             self.state['phase'] = 'revise'
-        elif (self.state.get('review_round', 0) < self._rounds() and (self.state.get('compile') or {}).get('ok')
+        elif (self.state.get('review_round', 0) < min(3, self._rounds()) and (self.state.get('compile') or {}).get('ok')
               and self._affordable()):
             # Nothing to revise from this round's findings: the next round reads the same text with its own focus.
             self.state['review_round'] = self.state.get('review_round', 0) + 1
@@ -5942,7 +5938,7 @@ class WriteupRunner(ResearchRunner):
             if 'P9' in rules and _OPENER.search(prose):
                 out.append(f'P9 {number}| {line.strip()[:160]}')
             previous = prose
-        return out[:12]
+        return out
 
     def _name_findings(self):
         """Names of people or works that the outline's literature needs mention and the material does not: the model
@@ -6086,7 +6082,7 @@ class WriteupRunner(ResearchRunner):
                 continue
             what = p['what'] if not choices_only else _clip(p['what'], 200)
             out.append(what + (f' Keep “{p["as_written"]}”, or write “{p["alternative"]}”?' if choice else ''))
-        return out[:3] if choices_only else out
+        return out
 
     def _missing_pieces(self):
         """The blocking needs of the outline, by type and section, without their text (which may name works)."""
@@ -6111,17 +6107,14 @@ class WriteupRunner(ResearchRunner):
     # -- the review loop ------------------------------------------------------------------------
 
     def _rounds(self):
-        """Revision rounds allowed: one fewer than the job's rounds, at most three (effort low: none, the source
-        checker alone)."""
-        rounds = max(0, min(3, int(self.state['settings'].get('max_rounds') or 1) - 1))
-        # A short write-up is checked and revised once: its review must not cost more than its writing.
-        return min(rounds, 1) if (self.state.get('outline') or {}).get('size') == 'short' else rounds
+        """Honor the job's revision allowance. The three planned checks each run once."""
+        return max(0, int(self.state['settings'].get('max_rounds') or 1) - 1)
 
     def _affordable(self):
-        """Whether one more review or revision call fits: a minute and an output allowance left."""
+        """Whether one more review or revision call fits: enough time to start a call and a useful output allowance left."""
         settings = self.state['settings']
-        return (settings['max_seconds'] - self._elapsed() >= 60
-                and remaining_limit(settings, 'max_tokens', self.state['tokens_charged']) >= 2048)
+        return (settings['max_seconds'] > self._elapsed()
+                and remaining_limit(settings, 'max_tokens', self.state['tokens_charged']) >= 512)
 
     def _review_of(self, digest):
         return next((r for r in reversed(self.state.get('reviews') or []) if r['candidate'] == digest), None)
@@ -6210,19 +6203,16 @@ class WriteupRunner(ResearchRunner):
             (piece for piece in pieces if re.match(r'\s*\\section\*?\s*\{[^}]*(?:' + _ROLE_WORDS['introduction'] + ')', piece, re.I)), '')
 
     def _batches(self, sections):
-        """Consecutive sections grouped into at most six style calls, short ones together."""
+        """Group consecutive short sections without forcing unrelated sections into oversized review calls."""
         groups, current, size = [], [], 0
         for index, section in enumerate(sections):
             current.append(index)
             size += len(section)
-            if size >= 1500:
+            if size >= max(1500, self._room() // 2):
                 groups.append(current)
                 current, size = [], 0
         if current:
             groups.append(current)
-        while len(groups) > 6:
-            pair = min(range(len(groups) - 1), key=lambda i: sum(len(sections[j]) for j in groups[i] + groups[i + 1]))
-            groups[pair:pair + 2] = [groups[pair] + groups[pair + 1]]
         return groups
 
     def _reader_rules(self):
@@ -7162,7 +7152,7 @@ class WriteupRunner(ResearchRunner):
             if issue['fix'].strip() and for_author(issue):
                 point += '; the review proposes: ``' + issue['fix'][:200] + "''"
             points.append(point[0].upper() + point[1:] + '.')
-        return points[:12]
+        return points
 
     def _review_summary(self):
         """Rounds made, fixed issues per rule, what is left, and the questions for the author, for the reply."""
@@ -7788,7 +7778,7 @@ class WriteupRunner(ResearchRunner):
             if {' '.join(c.casefold().split()) for c in need.get('concerns') or []} & problems:
                 continue  # a problem of the material: asked through its TODO
             out.append(_clip(need['what'], 200).rstrip('.'))
-        return out[:3]
+        return out
 
     def _statement_changes(self):
         """The changes of a statement's mathematics made by a fix that are still in the final text."""

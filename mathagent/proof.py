@@ -25,25 +25,26 @@ from .call_policy import (CONTEXT_MARGIN, CallContextError, allocate_call, count
                           streamed_characters)
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
-from .ledger import LedgerError, ProofStore
+from .ledger import MAX_FILE_BYTES, LedgerError, ProofStore
 from .model_limits import is_ds4, HOSTED_DS4, ProviderChanged
 from .proof_policy import (
     CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
-    VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request, review_request,
+    VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, VERIFIER_SCHEMA_V3, initial_request, review_request,
 )
 
-POLICY_VERSION = 11
+POLICY_VERSION = 12
 PREVIOUS_POLICY_SHA256 = '750e8ec2e4de9092d8faeb0d9f1d377276259a9657d87dbf2981759377f039a6'
 RECOGNIZED_POLICY_HASHES = {
     7: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
     8: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
     9: 'aabe8adeba577d4de0bf4788f22e3cb3c8401092443d8190588be57ae095727d',
     10: PREVIOUS_POLICY_SHA256,
+    11: '9a3a7016a41ce8cec6103caa27c111b007c7054f67bc75e39bedf1d3b6564fc6',
 }
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 # Explicit extra allowance on resume ("Resume with more budget"): bounds of one addition.
-MAX_ADD_TOKENS, MAX_ADD_SECONDS, MAX_ADD_ROUNDS = 20_000_000, 86400, 20
+MAX_ADD_TOKENS = MAX_ADD_SECONDS = MAX_ADD_ROUNDS = (1 << 53) - 1  # JSON-safe operator input
 # Proof calls have no tools; solver and reviewer read this beside the task (controller text, not proof policy).
 NO_CODE_NOTE = ('No code is run in this proof job: neither the solver nor the reviewer has tools. The output of a '
                 'program that was not actually computed in the text is unverified and cannot support an essential step.')
@@ -73,12 +74,12 @@ def _validate(value, spec, path='response'):
         for key, child in spec['properties'].items():
             _validate(value[key], child, path + '.' + key)
     elif kind == 'array':
-        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec['maxItems']:
+        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec.get('maxItems', math.inf):
             raise ValueError(f'{path}: invalid list')
         for item in value:
             _validate(item, spec['items'], path)
     elif kind == 'string':
-        if not isinstance(value, str) or not value.strip() or len(value) > spec.get('maxLength', 10000):
+        if not isinstance(value, str) or not value.strip() or len(value) > spec.get('maxLength', math.inf):
             raise ValueError(f'{path}: expected nonempty bounded text')
         if 'enum' in spec and value not in spec['enum']:
             raise ValueError(f'{path}: invalid value')
@@ -87,18 +88,20 @@ def _validate(value, spec, path='response'):
             raise ValueError(f'{path}: invalid integer')
 
 
-def validate_review(text, *, schema_version=3):
+def validate_review(text, *, schema_version=3, bounded_v3=False):
     """Validate the requested contract; legacy calls retain their original semantics."""
     if type(schema_version) is not int or schema_version not in (1, 2, 3):
         raise ValueError('Unknown review schema version')
     schema = {1: LEGACY_VERIFIER_SCHEMA, 2: VERIFIER_SCHEMA_V2, 3: VERIFIER_SCHEMA}[schema_version]
+    if bounded_v3:
+        schema = VERIFIER_SCHEMA_V3
     value = loads_single(text)
     def bounded(value, limit):
         marker = ' [truncated; full review in journal]'
         return value if len(value) <= limit else value[:limit - len(marker)] + marker
     # Old contracts normalize cosmetic extra fields; v3 has one assessment and
     # forbids an additional model verdict. All raw output remains in the journal.
-    if isinstance(value, dict) and all(k in value for k in schema['properties']):
+    if (schema_version < 3 or bounded_v3) and isinstance(value, dict) and all(k in value for k in schema['properties']):
         if schema_version < 3:
             value = {k: value[k] for k in schema['properties']}
         if isinstance(value['explanation'], str):
@@ -311,19 +314,19 @@ class ProofRunner:
             value['model_limits_sha256'] = hashlib.sha256(Path(__file__).with_name('model_limits.py').read_bytes()).hexdigest()
         return value
 
-    def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
+    def start(self, goal, *, max_rounds=5, max_tokens=None, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
               min_solve_tokens=None, verify_temperature=None, repair_tokens=None, reference_context=None,
               initial_min_solve_tokens=None, solver_leads=None, verifier_reference=None, source_passages=(), job_id=None,
-              statement=None):
+              statement=None, fixed_call_budgets=False):
         """``goal`` is the task as the user reads it; ``statement``, when given, is the fuller text the solver
         receives (and the reviewer reads as the solver's task) in its place."""
         for text in (goal, statement if statement is not None else goal):
-            if not isinstance(text, str) or not text.strip() or len(text) > 60000:
-                raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
+            if not isinstance(text, str) or not text.strip() or len(text.encode('utf-8')) > MAX_FILE_BYTES:
+                raise ValueError(f'Provide a nonempty proof goal within the saved-file limit of {MAX_FILE_BYTES:,} bytes')
         for name, value, lower, upper in (
-            ('max_rounds', max_rounds, 1, 100),
-            ('max_predict', max_predict, 128, 1000000), ('verify_tokens', verify_tokens, 128, 1000000),
+            ('max_rounds', max_rounds, 1, MAX_ADD_ROUNDS),
+            ('max_predict', max_predict, 128, MAX_ADD_TOKENS), ('verify_tokens', verify_tokens, 128, MAX_ADD_TOKENS),
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError(f'{name} must be an integer between {lower} and {upper}')
@@ -403,7 +406,8 @@ class ProofRunner:
                         repair_tokens=repair_tokens, reference_context=copy.deepcopy(reference_context))
         # Save this rule with new jobs; older paused jobs retain their original
         # allocation behaviour as well as their original numeric allowances.
-        settings['full_output_ceiling'] = is_ds4(self.agent)
+        settings['fit_remaining_budget'] = not fixed_call_budgets
+        settings['full_output_ceiling'] = fixed_call_budgets and is_ds4(self.agent)
         if verifier_reference is not None:
             settings['verifier_reference'] = copy.deepcopy(verifier_reference)
         if solver_leads and solver_leads.get('text'):
@@ -411,12 +415,12 @@ class ProofRunner:
         if statement is not None and statement != goal:
             settings['statement'] = statement
         task = settings.get('statement', goal)
-        if verifier_reference is not None or any(src.get('document_id') for src in sources):
+        if not fixed_call_budgets or verifier_reference is not None or any(src.get('document_id') for src in sources):
             self._fits('The first solve', initial_request(task, sources), reference_context, max_predict,
                        initial_min_solve_tokens, settings, sources)
             # The verifier must be able to read the candidate as well as generate a
             # review. Share the remaining window in the requested solve/review ratio,
-            # respecting both output floors. DS4 requires both full allowances.
+            # respecting both output floors. Fixed benchmark calls keep their configured allowances.
             explicit = settings['specialist_output_cap']
             candidate = min(max_predict, explicit or max_predict)
             review = min(verify_tokens, explicit or verify_tokens)
@@ -506,7 +510,7 @@ class ProofRunner:
                 'original_controller_sha256': saved.get('controller_sha256'),
                 'controller_sha256': current_provenance['controller_sha256']})
             saved.update(policy_version=POLICY_VERSION, policy_sha256=current_provenance['policy_sha256'])
-            self.emit('notice', 'Resuming with calibrated Proof policy 11; original calls and all saved allowances are retained. The policy change is recorded in the report.')
+            self.emit('notice', f'Resuming with Proof policy {POLICY_VERSION}; original calls and all saved allowances are retained. The policy change is recorded in the report.')
         if saved.get('transport_sha256') != current_provenance['transport_sha256']:
             self.state.setdefault('transport_migration', {
                 'original_controller_sha256': saved.get('controller_sha256'),
@@ -546,8 +550,8 @@ class ProofRunner:
                              'Start a new proof instead.')
         if additions.get('tokens') and settings.get('max_tokens') is None:
             raise ValueError('This proof has no cumulative token ceiling, so add_tokens does not apply.')
-        if settings['max_rounds'] + additions.get('rounds', 0) > 100:
-            raise ValueError('A proof can have at most 100 attempts in total.')
+        if settings['max_rounds'] + additions.get('rounds', 0) > MAX_ADD_ROUNDS:
+            raise ValueError('The total attempt allowance must be a JSON-safe integer.')
         if status == 'attempts_exhausted' and not additions.get('rounds'):
             raise ValueError('This proof used all its attempts: add attempts (add_rounds) to continue it.')
 
@@ -564,8 +568,14 @@ class ProofRunner:
         self.state['status'], self.state['stop_reason'] = status, reason
 
     def _remaining(self):
-        limit = self.state['settings']['max_tokens']
-        return math.inf if limit is None else limit - self.state['tokens_charged']
+        settings = self.state['settings']
+        limit = settings['max_tokens']
+        remaining = math.inf if limit is None else limit - self.state['tokens_charged']
+        if settings.get('fit_remaining_budget'):
+            shared = getattr(self.agent.client, 'remaining_tokens', math.inf)
+            if isinstance(shared, (int, float)):
+                remaining = min(remaining, shared)
+        return remaining
 
     def _call_cap(self, cap):
         explicit = self.state['settings'].get('specialist_output_cap')
@@ -576,16 +586,35 @@ class ProofRunner:
         cap = settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
         return min(cap, settings.get('reviewable_candidate_tokens', cap))
 
+    def _fitted_solver_cap(self, kind):
+        """Share a short output budget between a solver and its whole-candidate verifier."""
+        settings = self.state['settings']
+        solve = self._call_cap(self._attempt_cap(kind))
+        requested = self._call_cap(settings['max_predict'] if kind == 'initial' else settings['repair_tokens'])
+        verify = self._call_cap(settings['verify_tokens'])
+        floor = settings['initial_min_solve_tokens'] if kind in ('initial', 'retry') else settings['min_solve_tokens']
+        remaining = self._remaining()
+        if solve < floor or verify < 128 or remaining < floor + 128:
+            raise ProofBudget(f'This attempt needs at least {floor} solver tokens and 128 verifier tokens.')
+        if remaining >= solve + verify:
+            return solve
+        return min(solve, int(remaining) - 128, max(floor, int(remaining) * requested // (requested + verify)))
+
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']
-        solve = (self._attempt_cap(kind) if kind == 'initial' or settings.get('full_output_ceiling')
-                 else settings['min_solve_tokens'])
-        needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
-        if self._remaining() < needed:
-            raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
+        if settings.get('fit_remaining_budget'):
+            self._fitted_solver_cap(kind)
+        else:
+            solve = (self._attempt_cap(kind) if kind == 'initial' or settings.get('full_output_ceiling')
+                     else settings['min_solve_tokens'])
+            needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
+            if self._remaining() < needed:
+                raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted')
-        # After one full cycle, its measured duration estimates the next one.
+        if settings.get('fit_remaining_budget'):
+            return  # Each new call observes the actual active-time deadline.
+        # Saved strict runs also require the estimated time for a complete cycle.
         solver = next((c for c in self.state['calls'] if c['role'] == 'solver' and 'seconds' in c and c['status'] != 'rejected'), None)
         verifier = next((c for c in self.state['calls'] if c['role'] == 'verifier' and 'seconds' in c and c['status'] != 'rejected'), None)
         if solver and verifier:
@@ -743,6 +772,9 @@ class ProofRunner:
         """The initial solve keeps the direct-call allowance; later calls use the repair
         allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
+        if settings.get('fit_remaining_budget'):
+            pending['solver_cap'] = self._fitted_solver_cap(pending['kind'])
+            return pending['solver_cap']
         cap = self._attempt_cap(pending['kind'])
         if settings.get('full_output_ceiling') or pending['kind'] == 'initial':
             if self._remaining() < self._call_cap(cap) + self._call_cap(settings['verify_tokens']):
@@ -794,7 +826,9 @@ class ProofRunner:
         earlier = self.state['reviews'][:self.state['reviews'].index(review)]
         records = []
         seen = {(i['kind'], i['location'], i['evidence']) for i in review['response']['issues']}
-        for old in reversed([r for r in earlier if r.get('response') and r['response']['issues']][-3:]):
+        for old in reversed(earlier):
+            if not old.get('response'):
+                continue
             for issue in old['response']['issues']:
                 identity = (issue['kind'], issue['location'], issue['evidence'])
                 if identity in seen:
@@ -802,11 +836,7 @@ class ProofRunner:
                 item = {'candidate': old['candidate'], 'review': old['id'], 'kind': issue['kind'],
                         'disposition': 'not_reassessed',
                         'reason': 'No resolution established by this record; check the written candidate.'}
-                for field, limit in (('location', 200), ('evidence', 800)):
-                    value = issue[field]
-                    item[field] = value if len(value) <= limit else value[:limit] + ' [excerpt; full review saved]'
-                if len(json.dumps(records + [item], ensure_ascii=False)) > 3000 or len(records) >= 6:
-                    continue
+                item.update(location=issue['location'], evidence=issue['evidence'])
                 records.append(item)
                 seen.add(identity)
         return json.dumps(records, ensure_ascii=False) if records else ''
@@ -851,7 +881,8 @@ class ProofRunner:
             raise ProofContext('The previous generation reached its output limit without reusable written text or working notes. '
                                'Repeating the same allowance cannot advance this proof; its artifacts were retained.')
         settings = self.state['settings']
-        floor = self._call_cap(self._attempt_cap('continue'))
+        floor = (settings['min_solve_tokens'] if settings.get('fit_remaining_budget')
+                 else self._call_cap(self._attempt_cap('continue')))
         ctx = self.agent.ctx
         observed_context = getattr(self.agent.client, 'observed_context_tokens', None)
         if type(observed_context) is int and observed_context > 0:
@@ -884,8 +915,8 @@ class ProofRunner:
                 keep = int(keep * 0.75)
         if length_limited:
             settings = self.state['settings']
-            desired = self._attempt_cap('retry')
-            desired = min(desired, self._remaining() - self._call_cap(settings['verify_tokens']))
+            desired = (self._fitted_solver_cap('retry') if settings.get('fit_remaining_budget') else
+                       min(self._attempt_cap('retry'), self._remaining() - self._call_cap(settings['verify_tokens'])))
             fresh = self._payload('solver', self._initial_messages(goal, sources), desired)
             try:
                 _, allocation = allocate_call(self.agent.client, fresh, desired,
@@ -942,25 +973,32 @@ class ProofRunner:
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
         cap = self.state['settings']['verify_tokens']
         cached = self._find_call(self._call_key('verifier'))
-        if not cached and self._remaining() < self._call_cap(cap):
-            self._stop('review_unavailable', 'Insufficient budget for a full verifier call; the candidate was retained without rewriting it.')
-            return
+        flexible = self.state['settings'].get('fit_remaining_budget')
+        minimum = 128 if flexible else self._call_cap(cap)
+        if not cached:
+            if self._remaining() < minimum:
+                self._stop('review_unavailable', 'Insufficient budget for a verifier response. The candidate was retained.')
+                return
+            if flexible:
+                cap = min(self._call_cap(cap), self._remaining())
         result = self._call('verifier', messages, cap, format_schema=VERIFIER_SCHEMA)
         # A pre-upgrade call may have finished before its review was committed.
         # Its immutable request, not the migrated job policy, owns that contract.
-        schema_version = 3
+        schema_version, bounded_v3 = 3, False
         if cached:
             saved_request = json.loads(self.store.read_artifact(cached['request']))
             if saved_request.get('format') == LEGACY_VERIFIER_SCHEMA:
                 schema_version = 1
             elif saved_request.get('format') == VERIFIER_SCHEMA_V2:
                 schema_version = 2
+            elif saved_request.get('format') == VERIFIER_SCHEMA_V3:
+                bounded_v3 = True
             elif saved_request.get('format') != VERIFIER_SCHEMA:
                 raise ValueError('Unrecognized saved verifier schema; original artifacts retained')
         try:
             if not result['done'] or result['calls']:
                 raise ValueError('Review generation did not finish a standalone response')
-            response = validate_review(result['text'], schema_version=schema_version)
+            response = validate_review(result['text'], schema_version=schema_version, bounded_v3=bounded_v3)
         except (ValueError, TypeError, RecursionError) as exc:
             response = None
             error = str(exc)
@@ -975,7 +1013,7 @@ class ProofRunner:
         pending['review'] = review['id']
         if error:
             candidate['review_status'] = 'review_unavailable'
-            if pending['review_attempt'] == 0 and self._remaining() >= self._call_cap(cap):
+            if pending['review_attempt'] == 0 and self._remaining() >= minimum:
                 pending['review_attempt'] = 1
                 pending['protocol_error'] = error
                 self.emit('notice', 'Clarifying an unavailable review on the same candidate; no proof rewrite was requested')
@@ -1131,8 +1169,12 @@ class ProofRunner:
         previous = next((c for c in self.state['calls'] if c['key'] == key), None)
         if previous is not None:
             return self._read_stream(previous['stream'])
-        if self._remaining() < self._call_cap(cap):
-            raise ProofBudget('Insufficient budget for the full role allowance; no reduced-cap call was dispatched')
+        if self.state['settings'].get('fit_remaining_budget'):
+            cap = min(cap, self._fitted_solver_cap(self.state['pending']['kind']) if role == 'solver' else self._remaining())
+            if cap < 128:
+                raise ProofBudget('Insufficient remaining output allowance for this model call.')
+        elif self._remaining() < self._call_cap(cap):
+            raise ProofBudget('Insufficient budget for the saved full role allowance')
         remaining_seconds = self.state['settings']['max_seconds'] - self._elapsed()
         if remaining_seconds <= 0:
             raise ProofBudget('Elapsed-time budget exhausted')

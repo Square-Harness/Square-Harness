@@ -44,7 +44,6 @@ FLOOR = Limits(timeout_seconds=0.5, memory_mb=128, cpus=0.25, pids=16, tmpfs_mb=
 SANITY_BOUNDS = Limits(timeout_seconds=30, memory_mb=4096, cpus=2, pids=64, tmpfs_mb=128,
                        output_bytes=50_000, artifact_bytes=4_000_000)
 MAX_SANITY_RUNS = 10
-MAX_LAB_RUNS = 50
 
 # Memory is a cap, not a reservation: 2 GB lets a modest simulation run without crowding the host.
 SANITY_DEFAULTS = Limits(timeout_seconds=5, memory_mb=2048, cpus=1, pids=64, tmpfs_mb=64,
@@ -69,12 +68,15 @@ class Policy:
     name: str
     defaults: Limits
     ceiling: Limits          # equal to defaults when escalation is impossible
-    max_runs: int            # sandbox runs per check (one user turn)
+    max_runs: int | None     # optional operator allowance for a user-requested lab
     escalation: bool         # whether the user may approve more than the defaults
+
+    explicit_max_runs: int | None = None  # optional allowance for a user-selected sanity check
 
     def describe(self):
         return {'policy': self.name, 'defaults': self.defaults.as_dict(), 'max_runs': self.max_runs,
                 'escalation': self.escalation,
+                **({'explicit_max_runs': self.explicit_max_runs} if self.name == SANITY else {}),
                 **({'ceiling': self.ceiling.as_dict()} if self.escalation else {})}
 
 
@@ -98,12 +100,18 @@ def _limits(base, overrides, upper, label):
     return _bounded(replace(base, **overrides), upper, label)
 
 
-def sanity_policy(overrides=None, max_runs=3):
+def _explicit_runs(value):
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError('An explicit sandbox run allowance must be a positive integer or null')
+    return value
+
+
+def sanity_policy(overrides=None, max_runs=3, explicit_max_runs=None):
     """The automatic policy: never escalates, configurable only within SANITY_BOUNDS."""
     if type(max_runs) is not int or not 1 <= max_runs <= MAX_SANITY_RUNS:
         raise ValueError(f'sanity.max_runs must be an integer from 1 to {MAX_SANITY_RUNS}')
     limits = _limits(SANITY_DEFAULTS, overrides, SANITY_BOUNDS, 'sanity')
-    return Policy(SANITY, limits, limits, max_runs, escalation=False)
+    return Policy(SANITY, limits, limits, max_runs, escalation=False, explicit_max_runs=_explicit_runs(explicit_max_runs))
 
 
 def review_policy(role):
@@ -115,13 +123,11 @@ def review_policy(role):
     return Policy(REVIEW, limits, limits, REVIEW_RUNS[role], escalation=False)
 
 
-def lab_policy(defaults=None, ceiling=None, max_runs=20):
+def lab_policy(defaults=None, ceiling=None, max_runs=None):
     """The explicit policy: user-approved escalation from defaults up to the ceiling."""
-    if type(max_runs) is not int or not 1 <= max_runs <= MAX_LAB_RUNS:
-        raise ValueError(f'lab.max_runs must be an integer from 1 to {MAX_LAB_RUNS}')
     top = _limits(LAB_CEILING, ceiling, HARD_LIMITS, 'lab.ceiling')
     base = _limits(LAB_DEFAULTS, defaults, top, 'lab.defaults')
-    return Policy(LAB, base, top, max_runs, escalation=True)
+    return Policy(LAB, base, top, _explicit_runs(max_runs), escalation=True)
 
 
 def load_policies(path=None):
@@ -140,10 +146,10 @@ def load_policies(path=None):
             raise ValueError('Python sandbox limits must be a JSON object with "sanity" and/or "lab"')
     sanity = config.get('sanity') or {}
     lab = config.get('lab') or {}
-    if set(sanity) - {'limits', 'max_runs'} or set(lab) - {'defaults', 'ceiling', 'max_runs'}:
+    if set(sanity) - {'limits', 'max_runs', 'explicit_max_runs'} or set(lab) - {'defaults', 'ceiling', 'max_runs'}:
         raise ValueError('Unknown key in Python sandbox limits; see docs/guide.md')
-    return {SANITY: sanity_policy(sanity.get('limits'), sanity.get('max_runs', 3)),
-            LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs', 20))}
+    return {SANITY: sanity_policy(sanity.get('limits'), sanity.get('max_runs', 3), sanity.get('explicit_max_runs')),
+            LAB: lab_policy(lab.get('defaults'), lab.get('ceiling'), lab.get('max_runs'))}
 
 
 PREVIEW_CODE_LINES = 12

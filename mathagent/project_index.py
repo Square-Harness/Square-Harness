@@ -191,7 +191,7 @@ def _unreadable(folder, job_id):
     return _entry(folder, job_id, {'kind': 'unreadable', 'mode': folder, 'status': 'unreadable job'}, {})
 
 
-def line(entry):
+def line(entry, *, room=None):
     """One earlier record, named by its kind and task; its ID comes last, for read_index.
 
     A task a model brief worded is shown after the user's request it came from.
@@ -199,12 +199,16 @@ def line(entry):
     label = ' · '.join([_NAMES[entry['kind']], entry['status'], *entry['qualifiers']])
     task = ' '.join(entry['task']['text'].split())
     original = ' '.join(entry['task'].get('original_request', '').split())
-    statement = f'Recorded task: {task[:220]}'
+    statement = f'Recorded task: {task}'
     if original and 'worded by a model brief' in entry['qualifiers']:
-        statement = f'Recorded request: {original[:220]} | Model brief: {task[:220]}'
+        statement = f'Recorded request: {original} | Model brief: {task}'
     summary = ' '.join(entry['summary'].split())
-    return (f"{label} | {statement}" + (f' | {summary[:250]}' if summary else '')
-            + f" | entry id (for read_index only): {entry['id']}")
+    text = f'{label} | {statement}' + (f' | {summary}' if summary else '')
+    locator = f" | entry id (for read_index only): {entry['id']}"
+    if room is not None and len(text) + len(locator) > room:
+        marker = '… [open request/task/summary with read_index]'
+        text = text[:max(0, room - len(locator) - len(marker))] + marker
+    return text + locator
 
 
 def render(view):
@@ -377,7 +381,7 @@ def read_text(root, view, entry_id):
             if copy.exists():
                 _directory(copy.parent.parent)
                 _directory(copy.parent)
-                data = json.loads(_read(copy, 65536))
+                data = json.loads(_read(copy))
             else:
                 data = ExperimentStore(root).load(job)
             if data['id'] != job:

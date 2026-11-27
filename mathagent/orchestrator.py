@@ -64,9 +64,7 @@ You can delegate a precise objective to an existing worker when sustained proof
 search, independent proof review, exploration, a precise reference, a literature review,
 manuscript review or a write-up will help. The available modes are prove,
 explore, check, literature, referee, typo_check, quick_review, explain, writeup and summarize.
-Delegation is required for nontrivial proof search and otherwise optional. Prefer the
-least effort suitable for the objective: low, medium or high. Every literature review runs at high effort.
-High is the maximum effort. State the complete objective and its hypotheses. Children cannot
+Delegation is required for nontrivial proof search and otherwise optional. Every new worker runs at high effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. A prove worker and
@@ -85,7 +83,7 @@ facts: first look for each one in the conversation and the files (read the place
 a need they already meet needs nothing. Obtain only what is really missing (check
 for a reference; literature for earlier work on a topic: it writes a survey and does
 not complete a given list of references; prove only when a main result of the
-document has no proof at all, at the lowest effort, never for a routine step; or ask
+document has no proof at all, never for a routine step; or ask
 the user a question), then delegate the write-up once more with the same request: it
 then writes with what there is and marks what is still missing. Report unresolved
 needs if further delegation is unavailable. Never write the document yourself in the reply. A delivered
@@ -425,7 +423,7 @@ class Orchestrator:
         if hasattr(self.agent, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.agent.turn_image_refs)
         self.state = {
-            'version': STATE_VERSION, 'id': 'assistant_' + uuid.uuid4().hex,
+            'version': STATE_VERSION, 'high_effort': True, 'id': 'assistant_' + uuid.uuid4().hex,
             'status': 'running', 'query': query, 'transport': assistant_transport(self.agent.client),
             'files': list(files), 'history': original,
             'messages': self._working_history(original) + [message],
@@ -484,7 +482,7 @@ class Orchestrator:
         messages, archived = [], []
         for index, original in enumerate(history):
             item = copy.deepcopy(original)
-            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > input_limit(self.agent, 'working_note', 6000)):
+            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > getattr(getattr(self.agent, 'workspace', None), 'result_chars', 6000)):
                 text = self._conversation_text(item)
                 archived.append({'index': index, 'tool': item.get('tool_name'),
                     'role': item['role'], 'lines': len(text.splitlines()),
@@ -862,13 +860,24 @@ class Orchestrator:
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
         explicit = getattr(self.agent, 'document_output_cap', None)
-        payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        try:
+            payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        except CallContextError:
+            essential = [t for t in tools if t['function']['name'] not in NUMERICS_TOOLS]
+            if len(essential) == len(tools):
+                raise
+            payload['tools'] = essential
+            numerical_note = self._numerics_policy(tools)
+            if numerical_note:
+                payload['messages'][0]['content'] = payload['messages'][0]['content'].replace(numerical_note, '', 1)
+            payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
         view = self.state.get('index_view') or {}
-        if view.get('entries'):
-            from .briefs import for_worker
+        if view.get('entries') or view.get('pages'):
+            from .briefs import for_worker, load_view
+            view = load_view(self.agent.workspace.root, view)
             digest = for_worker(self.agent.workspace.root, view, self.state['query'], 'assistant',
                                 chat_id=getattr(self.agent, 'scope_chat_id', None),
-                                max_chars=input_limit(self.agent, 'brief_index', 3000))['text']
+                                max_chars=self.agent.workspace.result_chars)['text']
             if digest:
                 system = payload['messages'][0]
                 augmented = dict(payload, messages=[dict(system, content=system['content'] + PROJECT_RECORDS + digest),
@@ -1036,8 +1045,6 @@ class Orchestrator:
 
     def _prepare_calls(self, assistant):
         calls = assistant['tool_calls']
-        if len(calls) > 16:
-            raise AgentError('The main agent returned too many tool calls')
         previous_ids = {call.get('id') for message in self.state['messages']
                         for call in message.get('tool_calls', [])}
         pending = []
@@ -1056,7 +1063,8 @@ class Orchestrator:
                     raise AgentError('Malformed JSON main-agent tool arguments') from exc
             if not isinstance(arguments, dict):
                 raise AgentError('Main-agent tool arguments must be an object')
-            if function['name'] == 'delegate' and arguments.get('effort') in EFFORTS:
+            if (function['name'] == 'delegate' and arguments.get('effort') in EFFORTS
+                    and (not self.state.get('resumed_checkpoint') or self.state.get('high_effort'))):
                 arguments = {**arguments, 'effort': effort_for(arguments.get('mode'), arguments['effort'])}
             function['arguments'] = arguments
             call_id = call.get('id') or f'{self.state["id"]}_{self.state["main_calls"]}_{index}'
@@ -1084,13 +1092,14 @@ class Orchestrator:
                 args['effort'] in LEGACY_EFFORTS and args['effort'] == saved_effort
                 and self.state.get('resumed_checkpoint')):
             raise ValueError('Unknown worker effort; choose low, medium or high')
-        args['effort'] = effort_for(args['mode'], args['effort'])
-        for key, maximum in (('request', 8000), ('reason', 400)):
-            if not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > maximum:
-                raise ValueError(f'{key} must be nonempty text of at most {maximum} characters; no text was truncated')
+        if not self.state.get('resumed_checkpoint') or self.state.get('high_effort'):
+            args['effort'] = effort_for(args['mode'], args['effort'])
+        for key in ('request', 'reason'):
+            if not isinstance(args[key], str) or not args[key].strip():
+                raise ValueError(f'{key} must be nonempty text')
         files = args['files']
-        if not isinstance(files, list) or len(files) > 20:
-            raise ValueError('files must contain at most 20 workspace references')
+        if not isinstance(files, list):
+            raise ValueError('files must be a list of workspace references')
         workspace = getattr(self.agent, 'workspace', None)
         sandbox_files = set()
         experiments = None
@@ -1107,8 +1116,8 @@ class Orchestrator:
                 except (ValueError, TypeError, KeyError):
                     continue
         for filename in files:
-            if not isinstance(filename, str) or not filename or len(filename) > 300:
-                raise ValueError('Each file must be a nonempty workspace reference of at most 300 characters')
+            if not isinstance(filename, str) or not filename:
+                raise ValueError('Each file must be a nonempty workspace reference')
             from . import images
             if images.is_image(filename):
                 frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
@@ -1257,8 +1266,8 @@ class Orchestrator:
                 record = self.state['history'][index]
                 text = self._conversation_text(record)
                 lines = text.splitlines()
-                if start > len(lines) or end > len(lines) or end - start >= 200:
-                    raise ValueError('Read an existing range of at most 200 complete lines')
+                if start > len(lines) or end > len(lines):
+                    raise ValueError('Read an existing range of complete lines')
                 key = self._tool_key(name, args)
                 if key in self.state['tool_cache']:
                     pending['cached'] = True

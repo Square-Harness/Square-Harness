@@ -21,7 +21,7 @@ class TypoRequests(unittest.TestCase):
                       'Peux-tu corriger les coquilles de ce manuscrit ?', 'Are there spelling mistakes in this document?'):
             action = automatic_source_action(query, FILE)
             self.assertEqual(action['mode'], 'typo_check', query)
-            self.assertEqual((action['files'], action['effort'], action['request']), (FILE, 'low', query))
+            self.assertEqual((action['files'], action['effort'], action['request']), (FILE, 'high', query))
         self.assertEqual(mode('List the typos in manuscript.tex', []), 'typo_check')
 
     def test_other_requests_keep_their_skill(self):

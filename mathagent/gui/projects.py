@@ -18,15 +18,12 @@ import stat
 import threading
 import uuid
 
-from ..ledger import _ID, _atomic_write, _directory, _now, _regular
+from ..ledger import MAX_FILE_BYTES, _ID, _atomic_write, _directory, _now, _regular
 
-MAX_NOTES = 8000
-_MAX_BYTES = 40_000
 _PREFIX = '<!-- Square Harness project: '
 # Deleting a project renames its notebook: the project leaves every list, its files stay where
 # conversations cite them, and renaming the file back restores it.
 DELETED = 'PROJECT-deleted.md'
-MAX_FILES = 500
 _lock = threading.RLock()
 DEFAULT_NOTES = """# Project instructions
 Describe the research goal, preferred notation and working conventions.
@@ -79,8 +76,8 @@ def _validate(name, notes):
         raise ValueError('Give the project a name of at most 100 characters')
     if any(ord(char) < 32 or 127 <= ord(char) < 160 for char in name):
         raise ValueError('A project name cannot contain line breaks or control characters')
-    if not isinstance(notes, str) or len(notes) > MAX_NOTES or '\x00' in notes:
-        raise ValueError('Project notes must be text of at most 8000 characters')
+    if not isinstance(notes, str) or '\x00' in notes:
+        raise ValueError('Project notes must be text without NUL characters')
     return name.strip(), notes
 
 
@@ -98,13 +95,13 @@ def read_project(root, project_id):
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise ValueError('Project notebook must be a regular file')
-        data = stream.read(_MAX_BYTES + 1)
+        # The notebook is a regular user file. Use the same persisted-document size guard as other artifacts.
+        data = stream.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError('The project notebook exceeds the document storage limit.')
     notices = []
-    if len(data) > _MAX_BYTES:
-        data = data[:_MAX_BYTES]
-        notices.append(f'PROJECT.md is larger than {_MAX_BYTES // 1000} kB; only its beginning is shown.')
     text = data.decode('utf-8', 'replace')
-    if '\ufffd' in text and len(data) <= _MAX_BYTES:
+    if '\ufffd' in text:
         notices.append('PROJECT.md is not valid UTF-8; unreadable bytes are shown as \ufffd.')
     header, _, notes = text.partition('\n')
     metadata = None
@@ -124,9 +121,6 @@ def read_project(root, project_id):
     except ValueError:
         name = f'Project {project_id[:8]}'
     notes = notes.replace('\x00', '')
-    if len(notes) > MAX_NOTES:
-        notices.append(f'The notes are {len(notes)} characters, over the {MAX_NOTES}-character limit; '
-                       f'only the first {MAX_NOTES} are given to the model. Shorten them to save.')
     stamps = {key: metadata[key] if isinstance(metadata.get(key), str) else _now() for key in ('created_at', 'updated_at')}
     result = {'id': project_id, 'name': name, 'notes': notes,
               'revision': hashlib.sha256(data).hexdigest(), 'folder': f'projects/{project_id}', **stamps}
@@ -214,12 +208,12 @@ def holds_projects(path):
     """True for a projects/ folder that holds project folders: the harness's, not a workspace to open."""
     path = Path(path)
     try:
-        return path.name == 'projects' and any(folder_label(child) for child in sorted(path.iterdir())[:200])
+        return path.name == 'projects' and any(folder_label(child) for child in path.iterdir())
     except OSError:
         return False
 
 
-def list_files(root, project_id, limit=MAX_FILES):
+def list_files(root, project_id, limit=None):
     """The files saved in a project's folder (uploads and anything placed there), notebook excluded."""
     notebook = _path(root, project_id)
     if not notebook.is_file():
@@ -239,7 +233,7 @@ def list_files(root, project_id, limit=MAX_FILES):
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            if len(files) >= limit:
+            if limit is not None and len(files) >= limit:
                 truncated = True
                 break
             files.append({'path': path.relative_to(base).as_posix(), 'name': path.relative_to(folder).as_posix(),
@@ -254,10 +248,7 @@ def snapshot(root, project_id):
     """The bounded copy given to the model and saved with the turn."""
     if project_id is None:
         return None
-    project = read_project(root, project_id)
-    if len(project['notes']) > MAX_NOTES:
-        project['notes'] = project['notes'][:MAX_NOTES] + '\n[Notes truncated at the project limit.]'
-    return project
+    return read_project(root, project_id)
 
 
 def context(snapshot):

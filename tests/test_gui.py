@@ -588,23 +588,23 @@ class DeepInfraWorkflowTests(GuiCase):
         self.assertTrue(status['online_locked'])
         self.assertEqual(status['defaults']['budget_profile'], DS4_PROFILE)
         self.assertEqual(set(status['defaults']['literature_presets']), {'high'})
-        self.assertEqual(status['defaults']['effort_presets']['medium']['solve_tokens'], 4096)
-        self.assertEqual(status['defaults']['effort_presets']['medium']['verify_tokens'], 2048)
+        self.assertEqual(set(status['defaults']['effort_presets']), {'high'})
+        self.assertEqual(status['defaults']['effort_presets']['high']['solve_tokens'], 4096)
+        self.assertEqual(status['defaults']['effort_presets']['high']['verify_tokens'], 2048)
         launch = ['--gui', '--api-profile', 'deepinfra']
         defaults = cli.parser().parse_args(launch)
         cli.apply_defaults(defaults, launch)
         self.assertEqual(defaults.predict, 384_000)
-        for name, passes in [('low', 1), ('medium', 3), ('high', 5)]:
+        for name in ('low', 'medium', 'high'):
             proof_limits = effort.limits('prove', name, defaults)
             self.assertEqual((proof_limits['solve_tokens'], proof_limits['verify_tokens']), (384_000, 384_000))
             for mode in ('literature', 'referee', 'quick_review', 'detailed_review', 'explain', 'writeup',
                          'summarize', 'explore', 'check', 'style', 'python_lab'):
                 with self.subTest(mode=mode, effort=name):
                     worker = effort.level(mode, name, defaults)
-                    fixed = 5 if mode in ('referee', 'detailed_review', 'literature') else passes
-                    self.assertEqual(worker['tokens'], fixed * 3 * 384_000)
-                    self.assertEqual(worker['minutes'], fixed * 3 * 180)
-            self.assertEqual(effort.level('typo_check', name, defaults)['tokens'], 3 * 384_000)
+                    self.assertEqual(worker['tokens'], 5 * 3 * 384_000)
+                    self.assertEqual(worker['minutes'], 5 * 3 * 180)
+            self.assertEqual(effort.level('typo_check', name, defaults)['tokens'], 15 * 384_000)
         started = self.ok('POST', '/api/proofs', {
             'goal': 'Prove that x = x for every real x.', 'rounds': 1,
             'tokens': 12000, 'seconds': 120})
@@ -721,7 +721,9 @@ class DeepInfraWorkflowTests(GuiCase):
         # was committed. Migration preserves immutable input/output and budgets;
         # parsing uses that old request schema, not the new job policy version.
         for contract, old_version, schema, saved_response in (
-                (1, 9, LEGACY_VERIFIER_SCHEMA, legacy), (2, 10, VERIFIER_SCHEMA_V2, legacy_v2),
+                (1, 9, LEGACY_VERIFIER_SCHEMA, legacy),
+                (2, 10, VERIFIER_SCHEMA_V2, legacy_v2),
+                (3, 11, proof.VERIFIER_SCHEMA_V3, approval),
                 (2, 10, VERIFIER_SCHEMA_V2, contradictory_v2)):
             legacy_protocol_failure = saved_response is contradictory_v2
             interrupted = FakeClient([response(PROOF), response(json.dumps(saved_response)) + [KeyboardInterrupt()]])
@@ -746,7 +748,7 @@ class DeepInfraWorkflowTests(GuiCase):
             recovered = resumed.resume(paused['id'])
             self.assertEqual(recovered['status'], 'candidate_complete')
             self.assertEqual(len(resumed_client.requests), int(legacy_protocol_failure))
-            self.assertEqual(resumed.state['settings']['policy_version'], 11)
+            self.assertEqual(resumed.state['settings']['policy_version'], proof.POLICY_VERSION)
             self.assertEqual(resumed.state['reviews'][0]['schema_version'], contract)
             if legacy_protocol_failure:
                 self.assertIsNone(resumed.state['reviews'][0]['response'])
@@ -758,7 +760,7 @@ class DeepInfraWorkflowTests(GuiCase):
                                  ['solver', 'verifier', 'verifier'])
                 self.assertEqual([c['id'] for c in resumed.state['candidates']], ['P1'])
             else:
-                self.assertEqual(resumed.state['reviews'][0]['response'], saved_response)
+                self.assertEqual(resumed.state['reviews'][0]['response'], normalized if contract == 3 else saved_response)
             self.assertEqual(resumed.state['policy_migrations'][0]['from_policy'], old_version)
             self.assertEqual(allowances, {k: resumed.state['settings'][k] for k in allowances})
             self.assertEqual(immutable, {name: (old.directory / 'artifacts' / name).read_bytes() for name in immutable})
@@ -771,7 +773,7 @@ class DeepInfraWorkflowTests(GuiCase):
             with patch.object(resumed, '_run', return_value={}):
                 resumed.resume(paused['id'])
             self.assertEqual(resumed.state['policy_migrations'][-1]['from_policy'], old_version)
-            self.assertEqual(resumed.state['settings']['policy_version'], 11)
+            self.assertEqual(resumed.state['settings']['policy_version'], proof.POLICY_VERSION)
 
         # Actual provider streams use type:null in tool-call continuation
         # chunks. The full GUI turn must execute the tool and send its result

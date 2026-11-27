@@ -370,9 +370,9 @@ def _labels(src, kinds, complete):
                               m.group().replace(word, kind, 1), 'reference-kind')
 
 
-def _places(src, offsets, limit=12):
+def _places(src, offsets):
     lines = sorted({src.line(o) for o in offsets})
-    return lines, ', '.join(map(str, lines[:limit])) + (' …' if len(lines) > limit else '')
+    return lines, ', '.join(map(str, lines))
 
 
 def _pattern(src, offsets, minority, majority, comment, kind='typo'):
@@ -408,7 +408,7 @@ def _variants(src):
         offsets = sorted(o for places in few.values() for o in places)
         lines, shown = _places(src, offsets)
         finding = src.finding(offsets[0], offsets[0] + 1, 'typo', 'suggestion',
-                              f'The paper mixes British and American spellings: {name} forms ({", ".join(sorted(few)[:8])}) '
+                              f'The paper mixes British and American spellings: {name} forms ({", ".join(sorted(few))}) '
                               f'on line(s) {shown}; the other spelling is used {sum(map(len, many.values()))} times.',
                               'Use one spelling throughout.', 'variant')
         finding['quote'] = src.raw[offsets[0]:].split()[0] if src.raw[offsets[0]:].split() else ''
@@ -520,7 +520,7 @@ def _aspell(words):
 
 
 def looks_english(text):
-    words = re.findall(r'[a-zà-ÿ]+', text.lower())[:6000]
+    words = re.findall(r'[a-zà-ÿ]+', text.lower())
     english = sum(w in {'the', 'of', 'and', 'is', 'that', 'we', 'for', 'with', 'this', 'are'} for w in words)
     french = sum(w in {'le', 'la', 'les', 'des', 'est', 'et', 'une', 'que', 'dans', 'pour', 'nous'} for w in words)
     return english > 2 * french
@@ -553,7 +553,6 @@ def lint(lines, *, tex=True, preamble='', complete=True, spelling=True):
     for same in groups.values():
         if len(same) >= REPEATS and 'lines' not in same[0]:  # the same slip many times is one remark with its places
             same[0]['lines'] = [f['start_line'] for f in same]
-            same[0]['comment'] += f' {len(same)} times: lines {", ".join(str(f["start_line"]) for f in same[:12])}' \
-                                  + (' …' if len(same) > 12 else '') + '.'
+            same[0]['comment'] += f' {len(same)} times: lines {", ".join(str(f["start_line"]) for f in same)}.'
             out = [f for f in out if f not in same[1:]]
     return out

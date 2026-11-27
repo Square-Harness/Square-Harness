@@ -203,7 +203,7 @@ class ModesTests(ReviewCase):
         result = runner.start('Check the typos.', source_files=['paper.tex'], max_rounds=5)
         self.assertEqual({call['role'] for call in runner.asked}, {'read', 'typo-check'})
         self.assertEqual((runner.state['level'], runner.state['pipeline'], runner.state['settings']['max_rounds']),
-                         ('low', 'typo-check-v1', 1))
+                         ('high', 'typo-check-v1', 5))
         self.assertEqual(result['status'], 'reviewed')
         self.assertTrue(result['report'].startswith('# Typos and presentation'))
         self.assertIn('Say why the base case holds.', result['report'])
@@ -385,7 +385,7 @@ class FanOutCase(unittest.TestCase):
             self.assertEqual(review['batch_id'], literature['batch_id'])  # one batch, two cards and jobs
             # The literature review: lowest breadth, no manuscript, its own question in public words.
             action = literature['action']
-            self.assertEqual((action['effort'], action['files'], literature['context']['query']), ('low', [], action['request']))
+            self.assertEqual((action['effort'], action['files'], literature['context']['query']), ('high', [], action['request']))
             self.assertIn(BRIEF['question'], action['request'])
             self.assertNotIn('For every integer', action['request'])
             # The answer was not final when the review returned: both workers ran, and the position was written last.

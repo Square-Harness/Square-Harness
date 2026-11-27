@@ -19,7 +19,7 @@ from .review_position import (BRIEF_OUTPUT, BRIEF_POLICY, BRIEF_SCHEMA, POSITION
                               position_prompt, render_position)
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, effort_for
 from .source_tasks import (access_check_source, automatic_source_action, excludes_external_sources, _instruction_text,
-                           _source_lines)
+                           _source_text)
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
 from .model_limits import HOSTED_DS4
@@ -55,7 +55,6 @@ PROOF_PREP_OUTPUT = 2048
 PROOF_PREP_CALLS = 2
 PROOF_PREP_INPUT = 16384
 PROOF_PREP_TOTAL_INPUT = 32768
-PROOF_PREP_REQUEST_CHARS = 4000
 # A Proof started without a prepared task proves the user's request: the request is its visible task
 # (card, Proof page, findings) and this controller note goes to the solver alone (`proof_statement`).
 PROOF_HANDOFF = ('You are the Proof child. Prove the exact original user request in the reference context. '
@@ -123,7 +122,7 @@ def _reference_followup(text, history):
 
 def automatic_reference_action(query, files=(), history=()):
     """Seed a bounded check for an explicit, standalone reference request."""
-    if (files or not isinstance(query, str) or len(query) > 8000
+    if (files or not isinstance(query, str)
             or re.search(r'https?://|www\.|(?<![\w.])\S+\.(?:pdf|tex|md|txt)\b', query, re.I)):
         return None
     text = _instruction_text(query)
@@ -140,7 +139,7 @@ def automatic_reference_action(query, files=(), history=()):
             search_allowed = True
     if not search_allowed:
         return None
-    return {'mode': 'check', 'request': query, 'files': [], 'effort': 'low',
+    return {'mode': 'check', 'request': query, 'files': [], 'effort': 'high',
             'reason': 'Find an appropriate scholarly reference for the exact request and verify its bibliographic metadata.'}
 
 
@@ -275,9 +274,8 @@ def _unrelated_proof_task(request, query):
 
 
 def _handoff_statement(query):
-    """What the solver of a Proof without a prepared task reads as its statement: the note, then the request
-    unless it is long (the reference context holds it in full)."""
-    return PROOF_HANDOFF + ('\n\nORIGINAL REQUEST:\n' + query if len(query) <= 6000 else '')
+    """Retain the original goal when no prepared Proof statement is available."""
+    return PROOF_HANDOFF + '\n\nORIGINAL REQUEST:\n' + query
 
 
 def routed_python_task(state, args):
@@ -302,8 +300,6 @@ def validated_mode_call(content, selection, files=()):
     mode, start = selection['mode'], selection['start']
     if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES + ('investigate',) or type(start) is not int:
         raise ValueError('Unknown selected mode call')
-    if mode == 'investigate' and selection.get('effort') == 'high':
-        raise ValueError('Investigation tasks support Low or Medium effort.')
     token = '@' + mode
     end = start + len(token)
     if (start < 0 or content[start:end] != token
@@ -318,8 +314,6 @@ def validated_mode_call(content, selection, files=()):
         return SUMMARY_REQUEST, 'summarize'
     if not query:
         raise ValueError('Add a request after selecting a mode')
-    if len(query) > 8000:
-        raise ValueError('Mode-call requests are limited to 8000 characters; attach longer material as a file')
     return query, mode
 
 
@@ -356,7 +350,7 @@ class ModeOrchestrator(Orchestrator):
                           or (self.state or {}).get('proof_routing_required'))
         if selected_proof and mode == 'prove':
             chosen = (self.required_effort or (self.state or {}).get('required_effort')
-                      or (self.state or {}).get('proof_routing', {}).get('effort') or 'medium')
+                      or (self.state or {}).get('proof_routing', {}).get('effort') or 'high')
             if args.get('effort') != chosen:
                 raise ValueError(f'The selected Proof effort is {chosen}; preparation cannot change it')
         selected = (self.required_mode or (self.state or {}).get('required_mode') or
@@ -377,9 +371,6 @@ class ModeOrchestrator(Orchestrator):
                 raise ValueError('Unknown worker mode')
             return super()._validate_delegate({**args, 'mode': 'explore'})
         super()._validate_delegate(args)
-        if self._companion_call(args):
-            # Only the controller-created call can start the review's Low-breadth companion.
-            args['effort'] = 'low'
 
     def _worker_files(self, args):
         # New independent assignments already carry their specific source set.
@@ -407,7 +398,7 @@ class ModeOrchestrator(Orchestrator):
                         for p in self.state['pending_calls']))
 
     def _plan_pending(self):
-        """The fixed fan-out of a review: a literature review at its lowest breadth joins the batch of a review
+        """The fixed fan-out of a review: a public literature review joins the batch of a review
         that is about to start, whoever chose the review (the user's @referee, the router, the Assistant). Its
         question is written from the manuscript's title, abstract and introduction, in public words. Without
         online search, or when the request excludes it, the review starts alone and the reply says why no
@@ -434,7 +425,7 @@ class ModeOrchestrator(Orchestrator):
             self._save()
             return
         call = {'id': pending['call']['id'] + '_literature', 'type': 'function', 'function': {'name': 'delegate', 'arguments': {
-            'mode': 'literature', 'request': goal, 'files': [], 'effort': 'low',
+            'mode': 'literature', 'request': goal, 'files': [], 'effort': 'high',
             'reason': 'Place the main results of the reviewed manuscript in the literature, beside its review.'}}}
         state['pending_calls'].insert(state['pending_calls'].index(pending) + 1, {
             'call': copy.deepcopy(call), 'status': 'pending', 'child_id': None, 'batch_id': pending.get('batch_id')})
@@ -456,13 +447,13 @@ class ModeOrchestrator(Orchestrator):
             else:
                 names = [f for f in self._worker_files(args)
                          if Path(f).suffix.lower() in ('.tex', '.ltx', '.latex', '.pdf', '.md', '.txt')]
-                text = '\n'.join(_source_lines(self.agent.workspace, names[0])[0])
-            head = manuscript_head(text)
+                text, _ = _source_text(self.agent.workspace, names[0])
+            head = manuscript_head(text, self.agent.workspace.result_chars)
             self.emit('progress', 'Writing the question of the literature review…')
             user = 'TITLE, ABSTRACT AND INTRODUCTION OF THE MANUSCRIPT:\n' + head
             value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, BRIEF_POLICY, user, BRIEF_SCHEMA, BRIEF_OUTPUT)
-            goal = literature_goal(value, head)
-            copied = copied_phrases(value, head) if goal is None else []
+            goal = literature_goal(value, text)
+            copied = copied_phrases(value, text) if goal is None else []
             if copied:
                 # One more try: a brief that repeats a phrase of the manuscript word for word is dropped whole (its
                 # text would reach a search engine), and the model often keeps one long technical phrase verbatim.
@@ -470,7 +461,7 @@ class ModeOrchestrator(Orchestrator):
                                      + '\n\nYOUR PREVIOUS ANSWER COPIED THESE PHRASES OF THE MANUSCRIPT WORD FOR WORD; restate '
                                      'every sentence in your own words:\n' + '\n'.join('- ' + c for c in copied[:8]),
                                      BRIEF_SCHEMA, BRIEF_OUTPUT)
-                goal = literature_goal(value, head)
+                goal = literature_goal(value, text)
         except (AgentError, CallContextError, ValueError, TypeError, OSError, IndexError, UnicodeError) as exc:
             return None, ('the question of the literature review could not be written from the manuscript '
                           f'({str(exc)[:160] or type(exc).__name__})')
@@ -532,7 +523,7 @@ class ModeOrchestrator(Orchestrator):
         try:
             self.emit('progress', 'Placing the results in the literature…')
             value = bounded_json(self.agent.client, self.agent.model, self.agent.ctx, POSITION_POLICY,
-                                 position_prompt(report, text, references, marks), POSITION_SCHEMA, POSITION_OUTPUT)
+                                 position_prompt(report, text, references, marks, self.agent.workspace.result_chars), POSITION_SCHEMA, POSITION_OUTPUT)
         except (AgentError, CallContextError) as exc:
             return missing_position('the position could not be written from the literature review '
                                     f'({str(exc)[:160] or type(exc).__name__}); that review is on its own card')
@@ -569,11 +560,9 @@ class ModeOrchestrator(Orchestrator):
         prep = self._preparation()
         prep.update(status='fallback', reason=reason)
         chosen = (self.required_effort or self.state.get('required_effort')
-                  or self.state.get('proof_routing', {}).get('effort') or 'medium')
+                  or self.state.get('proof_routing', {}).get('effort') or 'high')
         query = self.state['query']
-        # A request longer than a delegation is named by the controller note; the reference context holds it.
-        request = query if len(query) <= 8000 else _handoff_statement(query)
-        action = {'mode': 'prove', 'request': request, 'files': list(self.state['files']),
+        action = {'mode': 'prove', 'request': query, 'files': list(self.state['files']),
                   'effort': chosen, 'reason': 'Start Proof now from the unchanged original request and context.'}
         self._validate_delegate(action)
         self._save()
@@ -729,13 +718,13 @@ class ModeOrchestrator(Orchestrator):
             allowed = {'delegate'}
         tools = [tool for tool in tools if tool['function']['name'] in allowed]
         chosen = (self.required_effort or self.state.get('required_effort')
-                  or self.state.get('proof_routing', {}).get('effort') or 'medium')
+                  or self.state.get('proof_routing', {}).get('effort') or 'high')
         for tool in tools:
             if tool['function']['name'] == 'delegate':
                 properties = tool['function']['parameters']['properties']
                 properties['mode']['enum'] = ['prove']
                 properties['effort']['enum'] = [chosen]
-                properties['request']['maxLength'] = PROOF_PREP_REQUEST_CHARS
+                properties['request'].pop('maxLength', None)
         exhausted = (prep['calls'] >= PROOF_PREP_CALLS
                      or prep['tokens'] >= PROOF_PREP_CALLS * PROOF_PREP_OUTPUT or self.state.get('force_final'))
         if exhausted:
@@ -794,8 +783,6 @@ class ModeOrchestrator(Orchestrator):
         if function['name'] == 'delegate':
             try:
                 self._validate_delegate(function['arguments'])
-                if len(function['arguments']['request']) > PROOF_PREP_REQUEST_CHARS:
-                    raise ValueError('The prepared task is too long')
                 if _unrelated_proof_task(function['arguments']['request'], self.state['query']):
                     # An earlier record or another statement can pass for the request; prove the request itself.
                     raise ValueError('The prepared task does not restate the current request')
@@ -810,6 +797,8 @@ class ModeOrchestrator(Orchestrator):
         return assistant, ''
 
     def _new_state(self, query, files, history):
+        if self.required_effort or self.required_mode:
+            self.required_effort = 'high'
         super()._new_state(query, files, history)
         previous = getattr(self.agent, 'previous_markdown', None)
         compile_job = getattr(self.agent, 'compile_job', None)
@@ -826,16 +815,16 @@ class ModeOrchestrator(Orchestrator):
             self.state['review_reference'] = copy.deepcopy(self.agent.review_reference)
         if self.required_mode is not None:
             action = {'mode': self.required_mode, 'request': query, 'files': list(files),
-                      'effort': effort_for(self.required_mode, self.required_effort or 'medium'),
+                      'effort': effort_for(self.required_mode, self.required_effort or 'high'),
                       'reason': 'User explicitly selected @' + self.required_mode + '.'}
         elif compile_job:
-            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'low',
+            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'high',
                       'reason': 'Compile the saved Write-Up with its original sources.'}
         elif experiments:
-            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'medium',
+            action = {'mode': 'writeup', 'request': query, 'files': [], 'effort': 'high',
                       'reason': 'Write up the previous result with its saved experiment files.'}
         elif self.local_markdown_conversion:
-            action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'low',
+            action = {'mode': 'writeup', 'request': query, 'files': list(files), 'effort': 'high',
                       'reason': 'Convert the previous answer to LaTeX.' if previous else 'Convert the supplied Markdown file to LaTeX.'}
         else:
             source = access_check_source(query, files)
@@ -936,7 +925,7 @@ class ModeOrchestrator(Orchestrator):
                     raise
                 # The provider refused or was unavailable: answer directly instead of pausing the turn. Any other
                 # routing failure (malformed decision, invalid usage) still stops before an answer.
-                decision = {'route': 'direct', 'effort': 'medium', 'fallback': 'provider_busy',
+                decision = {'route': 'direct', 'effort': 'high', 'fallback': 'provider_busy',
                             'reason': 'Routing was skipped because the model provider was busy.', 'error': str(exc)[:300]}
                 self._routing_fell_back = True
                 self.emit('notice', 'The model provider was busy while choosing a workflow, so this message is answered '

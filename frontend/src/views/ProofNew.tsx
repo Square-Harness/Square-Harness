@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { api, type WorkspaceFile } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
-import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
+import { describeLimits, effortLimits } from '../effort'
 import { Markdown } from '../components/Markdown'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
@@ -21,13 +21,12 @@ export function ProofNew() {
   const defaults = status?.defaults
   const [goal, setGoal] = useState('')
   const [files, setFiles] = useState<string[]>([])
-  const [rounds, setRounds] = useState(3)
+  const [rounds, setRounds] = useState(5)
   const [tokens, setTokens] = useState<number | null>(null)
-  const [minutes, setMinutes] = useState(15)
+  const [minutes, setMinutes] = useState(30)
   const [solveTokens, setSolveTokens] = useState(32768)
   const [verifyTokens, setVerifyTokens] = useState(16384)
   const [ctx, setCtx] = useState(40960)
-  const [level, setLevel] = useState<EffortLevel>('medium')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
@@ -38,22 +37,15 @@ export function ProofNew() {
     setFiles((items) => [...new Set([...items, ...paths])])
   })
 
-  // The form opens on the Medium effort; the context is the launch context.
-  const applyLevel = (next: EffortLevel) => {
+  useEffect(() => {
     if (!defaults) return
-    const limits = effortLimits('proof', defaults, next)
+    const limits = effortLimits('proof', defaults)
     setRounds(limits.rounds!)
     setTokens(limits.tokens)
     setMinutes(Math.round(limits.seconds / 60))
     setSolveTokens(limits.solve_tokens!)
     setVerifyTokens(limits.verify_tokens!)
-  }
-  useEffect(() => {
-    if (!defaults) return
-    applyLevel(level)
     setCtx(defaults.ctx)
-    // Only when the launch defaults arrive.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaults])
 
   useEffect(() => {
@@ -65,22 +57,15 @@ export function ProofNew() {
     return [...new Set(goal.match(MENTIONED) || [])].filter((name) => known.has(name) && !files.includes(name))
   }, [goal, files, workspace])
 
-  const preset = defaults ? effortLimits('proof', defaults, level) : null
-  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.round(preset.seconds / 60)
-    || solveTokens !== preset.solve_tokens || verifyTokens !== preset.verify_tokens)
-  const chooseLevel = (next: EffortLevel) => {
-    setLevel(next)
-    applyLevel(next)
-  }
 
   const running = capacityFull(snapshot, status)
   // The rules the server applies, said with the labels of this form.
-  const invalid = (value: number, low: number, high = Infinity) => !Number.isInteger(value) || value < low || value > high
-  const limitError = invalid(rounds, 1, 100) ? 'Attempts must be a whole number from 1 to 100.'
+  const invalid = (value: number, low: number, high = Number.MAX_SAFE_INTEGER) => !Number.isInteger(value) || value < low || value > high
+  const limitError = invalid(rounds, 1) ? 'Attempts must be a positive whole number.'
     : tokens !== null && invalid(tokens, 512) ? 'The total output token limit must be at least 512 tokens, or blank for no limit.'
     : invalid(minutes, 1) ? 'Time must be at least 1 minute.'
-    : invalid(solveTokens, 128, 1_000_000) ? 'The solve output ceiling must be from 128 to 1,000,000 tokens.'
-    : invalid(verifyTokens, 128, 1_000_000) ? 'The review output ceiling must be from 128 to 1,000,000 tokens.'
+    : invalid(solveTokens, 128) ? 'The solve output ceiling must be at least 128 tokens.'
+    : invalid(verifyTokens, 128) ? 'The review output ceiling must be at least 128 tokens.'
     : invalid(ctx, 2048) ? 'Context must be at least 2,048 tokens.' : ''
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -162,19 +147,17 @@ export function ProofNew() {
         <div className="entry">
           <span className="in-margin" />
           <div>
-            {defaults && <EffortSlider kind="proof" defaults={defaults} level={level} onLevel={chooseLevel} custom={custom}
-              current={{ rounds, tokens, seconds: minutes * 60, solve_tokens: solveTokens, verify_tokens: verifyTokens }} />}
-            <p className="field-hint">Effort sets the number of approaches and checks. Work is saved when paused. Optional limits stay with the job when you resume.</p>
+            <p className="field-hint">{describeLimits('proof', { rounds, tokens, seconds: minutes * 60, solve_tokens: solveTokens, verify_tokens: verifyTokens })}.</p>
             <Collapse summary="Advanced limits">
               <div className="field-grid">
-                <NumberField label="Attempts" value={rounds} onChange={setRounds} min={1} max={100}
+                <NumberField label="Attempts" value={rounds} onChange={setRounds} min={1}
                   hint="The initial solve and each repair or continuation" />
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens}
                   hint="Optional. Includes thinking across all calls; leave blank for no cumulative limit." />
                 <NumberField label="Time" value={minutes} onChange={setMinutes} min={1} suffix="min" />
-                <NumberField label="Solve output ceiling" value={solveTokens} onChange={setSolveTokens} min={128} max={1_000_000} step={128}
+                <NumberField label="Solve output ceiling" value={solveTokens} onChange={setSolveTokens} min={128} step={128}
                   hint="Tokens per solve, including thinking" />
-                <NumberField label="Review output ceiling" value={verifyTokens} onChange={setVerifyTokens} min={128} max={1_000_000} step={128}
+                <NumberField label="Review output ceiling" value={verifyTokens} onChange={setVerifyTokens} min={128} step={128}
                   hint="Tokens per whole-proof review, including thinking" />
                 <NumberField label="Context" value={ctx} onChange={setCtx} min={2048} step={1024}
                   hint="At least 2,048 tokens. Must hold the problem, the pinned text and a full answer." />

@@ -431,7 +431,8 @@ model settings from B4. Selecting a different profile never rewrites saved
 jobs or grants them new allowances on resume.
 
 DS4 uses 384,000 output tokens as the ceiling for substantive calls across its
-modes. Low, Medium and High allow 1, 3 and 5 solver passes in Proof. The total output allowance
+modes. All new jobs use High effort. Proof defaults to five solver passes,
+and operators can set `--proof-rounds` explicitly. The total output allowance
 includes one possible review-format retry per pass. See the budget table in
 [guide.md](guide.md). The common per-call time guard defaults to three hours;
 use `--proof-call-seconds SECONDS` for an explicit value in either the DS4
@@ -439,7 +440,7 @@ launcher or a manual launch.
 The workflow time allowance is derived from the permitted calls instead of the
 old short effort-specific deadline. Explicit token and time flags remain hard
 limits; they may stop a job before its maximum pass count. The scoped API key's
-spending allowance is separate and remains unchanged by selecting an effort.
+spending allowance is independent of workflow settings.
 
 The profile pins `deepseek-ai/DeepSeek-V4.1-Flash-1017` at
 `https://api.deepinfra.com/v1/openai`. It uses ordinary streamed Chat
@@ -911,7 +912,7 @@ Install the parts the user chose in step 1:
 
 - **Python sandbox** (`@python_lab`, `@sanity_check`): requires Docker (Docker
   Engine on Linux, Docker Desktop on macOS). From the repository, run
-  `.venv/bin/python -m mathagent.numerics build`, then
+  `.venv/bin/python -m mathagent.numerics build` (builds the required version 3 image and leaves an installed version 2 available for older checkouts), then
   `.venv/bin/python -m mathagent.numerics doctor`; the doctor must report the
   image and a successful test run. Without Docker, the harness works and these
   two skills explain what is missing. Snap-packaged Docker makes `doctor` report

@@ -91,7 +91,7 @@ class StandardReferenceSearch:
     def _standard_queue(self, provider, query, label):
         if not self.literature or not query.strip() or provider in self._standard_health():
             return False
-        if self._requests() >= self.state['settings']['max_requests'] or self._out_of_time(.9):
+        if self._requests() >= self.state['settings']['max_requests'] or self._out_of_time(1):
             return False
         arguments = {'provider': provider, 'query': query, 'limit': 8 if label == 'standard_discover' else 5}
         if provider == 'arxiv' and self.state.get('standard_author'):
@@ -127,9 +127,9 @@ class StandardReferenceSearch:
                 if str(earlier.get('year') or '') == str(record.get('year') or ''):
                     for field in ('abstract', 'review'):
                         if not earlier.get(field) and record.get(field):
-                            earlier[field] = str(record[field])[:2400]
+                            earlier[field] = str(record[field])
                             earlier['description_source_url'] = record.get('url')
-                            if len(str(record[field])) > 2400 or record.get(field + '_truncated'):
+                            if record.get(field + '_truncated'):
                                 earlier[field + '_truncated'] = True
                 if item in archive:
                     archive.remove(item)
@@ -140,10 +140,6 @@ class StandardReferenceSearch:
         # Retrieval is already bounded by the workflow's request and character
         # budgets. A first-come cutoff here hid later providers' relevant hits.
         saved = copy.deepcopy(record)
-        for name in ('review', 'abstract', 'source'):
-            if isinstance(saved.get(name), str) and len(saved[name]) > 2400:
-                saved[name] = saved[name][:2400]
-                saved[name + '_truncated'] = True
         saved.pop('references', None)
         saved.pop('reference_texts', None)
         number = max(s.get('standard_record_number', 0),
@@ -197,11 +193,7 @@ class StandardReferenceSearch:
                         ('crossref', ' '.join((surname, title))),
                         ('openlibrary' if kind != 'article' else 'zbmath',
                          ' '.join((surname, short)) if kind != 'article' else 'ti:' + short)]
-            if candidate.get('source') != 'caller':
-                attempts = attempts[:1]  # a recalled guess gets one search; the topic search needs the rest
             stage = candidate.get('standard_search_stage', 0)
-            if self._requests() >= max(1, s['settings']['max_requests'] - 5):
-                stage = len(attempts)
             while stage < len(attempts):
                 provider, query = attempts[stage]
                 stage += 1
@@ -262,12 +254,6 @@ class StandardReferenceSearch:
                     [('crossref', query), ('zbmath', query), ('arxiv', query), ('crossref', alternate), ('crossref', relaxed)]
                     + ([('openlibrary', query)] if kind == 'any' else []))
         stage = s.get('standard_discovery_stage', 0)
-        successes = sum(1 for e in evidence if any(self._standard_eligible(record)
-                         for record in self._records([e])))
-        if (not s.get('standard_discovery_continued') and
-                (author and s.get('standard_pool') or successes >= 2 or len(s.get('standard_pool', [])) >= 10)):
-            s['phase'] = 'standard_select' if s.get('standard_pool') else 'answer'
-            return
         while stage < len(attempts):
             provider, query = attempts[stage]
             stage += 1
@@ -311,7 +297,7 @@ class StandardReferenceSearch:
             'not unresolved requirements. Reserve partial coverage and unresolved for actual gaps in the QUESTION. '
             'Return compact JSON: {"selections":[{"id":"R1","reason":"why useful from the indexed description",'
             '"coverage":"supported|partial|unknown","limitations":"unverified scope or exact hypotheses"}],'
-            '"unresolved":"remaining question or empty"}. Select at most two. If none fits, selections is empty. '
+            '"unresolved":"remaining question or empty"}. Select the records needed to answer the question; respect any number the user requests. If none fits, selections is empty. '
             'A truncated abstract/review is partial evidence; do not infer absent content. '
             'Never name, recommend or allude to any work outside these records, including in unresolved, '
             'reason or limitations. Unresolved describes missing mathematical scope only, not other references.')
@@ -337,7 +323,7 @@ class StandardReferenceSearch:
         for candidate in previous:
             candidate['selected'] = False
         from .refcheck import _clean_candidate
-        for item in items[:2]:
+        for item in items:
             if (not isinstance(item, dict) or not isinstance(item.get('id'), str)
                     or item['id'] not in known or item['id'] in selected):
                 continue
@@ -369,9 +355,9 @@ class StandardReferenceSearch:
                 coverage = 'unknown'
             candidate['selected'] = True
             candidate['suitability'] = {
-                'reason': str(item.get('reason') or '')[:800],
+                'reason': str(item.get('reason') or ''),
                 'coverage': coverage,
-                'limitations': str(item.get('limitations') or '')[:800],
+                'limitations': str(item.get('limitations') or ''),
                 'basis': 'indexed_description' if described else 'metadata_only'}
             if not described:
                 candidate['suitability']['limitations'] = 'Only bibliographic metadata was available; exact assumptions and coverage remain unchecked.'
@@ -379,11 +365,11 @@ class StandardReferenceSearch:
         s['standard_selection_done'] = True
         s['standard_selection_usable'] = True
         s['standard_selection_signature'] = signature
-        s['standard_unresolved'] = str(value.get('unresolved') or '')[:1200] if isinstance(value, dict) else ''
+        s['standard_unresolved'] = str(value.get('unresolved') or '') if isinstance(value, dict) else ''
         # Search by topic again only when no record fits. An "unresolved" note or a
         # partial coverage nearly always restates unread places; in live checks a
         # second round never changed the selection and doubled the waiting time.
-        if not selected and s['standard_selection_calls'] < 3 and not s.get('standard_discovery_continued'):
+        if not selected and not s.get('standard_discovery_continued'):
             # Rejected records are archived (rediscovery restores their R identifiers),
             # so the next selection judges what the topic search adds.
             s['standard_discovery_continued'] = True

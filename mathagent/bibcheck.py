@@ -13,7 +13,6 @@ import unicodedata
 
 from .writeup import entry_identifiers
 
-MAX_ENTRIES = 40
 VERDICTS = {
     'matches': 'Matches a registry record',
     'differs': 'Record found; metadata differs',
@@ -94,16 +93,16 @@ def parse_entries(text):
         authors = [a.strip() for a in re.split(r'\s+and\s+', fields.get('author', '')) if a.strip()]
         raw = ', '.join(v for v in (fields.get('author'), fields.get('title'), fields.get('journal') or fields.get('booktitle'),
                                     fields.get('year')) if v)
-        entries.append({'key': match.group(2), 'raw': raw[:600], 'title': fields.get('title', ''), 'authors': authors,
+        entries.append({'key': match.group(2), 'raw': raw, 'title': fields.get('title', ''), 'authors': authors,
                         'year': fields.get('year', '')[:4], 'venue': fields.get('journal') or fields.get('booktitle') or '',
                         'identifiers': sorted(entry_identifiers(' '.join(
                             [('doi:' + fields['doi']) if fields.get('doi') else '',
                              ('arXiv:' + fields['eprint']) if fields.get('eprint') else '', fields.get('url', '')])))})
     if entries:
-        return entries[:MAX_ENTRIES]
+        return entries
     items, current = [], None
     for line in text.splitlines():
-        head = re.match(r'\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)]|[-*•])\s+(.*)', line)
+        head = re.match(r'\s*(?:\[\d+\]|\(\d+\)|\d+[.)]|[-*•])\s+(.*)', line)
         if head:
             current = [head.group(1)]
             items.append(current)
@@ -121,9 +120,9 @@ def parse_entries(text):
         lead = raw[:quoted.start()] if quoted else raw.split(',')[0]
         authors = [a for a in re.findall(r'[A-ZÀ-Ý][^\W\d_]+(?:-[A-ZÀ-Ý][^\W\d_]+)?', lead)
                    if a.lower() not in _STOP and len(a) > 2]
-        entries.append({'key': '', 'raw': raw[:600], 'title': quoted.group(1).strip() if quoted else '', 'authors': authors[:6],
+        entries.append({'key': '', 'raw': raw, 'title': quoted.group(1).strip() if quoted else '', 'authors': authors,
                         'year': year.group() if year else '', 'venue': '', 'identifiers': identifiers})
-    return entries[:MAX_ENTRIES] if len(entries) >= 2 else []
+    return entries if len(entries) >= 2 else []
 
 
 _PLACE = re.compile(r'\b(?:theorem|lemma|proposition|corollary|definition|remark|example|section|chapter|page|pp?\.|'
@@ -151,7 +150,7 @@ def is_reference_list(text):
                 if depth <= 0:
                     inside, depth = False, 0
                 continue
-        elif re.match(r'\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)]|[-*•])\s+', line):
+        elif re.match(r'\s*(?:\[\d+\]|\(\d+\)|\d+[.)]|[-*•])\s+', line):
             inside = True
             continue
         elif inside and line.strip() and line[:1] in (' ', '\t'):
@@ -176,7 +175,7 @@ def attached_material(workspace, files):
             continue
         if name.lower().endswith('.bib') or is_reference_list(text):
             parts.append(text)
-    return '\n\n'.join(parts)[:200_000]
+    return '\n\n'.join(parts)
 
 
 def _compare(entry, record):
@@ -199,7 +198,7 @@ def _compare(entry, record):
                 part for part in (('the registry also lists ' + ', '.join(missing)) if missing else '',
                                   ('not in the registry: ' + ', '.join(extra)) if extra else '') if part))
     elif actual and not (actual & ({_surname(a) for a in entry['authors']} | _words(entry['raw']))):
-        differences.append('authors: the registry lists ' + ', '.join(record.get('authors')[:4]))
+        differences.append('authors: the registry lists ' + ', '.join(record.get('authors')))
     if entry['title'] and theirs and overlap < .95:
         differences.append(f'title: the registry has “{record.get("title")}”')
     return overlap, differences
@@ -223,7 +222,8 @@ def check_entry(literature, entry):
     result = {'entry': entry['raw'], 'key': entry['key'], 'verdict': 'not_found', 'record': None, 'differences': [],
               'notes': [], 'asked': []}
     failures = 0
-    for identifier in entry['identifiers'][:2]:
+    resolved = []
+    for identifier in entry['identifiers']:
         value = json.loads(literature.execute('lookup_identifier', {'identifier': identifier}))
         result['asked'].append(identifier)
         if value.get('error'):
@@ -231,23 +231,26 @@ def check_entry(literature, entry):
             result['notes'].append(f'{identifier}: {value["error"][:120]}')
             continue
         if value.get('found') is False:
-            result.update(verdict='identifier_not_found')
             result['notes'].append(f'{identifier}: {value.get("note") or "not found"}')
-            return result
+            resolved.append(('identifier_not_found', None, []))
+            continue
         record = value.get('record') or {}
         if record.get('withdrawn'):
             result['notes'].append(f'{identifier}: withdrawn per arXiv ({record.get("comment") or "withdrawal notice"})')
         if record.get('journal_ref'):
             result['notes'].append(f'{identifier}: journal reference {record["journal_ref"]}')
+        verdict, differences = 'matches', []
         if record.get('title'):
             overlap, differences = _compare(entry, record)
             if overlap < .5 and (entry['title'] or len(_words(entry['raw'])) >= 4):
-                result.update(verdict='identifier_mismatch', record=record,
-                              differences=[f'{identifier} is “{record["title"]}”'])
-                return result
-            result.update(verdict='differs' if differences else 'matches', record=record, differences=differences)
-            return result
-        result.update(verdict='matches', record=record)
+                verdict, differences = 'identifier_mismatch', [f'{identifier} is “{record["title"]}”']
+            elif differences:
+                verdict = 'differs'
+        resolved.append((verdict, record, differences))
+    if resolved:
+        priority = ['identifier_mismatch', 'identifier_not_found', 'differs', 'matches']
+        verdict, record, _ = min(resolved, key=lambda row: priority.index(row[0]))
+        result.update(verdict=verdict, record=record, differences=list(dict.fromkeys(d for _, _, ds in resolved for d in ds)))
         return result
     query = ' '.join(entry['raw'].split())[:300]
     for provider, search in (('crossref', query),
@@ -271,7 +274,7 @@ def check_entry(literature, entry):
 
 
 def _budget_left(literature):
-    return literature.max_requests - literature.stats['requests'] >= 3 and literature.max_chars - literature.stats['returned_chars'] >= 4000
+    return literature.max_chars - literature.stats['returned_chars'] >= 100
 
 
 def check_entries(literature, entries, *, stop=lambda: False):
@@ -295,11 +298,11 @@ def compose(results, *, online=True):
         out += ['*Web research is off: only registry answers already in the local cache were used.*', '']
     for n, r in enumerate(results, 1):
         label = f'`{r["key"]}` ' if r['key'] else ''
-        out.append(f'{n}. {label}{r["entry"][:300]}')
+        out.append(f'{n}. {label}{r["entry"]}')
         out.append(f'   - **{VERDICTS[r["verdict"]]}**')
         record = r.get('record') or {}
         if record.get('title'):
-            who = ', '.join((record.get('authors') or [])[:4])
+            who = ', '.join(record.get('authors') or [])
             year = record.get('year') or str(record.get('published') or '')[:4]
             ident = record.get('identifier') or (('doi:' + record['doi']) if record.get('doi') else '')
             link = record.get('url') or ''

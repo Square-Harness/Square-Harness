@@ -42,6 +42,7 @@ from ..ledger import _directory
 from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
 from ..model_limits import HOSTED_DS4
 from .. import images
+from ..literature import UNLIMITED_SOURCE
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
@@ -113,12 +114,12 @@ def _int(body, key, low=None, high=None):
 
 
 def _added_seconds(body, key):
-    """An explicit extra working time on resume: 0 (none) up to one day."""
+    """An explicit extra working time on resume: a finite, nonnegative number of seconds."""
     value = body.get(key)
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 86400:
-        raise ValueError(f'{key} must be a number of seconds from 0 to 86400')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= MAX_ADD_TOKENS:
+        raise ValueError(f'{key} must be a finite, nonnegative number of seconds within the JSON-safe range')
     return value
 
 
@@ -140,17 +141,17 @@ def _flag(body, key):
 
 def _files(body, key='source_files'):
     value = body.get(key) or []
-    if not isinstance(value, list) or len(value) > 20 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in value):
-        raise ValueError('Pinned files must be a list of at most 20 workspace-relative paths')
+    if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
+        raise ValueError('Pinned files must be a list of workspace-relative paths')
     return value
 
 
-def _text(body, key, limit):
+def _text(body, key, limit=None):
     value = body.get(key)
     # Text made only of control characters and spaces is as empty as whitespace: refuse it before any model call.
     if not isinstance(value, str) or not ''.join(ch for ch in value if unicodedata.category(ch) != 'Cc').strip():
         raise ValueError(f'Provide {key}')
-    if len(value) > limit:
+    if limit is not None and len(value) > limit:
         raise ValueError(f'{key} is limited to {limit} characters')
     return value
 
@@ -398,8 +399,8 @@ def files(h, body):
     # explorer's search), relative to the interface root.
     hub = h.server.hub
     everywhere = (h.query.get('scope') or [''])[0] == 'root'
-    records = store.list_files(hub.base if everywhere else hub.root, limit=2001)
-    return {'files': records[:2000], 'truncated': len(records) > 2000}
+    records = store.list_files(hub.base if everywhere else hub.root)
+    return {'files': records, 'truncated': False}
 
 
 @route('GET', '/api/files/browse')
@@ -481,10 +482,10 @@ def proof_start(h, body):
     if _flag(body, 'literature'):
         raise ValueError('Proof jobs use the pinned text only, with no tools: pin the sources the proof needs')
     task = h.server.hub.start_proof(
-        _text(body, 'goal', 60000), source_files=_files(body),
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 512),
-        seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, 1_000_000),
-        verify_tokens=_int(body, 'verify_tokens', 128, 1_000_000), ctx=_int(body, 'ctx', 2048),
+        _text(body, 'goal'), source_files=_files(body),
+        rounds=_int(body, 'rounds', 1, MAX_ADD_ROUNDS), tokens=_int(body, 'tokens', 512),
+        seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, MAX_ADD_TOKENS),
+        verify_tokens=_int(body, 'verify_tokens', 128, MAX_ADD_TOKENS), ctx=_int(body, 'ctx', 2048),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
@@ -558,13 +559,13 @@ def research_start(h, body):
     if variant is not None and variant not in ('quick', 'review', 'journal', 'typos', 'explain'):
         raise ValueError('variant must be quick, review, typos or explain (journal, the former detailed review, is the review)')
     target = body.get('target') or ''
-    if not isinstance(target, str) or len(target) > 200:
-        raise ValueError('target is a short text, at most 200 characters')
+    if not isinstance(target, str):
+        raise ValueError('The review target must be text')
     task = h.server.hub.start_research(
-        body.get('kind'), _text(body, 'goal', 20000), source_files=_files(body), variant=variant, target=target,
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        body.get('kind'), _text(body, 'goal'), source_files=_files(body), variant=variant, target=target,
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
-        requests=_int(body, 'requests', 0, 1000), chars=_int(body, 'chars', 1000, 1_000_000),
+        requests=_int(body, 'requests', 0, UNLIMITED_SOURCE), chars=_int(body, 'chars', 1000, UNLIMITED_SOURCE),
         online=_flag(body, 'online'), queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
@@ -719,13 +720,13 @@ def chat_settings(h, body, id):
 
 @route('POST', '/api/chats/' + UUID + '/messages')
 def chat_message(h, body, id):
-    return {'task': h.server.hub.chat(id, _text(body, 'content', 60000), files=_files(body, 'files'),
+    return {'task': h.server.hub.chat(id, _text(body, 'content'), files=_files(body, 'files'),
                                      queue=bool(_flag(body, 'queue'))).summary()}
 
 
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
-    content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
+    content, mode = validated_mode_call(_text(body, 'content'), body.get('mode_call'), _files(body, 'files'))
     task = h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode,
                               required_effort=(body.get('mode_call') or {}).get('effort'), queue=bool(_flag(body, 'queue')))
     # A follow-up queued behind the running turn has state 'queued'; cancel it with /api/queue/<task>/cancel.
@@ -756,12 +757,12 @@ def route_start(h, body, id, index):
     if not isinstance(raw, dict):
         raise ValueError('limits must be an object')
     limits = {key: value for key, value in (
-        ('rounds', _int(raw, 'rounds', 1, 100)), ('tokens', _int(raw, 'tokens', 512)),
-        ('solve_tokens', _int(raw, 'solve_tokens', 128, 1_000_000)),
-        ('verify_tokens', _int(raw, 'verify_tokens', 128, 1_000_000)),
+        ('rounds', _int(raw, 'rounds', 1, MAX_ADD_ROUNDS)), ('tokens', _int(raw, 'tokens', 512)),
+        ('solve_tokens', _int(raw, 'solve_tokens', 128, MAX_ADD_TOKENS)),
+        ('verify_tokens', _int(raw, 'verify_tokens', 128, MAX_ADD_TOKENS)),
         ('input_tokens', _int(raw, 'input_tokens', 2048)), ('seconds', _seconds(raw, 'seconds')),
-        ('requests', _int(raw, 'requests', 0, 1000)), ('chars', _int(raw, 'chars', 1000, 1_000_000))) if value is not None}
-    task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request', 60000),
+        ('requests', _int(raw, 'requests', 0, UNLIMITED_SOURCE)), ('chars', _int(raw, 'chars', 1000, UNLIMITED_SOURCE))) if value is not None}
+    task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request'),
                                     _files(body, 'files'), limits)
     return {'task': task.summary()}
 
@@ -915,12 +916,12 @@ def writeup_start(h, body):
     if not isinstance(notes, str) or not isinstance(body.get('output') or '', str):
         raise ValueError('notes and output must be text')
     task = h.server.hub.start_writeup(
-        _text(body, 'goal', 20000), source_files=_files(body, 'files' if body.get('files') is not None else 'source_files'),
+        _text(body, 'goal'), source_files=_files(body, 'files' if body.get('files') is not None else 'source_files'),
         template_files=_files(body, 'template_files'),
         template=template if isinstance(template, str) and template else None,
         save_template=save_as if isinstance(save_as, str) and save_as.strip() else None,
         notes=notes, output=body.get('output') or '',
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
@@ -1014,11 +1015,11 @@ def style_start(h, body):
     name, goal = body.get('name'), body.get('goal') or ''
     if not isinstance(name, str) or not name.strip():
         raise ValueError('Name the style')
-    if not isinstance(goal, str) or len(goal) > 20000:
-        raise ValueError('goal must be text of at most 20000 characters')
+    if not isinstance(goal, str):
+        raise ValueError('goal must be text')
     task = h.server.hub.start_style(
         goal, name=name.strip(), source_files=_files(body), template_files=_files(body, 'template_files'),
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}

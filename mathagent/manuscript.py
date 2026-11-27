@@ -341,7 +341,7 @@ def _parse_tex(lines, preamble=''):
         match = TEX_BIBITEM.search(line)
         if match or '\\end{thebibliography}' in line:
             if bib_key:
-                result['bibliography'][bib_key] = ' '.join(l.strip() for l in clean[bib_start - 1:number - (0 if not match else 1)])[:400]
+                result['bibliography'][bib_key] = ' '.join(l.strip() for l in clean[bib_start - 1:number - (0 if not match else 1)])
             bib_key, bib_start = (match.group(1).strip(), number) if match else (None, None)
     if open_proof is not None:
         open_proof[1] = len(lines)
@@ -431,7 +431,7 @@ def _section_proofs(result, units, clean, inside=False):
         owners = _owners_named(units, match.group(1)) if match else []
         if not owners:
             opening = ' '.join(line.strip() for line in clean[sec['line']:min(end, sec['line'] + 12)] if line.strip())
-            said = SECTION_PROVES.search(opening[:1200])
+            said = SECTION_PROVES.search(opening)
             owners = _owners_named(units, said.group(1)) if said else []
         for owner in owners:
             if owner.get('statement') and sec['line'] <= owner['statement'][0] <= end:
@@ -505,7 +505,7 @@ def _parse_text(lines, fmt):
             events.append(('references', number, None))
             boundaries.add(number)
             continue
-        if re.match(r'^\s*(?:#{1,6}\s*)?abstract\b', stripped, re.I) and result['abstract'] is None and number < 200:
+        if re.match(r'^\s*(?:#{1,6}\s*)?abstract\b', stripped, re.I) and result['abstract'] is None:
             result['abstract'] = [number, number]
         if heading:
             title = heading.group(2).strip('*_ ')
@@ -551,7 +551,7 @@ def _parse_text(lines, fmt):
             boundaries.add(number)
     if result['abstract']:
         nxt = min([b for b in boundaries if b > result['abstract'][0]] or [len(lines) + 1])
-        result['abstract'][1] = min(nxt - 1, result['abstract'][0] + 40)
+        result['abstract'][1] = nxt - 1
     ordered = sorted(boundaries)
 
     def next_boundary(after):
@@ -701,12 +701,12 @@ def _text_bibliography(lines, start):
         match = re.match(r'^\s*\[(\w{1,12})\]\s+(.*)', line)
         if match:
             if key:
-                entries[key] = ' '.join(buffer)[:400]
+                entries[key] = ' '.join(buffer)
             key, buffer = match.group(1), [match.group(2).strip()]
         elif key and line.strip():
             buffer.append(line.strip())
     if key:
-        entries[key] = ' '.join(buffer)[:400]
+        entries[key] = ' '.join(buffer)
     return entries
 
 

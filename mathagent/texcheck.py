@@ -24,6 +24,7 @@ mathematics and the arguments of \\ref, \\label, \\cite... are blanked before th
 positions. These are heuristics: a finding is a point to look at, and the gate (`GATE`) says which ones
 keep a document a draft.
 """
+from bisect import bisect_left
 import re
 
 CATEGORIES = ('BLOCKER', 'MATH', 'PROSE', 'LAYOUT', 'FIDELITY')
@@ -110,9 +111,6 @@ _LOG_REFERENCE = re.compile(r"(Reference|Citation) [`'‘]([^'’\n]+)['’] on 
 _LOG_LABEL = re.compile(r"Label [`'‘]([^'’\n]+)['’] multiply defined")
 _LOG_GLYPH = re.compile(r'Missing character: There is no (\S+)')
 _NUMBER = re.compile(r'(?<![\w.{_^\\])\d+(?:[.,]\d+)?(?![\w}])')
-_PER_RULE = 12  # findings kept per rule: enough to fix, not a flood
-
-
 def _blank(match):
     return re.sub(r'[^\n]', ' ', match.group(0))
 
@@ -125,14 +123,12 @@ def finding(category, rule, message, excerpt='', line=None):
 def check(document, body_line, log='', material='', kind=None, points_total=None):
     """Findings on the body of `document` (from line `body_line`), its compile `log` and the `material`. `kind` is
     the outline's kind of document; for an exam, `points_total` is the total the request asks for, if any."""
-    out, kept = [], {}
+    out = []
+    newlines = [m.start() for m in re.finditer(r"\n", document)]
 
     def add(category, rule, message, excerpt='', position=None, line=None):
-        if kept.get(rule, 0) >= _PER_RULE:
-            return
-        kept[rule] = kept.get(rule, 0) + 1
         out.append(finding(category, rule, message, excerpt,
-                           line if position is None else document.count('\n', 0, position) + 1))
+                           line if position is None else bisect_left(newlines, position) + 1))
 
     lines = document.split('\n')
     start = len('\n'.join(lines[:max(0, body_line - 1)])) + (1 if body_line > 1 else 0)
@@ -231,7 +227,7 @@ def check(document, body_line, log='', material='', kind=None, points_total=None
     for name, number, message in file_line_errors(log):
         add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip(), '' if name == 'document.tex' else name,
             line=int(number) if name == 'document.tex' else None)
-    if not kept.get('latex-error'):
+    if not any(f['rule'] == 'latex-error' for f in out):
         for message in re.findall(r'^! (.+)$', log, re.M):
             add('BLOCKER', 'latex-error', 'LaTeX error: ' + message.strip())
     reported = set()

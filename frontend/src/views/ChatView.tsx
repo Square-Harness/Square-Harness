@@ -8,7 +8,7 @@ import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, CopyButton, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon, StopIcon } from '../components/Icons'
-import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
+import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { ProjectSelector } from '../components/Projects'
@@ -84,15 +84,13 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
 const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' || mode === 'investigate' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'typo_check', 'quick_review', 'explain'].includes(mode) ? 'research' : null
-// A review and a typo check have one depth: their level names a budget and is never chosen or shown.
-const levelOf = (mode: RouteMode, effort?: string): EffortLevel => FIXED_EFFORT[mode] ?? (isLevel(effort) ? effort : 'medium')
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'investigate' | 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
   mode !== 'critic' && mode !== 'free' && mode !== 'investigate' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
 const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' || mode === 'typo_check' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
-const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
+const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'high'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
@@ -123,12 +121,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const [draft, setDraft] = useState(() => kept?.draft || loadDraft(id))
   useEffect(() => { saveDraft(id, draft) }, [id, draft])
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(() => mode === 'free' ? typedCall(draft, true) : null)
-  // null: no effort named, so the harness picks its default for the mode.
-  const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
-  const selectCall = (next: ModeCall | null) => {
-    if (next?.mode !== selectedCall?.mode) setSelectedEffort(null)
-    setSelectedCall(next)
-  }
   const [attachments, setAttachments] = useState<string[]>(kept?.attachments || [])
   const [deletedNotice, setDeletedNotice] = useState(!!kept)
   const defaultProject = app.projects?.some((project) => project.id === app.projectFilter) ? app.projectFilter : null
@@ -160,7 +152,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       if ((draft.trim() || attachments.length) && !window.confirm('Start a new conversation in this project? Your unsent message and attachments will be cleared.')) {
         event.preventDefault(); return
       }
-      setDraft(''); setAttachments([]); setSelectedCall(null); setSelectedEffort(null); setSendError(''); createdChat.current = null
+      setDraft(''); setAttachments([]); setSelectedCall(null); setSendError(''); createdChat.current = null
     }
     window.addEventListener('square-new-project-chat', prepare)
     return () => window.removeEventListener('square-new-project-chat', prepare)
@@ -238,7 +230,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     }
     // A message that is only a mode name ("@summarize") is that call, picked from the menu or not.
     const call = validCall(raw, selectedCall) ? selectedCall : imageOnlyCall || (raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null)
-    const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
+    const modeCall = free && text === undefined ? callPayload(raw, call) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
     const queue = canQueue
@@ -315,7 +307,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const sentHere = useMemo(() => sentMessages(data?.transcript || []), [data?.transcript])
   const recall = useRecall(sentHere.length ? sentHere : recentMessages(), draft, (text) => {
     setDraft(text)
-    selectCall(free ? typedCall(text, true) : null)
+    setSelectedCall(free ? typedCall(text, true) : null)
   })
   // Esc in the message box pauses the running turn, as the Pause button does.
   const boxKeys = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -396,8 +388,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <PinnedImages paths={attachments} onRemove={(path) => setAttachments((items) => items.filter((item) => item !== path))} />
         {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
-          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
-            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !FIXED_EFFORT[selectedCall.mode] && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
+          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={setSelectedCall}
             onSend={() => { send() }} onKey={boxKeys} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -731,7 +722,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   // cancelled before running, can be started (again) as the model chose them.
   const start = (activeMode: RouteMode) => act(() => {
     const effort = effortKind(activeMode)
-    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, levelOf(activeMode, item.effort), !!FIXED_EFFORT[activeMode]) : undefined
+    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, !!FIXED_EFFORT[activeMode]) : undefined
     return api.startRoute(chatId, index, { mode: activeMode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
   })
 

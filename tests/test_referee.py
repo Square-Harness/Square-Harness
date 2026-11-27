@@ -266,7 +266,7 @@ class LedgerTests(RefereeCase):
         self.assertIn('repeats 8 consecutive words', tool['content'])
 
     def test_route_keeps_v3_when_the_paper_does_not_fit(self):
-        runner, _ = self.run_review(ScriptClient({}), ctx=150_000)
+        runner, _ = self.run_review(ScriptClient({}), ctx=4096)
         self.assertEqual(runner.state['pipeline'], 'review-v2')
         self.assertEqual(runner.state['issues'], [])
         self.assertIs(runner_class('review'), R.RefereeRunner)
@@ -476,8 +476,7 @@ class ReaderTests(RefereeCase):
         prompt = next(p for p in client.payloads if p.get('format') == R.READER_SCHEMA)
         self.assertTrue(prompt['think'])
         self.assertIn('LINE BY LINE', prompt['messages'][-1]['content'])
-        with unittest.mock.patch.object(R, 'READERS', 1):
-            self.assertEqual(len(runner._reader_plan()), 1)
+        self.assertEqual({r['unit'] for r in readers}, {u['id'] for u in runner._proof_units()})
 
     def test_reader_issue_in_the_ledger_and_merged_with_a_referee(self):
         base = line_of(BASE_CASE)

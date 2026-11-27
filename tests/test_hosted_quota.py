@@ -49,16 +49,27 @@ class HostedQuotaTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT output_tokens FROM calls WHERE charged IS NOT NULL ORDER BY rowid').fetchall(),
                                  [(None,), (37,), (23,)])
 
-            # The worker can afford two calls, but the parent cannot. The first
-            # reservation is unknown and admission refuses the replacement locally.
+            # Each attempt fits the remaining shared output. The unknown first
+            # dispatch consumes its fitted reservation. Only actual usage is
+            # charged for the smaller replacement and its independent review.
             smaller = BudgetClient(DeepInfra(fake.host), max_tokens=4096)
             runner = ProofRunner(Agent(smaller, Workspace(directory), model=MODEL, ctx=1048576))
+            fake.replies = [failure, (PROOF, '', 37), (json.dumps(APPROVAL), '', 23)]
+            recovered = runner.start('Prove y=y.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
+            self.assertEqual(recovered['status'], 'candidate_complete')
+            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [2730, 37, 23])
+            self.assertEqual([c['max_tokens'] for c in fake.completions[-3:]], [2730, 910, 1329])
+            self.assertEqual((smaller.snapshot()['tokens'], smaller.snapshot()['measured_tokens']), (2790, 60))
+            self.assertEqual((len(fake.completions), quota_status()['output_tokens']), (6, 120))
+            # A configured solver minimum plus even a minimal verifier cannot
+            # fit after an unknown failure. No replacement goes to the provider.
+            small_floor = BudgetClient(DeepInfra(fake.host), max_tokens=4096)
+            runner = ProofRunner(Agent(small_floor, Workspace(directory), model=MODEL, ctx=1048576))
             fake.replies = [failure]
-            stopped = runner.start('Prove y=y.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
-            self.assertEqual(stopped['status'], 'paused')
-            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
-            self.assertEqual(smaller.snapshot()['tokens'], 4096)
-            self.assertEqual(len(fake.completions), 4)
+            stopped = runner.start('Prove w=w.', max_tokens=10240, max_predict=4096, verify_tokens=2048,
+                                   initial_min_solve_tokens=3968)
+            self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [3968])
+            self.assertEqual((small_floor.snapshot()['tokens'], len(fake.completions)), (3968, 7))
             # A local context refusal is also a confirmed non-dispatch, even
             # when the worker already checkpointed its proposed replacement.
             guarded = BudgetClient(DeepInfra(fake.host), max_tokens=11000)
@@ -68,7 +79,7 @@ class HostedQuotaTests(unittest.TestCase):
                 stopped = runner.start('Prove z=z.', max_tokens=10240, max_predict=4096, verify_tokens=2048)
             self.assertEqual(stopped['status'], 'paused')
             self.assertEqual([c['charged_tokens'] for c in runner.state['calls']], [4096, 0])
-            self.assertEqual((guarded.snapshot()['tokens'], len(fake.completions)), (4096, 5))
+            self.assertEqual((guarded.snapshot()['tokens'], len(fake.completions)), (4096, 8))
 
     def test_a_busy_provider_is_waited_out_by_time_and_said_each_time(self):
         """DeepInfra's overload refusal (2026-11-26): it costs nothing, so a call keeps trying until its patience is

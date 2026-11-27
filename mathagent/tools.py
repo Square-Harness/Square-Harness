@@ -24,20 +24,19 @@ TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', 
 READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {'.py'},
                'text': {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv'}}
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
-MAX_BYTES = 1_000_000
+MAX_BYTES = 20 * 1024 * 1024  # Same per-file storage guard as GUI uploads.
 MAX_RESULT = 6000
-# A workspace tool result (a read_file excerpt, a list_files page, search_text matches) may take this share of the
-# model's context, at about 3 characters a token (LaTeX and extracted PDF text run close to that), and never less
-# than MAX_RESULT: a 65k-token model keeps 6000 characters, DS4's 1M tokens give about 94,000 (a 79-page paper in
-# three reads). Each result stays in the conversation for the rest of the turn and is sent again with every
-# call, so a larger share makes long reading turns expensive. Conversation titles have their own limits.
-RESULT_SHARE = 0.03
-CHARS_PER_TOKEN = 3
 
 
 def result_budget(ctx):
-    """Characters one workspace tool result may hold for a model with `ctx` tokens of context."""
-    return max(MAX_RESULT, int(ctx * RESULT_SHARE * CHARS_PER_TOKEN)) if type(ctx) is int and ctx > 0 else MAX_RESULT
+    """One paged tool reply in characters. Leave most of the window for sources, prior turns and output.
+
+    The next request is fitted with its actual schemas and encoding. Retained source replies also count
+    toward the cumulative input allowance each time they are sent again.
+    """
+    return max(256, ctx // 4) if type(ctx) is int and ctx > 0 else MAX_RESULT
+
+
 _WRITE_LOCK = Lock()
 SOURCE_ARCHIVE_SUFFIXES = ('.tar.gz', '.tgz', '.tar', '.gz')
 
@@ -191,12 +190,13 @@ def _file_title(path, deadline):
     return (label, words) if words else ('', '')
 
 
-def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=2.0):
+def workspace_overview(workspace, max_files=None, max_chars=None, title_seconds=2.0):
     """What the open folder holds, for the planners (the routing step and the main agent): one line per file the
     model may be given (the kinds File access allows, plus the attachments), with its kind, size, date and a
     title when cheap. Files from earlier conversations are there too. With more files than fit, the most
     recently modified are kept. Returns (text, paths)."""
     root, allowed = workspace.root, workspace.allowed_types | {'.png', '.jpg', '.jpeg', '.webp'}
+    max_chars = workspace.result_chars if max_chars is None else max_chars
     found = []
     for folder, dirs, names in os.walk(root, followlinks=False):
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP and not (Path(folder) / d).is_symlink())
@@ -210,10 +210,6 @@ def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=
                 continue
             if stat.S_ISREG(info.st_mode):
                 found.append((info.st_mtime, path, info.st_size))
-                if len(found) >= 5000:
-                    break
-        if len(found) >= 5000:
-            break
     total = len(found)
     found.sort(key=lambda item: -item[0])
     deadline = time.monotonic() + title_seconds
@@ -235,7 +231,7 @@ def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=
     text = '\n'.join(lines[i] for i in order)
     if total > len(lines):
         text += f'\n[{total - len(lines)} older files not listed: use list_files or search_text]'
-    return text, sorted(paths)
+    return text, sorted(path.relative_to(root).as_posix() for _, path, _ in found)
 
 
 class Workspace:
@@ -266,6 +262,7 @@ class Workspace:
         self.index = None
         self.result_chars = MAX_RESULT  # set from the model's context by its Agent (result_budget)
         self.pinned = set()
+        self.excluded_files = set()  # Explicit per-turn file exclusions.
         self.selected_files_only = False
         self.encodings = {}  # path -> encoding of the last read, for files that are not UTF-8
         self.source_archives = {}  # path -> last bounded, immutable source extraction
@@ -279,7 +276,7 @@ class Workspace:
             self.selected_files_only = True
             self.readable.clear()
             self.pinned.clear()
-        self.pinned.update(paths)
+        self.pinned.update(paths - self.excluded_files)
 
     def path(self, filename, *, pdf=False):
         if not isinstance(filename, str) or not filename:
@@ -297,6 +294,8 @@ class Workspace:
         return p
 
     def _readable(self, p):
+        if p in self.excluded_files:
+            raise ValueError('The user excluded this file from the current request')
         if self.selected_files_only and p not in self.pinned:
             raise ValueError('This file is outside the document selection for this request')
         if source_suffix(p) not in self.readable and p not in self.pinned:
@@ -316,7 +315,7 @@ class Workspace:
         with os.fdopen(fd, 'rb') as stream:
             st = os.fstat(stream.fileno())
             if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
-                raise ValueError(f'{name}: only regular {"source archives up to 10 MB" if archive else "text files up to 1 MB"} can be read')
+                raise ValueError(f'{name}: only regular files up to {limit:,} bytes can be read here')
             data = stream.read(limit + 1)
         if len(data) > limit:
             raise ValueError(f'{name}: file exceeds its bounded read limit')
@@ -348,26 +347,25 @@ class Workspace:
         allowed = TEXT if suffixes is None else suffixes
         if not allowed or self.selected_files_only:
             return
-        count = 0
         for folder, dirs, files in os.walk(self.root, followlinks=False):
+            if self.cancelled():
+                raise KeyboardInterrupt
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in SKIP
                              and not (Path(folder) / d).is_symlink())
             for name in sorted(files):
                 p = Path(folder) / name
-                if name.startswith('.') or source_suffix(p) not in allowed or p.is_symlink():
+                if name.startswith('.') or source_suffix(p) not in allowed or p.is_symlink() or p in self.excluded_files:
                     continue
                 yield p
-                count += 1
-                if count >= 2000:
-                    return
 
-    def list_files(self, offset=0, limit=100):
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
-            raise ValueError('Use a nonnegative file offset and a limit from 1 to 1000')
-        paths = sorted(self.pinned) if self.selected_files_only else self.files(self.readable)
+    def list_files(self, offset=0, limit=None):
+        if type(offset) is not int or offset < 0 or (limit is not None and (type(limit) is not int or limit < 1)):
+            raise ValueError('Use a nonnegative file offset and a positive optional page limit')
+        # Include individually pinned file types even if their group is disabled for the wider workspace.
+        paths = sorted(self.pinned | set(self.files(self.readable))) if not self.selected_files_only else sorted(self.pinned)
         names = [str(p.relative_to(self.root)) for p in paths]
         selected, size = [], 0
-        for name in names[offset:offset + limit]:
+        for name in names[offset:offset + limit if limit is not None else None]:
             if selected and size + len(name) + 1 > self.result_chars - 300:
                 break
             selected.append(name)
@@ -415,25 +413,26 @@ class Workspace:
             remaining -= len(prefix) + len(text) + 1
         return result + '\n'.join(selected)
 
-    def search_text(self, pattern, offset=0):
+    def search_text(self, pattern, offset=0, start_line=1):
         if not isinstance(pattern, str) or not pattern:
             raise ValueError('Provide nonempty literal search text (not regex)')
         if type(offset) is not int or offset < 0:
             raise ValueError('Use a nonnegative file offset')
-        hits, needle = [], pattern.casefold()
+        if type(start_line) is not int or start_line < 1:
+            raise ValueError('Use a positive starting line')
+        hits, room, needle = [], self.result_chars - 180, pattern.casefold()
         deadline = time.monotonic() + 10
         # PDFs are searched in their local text extraction (as read_file reads them): pinned ones,
         # and all readable ones when the user allows PDFs. Nothing is uploaded.
         pdfs = [] if self.literature is None else [q for q in self.pinned if q.suffix.lower() == '.pdf']
         if self.literature is not None and '.pdf' in self.readable:
             pdfs += [q for q in self.files({'.pdf'}) if q not in pdfs]
-        paths = list(dict.fromkeys(list(self.files(self.readable - {'.pdf'}))
-                                  + sorted(self.pinned - set(pdfs)) + pdfs))
+        paths = sorted(set(self.files(self.readable - {'.pdf'})) | self.pinned | set(pdfs))
         for index, p in enumerate(paths[offset:], offset):
             if self.cancelled():
                 raise KeyboardInterrupt()
             if time.monotonic() >= deadline:
-                return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}]'
+                return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}, start_line={start_line if index == offset else 1}]'
             page_starts = ()
             try:
                 if p.suffix.lower() == '.pdf':
@@ -452,16 +451,32 @@ class Workspace:
                     lines = text.splitlines()
             except (OSError, ValueError, UnicodeError):  # LiteratureError is a ValueError
                 continue
-            for i, line in enumerate(lines, 1):
-                if needle in line.casefold():
-                    page = pdf_page_label(page_starts, i, first=True)
-                    hits.append(f'{p.relative_to(self.root)}:{i}: {page}{line[:500]}')
-                    if len(hits) >= 50:
-                        return '\n'.join(hits) + '\n[50-match limit]'
+            for i in range(start_line - 1 if index == offset else 0, len(lines)):
+                line = lines[i]
+                if self.cancelled():
+                    raise KeyboardInterrupt
+                if time.monotonic() >= deadline:
+                    return ('\n'.join(hits) or '(no matches in files scanned so far)') + (
+                        f'\n[Search time limit; continue search_text with offset={index}, start_line={i+1}]')
+                if needle not in line.casefold():
+                    continue
+                prefix = f'{p.relative_to(self.root)}:{i+1}: ' + pdf_page_label(page_starts, i+1, first=True)
+                if hits and len(prefix) + len(line) + 1 > room:
+                    return '\n'.join(hits) + f'\n[Continue search_text with offset={index}, start_line={i+1}]'
+                if len(prefix) + len(line) + 1 > room:
+                    # An isolated very long line is still addressable with read_file at this line and column.
+                    match = re.search(re.escape(pattern), line, re.I)
+                    width = max(1, room - len(prefix) - 80)
+                    left = max(0, (match.start() if match else 0) - width // 4)
+                    excerpt = f'(from column {left+1}) ' + line[left:left + width] + ' [partial line]'
+                else:
+                    excerpt = line
+                hits.append(prefix + excerpt)
+                room -= len(hits[-1]) + 1
         return '\n'.join(hits) or '(no matches in supported files scanned)'
 
     def write_file(self, path, content):
-        return self._write_file(path, content, max_bytes=100_000)
+        return self._write_file(path, content, max_bytes=MAX_BYTES)
 
     def _write_file(self, path, content, *, max_bytes, expected=None):
         if not isinstance(content, str) or len(content.encode()) > max_bytes:
@@ -527,15 +542,13 @@ class Workspace:
         old = self.text(p)
         if old.count(old_text) != 1:
             raise ValueError('old_text must match exactly once; read a larger unique passage first')
-        if max(len(old_text.encode()), len(new_text.encode())) > 100_000:
-            raise ValueError('The changed passage must be at most 100 KB')
         return self._write_file(path, old.replace(old_text, new_text, 1), max_bytes=MAX_BYTES, expected=old)
 
     def run_python(self, code):
         if not self.allow_python:
             return 'Python execution disabled; restart with --allow-python to enable approval prompts.'
-        if not isinstance(code, str) or len(code) > 20000:
-            raise ValueError('Provide Python source, at most 20000 characters')
+        if not isinstance(code, str):
+            raise ValueError('Provide Python source')
         if not self.approve('RUN PYTHON (not sandboxed; has your account permissions and the server\'s environment)\n' + code):
             return 'User denied Python execution.'
         # A timeout and output-file limit are guardrails, NOT a security sandbox.
@@ -543,8 +556,10 @@ class Workspace:
 resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
 resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
 '''
-        with tempfile.TemporaryFile() as out:
-            p = subprocess.Popen([sys.executable, '-c', wrapper + code], cwd=self.root,
+        with tempfile.TemporaryFile() as script, tempfile.TemporaryFile() as out:
+            script.write((wrapper + code).encode())
+            script.seek(0)
+            p = subprocess.Popen([sys.executable, '-'], cwd=self.root, stdin=script,
                                  stdout=out, stderr=out, start_new_session=True)
             timed_out = False
             try:
@@ -559,17 +574,17 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                     pass
                 p.wait()
             out.seek(0)
-            data = out.read(MAX_RESULT + 1)
-            output = data[:MAX_RESULT].decode('utf-8', errors='replace')
+            data = out.read(self.result_chars + 1)
+            output = data[:self.result_chars].decode('utf-8', errors='replace')
         return f'Exit {p.returncode}; timeout={timed_out}\n{output}' + (
-            f'\n[output cut at {MAX_RESULT} bytes]' if len(data) > MAX_RESULT else '')
+            f'\n[output cut at {self.result_chars} bytes]' if len(data) > self.result_chars else '')
 
     def check_reference(self, statement, guesses=None):
-        if not isinstance(statement, str) or not statement.strip() or len(statement) > 2000:
-            raise ValueError('Describe the result to find a reference for, in at most 2000 characters')
+        if not isinstance(statement, str) or not statement.strip():
+            raise ValueError('Describe the result to find a reference for')
         if guesses is not None and (not isinstance(guesses, list) or not all(isinstance(g, dict) for g in guesses)):
             raise ValueError('guesses must be a list of objects')
-        return self.checker(statement.strip(), (guesses or [])[:3])
+        return self.checker(statement.strip(), guesses or [])
 
     def schemas(self):
         string = {'type': 'string'}
@@ -578,11 +593,11 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         if '.tex' in self.readable:
             kinds += ', .tar.gz/.tgz/.tar/.gz TeX sources'
         result = [] if not self.readable and not self.pinned else [
-            schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000). Continue with offset when paginated.', {'offset': integer, 'limit': integer}),
+            schema('list_files', f'List nonhidden files the user allows you to read ({kinds}). Continue with offset when paginated.', {'offset': integer, 'limit': integer}),
             schema('search_text', 'Case-insensitive literal search in allowed files'
                    + (', including the extracted text of attached or readable PDFs' if self.literature is not None else ' (not PDFs)')
-                   + '; max 50 matches and 10 seconds. Continue with the returned file offset.',
-                   {'pattern': string, 'offset': integer}, ['pattern']),
+                   + '; continue with the returned file offset and starting line.',
+                   {'pattern': string, 'offset': integer, 'start_line': integer}, ['pattern']),
         ]
         if self.readable or self.pinned:
             result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
@@ -632,6 +647,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             if self.index is not None and name in self.index.names:
                 return self.index.execute(name, arguments, budget=self.result_chars)
             if self.numerics is not None and name in self.numerics.tool_names:
+                self.numerics.result_chars = self.result_chars
                 return self.numerics.execute(name, arguments)
             if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:
                 return self.web.execute(name, arguments, on_result=on_result)

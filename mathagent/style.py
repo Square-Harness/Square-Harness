@@ -53,7 +53,7 @@ import re
 import unicodedata
 
 from .ledger import _atomic_write, _directory, _now
-from .research import ResearchRunner
+from .research import PINNED_SOURCE_BYTES, ResearchRunner
 from .reporting import usage_footer
 from .tools import unicode_source, source_suffix
 from .worker_errors import WorkerInputError
@@ -63,8 +63,7 @@ from . import images
 FORMAT = 'square-style'
 VERSION = 2
 NAME = re.compile(r'[\w][\w .-]{0,59}')
-LIMITS = {'aim': 400, 'audience': 400, 'item': 300, 'structure': 12, 'question': 5, 'names': 12, 'typesetting': 12,
-          'phrases': 10, 'departures': 12, 'usage': 200, 'macros': 100, 'environments': 30, 'packages': 60}
+LIMITS = {'aim': 400, 'audience': 400, 'item': 300, 'usage': 200}
 REPORT_CHARS = 40_000  # the whole style, in the job's report
 TEMPLATE_FILES = ('.tex', '.sty', '.cls', '.bib')
 
@@ -116,7 +115,7 @@ SCAN_KEYS = ('title', 'abstract', 'headings', 'environments', 'inputs', 'lines')
 
 DOMAINS_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['domains'],
-    'properties': {'domains': {'type': 'array', 'minItems': 1, 'maxItems': 6, 'items': {
+    'properties': {'domains': {'type': 'array', 'minItems': 1, 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['name', 'description', 'articles'],
         'properties': {'name': {'type': 'string', 'maxLength': 60},
                        'description': {'type': 'string', 'maxLength': 300},
@@ -124,13 +123,13 @@ DOMAINS_SCHEMA = {
 }
 
 
-def _strings(count, length=LIMITS['item']):
-    return {'type': 'array', 'maxItems': count, 'items': {'type': 'string', 'maxLength': length}}
+def _strings(length=LIMITS['item']):
+    return {'type': 'array', 'items': {'type': 'string', 'maxLength': length}}
 
 
-def _records(count, fields):
+def _records(fields):
     """An array of objects with these text fields, given as (name, maximum length, characters trimmed)."""
-    return {'type': 'array', 'maxItems': count, 'items': {
+    return {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': [name for name, _, _ in fields],
         'properties': {name: {'type': 'string', 'maxLength': length} for name, length, _ in fields}}}
 
@@ -145,11 +144,11 @@ STYLE_SCHEMA = {
     'properties': {
         'audience': {'type': 'string', 'maxLength': LIMITS['audience']},
         'aim': {'type': 'string', 'maxLength': LIMITS['aim']},
-        'structure': _strings(LIMITS['structure']),
-        **{key: _strings(LIMITS['question']) for key, _, _ in QUESTIONS},
-        'names': _records(LIMITS['names'], NAME_FIELDS),
-        'typesetting': _records(LIMITS['typesetting'], TYPESETTING_FIELDS),
-        'phrases': _strings(LIMITS['phrases']),
+        'structure': _strings(),
+        **{key: _strings() for key, _, _ in QUESTIONS},
+        'names': _records(NAME_FIELDS),
+        'typesetting': _records(TYPESETTING_FIELDS),
+        'phrases': _strings(),
     },
 }
 
@@ -163,14 +162,14 @@ CONDENSE_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': 
 # (its departures are counted over its articles by the controller).
 DEPARTURE_FIELDS = (('rule', 10, ' '), ('habit', LIMITS['item'], ' '), ('example', 300, ' `'))
 OBSERVE_SCHEMA = {**STYLE_SCHEMA, 'required': [*STYLE_SCHEMA['required'], 'departures'],
-                  'properties': {**STYLE_SCHEMA['properties'], 'departures': _records(LIMITS['departures'], DEPARTURE_FIELDS)}}
+                  'properties': {**STYLE_SCHEMA['properties'], 'departures': _records(DEPARTURE_FIELDS)}}
 
 MACROS_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['macros'],
     'properties': {'macros': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['name', 'usage', 'packages'],
         'properties': {'name': {'type': 'string', 'maxLength': 60}, 'usage': {'type': 'string', 'maxLength': LIMITS['usage']},
-                       'packages': _strings(4, 40)}}}},
+                       'packages': _strings(40)}}}},
 }
 
 
@@ -237,7 +236,7 @@ def macro_definitions(tex):
             index += name.end() if name else 0
         end = _arguments(text, index, 2 if 'PairedDelimiter' in match.group(0) else 1) if name else None
         if name and end and name.group(1) not in found:
-            found[name.group(1)] = ' '.join(text[match.start():end].split())[:LIMITS['item'] + 100]
+            found[name.group(1)] = ' '.join(text[match.start():end].split())
     return found
 
 
@@ -331,8 +330,8 @@ def scan(tex):
         counts[name] = counts.get(name, 0) + 1
     return {'title': ' '.join((title or '').split())[:300],
             'abstract': ' '.join(abstract.group(1).split())[:1500] if abstract else '',
-            'headings': headings[:60], 'environments': dict(sorted(counts.items(), key=lambda kv: -kv[1])[:20]),
-            'inputs': _INPUT.findall(body)[:20], 'lines': len(tex.splitlines())}
+            'headings': headings, 'environments': dict(sorted(counts.items(), key=lambda kv: -kv[1])),
+            'inputs': _INPUT.findall(body), 'lines': len(tex.splitlines())}
 
 
 def excerpts(tex, room, *, pdf=False):
@@ -482,11 +481,11 @@ def _text(value, length):
     return clip(_flat(str(value or '')), length)
 
 
-def _items(values, count):
-    return [clip(_flat(str(v)), LIMITS['item']) for v in values or [] if isinstance(v, str) and v.strip()][:count]
+def _items(values):
+    return [clip(_flat(str(v)), LIMITS['item']) for v in values or [] if isinstance(v, str) and v.strip()]
 
 
-def _records_of(values, fields, count):
+def _records_of(values, fields):
     """The model's objects whose text fields are all given, trimmed and bounded as `fields` says."""
     out = []
     for value in values or []:
@@ -495,7 +494,7 @@ def _records_of(values, fields, count):
                     for name, length, trim in fields}
             if all(item.values()):
                 out.append(item)
-    return out[:count]
+    return out
 
 
 def blank_style():
@@ -537,17 +536,17 @@ def clean_style(value, sources, typeset=None, rules=None):
         return next((text for text in (q.find(quote, least) for q in where) if text), None)
 
     style = {'audience': _text(value.get('audience'), LIMITS['audience']), 'aim': _text(value.get('aim'), LIMITS['aim']),
-             'structure': _items(value.get('structure'), LIMITS['structure']),
-             **{key: _items(value.get(key), LIMITS['question']) for key, _, _ in QUESTIONS}}
-    names = _records_of(value.get('names'), NAME_FIELDS, LIMITS['names'] * 2)
+             'structure': _items(value.get('structure')),
+             **{key: _items(value.get(key)) for key, _, _ in QUESTIONS}}
+    names = _records_of(value.get('names'), NAME_FIELDS)
     found_names = [n for n in names if found(n['term'], texts, 5)]
-    examples = _records_of(value.get('typesetting'), TYPESETTING_FIELDS, LIMITS['typesetting'] * 2) if latex else []
+    examples = _records_of(value.get('typesetting'), TYPESETTING_FIELDS) if latex else []
     found_examples = []
     for item in examples:
         text = found(item['example'], latex, 8)
         if text and len(text) >= 3:
             found_examples.append({**item, 'example': text[:TYPESETTING_FIELDS[1][1]]})
-    phrases = [p.strip(' "\'“”') for p in _items(value.get('phrases'), LIMITS['phrases'] * 2)]
+    phrases = [p.strip(' "\'“”') for p in _items(value.get('phrases'))]
     found_phrases = []
     for phrase in phrases:
         text = found(phrase, texts, 10) if len(phrase) >= 8 else None
@@ -555,7 +554,7 @@ def clean_style(value, sources, typeset=None, rules=None):
             found_phrases.append(text[:LIMITS['item']])
     known = {r['id'] for r in rules or []}
     departures = []  # one per rule, the first given
-    for item in _records_of(value.get('departures'), DEPARTURE_FIELDS, LIMITS['departures'] * 2) if known and latex else []:
+    for item in _records_of(value.get('departures'), DEPARTURE_FIELDS) if known and latex else []:
         if not any(item['rule'] == other['rule'] for other in departures):
             departures.append(item)
     found_departures = []
@@ -563,10 +562,10 @@ def clean_style(value, sources, typeset=None, rules=None):
         text = found(item['example'], latex, 8) if item['rule'] in known else None
         if text and len(text) >= 10:
             found_departures.append({**item, 'example': text[:DEPARTURE_FIELDS[2][1]]})
-    style['names'] = found_names[:LIMITS['names']]
-    style['typesetting'] = _unique(found_examples, 'example')[:LIMITS['typesetting']]
-    style['phrases'] = list(dict.fromkeys(found_phrases))[:LIMITS['phrases']]
-    style['departures'] = found_departures[:LIMITS['departures']]
+    style['names'] = found_names
+    style['typesetting'] = _unique(found_examples, 'example')
+    style['phrases'] = list(dict.fromkeys(found_phrases))
+    style['departures'] = found_departures
     dropped = (len(names) + len(examples) + len(phrases) + len(departures)
                - len(found_names) - len(found_examples) - len(found_phrases) - len(found_departures))
     return style, dropped
@@ -596,16 +595,14 @@ def read_template(workspace, paths):
         except (OSError, ValueError) as exc:
             problems.append(_unreadable(name, exc))  # a partial template could break write-ups: report them all
             continue
-        if len(content) > 500_000:
-            raise ValueError('Each template file must be text of at most 500 KB')
         if any(f['name'] == path.name for f in files):
             raise ValueError('Two template files have the same name: ' + path.name)
         files.append({'name': path.name, 'content': content})
     if problems:
         raise ValueError('These template files could not be read: ' + '; '.join(problems) +
                          '. Remove them from the template or save them as text.')
-    if len(files) > 8:
-        raise ValueError('A template has at most 8 files')
+    if sum(len(f['content'].encode()) for f in files) > PINNED_SOURCE_BYTES:
+        raise ValueError('The template exceeds the saved profile storage allowance')
     return files
 
 
@@ -628,8 +625,7 @@ def set_template(root, name, files):
 
 
 _TEXT_FIELDS = {'audience': LIMITS['audience'], 'aim': LIMITS['aim'], 'description': 300}
-_LIST_FIELDS = {'structure': LIMITS['structure'], 'phrases': LIMITS['phrases'],
-                **{key: LIMITS['question'] for key, _, _ in QUESTIONS}}
+_LIST_FIELDS = {'structure', 'phrases', *(key for key, _, _ in QUESTIONS)}
 
 
 def _edited_text(value, field, limit):
@@ -660,17 +656,17 @@ def edit_profile(root, name, items):
     for field, limit in _TEXT_FIELDS.items():
         if field in items:
             domain[field] = _edited_text(items[field], field, limit)
-    for field, count in _LIST_FIELDS.items():
+    for field in _LIST_FIELDS:
         if field in items:
             values = items[field]
-            if not isinstance(values, list) or len(values) > count:
-                raise ValueError(f'{field} is a list of at most {count} items')
+            if not isinstance(values, list):
+                raise ValueError(f'{field} is a list of text items')
             domain[field] = [text for text in (_edited_text(v, field, LIMITS['item']) for v in values) if text]
-    for field, fields, count in (('names', NAME_FIELDS, LIMITS['names']), ('typesetting', TYPESETTING_FIELDS, LIMITS['typesetting'])):
+    for field, fields in (('names', NAME_FIELDS), ('typesetting', TYPESETTING_FIELDS)):
         if field in items:
             values = items[field]
-            if not isinstance(values, list) or len(values) > count or not all(isinstance(v, dict) for v in values):
-                raise ValueError(f'{field} is a list of at most {count} entries')
+            if not isinstance(values, list) or not all(isinstance(v, dict) for v in values):
+                raise ValueError(f'{field} is a list of entries')
             edited = []
             for value in values:
                 entry = {key: _edited_text(value.get(key, ''), f'{field} {key}', length) for key, length, _ in fields}
@@ -931,7 +927,7 @@ class StyleRunner(ResearchRunner):
         if article.get('source_kind') == 'pdf_text':
             opening = _flat(self._article(article['id'])['content'][:2000])[:1500]
             return f'[{article["id"]}] {article["path"]}\nOpening of extracted PDF text: {opening}'
-        heads = '\n'.join(article['headings'][:30]) or '(no \\section headings)'
+        heads = '\n'.join(article['headings']) or '(no \\section headings)'
         envs = ', '.join(f'{k} ×{v}' for k, v in article['environments'].items()) or 'none'
         return (f'[{article["id"]}] {article["path"]}\nTitle: {article["title"] or "(none)"}\n'
                 f'Abstract: {article["abstract"] or "(none)"}\nSections:\n{heads}\nEnvironments: {envs}' +
@@ -1109,19 +1105,19 @@ class StyleRunner(ResearchRunner):
         merged by counting (the most frequent first, then in order of appearance), never retyped by a model."""
         notes = [self.state['observations'][i] for i in domain['articles'] if i in self.state['observations']]
 
-        def merged(key, field, limit):
+        def merged(key, field):
             count, first = Counter(), {}
             for note in notes:
                 for item in note.get(key) or []:
                     name = item[field] if field else item
                     count[name] += 1
                     first.setdefault(name, item)
-            return [first[name] for name, _ in sorted(count.items(), key=lambda kv: -kv[1])][:limit]
-        kept = {'names': merged('names', 'term', LIMITS['names']),
-                'typesetting': merged('typesetting', 'example', LIMITS['typesetting']),
-                'phrases': merged('phrases', None, LIMITS['phrases'])}
+            return [first[name] for name, _ in sorted(count.items(), key=lambda kv: -kv[1])]
+        kept = {'names': merged('names', 'term'),
+                'typesetting': merged('typesetting', 'example'),
+                'phrases': merged('phrases', None)}
         # Jobs resumed after a version 1 observation still describe the author's explanations in habits.
-        if habits := merged('habits', None, 10):
+        if habits := merged('habits', None):
             kept['habits'] = habits
         return kept
 
@@ -1160,7 +1156,6 @@ class StyleRunner(ResearchRunner):
             found[name] = {'name': name, 'definition': definition, 'uses': sum(counts.values()),
                            'articles': list(counts), 'source': path}
         kept = sorted((m for m in found.values() if m['uses']), key=lambda m: (-len(m['articles']), -m['uses'], m['name']))
-        kept = kept[:LIMITS['macros']]
         # A kept definition may use a macro the texts never use directly (\E inside \Ex): keep it too, for
         # the articles that need it. The list grows while it is read, so dependencies of dependencies come.
         names = {m['name']: m for m in kept}
@@ -1252,9 +1247,9 @@ class StyleRunner(ResearchRunner):
                               'domain': domain_of.get(a['id'], ''),
                               **({'source_kind': a['source_kind']} if a.get('source_kind') else {}),
                               **({'source_archive': a['source_archive']} if a.get('source_archive') else {})} for a in self.state['articles']],
-                'packages': sorted(loaded.values(), key=lambda p: (-len(p['articles']), p['name']))[:LIMITS['packages']],
+                'packages': sorted(loaded.values(), key=lambda p: (-len(p['articles']), p['name'])),
                 'macros': macros,
-                'environments': sorted(environments.values(), key=lambda e: -e['uses'])[:LIMITS['environments']],
+                'environments': sorted(environments.values(), key=lambda e: -e['uses']),
                 'domains': [{'name': d['name'], 'description': d['description'], 'articles': [paths[i] for i in d['articles']],
                              **blank_style(), **(d['style'] or {})}
                             for d in self.state['domains']]}

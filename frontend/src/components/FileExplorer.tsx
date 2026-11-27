@@ -207,7 +207,7 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
       </div>
       <ErrorNote>{error && folder ? '' : error}</ErrorNote>
       {!searching && folderNote?.(folder) && <p className="warning-note ws-file-note">{folderNote(folder)}</p>}
-      {truncated && <p className="warning-note" role="status">{searching ? 'The search covers the first 2,000 files of this workspace.' : 'This folder has more entries than can be listed.'}</p>}
+      {truncated && <p className="warning-note" role="status">{searching ? 'Some workspace entries were omitted from this listing.' : 'This folder has more entries than can be listed.'}</p>}
       <div className="ws-file-head" aria-hidden="true">
         <button type="button" onClick={() => sortBy('name')}>Name{arrow('name')}</button>
         <button type="button" className="ws-file-col-size" onClick={() => sortBy('size')}>Size{arrow('size')}</button>

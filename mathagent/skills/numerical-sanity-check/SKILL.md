@@ -74,8 +74,7 @@ until higher precision shows otherwise.
 
 ## Budget
 
-Each run: about 5 s, 2 GB, 1 CPU, no network or files; at most 3 runs per check;
-no escalation. Keep experiments small; a heavy computation is for `/python-lab`.
+An automatic check normally has three runs. If the user selects this skill, continue useful experiments within the job or the configured allowance. Each run normally has 5 s, 2 GB and one CPU in isolation. Use `/python-lab` for a computation that needs more resources.
 
 ## Reporting
 

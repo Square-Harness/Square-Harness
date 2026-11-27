@@ -13,7 +13,6 @@ import hashlib
 from html import unescape
 from html.parser import HTMLParser
 import http.client
-from bisect import bisect_right
 from functools import lru_cache
 import ipaddress
 import json
@@ -34,7 +33,7 @@ from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit, urlunspli
 from urllib.robotparser import RobotFileParser
 import xml.etree.ElementTree as ET
 
-from .tools import ENCODING_NAMES, decode_text
+from .tools import ENCODING_NAMES, decode_text, result_budget
 from .arxiv_source import SourceArchiveError, extract_source, is_source_archive
 
 BACKEND_VERSION = 'literature-v1'
@@ -54,7 +53,7 @@ DOWN_COOLDOWN = 240  # seconds before a provider marked down is probed again (ne
 MAX_TEXT = 4_000_000
 DOCUMENT_META_BYTES = 1_000_000
 ARXIV_HOSTS = frozenset({'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'})
-MAX_RESULT = 8000
+UNLIMITED_SOURCE = (1 << 53) - 1  # JSON-safe integer for fresh jobs without an operator quota.
 TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper', 'lookup_identifier'}
 PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath', 'crossref', 'openlibrary')
 API_HOSTS = frozenset({'api.crossref.org', 'api.opencitations.net', 'api.search.brave.com',
@@ -171,6 +170,87 @@ def line_matches(lines, query):
         begin, end = max(starts[first], match.start() - 160), starts[last] + len(lines[last])
         yield {'line': first + 1, 'end_line': last + 1, 'passage': text[begin:min(end, begin + 500)],
                'partial_line': begin > starts[first] or end > begin + 500 or last >= first + 80}
+
+
+def source_page(lines, source_id, fields, start_line, end_line, start_column, cap, *, label=""):
+    """Fit a numbered source excerpt and its exact continuation into the serialized result budget."""
+    if end_line is None:
+        end_line = len(lines)
+    if (any(type(n) is not int for n in (start_line, end_line, start_column))
+            or not 1 <= start_line <= min(end_line, len(lines))
+            or not 1 <= start_column <= max(1, len(lines[start_line - 1]))):
+        raise LiteratureError('Read an existing range of lines and a valid starting column', code='invalid_arguments')
+    requested_end = min(end_line, len(lines))
+    # Reserve the real JSON envelope (including the source URL), using the longest line/column
+    # numbers this page could return. Account for escaping, so _emit never clips an advanced cursor.
+    result = {**fields, 'total_lines': len(lines), 'start_line': start_line, 'start_column': start_column,
+              'end_line': requested_end, 'citation': f'{source_id}:L{start_line}-L{requested_end}',
+              'passage': '', 'lines_complete': False, 'truncated': False,
+              'next_line': requested_end + 1, 'next_column': MAX_TEXT + 1}
+    available = cap - len(json.dumps(result, ensure_ascii=False)) - 2
+    selected, end, column = [], start_line - 1, start_column
+    next_line = next_column = None
+    for number in range(start_line, requested_end + 1):
+        line = lines[number - 1]
+        prefix = f'{label}{number}: '
+        start = column - 1
+        room = available - len(prefix) - (2 if selected else 0)  # JSON's escaped newline
+        count = min(max(0, room), len(line) - start)
+        part = line[start:start + count]
+        size = len(json.dumps(part, ensure_ascii=False)) - 2
+        if size > room and room > 0:
+            lo, hi = 0, count
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if len(json.dumps(part[:mid], ensure_ascii=False)) - 2 <= room:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            part, count = part[:lo], lo
+            size = len(json.dumps(part, ensure_ascii=False)) - 2
+        if room < 0 or (not count and line) or (selected and start + count < len(line)):
+            next_line, next_column = number, column
+            break
+        selected.append(prefix + part)
+        available = room - size
+        end = number
+        if start + count < len(line):
+            next_line, next_column = number, column + count
+            break
+        column = 1
+    if not selected:
+        raise LiteratureError('The remaining evidence budget cannot fit one source character and its citation.', code='web_budget_exhausted')
+    if next_line is None and end < len(lines):
+        next_line, next_column = end + 1, 1
+    complete = start_column == 1 and (next_line != end)
+    return {**result, 'end_line': end, 'citation': f'{source_id}:L{start_line}-L{end}',
+            'passage': '\n'.join(selected), 'truncated': not complete or end < requested_end, 'lines_complete': complete,
+            'next_line': next_line, 'next_column': next_column}
+
+
+def match_page(lines, query, source_id, fields, offset, limit, cap, annotate):
+    if type(offset) is not int or offset < 0 or limit is not None and (type(limit) is not int or limit <= 0):
+        raise LiteratureError('Use a nonnegative match offset and a positive limit', code='invalid_arguments')
+    result = {**fields, 'query': query, 'matches': [], 'total_matches': 0, 'next_offset': None, 'truncated': False}
+    room = cap - len(json.dumps(result, ensure_ascii=False)) - 30
+    total, full = 0, False
+    for hit in line_matches(lines, query):
+        total += 1
+        if total <= offset or full or limit is not None and len(result['matches']) >= limit:
+            continue
+        hit.update(citation=f'{source_id}:L{hit["line"]}-L{hit["end_line"]}')
+        annotate(hit)
+        size = len(json.dumps(hit, ensure_ascii=False)) + 2
+        if size > room:
+            full = True
+            continue
+        result['matches'].append(hit)
+        room -= size
+    if total > offset and not result['matches']:
+        raise LiteratureError('One matching excerpt exceeds the remaining evidence budget', code='web_budget_exhausted')
+    following = offset + len(result['matches'])
+    result.update(total_matches=total, next_offset=following if following < total else None, truncated=following < total)
+    return result
 
 
 def arxiv_query(query):
@@ -392,24 +472,16 @@ def cites_place(text, number, surname, keys=()):
 
 def _s2_record(p):
     ids = p.get('externalIds') or {}
-    return {'identifier': 's2:' + str(p.get('paperId', '')), 'title': _plain(p.get('title'), 300),
-            'authors': [_plain(a.get('name'), 80) for a in p.get('authors') or [] if isinstance(a, dict)][:15],
-            'year': p.get('year'), 'abstract': _plain(p.get('abstract'), 900),
+    return {'identifier': 's2:' + str(p.get('paperId', '')), 'title': _plain(p.get('title'), None),
+            'authors': [_plain(a.get('name'), None) for a in p.get('authors') or [] if isinstance(a, dict)],
+            'year': p.get('year'), 'abstract': _plain(p.get('abstract'), None),
             'url': p.get('url'), 'external_ids': ids, 'doi': (ids.get('DOI') or '').lower() or None,
             'arxiv_id': ids.get('ArXiv'), 'cited_by': p.get('citationCount'),
             'open_access_url': (p.get('openAccessPdf') or {}).get('url')}
 
 
-def _review(text, size=2500):
-    """A zbMATH review, keeping the part that lists the chapters when it is long."""
-    text = _plain(re.sub(r'\\textit\{([^}]*)\}', r'\1', text or ''), 20000)
-    if len(text) <= size:
-        return text
-    found = re.search(r'chapter|contents|consists of|divided into|is organized', text, re.I)
-    if not found or found.start() < size - 600:
-        return text[:size]
-    start = max(600, found.start() - 200)
-    return text[:600] + ' [...] ' + text[start:start + size - 600]
+def _review(text):
+    return _plain(re.sub(r'\\textit\{([^}]*)\}', r'\1', text or ''), None)
 
 
 ZBMATH_HIDDEN = 'contents unavailable'  # zbMATH Open's placeholder for records it may not show
@@ -424,13 +496,13 @@ def _zbmath_record(r):
     reviews = [e.get('text') for e in r.get('editorial_contributions') or [] if isinstance(e, dict) and e.get('text')
                and 'contents unavailable' not in e['text']]
     return {'identifier': 'zbl:' + str(r.get('identifier') or r.get('id') or ''),
-            'title': _plain(hidden((r.get('title') or {}).get('title')), 300),
-            'authors': [_plain(a.get('name'), 80) for a in (r.get('contributors') or {}).get('authors') or []
-                        if isinstance(a, dict) and hidden(a.get('name'))][:15],
+            'title': _plain(hidden((r.get('title') or {}).get('title')), None),
+            'authors': [_plain(a.get('name'), None) for a in (r.get('contributors') or {}).get('authors') or []
+                        if isinstance(a, dict) and hidden(a.get('name'))],
             'year': r.get('year'), 'type': (r.get('document_type') or {}).get('description'),
-            'source': _plain(hidden(source.get('source')), 300), 'publisher': _plain(hidden(book.get('publisher')), 120) or None,
+            'source': _plain(hidden(source.get('source')), None), 'publisher': _plain(hidden(book.get('publisher')), None) or None,
             'doi': doi, 'url': r.get('zbmath_url'), 'review': _review(reviews[0]) if reviews else '',
-            'msc': [m.get('code') for m in r.get('msc') or [] if isinstance(m, dict) and m.get('code')][:8]}
+            'msc': [m.get('code') for m in r.get('msc') or [] if isinstance(m, dict) and m.get('code')]}
 
 
 class _HTMLText(HTMLParser):
@@ -497,10 +569,11 @@ class _HTMLText(HTMLParser):
 
 
 class LiteratureTools:
-    def __init__(self, root, *, online=False, max_requests=12, max_chars=30000, timeout=15):
+    def __init__(self, root, *, online=False, max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE, timeout=15):
         self.root = Path(root).resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError('Literature workspace must be a directory')
+        self.result_chars = result_budget(None)
         self.online = bool(online)
         self.timeout = min(30, max(1, float(timeout)))
         self._last_request = {}
@@ -515,7 +588,7 @@ class LiteratureTools:
         self._robots = {}
         self.reset_budget(max_requests=max_requests, max_chars=max_chars)
 
-    def reset_budget(self, *, max_requests=12, max_chars=30000):
+    def reset_budget(self, *, max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE):
         for value in (max_requests, max_chars):
             if type(value) is not int or value < 0:
                 raise ValueError('Literature budgets must be nonnegative integers')
@@ -552,27 +625,27 @@ class LiteratureTools:
                     'books, and its reviews often list their chapters; query it with fields, e.g. "au:Brezis ti:Functional analysis". '
                     'Crossref finds journal articles and books (plain author/title/topic query); Open Library is a book catalog. '
                     'For arXiv author searches use au:"Full Name"; sort=newest returns newest submissions first '
-                    '(arXiv only). Max 8 results.' + offline,
-                    {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer,
+                    '(arXiv only). Request the number of records needed.' + offline,
+                    {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer, 'offset': integer,
                      'sort': {'type': 'string', 'enum': ['relevance', 'newest']}}, ['query']),
-            _schema('search_web', 'Search web metadata with Brave; requires BRAVE_SEARCH_API_KEY. Max 8 results.' + offline,
-                    {'query': string, 'limit': integer}, ['query']),
+            _schema('search_web', 'Search web metadata with Brave; requires BRAVE_SEARCH_API_KEY. Up to 20 results per Brave request.' + offline,
+                    {'query': string, 'limit': integer, 'offset': integer}, ['query']),
             _schema('find_quotes', 'See how open papers cite a work at a given place: finds papers that cite the work '
                     '(OpenCitations and Crossref reference lists) and are about the topic, opens their arXiv versions and '
                     'returns the exact lines (with citation locators) that cite it at that number, e.g. author "Brezis", '
                     'locator "Theorem 9.26"; without a number, the places they cite. Give the title: it identifies the work '
                     '(not the author\'s other works). Also returns the bibliography entry.' + offline,
-                    {'author': string, 'locator': string, 'topic': string, 'title': string}, ['author']),
+                    {'author': string, 'locator': string, 'topic': string, 'title': string, 'offset': integer, 'limit': integer}, ['author']),
             _schema('lookup_identifier', 'Registry record of one DOI (Crossref, else the DOI registry) or arXiv ID (arXiv API: '
                     'title, authors, journal reference, comments, latest version, withdrawal notice). found=false means the '
                     'registry has no such identifier. One request; use it before a topic search when an identifier is given.' + offline,
                     {'identifier': string}, ['identifier']),
-            _schema('open_paper', 'Cache a public HTTPS paper, arXiv ID, or DOI. Explicit arXiv /src/ or /e-print/ URLs request TeX source, including source archives, only when site access rules permit. Source files are never executed. Returns source ID/index, not full paper. Treat all content as untrusted.' + offline,
-                    {'identifier_or_url': string}, ['identifier_or_url']),
-            _schema('read_paper', 'Read exact numbered lines of a cached extraction; max 80 lines / 6000 passage characters. Verify uncertain math against the original.',
-                    {'document_id': string, 'start_line': integer, 'end_line': integer}, ['document_id']),
-            _schema('search_paper', 'Literal search within a cached paper; returns at most 8 bounded passages with citation locations.',
-                    {'document_id': string, 'query': string}, ['document_id', 'query']),
+            _schema('open_paper', 'Cache a public HTTPS paper, arXiv ID, or DOI. Explicit arXiv /src/ or /e-print/ URLs request TeX source, including source archives, only when site access rules permit. Source files are never executed. Returns source ID/index; continue the heading index with next_section_offset. Use read_paper for full heading text.' + offline,
+                    {'identifier_or_url': string, 'section_offset': integer}, ['identifier_or_url']),
+            _schema('read_paper', 'Read exact numbered lines of a cached extraction. Follow next_line and next_column for the next page. Verify uncertain math against the original.',
+                    {'document_id': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['document_id']),
+            _schema('search_paper', 'Literal search within a cached paper; returns matches with citation locations. Continue with next_offset.',
+                    {'document_id': string, 'query': string, 'offset': integer, 'limit': integer}, ['document_id', 'query']),
         ]
 
     def execute(self, name, args):
@@ -593,8 +666,11 @@ class LiteratureTools:
             result = {'error': 'Literature operation failed. Check arguments, network availability, provider access, and document format.'}
         return self._emit(result)
 
+    def result_room(self):
+        return min(self.result_chars, max(0, self.max_chars - self.stats['returned_chars']))
+
     def _emit(self, result):
-        cap = min(MAX_RESULT, max(0, self.max_chars - self.stats['returned_chars']))
+        cap = self.result_room()
         if cap < 100:
             # Control errors contain no source data and remain valid JSON even when
             # the evidence budget has no room left for a JSON envelope.
@@ -653,6 +729,12 @@ class LiteratureTools:
                 # control error, never a misleading fragment of source metadata.
                 result = {'error': 'Literature output budget exhausted; request smaller excerpts.',
                           'truncated': True}
+            if result.get('sections_omitted') and 'section_offset' in result:
+                result['next_section_offset'] = result['section_offset'] + len(result['sections'])
+            if result.get('quotes_omitted') and 'offset' in result:
+                result['next_offset'] = result['offset'] + len(result['quotes'])
+            if result.get('results_omitted') and 'offset' in result:
+                result['next_offset'] = result['offset'] + len(result.get('results', []))
             value = json.dumps(result, ensure_ascii=False)
         if len(value) > cap:
             value = '{}' if cap >= 2 else ''
@@ -703,15 +785,15 @@ class LiteratureTools:
     def _query(self, query, limit):
         if not isinstance(query, str) or not query.strip() or len(query) > 500:
             raise LiteratureError('Provide a nonempty search query up to 500 characters')
-        if type(limit) is not int or not 1 <= limit <= 8:
-            raise LiteratureError('Search limit must be an integer from 1 to 8')
+        if type(limit) is not int or limit < 1:
+            raise LiteratureError('Search limit must be a positive integer')
         return query.strip()
 
-    def _cache_search(self, provider, query, limit, fetch):
-        key = _digest(json.dumps([provider, query, limit]))
+    def _cache_search(self, provider, query, limit, fetch, *, offset=0):
+        key = _digest(json.dumps([provider, query, limit] + ([offset] if offset else [])))
         parts = ('searches', key + '.json')
         try:
-            raw = self._read(parts, 3_000_000)
+            raw = self._read(parts, MAX_BYTES)
         except UnicodeError:
             raw = None
         if raw is not None:
@@ -738,16 +820,30 @@ class LiteratureTools:
         self._write(parts, json.dumps(result, ensure_ascii=False))
         return result
 
-    def search_papers(self, query, provider='arxiv', limit=5, sort='relevance'):
+    def search_papers(self, query, provider='arxiv', limit=5, sort='relevance', offset=0):
         query = self._query(query, limit)
+        if limit > 100:
+            raise LiteratureError('Catalog search pages accept up to 100 results')
         if provider not in PROVIDERS:
             raise LiteratureError('Unknown provider; choose ' + ', '.join(PROVIDERS))
         if sort not in ('relevance', 'newest') or sort == 'newest' and provider != 'arxiv':
             raise LiteratureError('Use sort=relevance, or sort=newest with provider=arxiv')
-        if sort == 'newest':
-            return self._cache_search('arxiv-recent', query, limit,
-                                      lambda: self._search('arxiv', query, limit, recent=True))
-        result = self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
+        if type(offset) is not int or offset < 0:
+            raise LiteratureError('Search offset must be a nonnegative integer')
+        source = 'arxiv-recent' if sort == 'newest' else provider
+        def fetch(start):
+            def page():
+                if not start:
+                    return self._search(provider, query, limit, recent=True) if sort == 'newest' else self._search(provider, query, limit)
+                return self._search(provider, query, limit, recent=sort == 'newest', offset=start)
+            return self._cache_search(source, query, limit, page, offset=start)
+        # zbMATH numbers pages; for an unaligned continuation return the rest of the cached page.
+        start = offset // limit * limit if provider == 'zbmath' else offset
+        result = fetch(start)
+        fetched = len(result['results'])
+        result['results'] = result['results'][offset-start:]
+        result['offset'] = offset
+        result['next_offset'] = start + fetched if fetched == limit else None
         if provider == 'zbmath':
             result['results'] = self._unhide(result['results'])
         if provider == 'crossref':
@@ -756,14 +852,14 @@ class LiteratureTools:
                                  for record in result['results']]
         return result
 
-    def _search(self, provider, query, limit, recent=False):
+    def _search(self, provider, query, limit, recent=False, offset=0):
         if provider == 'crossref':
             # Reuse the controller's normalized DOI records and its bounded
             # transport. The public search envelope is cached independently.
             return [{key: value for key, value in record.items() if key not in ('references', 'reference_texts')}
-                    for record in self.crossref(query=query, limit=limit)]
+                    for record in self.crossref(query=query, limit=limit, offset=offset)]
         if provider == 'openlibrary':
-            params = {'q': query, 'limit': limit,
+            params = {'q': query, 'limit': limit, **({'offset': offset} if offset else {}),
                       'fields': 'key,title,author_name,first_publish_year,publisher'}
             body, _, _ = self._fetch('https://openlibrary.org/search.json?' + urlencode(params),
                                      max_bytes=1_000_000)
@@ -774,14 +870,14 @@ class LiteratureTools:
                 key = entry.get('key')
                 if not isinstance(key, str) or not re.fullmatch(r'/works/OL[0-9]+W', key):
                     continue
-                title = _plain(entry.get('title'), 300)
+                title = _plain(entry.get('title'), None)
                 if not title:
                     continue
                 names = entry.get('author_name')
-                authors = [_plain(name, 80) for name in names if isinstance(name, str) and name.strip()][:15] \
+                authors = [_plain(name, None) for name in names if isinstance(name, str) and name.strip()] \
                     if isinstance(names, list) else []
                 publishers = entry.get('publisher')
-                publishers = list(dict.fromkeys(_plain(name, 120) for name in publishers
+                publishers = list(dict.fromkeys(_plain(name, None) for name in publishers
                                                 if isinstance(name, str) and name.strip())) \
                     if isinstance(publishers, list) else []
                 year = entry.get('first_publish_year')
@@ -800,18 +896,18 @@ class LiteratureTools:
             # otherwise broaden all but the first word to unrelated records.
             expression = arxiv_query(query)
             params = {'search_query': expression,
-                      'start': 0, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
+                      'start': offset, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
             return self._arxiv_feed(params, limit)
         if provider == 'semantic_scholar':
             headers = {}
             if os.environ.get('SEMANTIC_SCHOLAR_API_KEY'):
                 headers['x-api-key'] = os.environ['SEMANTIC_SCHOLAR_API_KEY']
-            params = {'query': query, 'limit': limit,
+            params = {'query': query, 'limit': limit, **({'offset': offset} if offset else {}),
                       'fields': 'title,authors,year,abstract,url,externalIds,openAccessPdf,citationCount'}
             body, _, _ = self._fetch('https://api.semanticscholar.org/graph/v1/paper/search?' + urlencode(params), headers=headers, max_bytes=1_000_000)
             return [_s2_record(p) for p in json.loads(body).get('data', [])[:limit] if isinstance(p, dict)]
         if provider == 'zbmath':
-            params = {'search_string': query, 'page': 0, 'results_per_page': limit}
+            params = {'search_string': query, 'page': offset // limit, 'results_per_page': limit}
             try:
                 body, _, _ = self._fetch('https://api.zbmath.org/v1/document/_search?' + urlencode(params), max_bytes=2_000_000)
             except LiteratureError as exc:
@@ -851,7 +947,7 @@ class LiteratureTools:
         """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
         return self.search_papers(query, 'arxiv', limit, sort='newest')['results']
 
-    def _arxiv_feed(self, params, limit, *, abstract=900):
+    def _arxiv_feed(self, params, limit, *, abstract=None):
         body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=4_000_000)
         atom = {'a': 'http://www.w3.org/2005/Atom', 'x': 'http://arxiv.org/schemas/atom'}
         feed = ET.fromstring(body)
@@ -865,14 +961,14 @@ class LiteratureTools:
                 continue
             doi = entry.findtext('x:doi', '', atom).strip().lower() or None
             results.append({'identifier': 'arxiv:' + identifier,
-                'title': _plain(entry.findtext('a:title', '', atom), 300),
-                'authors': [_plain(e.text, 80) for e in entry.findall('a:author/a:name', atom)][:15],
+                'title': _plain(entry.findtext('a:title', '', atom), None),
+                'authors': [_plain(e.text, None) for e in entry.findall('a:author/a:name', atom)],
                 'published': entry.findtext('a:published', '', atom),
                 'updated': entry.findtext('a:updated', '', atom),
                 'abstract': _plain(entry.findtext('a:summary', '', atom), abstract),
-                'categories': [c.get('term') for c in entry.findall('a:category', atom) if c.get('term')][:8],
-                'journal_ref': _plain(entry.findtext('x:journal_ref', '', atom), 200) or None,
-                **({'comment': comment} if (comment := _plain(entry.findtext('x:comment', '', atom), 300)) else {}),
+                'categories': [c.get('term') for c in entry.findall('a:category', atom) if c.get('term')],
+                'journal_ref': _plain(entry.findtext('x:journal_ref', '', atom), None) or None,
+                **({'comment': comment} if (comment := _plain(entry.findtext('x:comment', '', atom), None)) else {}),
                 **({'doi': doi} if doi and re.fullmatch(r'10\.\d{4,9}/\S+', doi) else {}),
                 'url': 'https://arxiv.org/abs/' + identifier,
                 'open_access_url': 'https://arxiv.org/pdf/' + identifier})
@@ -883,7 +979,7 @@ class LiteratureTools:
         query = ' '.join(str(query or '').split())[:300]
         if not query or type(limit) is not int or not 1 <= limit <= 50:
             raise LiteratureError('Give a query and a limit from 1 to 50')
-        cats = [c for c in categories if isinstance(c, str) and re.fullmatch(r'[a-z\-]+(?:\.[A-Za-z\-]+)?', c)][:6]
+        cats = [c for c in categories if isinstance(c, str) and re.fullmatch(r'[a-z\-]+(?:\.[A-Za-z\-]+)?', c)]
         expression = arxiv_query(query)
         if cats:
             expression = f'({expression}) AND (' + ' OR '.join('cat:' + c for c in cats) + ')'
@@ -900,7 +996,7 @@ class LiteratureTools:
             return []
         params = {'id_list': ','.join(ids), 'start': 0, 'max_results': len(ids)}
         return self._cache_search('arxiv-ids', ','.join(sorted(ids)), len(ids),
-                                  lambda: self._arxiv_feed(params, len(ids), abstract=2500))['results']
+                                  lambda: self._arxiv_feed(params, len(ids)))['results']
 
     def lookup_identifier(self, identifier):
         """The registry record of one DOI or arXiv identifier, or found=false when the registry has none."""
@@ -988,8 +1084,8 @@ class LiteratureTools:
                 # Open reference lists: the cited work's internal zbMATH document number, DOI and citation text.
                 record['cited_works'] = [{'zbmath_document': (x.get('zbmath') or {}).get('document_id'),
                                           'doi': str(x.get('doi') or '').lower() or None,
-                                          'text': _plain(x.get('text'), 300)}
-                                         for x in r.get('references') or [] if isinstance(x, dict)][:200]
+                                          'text': _plain(x.get('text'), None)}
+                                         for x in r.get('references') or [] if isinstance(x, dict)]
                 out.append(record)
             return out
         return self._unhide(self._cache_search('zbmath-full', query, limit, fetch)['results'])
@@ -1025,7 +1121,7 @@ class LiteratureTools:
                 paper = item.get(side) if isinstance(item, dict) else None
                 if isinstance(paper, dict) and paper.get('title'):
                     record = _s2_record(paper)
-                    record['venue'] = _plain(paper.get('venue'), 120) or None
+                    record['venue'] = _plain(paper.get('venue'), None) or None
                     out.append(record)
             return out
         return self._cache_search('s2-' + direction, key, limit, fetch)['results']
@@ -1044,7 +1140,7 @@ class LiteratureTools:
                 match = re.search(r'(?:^|\s)doi:(\S+)', str(item.get('cited') or '')) if isinstance(item, dict) else None
                 if match:
                     found.append(match.group(1).lower())
-            return list(dict.fromkeys(found))[:5000]
+            return list(dict.fromkeys(found))
         return self._cache_search('opencitations-references', doi, 1, fetch)['results']
 
     def citing(self, doi, limit=10):
@@ -1065,13 +1161,13 @@ class LiteratureTools:
                     if isinstance(item, dict) and isinstance(item.get('citingPaper'), dict)]
         return self._cache_search('s2-citations', doi, limit, fetch)['results']
 
-    def crossref(self, *, query=None, dois=(), limit=10, texts=False, offset=0, abstract=900):
+    def crossref(self, *, query=None, dois=(), limit=10, texts=False, offset=0, abstract=None):
         """Crossref works for controller code: a bibliographic search, or a batch of DOIs. Free and
         uncapped; records carry open reference lists (DOIs), used to follow citations backwards."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise LiteratureError('Crossref batches hold 1 to 100 works')
         params = {'rows': limit, 'select': 'DOI,title,author,issued,type,container-title,is-referenced-by-count,reference,abstract,link'}
-        if type(offset) is int and 0 < offset <= 900:
+        if type(offset) is int and offset > 0:
             params['offset'] = offset
         if dois:
             clean = [d.strip().lower() for d in dois if isinstance(d, str) and re.fullmatch(r'10\.\d{4,9}/\S+', d.strip())][:limit]
@@ -1090,22 +1186,22 @@ class LiteratureTools:
                 year = ((r.get('issued') or {}).get('date-parts') or [[None]])[0][0]
                 refs = [str(x['DOI']).lower() for x in r.get('reference') or [] if isinstance(x, dict) and x.get('DOI')]
                 out.append({'identifier': 'doi:' + str(r.get('DOI', '')).lower(), 'doi': str(r.get('DOI', '')).lower() or None,
-                            'title': _crossref_title((r.get('title') or [''])[0])[:300], 'type': r.get('type'), 'year': year,
-                            'authors': [_plain(' '.join(x for x in (a.get('given'), a.get('family')) if x), 80)
-                                        for a in r.get('author') or [] if isinstance(a, dict)][:15],
-                            'venue': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('container-title') or [''])[0])), 120) or None,
+                            'title': _crossref_title((r.get('title') or [''])[0]), 'type': r.get('type'), 'year': year,
+                            'authors': [_plain(' '.join(x for x in (a.get('given'), a.get('family')) if x), None)
+                                        for a in r.get('author') or [] if isinstance(a, dict)],
+                            'venue': _plain(unescape(re.sub(r'<[^>]+>', '', (r.get('container-title') or [''])[0])), None) or None,
                             'full_text_url': next((link['URL'] for link in r.get('link') or [] if isinstance(link, dict)
                                                    and link.get('content-type') == 'application/pdf'
                                                    and isinstance(link.get('URL'), str) and link['URL'].startswith('https://')), None),
-                            'cited_by': r.get('is-referenced-by-count'), 'references': ['doi:' + d for d in refs][:150],
+                            'cited_by': r.get('is-referenced-by-count'), 'references': ['doi:' + d for d in refs],
                             **({'reference_texts': [_plain(' '.join(str(x.get(k) or '') for k in (
                                 'unstructured', 'author', 'volume-title', 'article-title', 'year')), 300)
-                                for x in r.get('reference') or [] if isinstance(x, dict)][:200]} if texts else {}),
+                                for x in r.get('reference') or [] if isinstance(x, dict)]} if texts else {}),
                             'abstract': _plain(re.sub(r'<[^>]+>', ' ', r.get('abstract') or ''), abstract),
                             'url': 'https://doi.org/' + str(r.get('DOI', ''))})
             return out
         key = json.dumps([params.get('query.bibliographic'), params.get('filter'), params.get('offset', 0)] + (['texts'] if texts else [])
-                         + ([f'abstract {abstract}'] if abstract != 900 else []))
+                         + ([f'abstract {abstract}'] if abstract is not None and abstract != 900 else []))
         return self._cache_search('crossref', key, limit, fetch)['results']
 
     def repository_versions(self, doi):
@@ -1134,7 +1230,7 @@ class LiteratureTools:
                         if first(inst.get('accessright'), '@classid') != 'OPEN':
                             continue
                         url = first(inst.get('fulltext'))
-                        abstract = _plain(first(item.get('description')), 2500)
+                        abstract = _plain(first(item.get('description')), None)
                         # OpenAIRE's legacy index clips some descriptions at 500 characters.
                         # Only complete sentences from those deposits are admissible evidence.
                         if len(abstract) >= 500 and not re.search(r'[.!?][”")]*$', abstract):
@@ -1143,7 +1239,7 @@ class LiteratureTools:
                                          'authors': [x['$'] for x in objects(item.get('creator')) if x.get('$')],
                                          'abstract': abstract, 'url': first(inst.get('url')),
                                          'full_text_url': url if url.startswith('https://') else ''})
-            return sorted(versions, key=lambda v: (bool(v['full_text_url']), bool(v['abstract'])), reverse=True)[:8]
+            return sorted(versions, key=lambda v: (bool(v['full_text_url']), bool(v['abstract'])), reverse=True)
         return self._cache_search('openaire-version', doi, 8, fetch)['results']
 
     def citations_of(self, doi):
@@ -1160,24 +1256,31 @@ class LiteratureTools:
                 match = re.search(r'(?:^|\s)doi:(\S+)', str(item.get('citing') or '')) if isinstance(item, dict) else None
                 if match:
                     found.append(match.group(1).lower())
-            return list(dict.fromkeys(found))[:20000]
+            return list(dict.fromkeys(found))
         return self._cache_search('opencitations', doi, 1, fetch)['results']
 
     def arxiv_by_titles(self, titles):
         """arXiv versions of several papers in one request: a few distinctive title words each."""
-        groups = []
+        groups, batches = [], []
         for title in titles:
             words = [w for w in re.findall(r'[A-Za-z]{4,}', re.sub(r'\$.*?\$', ' ', str(title)))
                      if w.lower() not in TITLE_STOP and w.lower() not in ('with', 'from', 'that', 'this', 'into')][:4]
-            if len(words) >= 2:
-                group = '(' + ' AND '.join('ti:' + w for w in words) + ')'
-                if len(' OR '.join(groups + [group])) > 900:
-                    break
-                groups.append(group)
-        if not groups:
-            return []
-        query = ' OR '.join(groups)
-        return self._cache_search('arxiv-titles', query, 20, lambda: self._search('arxiv', query, 20))['results']
+            if len(words) < 2:
+                continue
+            group = '(' + ' AND '.join('ti:' + w for w in words) + ')'
+            if groups and len(' OR '.join(groups + [group])) > 900:
+                batches.append(groups)
+                groups = []
+            groups.append(group)
+        if groups:
+            batches.append(groups)
+        results = {}
+        for batch in batches:
+            query = ' OR '.join(batch)
+            limit = max(20, min(100, len(batch) * 4))
+            hits = self._cache_search('arxiv-titles', query, limit, lambda: self._search('arxiv', query, limit))['results']
+            results.update((r['identifier'], r) for r in hits)
+        return list(results.values())
 
     def _chain(self, surname, title, topic):
         """Papers that cite the work and are about the topic, with an arXiv version (no full-text search).
@@ -1191,7 +1294,7 @@ class LiteratureTools:
                 found = set(title_words(r.get('title')))
                 return (words and len(set(words) & found) >= max(1, (len(words) + 1) // 2)
                         and name in _fold(' '.join(r.get('authors') or [])))
-            info['work_dois'] = [r['doi'] for r in self.crossref(query=f'{title} {surname}', limit=6) if r.get('doi') and fits(r)][:3]
+            info['work_dois'] = [r['doi'] for r in self.crossref(query=f'{title} {surname}', limit=6) if r.get('doi') and fits(r)]
         citing = set()
         for doi in info['work_dois']:
             try:
@@ -1210,15 +1313,15 @@ class LiteratureTools:
             page = self.crossref(query=topic or title or surname, limit=100, texts=True, offset=offset)
             papers += page
             chosen += [r for r in page if cites(r)]
-            if len(chosen) >= 4 or len(page) < 100:
+            if len(page) < 100:
                 break
         info['topic_papers'] = len(papers)
         # Crossref's relevance order, recent papers first (likelier to have an arXiv version with HTML).
         chosen.sort(key=lambda r: not (str(r.get('year') or '').isdigit() and int(r['year']) >= 2010))
         info['topic_citing'] = len(chosen)
-        found = self.arxiv_by_titles([r['title'] for r in chosen[:10]]) if chosen else []
+        found = self.arxiv_by_titles([r['title'] for r in chosen]) if chosen else []
         hits = []
-        for r in chosen[:10]:
+        for r in chosen:
             mine = set(re.findall(r'[a-z]{4,}', _fold(re.sub(r'\$.*?\$', ' ', r['title']))))
             for a in found:
                 theirs = set(re.findall(r'[a-z]{4,}', _fold(re.sub(r'\$.*?\$', ' ', a['title']))))
@@ -1228,22 +1331,24 @@ class LiteratureTools:
         info['on_arxiv'] = len(hits)
         return hits, info
 
-    def find_quotes(self, author, locator='', topic='', title=''):
+    def find_quotes(self, author, locator='', topic='', title='', offset=0, limit=None):
         """Find papers that cite the work, open them, and read the lines that cite it.
 
         The citation chain: papers citing the work (OpenCitations, Crossref reference lists) and about the topic,
         read through their arXiv versions. Failing that, papers on the topic from arXiv."""
         if not isinstance(author, str) or not re.fullmatch(r"[^\W\d_][\w'\-. ]{1,60}", author.strip()):
             raise LiteratureError('Give the author\'s surname, e.g. "Brezis"')
+        if type(offset) is not int or offset < 0 or (limit is not None and (type(limit) is not int or limit < 1)):
+            raise LiteratureError('Give a nonnegative quote offset and a positive limit', code='invalid_arguments')
         surname = author.strip().split()[-1]
         locator = locator.strip() if isinstance(locator, str) else ''
-        topic = ' '.join(topic.split())[:120] if isinstance(topic, str) else ''
-        title = ' '.join(title.split())[:300] if isinstance(title, str) else ''
+        topic = ' '.join(topic.split()) if isinstance(topic, str) else ''
+        title = ' '.join(title.split()) if isinstance(title, str) else ''
         # A theorem-like number wins over a section number when the locator names both.
         number = place_number(locator)
         if not number and not topic:
             raise LiteratureError('Give a numbered locator (e.g. "Theorem 9.26") or a topic phrase')
-        hits, chain, searched, opens = [], None, '', 4
+        hits, chain, searched = [], None, ''
         if topic or title:
             try:
                 hits, chain = self._chain(surname, title, topic)
@@ -1254,19 +1359,32 @@ class LiteratureTools:
             # Last resort: papers on the topic, scanned for citations of the work.
             searched = 'arXiv topic search'
             hits = [{**h, 'arxiv_id': h['identifier'][6:]} for h in self.search_papers(topic or surname, 'arxiv', 6)['results']]
-            opens = 3
-        quotes, opened, failures, others = [], [], 0, 0
-        # arXiv first: it is reliably readable and its HTML keeps citation brackets. Publisher
-        # links often refuse robots, so at most one is tried.
+        quotes, opened, failures = [], [], 0
+        # Prefer the primary arXiv text when its citation brackets are available.
+        seen_quotes = 0
+        quote_room = self.result_room()
+
+        def add_quote(row):
+            nonlocal seen_quotes, quote_room
+            seen_quotes += 1
+            if seen_quotes <= offset:
+                return True
+            size = len(json.dumps(row, ensure_ascii=False))
+            if quotes and ((limit is not None and len(quotes) >= limit) or size > quote_room):
+                return False
+            quotes.append(row)
+            quote_room -= size
+            return True
+
+        more = False
         for hit in sorted(hits, key=lambda h: not h.get('arxiv_id')):
             url = hit.get('arxiv_id') or hit.get('open_access_url')
-            if len(opened) == opens or not url or any('passage' in q for q in quotes) or (not hit.get('arxiv_id') and others):
+            if not url:
                 continue
-            others += not hit.get('arxiv_id')
             try:
                 document = self.open_paper(url)
                 doc = document['document_id']
-                _, lines = self._document(doc)
+                metadata, lines = self._document(doc)
             except LiteratureError:
                 failures += 1
                 continue
@@ -1284,39 +1402,54 @@ class LiteratureTools:
                         _fold(surname) in _fold(lines[i]) and re.search(PLACE_WORDS + r'\.?\s*\d+(?:\.\d+)+', window, re.I)
                         and not re.search(r'(?:19|20)\d\d', lines[i])):
                     hits_here.append(i + 1)
-                if len(hits_here) == (2 if number else 12):
-                    break
             if not number:  # citations near the topic words first
                 near = lambda n: any(w in _fold(' '.join(lines[max(0, n - 3):n + 2])) for w in words)
-                hits_here = sorted(hits_here, key=lambda n: not near(n))[:3]
+                hits_here = sorted(hits_here, key=lambda n: not near(n))
             for line in hits_here:
-                passage = self.read_paper(doc, max(1, line - 1), line + 1)
-                passage['passage'] = passage['passage'][:900]
+                if self.cancelled():
+                    raise KeyboardInterrupt
+                self._remaining_timeout()
+                passage = self._paper_page(doc, metadata, lines, max(1, line - 1), line + 1, 1)
                 cited = [place for _, place in keyed_citations(passage['passage'], keys)]
-                quotes.append({'title': hit.get('title'), 'cited_as': cited[:3], **{k: passage[k] for k in (
-                    'document_id', 'source_url', 'citation', 'start_line', 'end_line', 'passage', 'truncated')}})
+                if not add_quote({'title': hit.get('title'), 'cited_as': cited, **{k: passage[k] for k in (
+                    'document_id', 'source_url', 'citation', 'start_line', 'end_line', 'passage', 'truncated')}}):
+                    more = True
+                    break
+            if more:
+                break
             entry = bibliography_entry(lines, keys[0]) if keys else ''
             if entry:  # how this paper lists the work: its edition matters for the numbering
-                quotes.append({'title': hit.get('title'), 'document_id': doc, 'bibliography_entry': entry[:400],
-                               'bibliography_keys': keys})
+                if not add_quote({'title': hit.get('title'), 'document_id': doc, 'bibliography_entry': entry, 'bibliography_keys': keys}):
+                    more = True
+                    break
         return {'author': surname, 'searched_with': searched, 'number': number,
                 **({'citation_chain': chain} if chain else {}), 'papers_found': len(hits), 'papers_opened': opened,
-                'unreadable_papers': failures, 'quotes': quotes,
+                'unreadable_papers': failures, 'quotes': quotes, 'offset': offset,
+                'next_offset': offset + len(quotes) if more else None,
                 'evidence_kind': 'untrusted_cached_extraction',
                 'note': 'Quotes show how other papers cite the work; check that the cited statement is the result sought.'}
 
-    def search_web(self, query, limit=5):
+    def search_web(self, query, limit=5, offset=0):
+        if type(limit) is int and limit > 20:
+            raise LiteratureError('Brave search pages accept up to 20 results')
         query = self._query(query, limit)
+        if type(offset) is not int or offset < 0 or offset // limit > 9:
+            raise LiteratureError('Brave accepts page offsets 0 through 9')
+        page, skip = divmod(offset, limit)
         def fetch():
             key = os.environ.get('BRAVE_SEARCH_API_KEY')
             if not key:
                 raise LiteratureError('Web search unavailable: set BRAVE_SEARCH_API_KEY, or use search_papers with arxiv.')
-            body, _, _ = self._fetch('https://api.search.brave.com/res/v1/web/search?' + urlencode({'q': query, 'count': limit}),
+            body, _, _ = self._fetch('https://api.search.brave.com/res/v1/web/search?' + urlencode({'q': query, 'count': limit, **({'offset': page} if page else {})}),
                                      headers={'X-Subscription-Token': key}, max_bytes=1_000_000)
-            return [{'title': _plain(r.get('title'), 300), 'url': r.get('url'),
-                     'description': _plain(r.get('description'), 700)}
+            return [{'title': _plain(r.get('title'), None), 'url': r.get('url'),
+                     'description': _plain(r.get('description'), None)}
                     for r in json.loads(body).get('web', {}).get('results', [])[:limit]]
-        return self._cache_search('brave', query, limit, fetch)
+        result = self._cache_search('brave', query, limit, fetch, offset=page * limit)
+        length = len(result['results'])
+        result['results'] = result['results'][skip:]
+        result.update(offset=offset, next_offset=(page + 1) * limit if page < 9 and length == limit else None)
+        return result
 
     def _canonical(self, value):
         if not isinstance(value, str) or not value.strip() or len(value) > 2000:
@@ -1360,7 +1493,9 @@ class LiteratureTools:
         canonical = urlunsplit(('https', host, split.path or '/', split.query, ''))
         return canonical, canonical, None
 
-    def open_paper(self, identifier_or_url, *, cache_only=False):
+    def open_paper(self, identifier_or_url, *, cache_only=False, section_offset=0):
+        if type(section_offset) is not int or section_offset < 0:
+            raise LiteratureError('Give a nonnegative section offset', code='invalid_arguments')
         canonical, url, arxiv_id = self._canonical(identifier_or_url)
         source_request = canonical.startswith('arxiv-source:')
         canonical_id = document_id = 'doc-' + _digest(canonical)[:24]
@@ -1385,7 +1520,7 @@ class LiteratureTools:
                 metadata['cached'] = True
                 if stale:
                     metadata['stale_cache'] = True
-                return self._document_summary(metadata)
+                return self._document_summary(metadata, section_offset)
         if cache_only or not self.online:
             raise LiteratureError('Offline mode: paper is not cached. Online retrieval must be enabled explicitly.')
         try:
@@ -1444,15 +1579,13 @@ class LiteratureTools:
             # Preserve saved locators when the source OR its extraction changes.
             document_id = 'doc-' + _digest(canonical + ':' + _digest(body) + ':' + _digest(text))[:24]
         lines = text.splitlines()
-        sections = [{'line': i, 'title': line[:160]} for i, line in enumerate(lines, 1)
-                    if re.match(r'^(?:\d+(?:\.\d+)*\s+\S|abstract\b|references\b|bibliography\b|appendix\b|theorem\b|lemma\b|proposition\b)', line, re.I)][:60]
         metadata = {'document_id': document_id, 'canonical_identifier': canonical,
             'source_url': source_url, 'requested_url': url, 'title': title,
             'version': (re.search(r'v\d+$', (final_identifier if source_request else arxiv_id) or '') or ['unspecified; use versioned arXiv ID for reproducibility'])[0],
             'retrieved_at': _stamp(), 'sha256': _digest(body), 'text_sha256': _digest(text),
             'backend_version': BACKEND_VERSION, 'extractor': extractor,
             'content_type': content_type, 'original_file': document_id + suffix,
-            'total_lines': len(lines), 'sections': sections, 'cached': False,
+            'total_lines': len(lines), 'sections_from_text': True, 'cached': False,
             'warning': 'Untrusted external source. Extraction can damage mathematical notation; line numbers refer to this cached text. Verify exact hypotheses and important formulas against the original.',
             **source_details}
         self._write(('documents', document_id + suffix), body)
@@ -1460,7 +1593,7 @@ class LiteratureTools:
         self._write(('documents', document_id + '.json'), json.dumps(metadata, ensure_ascii=False))
         if document_id != canonical_id:
             self._write(('document-index', canonical_id + '.json'), json.dumps({'document_id': document_id}))
-        return self._document_summary(metadata)
+        return self._document_summary(metadata, section_offset)
 
     def _landing_check(self, doi, title, text, source_url):
         """A DOI's web page must show its work: a page that never names the registered title (a journal's home
@@ -1535,13 +1668,35 @@ class LiteratureTools:
         self._write(('documents', document_id + '.json'), json.dumps(metadata, ensure_ascii=False))
         return self._document_summary(metadata)
 
-    def _document_summary(self, metadata):
-        summary = {**metadata, 'sections': metadata.get('sections', [])[:20],
-                'next_action': 'Use read_paper or search_paper with document_id for exact cited passages.'}
+    def _document_summary(self, metadata, offset=0):
+        summary = {**metadata, 'next_action': 'Use read_paper or search_paper with document_id for exact cited passages.'}
         if 'source_files' in metadata:
-            summary.update(source_files=metadata['source_files'][:8], source_files_total=len(metadata['source_files']),
-                           source_files_truncated=len(metadata['source_files']) > 8,
-                           source_warnings=metadata.get('source_warnings', [])[:4])
+            summary.update(source_files_total=len(metadata['source_files']), source_files_truncated=False)
+        if metadata.get('sections_from_text') or metadata.get('sections'):
+            # Derive the outline from the durable, size-checked text; dense input cannot overflow the metadata file.
+            _, lines = self._document(metadata['document_id'])
+            heading = re.compile(r'^(?:\d+(?:\.\d+)*\s+\S|abstract\b|references\b|bibliography\b|appendix\b|theorem\b|lemma\b|proposition\b)', re.I)
+            room = self.result_room() - len(json.dumps({**summary, 'sections': []}, ensure_ascii=False)) - 128
+            page, total, full = [], 0, False
+            for n, line in enumerate(lines, 1):
+                if not heading.match(line):
+                    continue
+                total += 1
+                if total <= offset or full:
+                    continue
+                item = {'line': n, 'title': line}
+                size = len(json.dumps(item, ensure_ascii=False)) + 2
+                if size > room:
+                    if not page:
+                        page.append({'line': n, 'title': '', 'read_line_for_title': True})
+                    full = True
+                else:
+                    page.append(item)
+                    room -= size
+            if offset > total:
+                raise LiteratureError('Section offset is beyond the outline', code='invalid_arguments')
+            summary.update(sections=page, sections_total=total, section_offset=offset,
+                           next_section_offset=offset + len(page) if offset + len(page) < total else None)
         return summary
 
     def _source(self, body):
@@ -1585,51 +1740,32 @@ class LiteratureTools:
         starts = [1] + [n + 1 for n, piece in enumerate(pieces, 1) if piece.endswith('\x0c') and n < len(pieces)]
         return starts if len(starts) > 1 else []
 
-    def read_paper(self, document_id, start_line=1, end_line=80):
-        if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
-            raise LiteratureError('Line bounds must be positive integers with start <= end')
-        metadata, lines = self._document(document_id)
-        end = min(end_line, start_line + 79, len(lines))
-        selected, size, clipped = [], 0, False
-        for i in range(start_line - 1, end):
-            numbered = f'{i + 1}: {lines[i]}'
-            if size + len(numbered) + 1 > 6000:
-                room = 6000 - size
-                if not selected and room > 0:
-                    selected.append(numbered[:room])
-                clipped = True
-                break
-            selected.append(numbered)
-            size += len(numbered) + 1
-        actual_end = start_line + len(selected) - 1
-        pages = {}
-        if selected and (starts := metadata.get('pdf_page_starts')):
-            for page in range(bisect_right(starts, start_line), bisect_right(starts, actual_end) + 1):
-                pages[page] = max(start_line, starts[page - 1])
-        return {'document_id': document_id, 'source_url': metadata['source_url'],
-                'text_sha256': metadata['text_sha256'], 'total_lines': len(lines),
-                'citation': f'{document_id}:L{start_line}-L{actual_end}',
-                'start_line': start_line, 'end_line': actual_end,
-                **({'pdf_pages_first_excerpt_line': pages} if pages else {}),
-                'passage': '\n'.join(selected), 'truncated': clipped or end < min(end_line, len(lines)),
-                # Truncation means more text existed; every line from start_line to end_line was still returned in
-                # full, unless the only line returned had to be cut.
-                'lines_complete': bool(selected) and not (clipped and len(selected) == 1 and len(selected[0]) < len(f'{start_line}: {lines[start_line - 1]}')),
-                'evidence_kind': 'untrusted_cached_extraction'}
+    def read_paper(self, document_id, start_line=1, end_line=None, start_column=1):
+        return self._paper_page(document_id, *self._document(document_id), start_line, end_line, start_column)
 
-    def search_paper(self, document_id, query):
+    def _paper_page(self, document_id, metadata, lines, start_line, end_line, start_column):
+        fields = {'document_id': document_id, 'source_url': metadata['source_url'],
+                  'text_sha256': metadata['text_sha256'], 'evidence_kind': 'untrusted_cached_extraction'}
+        starts = metadata.get('pdf_page_starts', ())
+        page = source_page(lines, document_id, fields, start_line, end_line, start_column, self.result_room())
+        if starts:
+            pages = {p: max(start_line, starts[p - 1]) for p in
+                     range(bisect_right(starts, start_line), bisect_right(starts, page['end_line']) + 1) if p}
+            if pages:
+                extra = {'pdf_pages_first_excerpt_line': pages}
+                # Exact passage and a correct cursor are more important than redundant page labels.
+                if len(json.dumps({**page, **extra}, ensure_ascii=False)) <= self.result_room():
+                    page.update(extra)
+        return page
+
+    def search_paper(self, document_id, query, offset=0, limit=None):
         query = self._query(query, 1)
         metadata, lines = self._document(document_id)
-        hits = []
-        for match in line_matches(lines, query):
-            hit = {**match, 'citation': f'{document_id}:L{match["line"]}-L{match["end_line"]}'}
+        def annotate(hit):
             if starts := metadata.get('pdf_page_starts'):
-                hit['pdf_page'] = bisect_right(starts, match['line'])
-            hits.append(hit)
-            if len(hits) == 8:
-                break
-        return {'document_id': document_id, 'source_url': metadata['source_url'],
-                'query': query, 'matches': hits, 'match_limit': 8, 'text_sha256': metadata['text_sha256']}
+                hit['pdf_page'] = bisect_right(starts, hit['line'])
+        return match_page(lines, query, document_id, {'document_id': document_id, 'source_url': metadata['source_url'],
+                          'text_sha256': metadata['text_sha256']}, offset, limit, self.result_room(), annotate)
 
     def _pdf(self, body):
         if b'%PDF-' not in body[:1024]:
@@ -1666,8 +1802,8 @@ try:
 except ImportError:
  pass
 reader = pypdf.PdfReader(sys.argv[1])
-if reader.is_encrypted or len(reader.pages) > 300:
- raise ValueError('Unsupported PDF')
+if reader.is_encrypted:
+ raise ValueError('Encrypted PDF')
 with open(sys.argv[2], 'w', encoding='utf-8') as out:
  for page in reader.pages:
   out.write(page.extract_text() or '')
@@ -1687,7 +1823,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 last = (result.stderr or b'')[-2000:].decode('utf-8', 'replace').strip().splitlines()[-1:] or ['']
                 reason = re.sub(r'^[\w.]+(?:Error|Exception):\s*', '', last[0]).replace(directory, '')[:200]
                 raise LiteratureError('This PDF could not be read' + (
-                    ': it is encrypted or has more than 300 pages.' if 'Unsupported PDF' in reason else
+                    ': it is encrypted.' if 'Encrypted PDF' in reason else
                     f': {reason}.' if reason else '.') + ' Export it again, or supply the TeX source.')
             if target.stat().st_size > MAX_TEXT:
                 raise LiteratureError('This PDF could not be read: its extracted text exceeds 4 MB.')

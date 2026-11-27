@@ -31,9 +31,9 @@ from ..format_request import can_recover_previous_markdown, compile_followup_req
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
 from ..openrouter import OpenRouter
-from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4, ProviderChanged
+from ..model_limits import MODEL_OUTPUT_TOKENS, substantive_output, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4, ProviderChanged
 from ..ledger import LedgerError, ProofStore
-from ..literature import LiteratureTools
+from ..literature import LiteratureTools, UNLIMITED_SOURCE
 from ..proof import TERMINAL as PROOF_TERMINAL, ProofRunner, budget_stop, unsettled_interrupts
 from ..research import _job_directory, _read_state
 from ..prompts import FRESH_REVIEW
@@ -42,7 +42,7 @@ from ..workers import REVIEW_MODES, run_worker
 from ..refcheck import CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state, full_review_requested
 from ..style import StyleRunner, load_choice, style_path
-from ..source_tasks import excludes_external_sources, requests_workspace_search
+from ..source_tasks import excludes_external_sources, explore_sources, named_explore_sources, requests_workspace_search
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted, assistant_transport, check_assistant_transport
@@ -793,8 +793,8 @@ class Hub:
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
             raise ValueError('Only Assistant conversations orchestrate workers.')
-        if not isinstance(content, str) or not content.strip() or len(content) > 60000:
-            raise ValueError('Write a message of at most 60000 characters.')
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError('Write a nonempty message.')
         with self._lock:
             if self._closing:
                 raise Busy('The interface is shutting down.')
@@ -1176,7 +1176,7 @@ class Hub:
         return target
 
     def workspace_files(self):
-        return [f['path'] for f in store.list_files(self.root, limit=400)]
+        return [f['path'] for f in store.list_files(self.root)]
 
     def image_support(self):
         return self.args.backend == 'openai' and images.supported(getattr(self.args, 'api_profile', None), self.args.model)
@@ -1228,8 +1228,8 @@ class Hub:
 
     def check_files(self, files, pdf=True, image_refs=()):
         """Workspace-relative files that exist; used before pinning them."""
-        if not isinstance(files, (list, tuple)) or len(files) > 20:
-            raise ValueError('Give at most 20 files')
+        if not isinstance(files, (list, tuple)):
+            raise ValueError('Give a list of files')
         workspace = Workspace(self.root)
         checked = []
         for name in files:
@@ -1270,7 +1270,7 @@ class Hub:
     def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
         args = self.args
         library = LiteratureTools(self.root, online=self.online(online),
-                                  max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
+                                  max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
         library.offline_locked = self.online_locked  # launched --offline: online search cannot be turned on
         if isinstance(getattr(task, 'libraries', None), list):
             task.libraries.append(library)
@@ -1417,7 +1417,7 @@ class Hub:
         # Proof allocates its own output from the actual prompt and context.
         # A DS4 context override is independent of the ordinary-chat ceiling.
         _check_ctx(ctx, None if getattr(args, 'api_profile', None) in HOSTED_DS4 else args.predict)
-        _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx, explicit_ctx=ctx)
+        _check_proof(args, tokens=tokens, solve=solve, verify=verify)
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
         job_id = str(uuid.uuid4())  # known at once, so a queued proof can be followed by its id
 
@@ -1514,8 +1514,8 @@ class Hub:
                     max_tokens=args.research_tokens if tokens is None else tokens,
                     max_input_tokens=args.research_input_tokens if input_tokens is None else input_tokens,
                     max_seconds=args.research_seconds if seconds is None else seconds,
-                    max_requests=args.research_requests if requests is None else requests,
-                    max_chars=args.research_chars if chars is None else chars)
+                    max_requests=min(n for n in (requests, args.research_requests, UNLIMITED_SOURCE) if n is not None),
+                    max_chars=min(n for n in (chars, args.research_chars, UNLIMITED_SOURCE) if n is not None))
 
     def review_concurrency(self):
         """Independent review calls run together only on a server that batches requests (vLLM); the
@@ -1534,12 +1534,8 @@ class Hub:
                 budgets['max_seconds'] = min(self.args.research_seconds, budgets['max_seconds'])
             elif limits.get('seconds') is None:
                 budgets['max_seconds'] = None
-            if self.args.research_requests is not None:
-                budgets['max_requests'] = min(self.args.research_requests, budgets['max_requests'])
         online = self.online(online)
         variant = ('review' if variant in (None, 'journal') else variant) if kind == 'referee' else None
-        if budgets['max_requests'] is None and kind != 'literature':
-            budgets['max_requests'] = 12
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
         job_id = str(uuid.uuid4())  # known at once, so a queued job can be followed by its id
 
@@ -1669,8 +1665,6 @@ class Hub:
         session = store.load_chat(self.root, chat_id)
         if not isinstance(content, str) or not content.strip():
             raise ValueError('Write a message first')
-        if len(content) > 60000:
-            raise ValueError('Messages are limited to 60000 characters; pin long material as a file instead')
         mode = mode or session['mode']
         legacy = mode == 'critic' and session['mode'] == 'critic'
         if mode != 'explore' and not legacy:
@@ -1685,6 +1679,14 @@ class Hub:
         files = self.check_files(selected, image_refs=image_refs)
         files = [name for name in files if not images.is_image(name) or any(ref['name'] == name for ref in attached_images)]
         text_files = [name for name in files if not images.is_image(name)]
+        source_scope = Workspace(self.root, read_types=store.read_types(self.root))
+        attached = set(attached_files) | {name for row in session['transcript'] if row.get('role') == 'user'
+                                          for name in row.get('attached_files', row.get('files', []))}
+        authorized = [name for name in text_files if name in attached or source_suffix(name) in source_scope.allowed_types]
+        named, excluded = named_explore_sources(source_scope, content, text_files, authorized)
+        text_files = authorized if legacy else named
+        if not legacy:
+            files = [*text_files, *(name for name in files if images.is_image(name))]
         project_snapshot = projects.snapshot(self.root, session.get('project_id'))
         personal_context = personalization.context(personalization.load(self.base))
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(text_files)) if text_files else '')
@@ -1701,20 +1703,48 @@ class Hub:
             agent.personal_context = personal_context
             agent.project_context = projects.context(project_snapshot)
             images.bind(agent, image_refs)
+            for name in excluded:
+                try:
+                    agent.workspace.excluded_files.add(agent.workspace.path(name, pdf=True))
+                except ValueError:
+                    pass
             agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
             self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
             if agent.workspace.literature.online:
                 agent.workspace.checker = nested_checker(agent, capture.emit)
+            coverage = None
+            previous = fresh.get('direct_reading') or {}
+            signature = {'request': content, 'attached': list(attached_files), 'project': fresh.get('project_id'),
+                         'history_length': len(agent.history), 'images': [ref['sha256'] for ref in image_refs]}
+            previous = previous if previous.get('signature') == signature else {}
             try:
-                answer = agent.run(prompt, capture.emit, instruction='' if legacy else None)
+                if not legacy and (text_files or previous):
+                    if previous:
+                        check_assistant_transport(previous['transport'], assistant_transport(agent.client))
+                    transport = assistant_transport(agent.client)
+                    def remember(state):
+                        store.save_direct_reading(self.root, chat_id,
+                                                  {'signature': signature, 'transport': transport, 'reading': state})
+                    history = list(agent.history)
+                    reading = previous.get('reading')
+                    paths = [doc['path'] for doc in reading['documents']] if reading else text_files
+                    agent.predict = min(substantive_output(agent, agent.predict), agent.document_output_cap or agent.ctx)
+                    answer, coverage = explore_sources(agent, paths, content, capture.emit, reading, remember,
+                                                       requested=content, history=history)
+                    # Save the actual exchange. Private paging prompts and temporary
+                    # cumulative findings do not become the next user's conversation.
+                    user = {'role': 'user', 'content': content, 'images': attached_images}
+                    agent.history = [*history, user, {'role': 'assistant', 'content': answer}]
+                else:
+                    answer = agent.run(prompt, capture.emit, instruction='' if legacy else None)
             except BaseException as exc:
                 self._discarded(chat_id, content if echo_user else '', exc, files=files,
                                 attached_files=attached_files, image_refs=attached_images)
                 raise
-            store.commit_turn(self.root, chat_id, agent.history, capture.calls, capture.notices,
-                              echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files,
+            store.commit_turn(self.root, chat_id, agent.history, capture.calls[-1:] if coverage is not None else capture.calls, capture.notices,
+                              echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files, source_coverage=coverage,
                               user_content=content,
                               project_snapshot=project_snapshot, image_refs=attached_images)
             self.bus.publish('chat_saved', chat=chat_id)
@@ -1723,11 +1753,11 @@ class Hub:
         label = 'Conversation' if legacy else 'Exploration'
         return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
 
-    def check(self, chat_id, question, *, effort='medium', on_update=None, queue=False, files=()):
+    def check(self, chat_id, question, *, effort='high', on_update=None, queue=False, files=()):
         """A literature check answered in a Default conversation (its evidence stays in .mathagent/checks)."""
         session = store.load_chat(self.root, chat_id)
-        if not isinstance(question, str) or not question.strip() or len(question) > 8000:
-            raise ValueError('Describe the result to find a reference for, in at most 8000 characters')
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError('Describe the result to find a reference for')
         root = self.root
         image_refs = store.chat_images(session)
         if image_refs and not self.image_support():
@@ -1749,12 +1779,13 @@ class Hub:
             try:
                 limits = {}
                 if is_ds4(agent):
-                    work_limit = workflow_budget(effort, self.args)
+                    work_limit = workflow_budget('high', self.args)
                     limits = dict(max_tokens=work_limit['tokens'], max_seconds=work_limit['seconds'],
                                   max_input_tokens=self.args.research_input_tokens)
                 # An attached .bib (or reference list) is checked entry by entry.
                 material = bibcheck.attached_material(Workspace(root, read_types=store.read_types(root)), files)
-                result = runner.start(question, effort=effort, **limits, material=material,
+                result = runner.start(question, effort='high', **limits, material=material,
+                                      max_requests=self.args.research_requests, max_chars=self.args.research_chars,
                     lookup='precise' if precise_reference_request(question) else 'standard')
             except BaseException as exc:
                 self._discarded(chat_id, '', exc)
@@ -1936,8 +1967,8 @@ class Hub:
             if saved.get('images') and not self.image_support():
                 raise ProviderChanged('Resume image work with the original DeepInfra DS4.1 Flash 1017 profile.')
             content, files = saved['query'], saved.get('files', ())
-        if not isinstance(content, str) or not content.strip() or len(content) > 60000:
-            raise ValueError('Write a message of at most 60000 characters.')
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError('Write a nonempty message.')
 
         def admission_chat():
             # Caller holds the hub lock. Inputs assembled outside it are valid
@@ -2080,7 +2111,7 @@ class Hub:
             main.scope_chat_id = chat_id
             main.index_view = (previous.get('index_view') if previous is not None else
                                briefs.freeze_view(root, fresh, workspace=getattr(self.args, 'terminal_investigation', False)))
-            if main.index_view and (project_snapshot or main.index_view.get('entries')):
+            if main.index_view and (project_snapshot or main.index_view.get('entries') or main.index_view.get('pages')):
                 main.workspace.index = briefs.IndexReader(root, main.index_view)
             main.project_snapshot = project_snapshot
             main.unavailable_source_files = unavailable_sources
@@ -2181,7 +2212,7 @@ class Hub:
                 return Investigation(main, delegate, args=self.args, chat_id=chat_id, requested_effort=effort, **options)
 
             if selected_mode == 'investigate':
-                parent = investigation(required_effort or (previous or {}).get('required_effort') or 'medium')
+                parent = investigation(required_effort or (previous or {}).get('required_effort') or 'high')
             else:
                 parent = ModeOrchestrator(main, delegate, required_mode=required_mode,
                                           required_effort=required_effort or (previous or {}).get('required_effort'),
@@ -2403,7 +2434,7 @@ class Hub:
         if item.get('mode') in ('writeup', 'summarize') and item.get('job_id') and item['job_id'] not in downloads:
             downloads.append(item['job_id'])
         store.update_item(root, chat_id, index, mode=mode, request=request, files=files, status='starting', error=None,
-                          **({'effort': 'high'} if mode == 'literature' else {}),
+                          effort='high',
                           previous_downloads=downloads, job_id=None, outputs=None, outcome='')
         try:
             if mode == 'prove':
@@ -2415,7 +2446,7 @@ class Hub:
                                            variant=REVIEW_MODES.get(mode), online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
             elif mode == 'check':
-                task = self.check(chat_id, request, files=files, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
+                task = self.check(chat_id, request, files=files, effort='high',
                                   queue=True, on_update=on_update)
             elif mode in ('writeup', 'summarize'):
                 task = self.start_writeup(request, source_files=files,
@@ -2464,21 +2495,16 @@ def _check_ctx(ctx, predict):
         raise ValueError('Context must exceed the output budget + 1024')
 
 
-def _check_proof(args, *, tokens, solve, verify, ctx, explicit_ctx=None):
+def _check_proof(args, *, tokens, solve, verify):
     """The terminal's checks for a new proof, made before the job exists."""
     if getattr(args, 'api_profile', None) in HOSTED_DS4 and max(solve, verify) > MODEL_OUTPUT_TOKENS:
         raise ValueError(f'DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     cap = getattr(args, 'specialist_output_tokens', None)
-    if explicit_ctx is not None and getattr(args, 'api_profile', None) in HOSTED_DS4:
-        # DS4 calls need their whole output allowance beside the statement; a smaller context only fails later.
-        needed = max(min(solve, cap or solve), min(verify, cap or verify)) + 2048
-        if explicit_ctx < needed:
-            raise ValueError(f'ctx {explicit_ctx} is too small for this proof: each solve or review needs its output '
-                             f'allowance plus room for the statement, at least {needed} tokens. Raise ctx or lower '
-                             'solve_tokens and verify_tokens.')
-    required = min(solve, cap) + min(verify, cap) if cap is not None else solve + verify
-    if tokens is not None and tokens < required:
-        raise ValueError(f'The token budget must cover one full solve and its review: at least {required} tokens')
+    minimum = args.proof_min_solve_tokens or 128
+    if cap is not None and cap < minimum:
+        raise ValueError('The specialist output cap is below the minimum solve allowance')
+    if tokens is not None and tokens < minimum + 128:
+        raise ValueError(f'The token budget must cover {minimum} solver tokens and 128 verifier tokens')
     repair = args.proof_repair_tokens
     if getattr(args, 'api_profile', None) in HOSTED_DS4:
         repair = min(solve, repair or solve)

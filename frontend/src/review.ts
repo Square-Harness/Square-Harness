@@ -49,11 +49,8 @@ export const VARIANT_STEP_NAMES: Record<string, string> = {
   literature: 'Literature', presentation: 'Presentation', write: 'Write', explain: 'Explain', fill: 'Fill', fix: 'Fix', done: 'Done',
 }
 
-/** The effort each kind starts from. A review and a typo check have one depth: no effort is chosen for them, and
- *  the level only names their budget (mathagent/router.py FIXED_EFFORT). */
-export const VARIANT_EFFORT: Record<ReviewVariant, EffortLevel> = { quick: 'medium', review: 'high', journal: 'high', typos: 'low', explain: 'medium' }
 export const FIXED_VARIANTS: ReviewVariant[] = ['review', 'journal', 'typos']
-export const FIXED_EFFORT: Partial<Record<RouteMode, EffortLevel>> = { referee: 'high', detailed_review: 'high', typo_check: 'low' }
+export const FIXED_EFFORT: Partial<Record<RouteMode, EffortLevel>> = { referee: 'high', detailed_review: 'high', typo_check: 'high' }
 
 export const VARIANT_CAVEATS: Record<ReviewVariant, string> = {
   quick: 'Model check, not a certificate. Each objection links to the proof lines it concerns; the proof was not rewritten.',

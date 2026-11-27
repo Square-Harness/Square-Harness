@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- The numerical sandbox image is now version 3. It preserves long arrays and other structured results within the configured byte allowance. Builds serving numerical work need the new image.
+- Explore now receives the selected source files together when they fit. For larger
+  requests it pages through the assigned text, saves findings and source positions,
+  checks the source identities on resume and reports exactly what remained unread.
+- New jobs use High. Proof, Investigation and their writers fit their calls to the
+  available job and model budgets. Saved explicit allowances remain meaningful on
+  resume. Independent proof verification and the tester's settled-spend cutoff remain
+  in force.
+- Bibliography checks process the supplied entries. Referee readers are planned for
+  every mapped proof. Source readers report continuation positions, including within
+  long lines. Reviews, outlines and style profiles retain the requested items across
+  the older list boundaries. The GUI and the Assistant can pass larger file selections,
+  tool batches and prior-work indexes without dropping the tail.
+
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns
   with images. Older turns can confirm their destination when it is unknown.

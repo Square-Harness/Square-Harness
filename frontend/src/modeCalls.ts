@@ -3,7 +3,6 @@
 
 import type { RouteMode } from './api'
 import type { Cover } from './components/Glyph'
-import type { EffortLevel } from './effort'
 
 /** The cover a mode call is drawn with: the Proof Check, the Review, the Typo check and Explain each have their own mark. */
 export const coverOf = (mode: RouteMode): Cover =>
@@ -75,9 +74,8 @@ export function updateCall(before: string, after: string, call: ModeCall | null)
   return validCall(after, next) ? next : null
 }
 
-export function callPayload(text: string, call: ModeCall | null, effort?: EffortLevel) {
+export function callPayload(text: string, call: ModeCall | null) {
   if (!validCall(text, call)) return undefined
-  const level = call.mode === 'literature' ? 'high' : effort
   // DOM selections use UTF-16 offsets; the server indexes Unicode code points.
-  return { mode: call.mode, start: Array.from(text.slice(0, call.start)).length, ...(level ? { effort: level } : {}) }
+  return { mode: call.mode, start: Array.from(text.slice(0, call.start)).length, effort: 'high' as const }
 }

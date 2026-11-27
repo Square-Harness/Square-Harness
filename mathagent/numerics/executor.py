@@ -11,7 +11,7 @@ JSON result comes back. The host enforces the deadline, caps what it reads,
 and removes the container on every exit path.
 """
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 from datetime import datetime, timezone
 import json
@@ -29,9 +29,9 @@ import uuid
 
 from .admission import AdmissionCancelled, AdmissionUnavailable, slot as numerical_slot
 
-IMAGE = 'square-harness/python-numerics:2'
+IMAGE_VERSION = '3'
+IMAGE = f'square-harness/python-numerics:{IMAGE_VERSION}'
 IMAGE_LABEL = 'org.squareharness.sandbox'
-IMAGE_VERSION = '2'
 CONTAINER_LABEL = 'org.squareharness.sandbox.run'
 # The build context's digest, set by `python -m mathagent.numerics build`: an image built from an
 # older Dockerfile, runner or lock file is refused even under the same tag and version.
@@ -41,8 +41,7 @@ PROCESS_LABEL = 'org.squareharness.sandbox.process'
 DOCKER_DIR = Path(__file__).resolve().parent / 'docker'
 BUILD_FILES = ('Dockerfile', 'LICENSE.md', 'NOTICE', 'requirements.in', 'requirements.lock', 'runner.py')
 DEFAULT_CONCURRENCY = 2
-MAX_CODE_BYTES = 200_000
-MAX_PARAMETER_BYTES = 8_000
+PROTOCOL_BYTES = 512 * 1024
 STARTUP_SECONDS = 60
 GRACE_SECONDS = 3
 MAX_ARTIFACTS = 20
@@ -339,13 +338,13 @@ class DockerExecutor:
         """Execute ``code`` under ``limits``; user errors come back in the result, never as exceptions."""
         if not isinstance(code, str) or not code.strip():
             raise ValueError('Provide nonempty Python source code')
-        if len(code.encode('utf-8')) > MAX_CODE_BYTES:
-            raise ValueError(f'Python source is limited to {MAX_CODE_BYTES} bytes')
+        if len(code.encode('utf-8')) > PROTOCOL_BYTES:
+            raise ValueError(f'Python source is limited to {PROTOCOL_BYTES} bytes')
         if seed is not None and (type(seed) is not int or not 0 <= seed < 2 ** 63):
             raise ValueError('seed must be a nonnegative integer')
-        parameters = parameters or {}
-        if not isinstance(parameters, dict) or len(json.dumps(parameters)) > MAX_PARAMETER_BYTES:
-            raise ValueError(f'parameters must be a JSON object of at most {MAX_PARAMETER_BYTES} bytes')
+        parameters = {} if parameters is None else parameters
+        if not isinstance(parameters, dict):
+            raise ValueError('parameters must be a JSON object')
         try:
             with numerical_slot(cancel):
                 self.probe()
@@ -366,7 +365,9 @@ class DockerExecutor:
         request = json.dumps({'code': code, 'nonce': nonce, 'timeout': limits.timeout_seconds, 'seed': seed,
                               'parameters': parameters or {},
                               'limits': {'output_bytes': limits.output_bytes, 'cpus': limits.cpus,
-                                         'artifact_bytes': limits.artifact_bytes}}).encode('utf-8')
+                                         'artifact_bytes': limits.artifact_bytes}}, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        if len(request) > PROTOCOL_BYTES:
+            raise ValueError(f'The encoded Python request exceeds the {PROTOCOL_BYTES}-byte sandbox protocol limit')
         marker = f'<<<SQH-START {nonce}>>>'.encode()
         out, err = bytearray(), bytearray()
         overflow, started = threading.Event(), threading.Event()
@@ -488,9 +489,22 @@ class DockerExecutor:
             setattr(result, key, text[:limits.output_bytes + 200])
             setattr(result, key + '_truncated', bool(data.get(key + '_truncated')) or len(text) > limits.output_bytes + 200)
         if isinstance(data.get('error'), dict):
-            result.error = {k: str(data['error'].get(k, ''))[:6000] for k in ('type', 'message', 'traceback')}
+            result.error = {k: str(data['error'].get(k, ''))[:limits.output_bytes] for k in ('type', 'message', 'traceback')}
         result.result = data.get('result')
-        result.warnings = [str(w)[:300] for w in (data.get('warnings') or [])[:20]]
+        remaining = limits.output_bytes
+        for warning in data.get('warnings') or []:
+            message = str(warning)
+            size = len(message.encode('utf-8'))
+            if size > remaining:
+                result.warnings.append('Further diagnostics exceeded the configured output allowance.')
+                break
+            result.warnings.append(message)
+            remaining -= size
+        size = len(json.dumps(result.result, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+        if size > max(limits.output_bytes, limits.artifact_bytes):
+            result.result = {'unavailable': True, 'reason': 'Structured result exceeded the configured return bytes.'}
+        elif size > limits.output_bytes:
+            limits = replace(limits, artifact_bytes=limits.artifact_bytes - size)
         result.artifacts = self._artifacts(data.get('artifacts') or [], limits, result.warnings)
         return result
 
@@ -498,6 +512,8 @@ class DockerExecutor:
     def _artifacts(items, limits, warnings):
         """Keep only well-named, well-formed files of the allowed types, within the artifact budget."""
         accepted, names, total = [], set(), 0
+        if len(items) > MAX_ARTIFACTS:
+            warnings.append(f'Only the first {MAX_ARTIFACTS} artifacts fit the sandbox file-count limit.')
         for item in items[:MAX_ARTIFACTS]:
             name = item.get('name') if isinstance(item, dict) else None
             if not isinstance(name, str) or not ARTIFACT_NAME.match(name) or name in names:
@@ -532,9 +548,14 @@ class DockerExecutor:
                     warnings.append(f'Rejected {name}: not an SVG image')
                     continue
             summary = item.get('summary') if isinstance(item.get('summary'), dict) else None
-            if summary is not None and len(json.dumps(summary)) > 8000:
-                summary = None
-            names.add(name)
             total += len(data)
+            if summary is not None:
+                size = len(json.dumps(summary, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+                if total + size <= limits.artifact_bytes:
+                    total += size
+                else:
+                    warnings.append(f'The full metadata for {name} exceeded the artifact allowance; its file was kept.')
+                    summary = None
+            names.add(name)
             accepted.append(Artifact(name, ARTIFACT_TYPES[suffix][0], data, summary, width, height))
         return accepted

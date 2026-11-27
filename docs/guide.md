@@ -100,13 +100,11 @@ This includes Assistant replies, Explore, Review and Explanation, Literature rev
 reference checking, Write-up, Summary, Writing Style and the Python modes. Short
 control operations such as routing and generating a conversation title have smaller
 limits. Research workers fit each request to its available context, explicit limits and
-remaining budget. Proof reserves room for each complete solve and verification.
-The Proof presets are
+remaining budget. Proof fits each solve and independent verification to the available
+context and remaining output. New jobs use the High workflow profile.
 
 | Proof effort | Solver passes | Solve / repair | Review | Total output allowance |
 | --- | ---: | ---: | ---: | ---: |
-| Low | 1 | 384,000 | 384,000 | 1,152,000 |
-| Medium | 3 | 384,000 | 384,000 | 3,456,000 |
 | High | 5 | 384,000 | 384,000 | 5,760,000 |
 
 These are ceilings, not target lengths. The total allows one solve and up to
@@ -122,20 +120,15 @@ calls were charged in full, are re-charged from their saved streams when resumed
 the report lists each change. A successful review ends the run early; an uncertain review preserves
 the uncertainty. Reasoning tokens count toward generated-token usage.
 
-Low, Medium and High select workflow allowances, separately from the provider's
-reasoning effort. DS4 uses thinking for both solving and review, with provider
-reasoning effort High by default; selecting Low here does not lower that setting.
-
-All three levels use the same per-call time guard; the workflow time
-allowance grows with the permitted number of calls. The default guard is three
-hours per call, configurable for Proof with `--proof-call-seconds`.
-The default cumulative DS4 worker allowances are 1,152,000, 3,456,000 and
-5,760,000 output tokens, with 9, 27 and 45 hours of active work. Explicit launch or Advanced limits and the provider's
-spending allowance can stop work earlier. Full input plus output must fit the
-context; the harness reports an insufficient allowance rather than silently
-shrinking a DS4 Proof call. These settings have not been established as optimal
-by a mathematical benchmark. Existing Qwen profiles keep their previous budget
-rules, and paused jobs keep their saved limits when resumed.
+DS4 enables thinking for the solver and verifier. Its provider reasoning effort
+defaults to High and is separate from workflow limits. Each Proof call can use up
+to three hours by default, configurable with `--proof-call-seconds`. Five
+passes allow up to 5,760,000 generated tokens and 45 hours of active work.
+Explicit numeric budgets and the provider's spending allowance can stop the job
+earlier. With a smaller budget, Proof gives both the solver and verifier a share.
+The verifier must receive the exact task and the entire candidate. If they cannot
+fit, Proof retains the candidate and reports that verification was unavailable.
+A paused job keeps its saved allowances.
 
 Pause interrupts an active model-response stream even if the provider stops
 sending data. The partial response remains unfinished and resumable. When the
@@ -243,10 +236,9 @@ notation, assumptions, established results with their sources, conjectures and
 open questions. Saving writes a `PROJECT.md` in the project's file folder.
 Edits from another tab are detected before saving so they cannot silently
 replace your draft. You may also edit `PROJECT.md` in another editor. If its
-first line (the project header) is removed or damaged, or the notes grow past
-8,000 characters, the project stays listed and its conversations keep working:
-the notes editor shows a notice, the model receives only the first 8,000
-characters, and saving shorter notes writes the header again.
+first line (the project header) is removed or damaged, the project stays listed,
+the editor shows a notice and saving the notes writes the header again. Longer
+notes can be saved and are subject to the document storage and model context limits.
 
 Deleting a conversation keeps its saved proofs, reports and runs in its
 project's research record; only its short worker answers are deleted with it.
@@ -357,8 +349,8 @@ result says so. It never turns that failure into a mathematical verdict.
 saved in your folder. You can pause work and resume it later with the budget it
 had left, and you can always see exactly what the model saw and wrote.
 
-**Bounded work.** Every job has a budget of attempts, working time and retrieval
-requests. Most skills offer Low, Medium and High effort. When you request a Literature review, it uses High.
+**Working budgets.** New jobs use High effort. You can set numeric limits on attempts,
+working time, tokens and external requests. Saved jobs retain their original allowances.
 
 **Text is data, never instructions.** Manuscripts, papers, web pages and model
 answers cannot change what the harness is allowed to do:
@@ -372,7 +364,7 @@ answers cannot change what the harness is allowed to do:
   permissions and the server's environment.
 
 **Simple for mathematicians.** A conversation is the entry point. Mathematics is
-typeset with LaTeX everywhere, and one menu sets the effort. Square Harness is a
+typeset with LaTeX throughout the interface. Square Harness is a
 practical tool for daily research. It will not solve Navier–Stokes overnight.
 
 ## Install
@@ -430,9 +422,8 @@ one with a message.
 - **Call a skill yourself** by typing `@` in the text box: `@prove`, `@check`,
   `@literature`, `@quick_review`, `@referee`, `@typo_check`, `@explain`,
   `@writeup`, `@summarize`, `@explore`, `@python_lab`, `@sanity_check`.
-  Hover over the chip above the text box to read what the skill does. Where effort can be chosen,
-  **Auto** means Medium. A requested Literature review uses High. Review and Typo each have
-  a single depth. The former `@detailed_review` command still starts a Review.
+  Hover over the chip above the text box to read what the skill does. New work uses High effort, including automatic
+  selections and jobs delegated by the Assistant. The former `@detailed_review` command still starts a Review.
   This is for users who know the skills: each one is built for a specific goal,
   while the Assistant divides a large task into jobs the skills can handle.
   A skill forced onto a larger task can fail in unexpected ways (for example,
@@ -656,7 +647,7 @@ context; the next must hand the task to Proof. Preparation input is limited to
 16,384 tokens per call and 32,768 in total, using the backend's count or its
 labelled estimate. Larger material goes to Proof without trimming the original
 request or hypotheses. These limits apply to preparation, not Proof's context.
-The model-written brief is limited to 4,000 characters and gives the precise
+The model-written brief gives the precise
 objective, definitions, conventions and any unresolved ambiguity. It may add
 one short natural direction, clearly labelled as an unproved suggestion; it
 must not begin the proof or add a missing hypothesis.
@@ -690,8 +681,7 @@ Assistant reports the result in its own words.
 A request to prove that names no statement ("Prove the lemma.", with nothing in
 the message, its files or the conversation to say which) gets a question asking
 for the statement instead of a Proof job. When DS4 recognises a famous open
-problem (for example the Riemann hypothesis), it does not start a Medium or High
-Proof by itself: the reply says what is known about the problem, and a Proof card
+problem (for example the Riemann hypothesis), it proposes Proof for you to start: the reply says what is known about the problem, and a Proof card
 below it states the time and tokens such a run may use. Select **Start** on the
 card to run it anyway. Selecting **@prove** always starts Proof.
 
@@ -753,10 +743,10 @@ message. A name alone follows the workspace’s file-type permissions.
 Older messages show a neutral source label because they did not record how
 the file was selected.
 
-Up to six tasks can draw on Explore, Check, Literature,
-Proof and Quick review. At most two are Proof tasks. Literature review uses
-High effort. The other tasks can use up to Medium effort. Independent tasks
-can run together when the model server supports it.
+An investigation can combine Explore, Check, Literature, Proof and Quick review.
+All new tasks use High effort. Workers and the writer share the available
+output, input and working time. The plan can contain multiple Proof tasks, and
+independent tasks can run together when the model server supports it.
 Proof waits for the preceding steps listed in its plan. When the plan calls
 for a special case, the controller selects a precise statement from the evidence
 or uses the case proposed in the plan. A change in hypotheses gets its own statement and hash. Numerical
@@ -813,7 +803,7 @@ How it works: **solve → verify → repair**.
    written proof. It
    avoids unnecessary repeated derivation of routine steps and
    concentrates effort on delicate implications, theorem hypotheses, quantifiers,
-   domains, constant dependence and limits. It records up to five essential
+   domains, constant dependence and limits. It records the essential
    dependencies, distinguishing supplied facts, checked deductions, standard
    results and unresolved claims. A theorem name alone does not establish an
    essential input. For the weakest nonroutine dependency, it attempts one short
@@ -831,7 +821,7 @@ How it works: **solve → verify → repair**.
    needed by the argument still blocks acceptance. Essential objections go
    back to the solver, which repairs the proof or argues the objection is
    mistaken. The solver receives the latest full written candidate and review.
-   Later repairs also receive a short record of earlier located objections;
+   Later repairs can also receive earlier located objections when they fit;
    these remain fallible and are marked not reassessed, rather than assumed
    resolved because a later review omits them. The solver gives a short
    mathematical reason for repairing, rebutting or retaining an objection. The new
@@ -840,8 +830,7 @@ How it works: **solve → verify → repair**.
    objection, the uncertain repaired answer becomes the export; the original
    and both reviews remain available.
 
-Every version is kept, and the first answer is never lost. Effort sets the number
-of attempts and the working time. “Response reviewed” means the verifier found
+Every version is kept, and the first answer is never lost. The default is five solver attempts. You can change the attempt and time limits. “Response reviewed” means the verifier found
 no blocking mathematical issue in the selected response; any nonblocking notes
 remain visible in its review and report. The response can prove the statement or
 refute it with a counterexample; this status does not assert the statement is
@@ -888,12 +877,23 @@ conversation is using: pause the conversation first.
 `.mathagent/trash/proofs/` in the workspace, named by its id and the deletion
 time; to restore it, move it back into `.mathagent/proofs/` under its id alone. A running or queued proof cannot be deleted.
 
-Paused jobs using recognized Proof policies 7, 8, 9 or 10 are upgraded to policy 11
+Paused jobs using recognized Proof policies 7 through 11 are upgraded to policy 12
 on resume. The report records the old and new policy hashes; completed calls,
 candidate versions and saved allowances are retained. Completed old jobs remain
 readable without an upgrade.
 
 ### Explore
+
+With `@explore`, attached text, BibTeX and extracted PDF text stay with that worker.
+When the complete set fits the model request and the remaining job allowance, Explore
+receives every file together. Larger sets are read in successive portions. The run
+saves the next source position and its findings. On resuming, it checks that the
+source still matches. The source record says which lines reached the model and gives
+the next unread line and column if it stopped. A request to locate or state one
+numbered result can finish as soon as Explore finds an exact supporting quotation
+in the source. The answer includes the quotation, its locator and reading coverage.
+Whole-document requests continue through the selected sources. The mathematical answer states which
+proofs or claims the worker actually checked.
 
 Ordinary mathematical chat with read access to your folder (`.tex`, `.bib`, PDF
 text, …). **Explore** gives promising approaches early, with the first useful
@@ -975,16 +975,17 @@ Every sentence of a section is checked against the available evidence. A first p
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
-A requested Literature review uses High workflow effort, whether you ask the
-Assistant, select `@literature`, use the standalone form or run
-`/literature` in the terminal. The review can make up to 165 public source
-requests, screen up to 500 candidates and plan full-text reading for up to
-14 papers. The outline can add up to three papers it relies on. The review
-reuses papers already cached in the workspace. A focused question may need
-fewer sources. Local-model profiles normally allow 20 minutes.
-Hosted DS4 uses the workflow time allowance described above. Explicit resource
-limits and the remaining budget of a conversation can stop a review earlier.
-Resuming a saved review keeps its original search breadth and remaining budget.
+New Literature reviews use High effort in the Assistant, the standalone form,
+the terminal and the companion survey beside a Referee report. The companion
+searches using its public question. It receives no manuscript attachments.
+The review screens the candidates it collects for the question, ranks relevant
+works, reuses cached papers and retrieves full texts while its reading time
+remains. A follow-up reading pass considers works assigned to the outline.
+An operator can set a source-request or evidence allowance. With the defaults,
+source access continues until the workflow deadline, cancellation or another
+configured budget stops it. Local profiles normally allow 20 minutes. Hosted
+DS4 uses the workflow allowance described above. Saved reviews keep their
+original search breadth and budget.
 The job report shows the time spent at each step, including waits between
 requests to arXiv.
 
@@ -1027,8 +1028,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   It needs a proof: statements or formulas without one are not judged (use
   `@sanity_check` to test a formula). Independent verifier passes read it
   through different lenses: line by line, adversarially, the results it uses.
-  Effort sets the number of passes: 1, 2 or 3. From Medium up, each alleged error
-  is re-checked by a fresh call. The verdict is *no issue found*, *issues found* or
+  A new Proof Check uses the High profile. Its verifier passes examine distinct
+  aspects of the proof, and a fresh call rechecks each alleged error. The verdict is *no issue found*, *issues found* or
   *uncertain*; *uncertain* always names the step that was not settled. Each issue
   quotes the exact proof lines and comes with a suggested repair. The proof itself
   is never rewritten. When the proof is in an attached file and the model has a
@@ -1091,8 +1092,8 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   the complete repair and it needs nothing new (then it is filed as a gap, with
   the judge's argument shown). Meanwhile the code compiles the TeX source (a
   figure that is not attached becomes a box) and checks the bibliography. The
-  referees are asked to finish after about 11 minutes; the report is written
-  from what was found and judged by 20 minutes at the latest. If the model
+  referees work within the job’s active-time allocation. The scheduler reserves
+  the final portion for judgments and writing the report from the recorded findings. If the model
   provider refuses the calls (an expired credential or no credit), the review
   stops at once and the report is written from what was recorded.
 
@@ -1133,7 +1134,7 @@ The review kinds work on a proof you paste, or on a manuscript you attach
 
   The referees can check works the manuscript cites. A separate literature search places its results in context.
   In a conversation, the Assistant starts **two jobs at once** when you ask for a
-  review: the review, and a literature review at its lowest breadth, each with its
+  review: the review and a High-effort literature review, each with its
   own card and page. The question of that literature review is written by the
   Assistant from the title, abstract and introduction of your manuscript, in
   public mathematical words; no manuscript text is pasted into it, and the
@@ -1438,8 +1439,7 @@ How it works:
    more than 5pt into the margin. Numbers in the mathematics that your material
    does not contain are listed in the report as points to look at; they never
    block. These are heuristics, not a proofreading.
-6. Then the document is reviewed, as Proof reviews a proof, unless the effort
-   is Low. A fresh check compares it with your material and request: a result,
+6. Then the document is reviewed, as Proof reviews a proof. A fresh check compares it with your material and request: a result,
    hypothesis or constant that changed, something left out, mathematics added
    where the text restates your notes, a generated exercise or solution that is
    wrong, a requirement not met. A style check reads it section by section
@@ -1456,7 +1456,7 @@ How it works:
    made for you: it is put to you with both versions. Generated mathematics (an
    exercise, a solution, exam questions) is corrected when the check finds it
    wrong, and checked again; once a check has passed over it, it no longer
-   counts as unchecked. Up to three rounds, each with its own focus: first
+   counts as unchecked. The three kinds of checks are run in order as the job allows: first
    fidelity and the required parts, then how the whole reads, then the
    sentences. Every finding is kept with what became of it (fixed, set aside,
    for you, its passage gone) and is not raised again. The writer answers each
@@ -1646,16 +1646,14 @@ conversation. Install the sandbox once (see the install guide).
   run. It can ask for up to 300 s, 16 GB and 4 CPUs, and you approve each such
   request: the approval shows the new limits, the run's stated purpose and the
   start of its code.
-  Code that does not compile is reported at once without starting a container
-  or using a run.
+  A syntax error costs no run. Selected and routed Python Lab jobs can keep running useful experiments within the job budget. Set `lab.max_runs` to a positive integer for an explicit run allowance.
 - **Sanity check** tries to falsify a claim with cheap experiments: small cases,
   boundaries, random sampling, minimising the margin. When the sandbox is
-  installed and the model context is at least 32,768 tokens, it is offered
-  automatically in Explore and the Assistant (5 s, 2 GB, 1 CPU, 3 runs
+  installed and the call has room for its tools, it is offered automatically in Explore and the Assistant (5 s, 2 GB, 1 CPU, 3 runs
   per turn; `--no-numerical-checks` turns this off). The result is exactly one of *exact
   counterexample*, *numerically verified candidate*, *no counterexample detected*
   or *inconclusive*. Passing tests never count as a proof.
-  For an explicit **@sanity_check**, a run without a classification is recorded as *unclassified*.
+  Selecting **@sanity_check** allows further useful experiments within the job budget. Set `sanity.explicit_max_runs` for an explicit run allowance. A selected check without a classification is recorded as *unclassified*.
 - **The Review** binds the sanity-check skill with its own policy, *review*:
   30 s, 2 GB and 1 CPU a run; 20 runs for the lead referee, 8 for each
   co-referee and 3 for each judge of one review; two runs at a time; no
@@ -1678,14 +1676,14 @@ built-in maxima: for automatic checks 30 s, 4 GB, 2 CPUs and 10 runs; for anythi
 
 The experiment record identifies a selected skill as `explicit`, a requested Python Lab run started by the Assistant as `routed`, and an automatic check as `automatic`.
 
-Each run is saved under `.mathagent/experiments/<id>/` (the oldest are pruned
-beyond 200 runs or 256 MB; a run whose record is damaged is left in place).
+Each run is saved under `.mathagent/experiments/<id>/`. At 256 MB the oldest healthy artifact directories rotate. The evidence index retains each new run’s full returned values, code, parameters, diagnostics and artifact descriptions. The binary figures and files require the native directory. Older retained records can contain explicitly shortened fields.
+The model can page through a record using `read_experiment` and the returned `next_offset`. A structured `RESULT` that fits the per-run output allowance is returned in full. A larger one shares the available artifact bytes with plots and files. If the value exceeds both allowances, the record says so and the experiment can return it in separate runs.
 Manage runs with `python -m mathagent.numerics list`,
 `show <id>`, `rerun <id>` (same code, seed, parameters and limits) and `clean`
 (remove stopped containers and those left by a server that is no longer
 running; a live run of another interface is never touched), adding
 `--workspace <folder>` to `list`, `show` and `rerun`. `--no-python-sandbox`
-disables the sandbox entirely. The sandbox image is labelled with a digest of
+disables the sandbox entirely. The full numerical-result format requires image `square-harness/python-numerics:3`. The sandbox image is labelled with a digest of
 its build files; after an update that changes them, the harness asks you to
 rebuild it with `python -m mathagent.numerics build`.
 
@@ -1733,25 +1731,17 @@ declaration, and so do the sandbox limits: the text of a skill cannot raise them
 
 ### Effort
 
-The following table describes the original local-model profiles, including
-Qwen. The hosted DS4 profile uses the generation and workflow allowances
-described above for Proof and the other modes.
+High is the workflow profile for all new jobs, whether you start one in the
+interface, in the terminal or through the Assistant. In Proof it allows five
+solver attempts by default. On a local model the general High time allowance
+is 30 minutes. Whole-manuscript Review and Typo check allow up to an hour by
+default. Each mode uses its own working method. You can set numeric limits for a
+particular job or launch. The model context still limits each request, and
+research tools respect any explicit request and source-character budgets.
 
-| Effort | Attempts / rounds | Working time | Retrieval requests |
-| --- | ---: | ---: | ---: |
-| Low | 1 | 1 min | 20 |
-| Medium | 3 | 15 min | 50 |
-| High | 5 | 30 min | 80 |
-
-Each skill translates the level into its own terms. For a proof, it is the number
-of attempts. For a quick review, the number of verifier passes. A review and a
-typo check have no effort to choose: the review always runs with the allowance
-of High, the typo check with that of Low, and a review gets twice the working
-time on a local model. There
-is no fixed token allowance for the original profiles unless one was supplied
-explicitly, but every model call is still limited by the model's context. A
-paused job resumes with what is left; it never gets a new allowance silently.
-Older saved Extra high and Poincaré jobs remain readable and retain their saved allowances.
+Resuming a saved job preserves its recorded numeric allowances, including historical
+Low, Medium, Extra high and Poincaré jobs. The **Resume with more budget** action
+records any explicit increase.
 
 ## Your data
 
@@ -1765,7 +1755,7 @@ Everything is saved in your folder under `.mathagent/`:
 | `chats/` | Conversations and saved Assistant checkpoints |
 | `investigations/` | Investigation statements, task records and final reports, removed with their owning conversation |
 | `answers/` | Delegated chat-worker answers, removed with their owning conversation |
-| `index/experiments/` | Compact experiment records retained when older sandbox artifacts are pruned |
+| `index/experiments/` | Experiment records retained when older sandbox artifacts are pruned |
 | `experiments/` | Sandbox runs |
 | `literature/` | Cache of downloaded sources |
 

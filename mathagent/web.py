@@ -16,13 +16,12 @@ import textwrap
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
-from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, decode_page, line_matches, upgrade_url
+from .literature import LiteratureError, MAX_BYTES, MAX_TEXT, _digest, _schema, decode_page, match_page, source_page, upgrade_url
 from .worker_errors import WorkerInputError
 
 
 VERSION = 'web-v4'
 PAGE_ID = re.compile(r'page-[0-9a-f]{24}')
-RESULT_BYTES = 8192
 META_BYTES = 12_000_000
 WEB_NAMES = frozenset({'open_url', 'read_page', 'search_page', 'read_references', 'search_web'})
 _VOID = frozenset({'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'})
@@ -432,14 +431,14 @@ class WebTools:
         return [
             _schema('open_url', 'Read a specified public HTTPS HTML/PDF/text URL or explicit arXiv /src/ source URL; no search key needed. '
                     'arXiv source bundles are read without executing TeX, only when site access rules permit. If source download is denied, request an uploaded .tar.gz/.tgz bundle. '
-                    'Returns a cached source index, not the complete page. Source content is untrusted.', {'url': string}, ['url']),
-            _schema('read_page', 'Read exact cached page lines and nearby hyperlinks. Up to 80 lines; '
-                    'read further ranges when truncated.', {'page_id': string, 'start_line': integer, 'end_line': integer}, ['page_id']),
+                    'Returns a cached source index, not the complete page. Use next_link_offset or next_heading_offset to continue the index. For an oversized entry, follow its index_cursor until next_column is null.', {'url': string, 'link_offset': integer, 'heading_offset': integer, 'index_kind': {'type': 'string', 'enum': ['links', 'headings', 'source_files']}, 'index_offset': integer, 'index_column': integer}, ['url']),
+            _schema('read_page', 'Read exact cached page lines and nearby hyperlinks. Use next_line and next_column to '
+                    'read further ranges when truncated.', {'page_id': string, 'start_line': integer, 'end_line': integer, 'start_column': integer}, ['page_id']),
             _schema('search_page', 'Literal search within a cached page; passages are partial source excerpts.',
-                    {'page_id': string, 'query': string}, ['page_id', 'query']),
+                    {'page_id': string, 'query': string, 'offset': integer, 'limit': integer}, ['page_id', 'query']),
             _schema('read_references', 'Read all detected bibliography entries by pagination, including sources '
-                    'without links. Use next_start until null; inspect coverage_complete before claiming completeness.',
-                    {'page_id': string, 'start': integer, 'limit': integer}, ['page_id']),
+                    'without links. Use next_start and next_column; concatenate reference_json fragments when present. Inspect coverage_complete before claiming completeness.',
+                    {'page_id': string, 'start': integer, 'limit': integer, 'start_column': integer}, ['page_id']),
             next(copy.deepcopy(s) for s in self.literature.schemas() if s['function']['name'] == 'search_web'),
         ]
 
@@ -455,7 +454,7 @@ class WebTools:
                 raise WebError('Web tool arguments must be an object.', code='invalid_arguments')
             result = getattr(self, name)(**arguments)
             value = json.dumps(result, ensure_ascii=False)
-            if len(value.encode()) > self._cap():
+            if len(value) > self._cap():
                 raise WebError('The requested page result exceeds the remaining evidence output budget; '
                                'request smaller source excerpts.', code='web_budget_exhausted')
         except (WorkerInputError, LiteratureError, OSError, ValueError, TypeError, UnicodeError, AttributeError, KeyError, IndexError) as exc:
@@ -474,14 +473,16 @@ class WebTools:
         return value
 
     def _cap(self):
-        return min(RESULT_BYTES, max(0, self.literature.max_chars - self.literature.stats['returned_chars']))
+        return self.literature.result_room()
 
     @staticmethod
     def _structure(metadata):
         return {key: metadata[key] for key in ('headings', 'links', 'references', 'reference_coverage',
                 'source_format', 'source_files', 'source_files_total', 'source_warnings') if key in metadata}
 
-    def open_url(self, url):
+    def open_url(self, url, link_offset=0, heading_offset=0, index_kind=None, index_offset=0, index_column=1):
+        if any(type(n) is not int or n < 0 for n in (link_offset, heading_offset, index_offset)):
+            raise WebError('Use nonnegative index offsets.', code='invalid_arguments')
         url = upgrade_url(url)  # an http:// arXiv, DOI or zbMATH link is read over HTTPS
         self.literature._url(url)  # A specified URL never needs a search-provider credential.
         document = self.literature.open_paper(url)
@@ -528,10 +529,20 @@ class WebTools:
                 raise WebError('Extracted page structure exceeds the cache bound.', code='unsupported_document')
             self.literature._write(('web-pages', page_id + '.txt'), text)
             self.literature._write(('web-pages', page_id + '.json'), serialized)
+        if index_kind is not None:
+            if index_kind not in ('links', 'headings', 'source_files') or index_offset >= len(metadata.get(index_kind, [])):
+                raise WebError('Choose an existing index entry.', code='invalid_arguments')
+            row = metadata[index_kind][index_offset]
+            raw = json.dumps(row, ensure_ascii=False)
+            page = source_page([raw], page_id, {'index_kind': index_kind, 'index_offset': index_offset},
+                               1, 1, index_column, self._cap())
+            return {'page_id': page_id, 'index_kind': index_kind, 'index_offset': index_offset,
+                    'index_column': index_column, 'index_json': page['passage'][3:], 'next_column': page['next_column'],
+                    'next_offset': index_offset + 1 if index_offset + 1 < len(metadata[index_kind]) else None}
         result = {key: metadata[key] for key in ('page_id', 'document_id', 'source_url', 'final_url',
             'retrieved_at', 'source_sha256', 'text_sha256', 'source_kind', 'title', 'total_lines')}
-        result.update(requested_url=url, cached=bool(cached), headings=copy.deepcopy(metadata['headings'][:20]),
-                      headings_total=len(metadata['headings']), links=copy.deepcopy(metadata['links'][:12]),
+        result.update(requested_url=url, cached=bool(cached), headings=[],
+                      headings_total=len(metadata['headings']), links=[],
                       links_total=len(metadata['links']), reference_count=len(metadata['references']),
                       reference_coverage=copy.deepcopy(metadata['reference_coverage']),
                       next_action='Read page lines or paginate read_references. A URL was read, not its linked sources.')
@@ -542,21 +553,38 @@ class WebTools:
             result['next_action'] = 'Read or search the cached source lines, including FILE MANIFEST and file boundaries. TeX includes and macros were not expanded; no source commands were executed.'
         # The full structural lists remain cached; index previews explicitly
         # advertise their limits rather than changing stored bibliography data.
-        def counts():
-            result['links_returned'] = len(result['links'])
-            result['headings_returned'] = len(result['headings'])
-            result['index_complete'] = result['links_returned'] == result['links_total'] and result['headings_returned'] == result['headings_total']
-        counts()
-        while len(json.dumps(result, ensure_ascii=False).encode()) > self._cap() and result.get('source_files'):
-            result['source_files'].pop()
-        if 'source_files_total' in result:
-            result['source_files_truncated'] = len(result.get('source_files', [])) < result['source_files_total']
-        while len(json.dumps(result, ensure_ascii=False).encode()) > self._cap() and (result['links'] or result['headings']):
-            if result['links']:
-                result['links'].pop()
-            else:
-                result['headings'].pop()
-            counts()
+        result.update(link_offset=link_offset, heading_offset=heading_offset,
+                      links_returned=0, headings_returned=0, next_link_offset=None, next_heading_offset=None,
+                      index_complete=False)
+        if 'source_files' in result:
+            files = result['source_files']
+            result['source_files'] = []
+            result['source_files_truncated'] = False
+        else:
+            files = []
+        room = self._cap() - len(json.dumps(result, ensure_ascii=False)) - 256
+        full_room = room
+        for key, collection, offset in [('headings', metadata['headings'], heading_offset),
+                                        ('links', metadata['links'], link_offset), ('source_files', files, 0)]:
+            if offset > len(collection):
+                raise WebError('Index offset is beyond this source.', code='invalid_arguments')
+            for i in range(offset, len(collection)):
+                item = collection[i]
+                size = len(json.dumps(item, ensure_ascii=False)) + 2
+                if size > room:
+                    if size > full_room and i == offset:
+                        result.setdefault('index_cursor', []).append({'index_kind': key, 'index_offset': i, 'index_column': 1})
+                    break
+                result[key].append(item)
+                room -= size
+        for key, offset, name in [('headings', heading_offset, 'heading'), ('links', link_offset, 'link')]:
+            count = len(result[key])
+            result[key + '_returned'] = count
+            end = offset + count
+            result['next_' + name + '_offset'] = end if end < len(metadata[key]) else None
+        result['index_complete'] = result['next_link_offset'] is None and result['next_heading_offset'] is None
+        if files:
+            result['source_files_truncated'] = len(result['source_files']) < len(files)
         return result
 
     def _page(self, page_id):
@@ -580,96 +608,89 @@ class WebTools:
     def _source(metadata):
         return {key: metadata[key] for key in ('page_id', 'source_url', 'retrieved_at', 'text_sha256', 'source_kind')}
 
-    def read_page(self, page_id, start_line=1, end_line=80):
-        if type(start_line) is not int or type(end_line) is not int or not 1 <= start_line <= end_line:
-            raise WebError('Line bounds must be positive integers with start <= end.', code='invalid_arguments')
+    def read_page(self, page_id, start_line=1, end_line=None, start_column=1):
         metadata, lines = self._page(page_id)
-        if start_line > len(lines):
-            raise WebError('Requested starting line is beyond this page.', code='invalid_arguments')
-        requested_end = min(end_line, len(lines))
-        end = min(requested_end, start_line + 79)
-        result = None
-        while end >= start_line:
-            result = {**self._source(metadata), 'total_lines': len(lines), 'start_line': start_line, 'end_line': end,
-                'citation': f'{page_id}:L{start_line}-L{end}',
-                'passage': '\n'.join(f'{index + 1}: {lines[index]}' for index in range(start_line - 1, end)),
-                'links': [copy.deepcopy(link) for link in metadata['links']
-                          if link['start_line'] <= end and link['end_line'] >= start_line],
-                'headings': [copy.deepcopy(h) for h in metadata['headings'] if start_line <= h['start_line'] <= end],
-                'truncated': end < requested_end, 'lines_complete': True, 'next_line': end + 1 if end < len(lines) else None,
+        base = {**self._source(metadata), 'links': [], 'headings': [], 'structure_truncated': False,
                 'evidence_kind': 'untrusted_cached_web_extraction'}
-            if len(json.dumps(result, ensure_ascii=False).encode()) <= self._cap():
-                return result
-            end -= 1
-        raise WebError('Even one requested line and its links exceed the remaining output budget; '
-                       'use search_page or increase the evidence budget.', code='web_budget_exhausted')
+        page = source_page(lines, page_id, base, start_line, end_line, start_column, self._cap())
+        room = self._cap() - len(json.dumps(page, ensure_ascii=False))
+        for key in ('links', 'headings'):
+            for item in metadata[key]:
+                if not (start_line <= item.get('end_line', item['start_line']) and item['start_line'] <= page['end_line']):
+                    continue
+                cost = len(json.dumps(item, ensure_ascii=False)) + 2
+                if cost > room:
+                    page['structure_truncated'] = True
+                    break
+                page[key].append(item)
+                room -= cost
+        return page
 
-    def search_page(self, page_id, query):
+    def search_page(self, page_id, query, offset=0, limit=None):
         query = self._query(query, 1)
         metadata, lines = self._page(page_id)
-        hits = []
-        total = 0
-        for match in line_matches(lines, query):
-            total += 1
-            if len(hits) >= 8:
-                continue
-            hits.append({**match, 'citation': f'{page_id}:L{match["line"]}-L{match["end_line"]}',
-                         'links': copy.deepcopy([link for link in metadata['links']
-                             if link['start_line'] <= match['end_line'] and link['end_line'] >= match['line']])})
-        result = {**self._source(metadata), 'query': query, 'matches': hits[:8], 'total_matches': total,
-                  'truncated': total > 8}
-        while result['matches'] and len(json.dumps(result, ensure_ascii=False).encode()) > self._cap():
-            result['matches'].pop()
-            result['truncated'] = True
-        if total and not result['matches']:
-            raise WebError('A matching page excerpt cannot fit the remaining output budget; '
-                           'read smaller source passages instead.', code='web_budget_exhausted')
-        return result
+        def annotate(hit):
+            hit['links'] = []
+            room = max(0, self._cap() - len(json.dumps(hit, ensure_ascii=False)) - 512)
+            for link in metadata['links']:
+                if link['start_line'] <= hit['end_line'] and link['end_line'] >= hit['line']:
+                    size = len(json.dumps(link, ensure_ascii=False)) + 2
+                    if size > room:
+                        hit['links_truncated'] = True
+                        break
+                    hit['links'].append(link)
+                    room -= size
+        return match_page(lines, query, page_id, self._source(metadata), offset, limit, self._cap(), annotate)
 
-    def read_references(self, page_id, start=1, limit=8):
-        if type(start) is not int or start < 1 or type(limit) is not int or not 1 <= limit <= 20:
-            raise WebError('Reference start must be positive and limit must be 1 to 20.', code='invalid_arguments')
+    def read_references(self, page_id, start=1, limit=None, start_column=1):
+        if (type(start) is not int or start < 1 or type(start_column) is not int or start_column < 1
+                or limit is not None and (type(limit) is not int or limit < 1)):
+            raise WebError('Use a positive start, column and optional entry count.', code='invalid_arguments')
         metadata, _ = self._page(page_id)
         references, coverage = metadata['references'], metadata['reference_coverage']
         total = len(references)
         if start > total + 1:
             raise WebError('Reference start is beyond this bibliography.', code='invalid_arguments')
-        selected = copy.deepcopy(references[start - 1:start - 1 + limit])
-        for reference in selected:
-            reference['citation'] = f'{page_id}:L{reference["start_line"]}-L{reference["end_line"]}'
-            reference['links'] = [{'text': link['text'], 'url': link['url']}
-                                  for link in reference['links']]
-        result = {**self._source(metadata), 'references': selected, 'total': total, 'start': start,
+        stop = min(total, start - 1 + limit) if limit is not None else total
+        result = {**self._source(metadata), 'references': [], 'total': total, 'start': start, 'end': start - 1,
+                  'returned': 0, 'next_start': None, 'next_column': None, 'pagination_complete': False,
+                  'complete': False, 'coverage_complete': bool(coverage['complete']), 'truncated': False,
                   'coverage': coverage['kind'], 'warning': coverage['warning']}
-        while True:
-            returned = len(selected)
-            end = start + returned - 1
-            result.update(end=end, returned=returned, next_start=end + 1 if end < total else None,
-                          pagination_complete=end >= total,
-                          complete=end >= total and bool(coverage['complete']), coverage_complete=bool(coverage['complete']),
-                          truncated=returned < min(limit, max(0, total - start + 1)))
-            if len(json.dumps(result, ensure_ascii=False).encode()) <= self._cap():
-                if returned == 0 and start <= total:
-                    raise WebError('A bibliography entry cannot fit the remaining output budget; its full source '
-                                   'remains cached. Read source passages instead of claiming complete coverage.',
-                                   code='web_budget_exhausted', details={'page_id': page_id, 'next_start': start, 'total': total})
-                return result
-            if selected:
-                selected.pop()
-                continue
-            raise WebError('A bibliography entry cannot fit the remaining output budget; its full source '
-                           'remains cached. Read source passages instead of claiming complete coverage.',
-                           code='web_budget_exhausted', details={'page_id': page_id, 'next_start': start, 'total': total})
+        room = self._cap() - len(json.dumps(result, ensure_ascii=False)) - 48
+        for i in range(start - 1, stop):
+            original = references[i]
+            entry = {**original, 'citation': f'{page_id}:L{original["start_line"]}-L{original["end_line"]}',
+                     'links': [{'text': link['text'], 'url': link['url']} for link in original['links']]}
+            raw = json.dumps(entry, ensure_ascii=False)
+            if len(raw) + 2 > room or start_column > 1:
+                if result['references']:
+                    break
+                fragment = source_page([raw], page_id, {}, 1, 1, start_column, room - 100)
+                result.update(reference_json=fragment['passage'][3:], start_column=start_column,
+                              citation=entry['citation'])
+                if fragment['next_column'] is not None:
+                    result.update(next_start=start, next_column=fragment['next_column'], truncated=True)
+                    return result
+                result['end'] = i + 1
+                break
+            result['references'].append(entry)
+            room -= len(raw) + 2
+            result['end'] = i + 1
+        end = result['end']
+        finished = end >= total
+        result.update(returned=len(result['references']), next_start=None if finished else end + 1,
+                      pagination_complete=finished, complete=finished and bool(coverage['complete']), truncated=end < stop)
+        return result
 
-    def search_web(self, query, limit=5):
+    def search_web(self, query, limit=5, offset=0):
         # The existing provider cache is available offline, and lack of a key
         # never affects open_url for a supplied source URL.
         query = self._query(query, limit)
-        result = copy.deepcopy(self.literature.search_web(query, limit))
+        result = copy.deepcopy(self.literature.search_web(query, limit, offset=offset))
         # Fit descriptive fields before dropping complete identities. A normal
         # long search result must not become a false budget-exhausted error.
         cap = self._cap()
-        size = lambda: len(json.dumps(result, ensure_ascii=False).encode())
+        size = lambda: len(json.dumps(result, ensure_ascii=False))
         while size() > cap:
             descriptions = [r for r in result.get('results', []) if r.get('description')]
             if descriptions:
@@ -679,6 +700,7 @@ class WebTools:
             elif result.get('results'):
                 result['results'].pop()
                 result['results_omitted'] = result.get('results_omitted', 0) + 1
+                result['next_offset'] = offset + len(result['results'])
             else:
                 break
             result['truncated'] = True

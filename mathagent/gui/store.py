@@ -30,10 +30,10 @@ from ..reporting import one_line
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
-from ..literature import LiteratureTools
+from ..literature import LiteratureTools, UNLIMITED_SOURCE
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
-from ..research import _job_directory, _read_state as _read_research
+from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
 from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
 from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
@@ -459,8 +459,8 @@ def research_detail(root, job_id, active=None):
                    'tokens': job_output_budget(s, running),
                    'input_tokens': _budget(s['input_tokens_charged'], settings['max_input_tokens']),
                    'seconds': _working_time(s, running),
-                   'requests': _budget(usage.get('requests', 0), settings['max_requests']),
-                   'chars': _budget(usage.get('returned_chars', 0), settings['max_chars']),
+                   'requests': _budget(usage.get('requests', 0), None if settings['max_requests'] == UNLIMITED_SOURCE else settings['max_requests']),
+                   'chars': _budget(usage.get('returned_chars', 0), None if settings['max_chars'] == UNLIMITED_SOURCE else settings['max_chars']),
                    **_live_context(call)},
         'progress': s.get('progress'),
         'sources': [{'id': src['id'], 'path': src['path'], 'sha256': src['sha256'],
@@ -722,7 +722,7 @@ def _file_record(path, root, info):
             'updated_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
 
 
-def list_files(root, limit=2000):
+def list_files(root, limit=None):
     root = Path(root)
     found = []
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -737,12 +737,12 @@ def list_files(root, limit=2000):
             except OSError:
                 continue
             found.append(_file_record(path, root, info))
-            if len(found) >= limit:
+            if limit is not None and len(found) >= limit:
                 return found
     return found
 
 
-def browse_files(root, relative='', limit=2000):
+def browse_files(root, relative='', limit=None):
     """One folder at or below `root` (the interface root), for the file explorer: its subfolders (empty ones
     too) and the files the model can be given, with size and modification time. A project's folder carries the project's name and
     hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
@@ -759,14 +759,14 @@ def browse_files(root, relative='', limit=2000):
         if entry.name.startswith('.') or entry.is_symlink():
             continue
         path = Path(entry.path)
-        if len(folders) + len(files) >= limit:
+        if limit is not None and len(folders) + len(files) >= limit:
             truncated = True
             break
         if entry.is_dir(follow_symlinks=False):
             if entry.name in SKIP:
                 continue
             try:
-                inside = sum(1 for child in itertools.islice(os.scandir(path), 1000) if not child.name.startswith('.')
+                inside = sum(1 for child in os.scandir(path) if not child.name.startswith('.')
                              and not child.is_symlink() and (child.is_dir(follow_symlinks=False) and child.name not in SKIP
                                                              or child.is_file(follow_symlinks=False) and _listable(child.name)))
             except OSError:
@@ -1169,8 +1169,15 @@ def list_chats(root, templates_root=None, *, query=None, search=None):
 
 
 @_locked_chat
+def save_direct_reading(root, chat_id, record):
+    chat = load_chat(root, chat_id)
+    chat['direct_reading'] = record
+    _save_chat(root, chat)
+
+
+@_locked_chat
 def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
-                project_snapshot=None, image_refs=(), job_id=None):
+                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -1196,6 +1203,8 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
+            if source_coverage is not None and message is history[-1]:
+                item['source_coverage'] = source_coverage
             if job_id and mode == 'check':
                 item['job_id'] = job_id
             if message.get('tool_calls'):
@@ -1213,6 +1222,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     if notices:
         items.append({'role': 'notice', 'content': '\n'.join(dict.fromkeys(notices)), 'time': stamp})
     # The model context may drop old turns to fit; the transcript never does.
+    chat.pop('direct_reading', None)
     chat['history'] = history
     chat['transcript'].extend(items)
     if not chat['title']:
@@ -1576,7 +1586,7 @@ def _counts(folder):
         entries = list(os.scandir(folder))
     except OSError:
         return counts
-    for entry in entries[:5000]:
+    for entry in entries:
         if entry.name.startswith('.') or not entry.is_file(follow_symlinks=False):
             continue
         suffix = source_suffix(entry.name)
@@ -1604,7 +1614,7 @@ def list_folders(root, relative=''):
         project = projects.folder_label(path)
         counts = _counts(path)
         if projects.holds_projects(path):
-            for child in sorted(path.iterdir())[:200]:
+            for child in path.iterdir():
                 if projects.folder_label(child):
                     counts = _add_counts(counts, _counts(child))
         folders.append({'name': project['name'] if project else entry.name, 'path': path.relative_to(root).as_posix(),
@@ -1989,8 +1999,8 @@ def previous_writeup_source(root, chat, *, before=None):
         name = 'previous-answer.md'
     else:
         return None
-    if len(content.encode()) + len(bibliography.encode()) > 2_000_000:
-        raise WorkerInputError('The selected answer and bibliography exceed Write-Up’s 2 MB pinned-source limit. '
+    if len(content.encode()) + len(bibliography.encode()) > PINNED_SOURCE_BYTES:
+        raise WorkerInputError('The selected answer and bibliography exceed the pinned-source storage allowance. '
                                'Split the Markdown into smaller files to convert it.', code='writeup_source_too_large')
     origin['transcript_index'] = answers[0][0] if answers else index
     source = {'id': 'M1', 'path': name, 'content': content, 'sha256': hashlib.sha256(content.encode()).hexdigest(),
@@ -2173,7 +2183,7 @@ def saved_chat_experiment(root, chat_id, experiment_id):
         try:
             base = Path(root) / '.mathagent' / 'index' / 'experiments'
             _directory(base)
-            copy = json.loads(_read(base / (experiment_id + '.json'), 65536))
+            copy = json.loads(_read(base / (experiment_id + '.json')))
             shown = {key: copy.get(key) for key in DETAIL_FIELDS}
         except (OSError, ValueError, TypeError, AttributeError):
             shown = {}

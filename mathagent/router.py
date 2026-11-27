@@ -17,23 +17,19 @@ JOB_MODES = ('prove', 'explore', 'check', 'literature', 'referee', 'detailed_rev
              'writeup', 'summarize')
 # detailed_review is the former name of the review: still accepted (saved chats, explicit calls), never offered.
 OFFERED_MODES = tuple(mode for mode in JOB_MODES if mode != 'detailed_review')
-# A review and a typo check have one depth each: no effort is chosen for them. The level names their budget (the
-# review has the working time and tokens of High, the typo check those of Low) and is what their cards save.
-FIXED_EFFORT = {'literature': 'high', 'referee': 'high', 'detailed_review': 'high', 'typo_check': 'low'}
+# Old clients and saved jobs can still name the previous levels. New work uses High.
+EFFORTS = ('low', 'medium', 'high')
+LEGACY_EFFORTS = ('xhigh', 'poincare')
+FIXED_EFFORT = dict.fromkeys(JOB_MODES, 'high')
 
 
 def effort_for(mode, effort):
-    """The effort a task of this mode runs at: its fixed one, else the effort chosen."""
-    return FIXED_EFFORT.get(mode, effort)
+    """Canonical effort for a fresh delegation, including one from an older client."""
+    return 'high'
 
 
-# Name used by existing callers, including investigation plans.
 worker_effort = effort_for
-
 ROUTE_MODES = JOB_MODES + ('clarify',)
-EFFORTS = ('low', 'medium', 'high')
-LEGACY_EFFORTS = ('xhigh', 'poincare')  # Read saved jobs without offering these levels for new work.
-MAX_TASKS = 4
 ROUTE_PREDICT = 1600
 
 TASK_SCHEMA = {
@@ -41,10 +37,10 @@ TASK_SCHEMA = {
     'required': ['mode', 'request', 'files', 'effort', 'reason'],
     'properties': {
         'mode': {'type': 'string', 'enum': list(OFFERED_MODES)},
-        'request': {'type': 'string', 'maxLength': 8000},
-        'files': {'type': 'array', 'maxItems': 20, 'items': {'type': 'string', 'maxLength': 300}},
-        'effort': {'type': 'string', 'enum': list(EFFORTS)},
-        'reason': {'type': 'string', 'maxLength': 400},
+        'request': {'type': 'string'},
+        'files': {'type': 'array', 'items': {'type': 'string'}},
+        'effort': {'type': 'string', 'enum': ['high']},
+        'reason': {'type': 'string'},
     },
 }
 
@@ -52,8 +48,8 @@ ROUTE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['tasks', 'question'],
     'properties': {
-        'tasks': {'type': 'array', 'maxItems': MAX_TASKS, 'items': TASK_SCHEMA},
-        'question': {'type': 'string', 'maxLength': 600},
+        'tasks': {'type': 'array', 'items': TASK_SCHEMA},
+        'question': {'type': 'string'},
     },
 }
 
@@ -95,8 +91,7 @@ never see the conversation: copy every hypothesis, definition, statement and fil
 need from the context. Keep the user's language. Do not solve or answer anything yourself.
 `files` lists workspace files the task needs: the user's attachments and files named in the
 message or context, spelled exactly as listed.
-`effort` sizes the job: low for a quick check or a routine statement, medium for ordinary
-work, and high for a hard problem, a long manuscript or an explicit maximum-effort request.
+Set `effort` to high for every task.
 `reason` explains the choice in one sentence.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""
@@ -107,8 +102,8 @@ FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a resul
 
 def clarify(message, files=(), question='', reason=''):
     """A suggestion that asks one question instead of starting anything."""
-    return {'mode': 'clarify', 'request': message, 'files': list(files), 'effort': 'medium',
-            'reason': reason, 'question': repair_latex((question or '').strip())[:600] or FALLBACK_QUESTION}
+    return {'mode': 'clarify', 'request': message, 'files': list(files), 'effort': 'high',
+            'reason': reason, 'question': repair_latex((question or '').strip()) or FALLBACK_QUESTION}
 
 
 def _task(value, message, files):
@@ -117,10 +112,10 @@ def _task(value, message, files):
     mode = 'referee' if value['mode'] == 'detailed_review' else value['mode']  # the former name of the review
     return {
         'mode': mode,
-        'request': repair_latex(request.strip() or message)[:8000],
-        'files': list(dict.fromkeys([*files, *proposed]))[:20],
-        'effort': effort_for(mode, value.get('effort') if value.get('effort') in EFFORTS else 'medium'),
-        'reason': repair_latex(str(value.get('reason') or ''))[:400],
+        'request': repair_latex(request.strip() or message),
+        'files': list(dict.fromkeys([*files, *proposed])),
+        'effort': 'high',
+        'reason': repair_latex(str(value.get('reason') or '')),
         'question': '',
     }
 
@@ -137,12 +132,12 @@ def parse(text, message, files=()):
         value = None
     if isinstance(value, dict) and 'tasks' not in value and 'mode' in value:
         if value.get('mode') == 'clarify':
-            return [clarify(message, files, value.get('question'), str(value.get('reason') or '')[:400])]
+            return [clarify(message, files, value.get('question'), str(value.get('reason') or ''))]
         value = {'tasks': [value], 'question': ''}
     if not isinstance(value, dict) or not isinstance(value.get('tasks'), list):
         return [clarify(message, files, '', 'The routing answer was not usable.')]
     tasks = [_task(item, message, files) for item in value['tasks']
-             if isinstance(item, dict) and item.get('mode') in JOB_MODES][:MAX_TASKS]
+             if isinstance(item, dict) and item.get('mode') in JOB_MODES]
     if not tasks:
         question = value.get('question') if isinstance(value.get('question'), str) else ''
         return [clarify(message, files, question, '' if question.strip() else 'The routing answer was not usable.')]
@@ -152,13 +147,12 @@ def parse(text, message, files=()):
 def classify(client, model, message, *, context='', files=(), available=(), ctx=8192):
     """One bounded structured call with thinking off, returning suggestions."""
     predict = output_limit(client, 'router', ROUTE_PREDICT)
-    room = max(2000, (ctx - predict - 400) * 3 - len(ROUTER_POLICY) - len(message) - 2000)
     parts = []
     if context:
-        parts.append('EARLIER IN THIS CONVERSATION (oldest first):\n' + context[-room:])
+        parts.append('EARLIER IN THIS CONVERSATION (oldest first):\n' + context)
     if available:
         parts.append('WORKSPACE FILES (only to spell the names of files the message mentions; '
-                     'never use a file the message does not mention):\n' + '\n'.join(list(available)[:200]))
+                     'never use a file the message does not mention):\n' + '\n'.join(available))
     if files:
         parts.append('ATTACHED BY THE USER:\n' + '\n'.join(files))
     parts.append('MESSAGE:\n' + message)
@@ -166,6 +160,8 @@ def classify(client, model, message, *, context='', files=(), available=(), ctx=
                'options': {'num_ctx': ctx, 'num_predict': predict, 'temperature': 0},
                'messages': [{'role': 'system', 'content': ROUTER_POLICY},
                             {'role': 'user', 'content': '\n\n'.join(parts)}]}
+    from .call_policy import allocate_call
+    payload, _ = allocate_call(client, payload, predict)
     text = ''
     for event in client.stream(payload):
         content = (event.get('message') or {}).get('content')

@@ -5,13 +5,11 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 import { MODE_CALLS, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'
 import { Glyph } from './Glyph'
-import { EFFORTS, type EffortLevel } from './Effort'
 import './ModeMessage.css'
 
-export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, hasEffort, onSend, onKey, disabled }: {
+export function ModeMessage({ value, onChange, call, onCall, onSend, onKey, disabled }: {
   value: string; onChange: (value: string) => void
   call: ModeCall | null; onCall: (call: ModeCall | null) => void
-  effort: EffortLevel | null; onEffort: (effort: EffortLevel | null) => void; hasEffort: boolean
   onSend: () => void; disabled: boolean
   /** Keys the skill menu did not take (message recall, Esc to pause); returns true when it handled the key. */
   onKey?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean
@@ -92,33 +90,17 @@ export function ModeMessage({ value, onChange, call, onCall, effort, onEffort, h
     <div className="mode-message">
       {validCall(value, call) && (() => {
         const info = MODE_CALLS.find((item) => item.mode === call.mode)
-        const fixedEffort = call.mode === 'literature'
-        const level = EFFORTS.find((item) => item.id === (fixedEffort ? 'high' : effort))
-        const choose = (next: EffortLevel | null) => { onEffort(next); input.current?.focus() }
         return <div className={'selected-mode-wrap' + (pinned ? ' selected-mode-open' : '')} ref={chip}>
           <div className="selected-mode-menu" role="group" aria-label={`@${call.mode} options`}>
             <p className="selected-mode-title"><strong>@{call.mode}</strong>{info && info.label !== call.mode && <span> · {info.label}</span>}</p>
             {info && <p className="selected-mode-about">{info.summary}</p>}
-            {fixedEffort ? null : hasEffort ? <>
-              <p className="selected-mode-label">Effort</p>
-              <div role="radiogroup" aria-label="Effort for this message" className="effort-menu">
-                {[{ id: null, label: 'Auto', hint: call.mode === 'investigate' ? 'Up to Medium for tasks with adjustable effort' : 'The harness picks the effort for this skill' },
-                  ...EFFORTS.filter((item) => call.mode !== 'investigate' || item.id !== 'high')].map((item) => (
-                  <button key={item.id ?? 'auto'} type="button" role="radio" aria-checked={item.id === effort}
-                    className={'effort-menu-item' + (item.id === effort ? ' effort-menu-current' : '')}
-                    disabled={disabled} onClick={() => choose(item.id)}>
-                    <span className="effort-menu-name">{item.label}</span><span className="effort-menu-hint">{item.hint}</span>
-                  </button>
-                ))}
-              </div>
-              {call.mode === 'investigate' && <p className="selected-mode-about">Literature reviews use High effort within the investigation’s budget.</p>}
-            </> : <p className="selected-mode-label">No effort setting for this skill.</p>}
+
           </div>
           <div className="selected-mode" role="status" tabIndex={0} onClick={() => setPinned((on) => !on)}
             onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setPinned((on) => !on) } else if (event.key === 'Escape') setPinned(false) }}
             aria-haspopup="true" aria-expanded={pinned}>
             <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
-            <strong>@{call.mode}</strong><span>{hasEffort ? (level ? `${level.label} effort` : 'Auto effort') : 'Selected for this message'}</span>
+            <strong>@{call.mode}</strong><span>Selected for this message</span>
             <button type="button" className="chip-remove" aria-label="Clear selected skill" onClick={(event) => { event.stopPropagation(); declined.current = call; onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
           </div>
         </div>

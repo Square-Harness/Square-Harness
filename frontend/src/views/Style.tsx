@@ -4,7 +4,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { api, type DomainStyle, type ResearchDetail, type StyleChoice, type StyleDescription, type StyleEdit, type StyleProfile } from '../api'
 import { Collapse, ErrorNote, FilePicker, Loading, Modal, NumberField, OptionalNumberField, Tabs, UsageMeters, WorkProgressNote, useLoad } from '../components/common'
-import { effortLimits } from '../components/Effort'
+import { effortLimits } from '../effort'
 import { CloseIcon, FileIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, TrashIcon } from '../components/Icons'
 import { Markdown, MathMacrosProvider } from '../components/Markdown'
 import { IMAGE_SUFFIXES, isImagePath } from '../components/ImageAttachments'
@@ -21,7 +21,6 @@ const NAME = /^[\w][\w .-]{0,59}$/u
 const DEFAULT_NAME = 'My papers'
 const TEMPLATE = ['.tex', '.sty', '.cls', '.bib']
 const ARTICLE_FILES = ['.tex', '.pdf', '.tar.gz', '.tgz', '.tar', '.gz', ...IMAGE_SUFFIXES]
-const MAX_FILES = 20  // Hub._capture_images refuses more
 const isArticleFile = (path: string) => ARTICLE_FILES.some((suffix) => path.toLowerCase().endsWith(suffix))
 const STEPS = ['scan', 'classify', 'observe', 'condense', 'macros', 'save'] as const
 const STEP_NAMES: Record<string, string> = { scan: 'Read', classify: 'Domains', observe: 'Articles', condense: 'Merge', macros: 'Macros', save: 'Save', done: 'Done' }
@@ -64,7 +63,7 @@ export function StyleNew() {
   useEffect(() => { api.styles().then((result) => { setSaved(result.styles); setChoice(result.choice) }, () => undefined) }, [])
   useEffect(() => {
     if (!d) return
-    const limits = effortLimits('style', d, 'high')
+    const limits = effortLimits('style', d)
     setTokens(limits.tokens)
     setMinutes(Math.max(1, Math.round(limits.seconds / 60)))
     setInputTokens(limits.input_tokens!)
@@ -81,7 +80,6 @@ export function StyleNew() {
   const name = (typedName ?? freeName(saved)).trim()
   const validName = NAME.test(name)
   const replaces = saved.some((item) => item.name === name)
-  const tooMany = selected.length > MAX_FILES
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (uploading) return
@@ -152,9 +150,7 @@ export function StyleNew() {
               <span className="field-hint">PDFs with selectable text or TeX sources{images && '; you can also paste screenshots'}</span>
             </button>
             <FilePicker selected={selected} onChange={setSelected} allowPdf allowImages={images} accept={ARTICLE_FILES} label="Choose from workspace" />
-            {tooMany ? <ErrorNote>Choose at most {MAX_FILES} files: {selected.length} are selected.</ErrorNote>
-              : <span className="field-hint">One article is enough to start; two or more per field work better. TeX sources also teach your
-                macros: add the files they \input as well.</span>}
+            <span className="field-hint">One article is enough to start. Include the TeX files that define the macros you want to use.</span>
             {otherFiles.length > 0 && <p className="field-hint" role="status">Saved to the workspace only: {otherFiles.join(', ')}. Choose a PDF, TeX source or screenshot for the style.</p>}
           </div>
         </div>
@@ -206,7 +202,7 @@ export function StyleNew() {
             <ErrorNote>{error}</ErrorNote>
             {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
             {running && <BusyNote queue />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || tooMany || !validName}>
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !!uploading || !selected.length || !validName}>
               {uploading ? 'Uploading…' : busy ? 'Starting…' : running ? 'Add to the queue' : 'Learn my style'}
             </button>
             <p className="field-hint">
@@ -366,11 +362,9 @@ function DeleteStyleDialog({ profile, onClose, onDone }: { profile: StyleProfile
 
 /** The limits of style.py LIMITS: items per list and characters per item. */
 const ITEM = 300
-const COUNTS: Record<string, number> = { structure: 12, phrases: 10, names: 12, typesetting: 12 }
-const listCount = (key: string) => COUNTS[key] ?? 5
 
 /** One list of a style guide, as text items the author can change, remove or add to. */
-function ListEditor({ label, items, max, onChange }: { label: string; items: string[]; max: number; onChange: (items: string[]) => void }) {
+function ListEditor({ label, items, onChange }: { label: string; items: string[]; onChange: (items: string[]) => void }) {
   return (
     <div className="field style-edit-list">
       <span className="field-label">{label}</span>
@@ -382,8 +376,8 @@ function ListEditor({ label, items, max, onChange }: { label: string; items: str
             onClick={() => onChange(items.filter((_, i) => i !== index))}><CloseIcon size={15} /></button>
         </div>
       ))}
-      {items.length < max && <button type="button" className="btn btn-small btn-quiet style-edit-add" onClick={() => onChange([...items, ''])}>
-        <PlusIcon size={14} /> Add</button>}
+      <button type="button" className="btn btn-small btn-quiet style-edit-add" onClick={() => onChange([...items, ''])}>
+        <PlusIcon size={14} /> Add</button>
     </div>
   )
 }
@@ -432,8 +426,8 @@ function StyleEditor({ profile, onClose, onSaved }: { profile: StyleProfile; onC
               onClick={() => update(rows.filter((_, i) => i !== index))}><CloseIcon size={15} /></button>
           </div>
         ))}
-        {rows.length < listCount(key) && <button type="button" className="btn btn-small btn-quiet style-edit-add"
-          onClick={() => update([...rows, { [fields[0]]: '', [fields[1]]: '' }])}><PlusIcon size={14} /> Add</button>}
+        <button type="button" className="btn btn-small btn-quiet style-edit-add"
+          onClick={() => update([...rows, { [fields[0]]: '', [fields[1]]: '' }])}><PlusIcon size={14} /> Add</button>
       </div>
     )
   }
@@ -452,13 +446,13 @@ function StyleEditor({ profile, onClose, onSaved }: { profile: StyleProfile; onC
         <textarea rows={2} maxLength={400} value={draft.audience} onChange={(event) => set({ audience: event.target.value })} /></label>
       <label className="field"><span className="field-label">Aim</span>
         <textarea rows={2} maxLength={400} value={draft.aim} onChange={(event) => set({ aim: event.target.value })} /></label>
-      <ListEditor label="Typical structure" items={draft.structure || []} max={listCount('structure')} onChange={(structure) => set({ structure })} />
+      <ListEditor label="Typical structure" items={draft.structure || []} onChange={(structure) => set({ structure })} />
       {QUESTIONS.map(([key, label]) => (
-        <ListEditor key={key} label={label} items={draft[key] || []} max={listCount(key)} onChange={(items) => set({ [key]: items } as StyleEdit)} />
+        <ListEditor key={key} label={label} items={draft[key] || []} onChange={(items) => set({ [key]: items } as StyleEdit)} />
       ))}
       {pairs('names', ['term', 'note'], ['name', 'what you use it for'], 'Names you use')}
       {pairs('typesetting', ['habit', 'example'], ['habit', 'example from your articles'], 'Typesetting habits')}
-      <ListEditor label="Your phrasings" items={draft.phrases || []} max={listCount('phrases')} onChange={(phrases) => set({ phrases })} />
+      <ListEditor label="Your phrasings" items={draft.phrases || []} onChange={(phrases) => set({ phrases })} />
       {(domain.departures || []).length > 0 && (
         <fieldset className="field style-edit-list">
           <legend className="field-label">Write-up guidelines this style sets aside (untick to follow the guideline again)</legend>

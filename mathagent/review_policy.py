@@ -21,10 +21,10 @@ ISSUE = {
     'properties': {
         'start_line': {'type': 'integer'},
         'end_line': {'type': 'integer'},
-        'quote': {'type': 'string', 'maxLength': 200},
+        'quote': {'type': 'string'},
         'kind': {'type': 'string', 'enum': ['invalid_inference', 'missing_justification', 'uncertainty']},
-        'evidence': {'type': 'string', 'maxLength': 1500},
-        'suggestion': {'type': 'string', 'maxLength': 800},
+        'evidence': {'type': 'string'},
+        'suggestion': {'type': 'string'},
     },
 }
 # The paper review reports every problem with its consequence; severity follows from the effect (major: the
@@ -35,15 +35,15 @@ AUDIT_ISSUE = {**ISSUE, 'required': ISSUE['required'][:4] + ['effect'] + ISSUE['
                'properties': {**ISSUE['properties'], 'effect': {'type': 'string', 'enum': EFFECTS}}}
 EXTERNAL = {
     'type': 'object', 'additionalProperties': False, 'required': ['key', 'place', 'used_for'],
-    'properties': {'key': {'type': 'string', 'maxLength': 40}, 'place': {'type': 'string', 'maxLength': 80},
-                   'used_for': {'type': 'string', 'maxLength': 300}},
+    'properties': {'key': {'type': 'string'}, 'place': {'type': 'string'},
+                   'used_for': {'type': 'string'}},
 }
 
 
 def check_schema():
     properties = {
-        'explanation': {'type': 'string', 'maxLength': 3000},
-        'issues': {'type': 'array', 'maxItems': 6, 'items': ISSUE},
+        'explanation': {'type': 'string'},
+        'issues': {'type': 'array', 'items': ISSUE},
         'verdict': {'type': 'string', 'enum': ['no_issue_found', 'issues_found', 'uncertain']},
     }
     return {'type': 'object', 'additionalProperties': False, 'required': list(properties), 'properties': properties}
@@ -52,16 +52,16 @@ def check_schema():
 AUDIT_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['explanation', 'issues', 'verdict', 'external'],
     'properties': {
-        'explanation': {'type': 'string', 'maxLength': 3000},
-        'issues': {'type': 'array', 'maxItems': 10, 'items': AUDIT_ISSUE},
+        'explanation': {'type': 'string'},
+        'issues': {'type': 'array', 'items': AUDIT_ISSUE},
         'verdict': {'type': 'string', 'enum': ['no_issue_found', 'issues_found', 'uncertain']},
-        'external': {'type': 'array', 'maxItems': 4, 'items': EXTERNAL},
+        'external': {'type': 'array', 'items': EXTERNAL},
     },
 }
 SWEEP_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['explanation', 'issues'],
-    'properties': {'explanation': {'type': 'string', 'maxLength': 2000},
-                   'issues': {'type': 'array', 'maxItems': 20, 'items': AUDIT_ISSUE}},
+    'properties': {'explanation': {'type': 'string'},
+                   'issues': {'type': 'array', 'items': AUDIT_ISSUE}},
 }
 _EFFECT_SCALE = """- statement_false: the result as stated is false (a counterexample satisfying every hypothesis, or a calculation);
 - breaks_proof: a step fails and the proof cannot be completed without a new idea, an extra hypothesis or a
@@ -145,9 +145,9 @@ show it is false, breaks_proof when a main result depends on it and it needs a n
 DEFENSE_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['position', 'argument', 'effect', 'repair'],
     'properties': {'position': {'type': 'string', 'enum': ['defended', 'partly', 'conceded']},
-                   'argument': {'type': 'string', 'maxLength': 2500},
+                   'argument': {'type': 'string'},
                    'effect': {'type': 'string', 'enum': EFFECTS},
-                   'repair': {'type': 'string', 'maxLength': 1500}},
+                   'repair': {'type': 'string'}},
 }
 DEFENSE_POLICY = """A referee alleges the problem below in the manuscript. You are the authors' advocate: find the
 strongest correct argument that the manuscript is right as written, from its hypotheses, definitions and results and
@@ -165,8 +165,8 @@ ARBITER_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['assessment', 'effect', 'argument', 'repair'],
     'properties': {'assessment': {'type': 'string', 'enum': ['valid', 'rejected', 'undecided']},
                    'effect': {'type': 'string', 'enum': EFFECTS},
-                   'argument': {'type': 'string', 'maxLength': 2500},
-                   'repair': {'type': 'string', 'maxLength': 1500}},
+                   'argument': {'type': 'string'},
+                   'repair': {'type': 'string'}},
 }
 ARBITER_POLICY = """Two referees disagree about the problem below: an allegation, and a defence of the manuscript.
 Decide independently, from the manuscript. Check both arguments step by step: a defence that assumes what is to
@@ -187,9 +187,9 @@ manuscript; reject it when the manuscript is right as written."""
 
 TYPO_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
-    'properties': {'items': {'type': 'array', 'maxItems': 60, 'items': {
+    'properties': {'items': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
-        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+        'properties': {'id': {'type': 'string'}, 'check': {'type': 'string'},
                        'keep': {'type': 'boolean'}}}}},
 }
 TYPO_CHECK_POLICY = """Below are remarks on the writing of the manuscript above, each with an id. Check each one against
@@ -207,9 +207,9 @@ ATTACK_SCHEMA = {
     'required': ['verdict', 'counterexample', 'hypothesis_check', 'quote'],
     'properties': {
         'verdict': {'type': 'string', 'enum': list(ATTACK_VERDICTS)},
-        'counterexample': {'type': 'string', 'maxLength': 2500},
-        'hypothesis_check': {'type': 'string', 'maxLength': 2500},
-        'quote': {'type': 'string', 'maxLength': 200},
+        'counterexample': {'type': 'string'},
+        'hypothesis_check': {'type': 'string'},
+        'quote': {'type': 'string'},
     },
 }
 ATTACK_POLICY = """The whole manuscript is above. Attack the STATEMENT of the main result given below: try to show that
@@ -237,9 +237,9 @@ part that fails (empty when the verdict is none)."""
 
 MINOR_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['items'],
-    'properties': {'items': {'type': 'array', 'maxItems': 30, 'items': {
+    'properties': {'items': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['id', 'check', 'keep'],
-        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'check': {'type': 'string', 'maxLength': 700},
+        'properties': {'id': {'type': 'string'}, 'check': {'type': 'string'},
                        'keep': {'type': 'boolean'}}}}},
 }
 MINOR_CHECK_POLICY = """Below are minor findings of a referee on the manuscript above, each with an id. Each was raised
@@ -289,8 +289,8 @@ CONFIRM_SCHEMA = {
         'assessment': {'type': 'string', 'enum': ['valid', 'rejected', 'undecided']},
         'kind': {'type': 'string', 'enum': ['invalid_inference', 'missing_justification']},
         'severity': {'type': 'string', 'enum': ['major', 'minor']},
-        'argument': {'type': 'string', 'maxLength': 2000},
-        'suggestion': {'type': 'string', 'maxLength': 800},
+        'argument': {'type': 'string'},
+        'suggestion': {'type': 'string'},
     },
 }
 CONFIRM_POLICY = """Another reviewer alleges the issue below in a proof. Decide independently whether it is real; do not defer
@@ -326,27 +326,27 @@ STEP = {
     'properties': {
         'start_line': {'type': 'integer'},
         'end_line': {'type': 'integer'},
-        'what': {'type': 'string', 'maxLength': 800},
-        'why': {'type': 'string', 'maxLength': 1500},
-        'uses': {'type': 'string', 'maxLength': 400},
+        'what': {'type': 'string'},
+        'why': {'type': 'string'},
+        'uses': {'type': 'string'},
     },
 }
 EXPLAIN_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['says', 'idea', 'steps', 'facts', 'hypotheses', 'gaps'],
     'properties': {
-        'says': {'type': 'string', 'maxLength': 2500},
-        'idea': {'type': 'string', 'maxLength': 1200},
-        'steps': {'type': 'array', 'maxItems': 40, 'items': STEP},
-        'facts': {'type': 'array', 'maxItems': 10, 'items': {
+        'says': {'type': 'string'},
+        'idea': {'type': 'string'},
+        'steps': {'type': 'array', 'items': STEP},
+        'facts': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['name', 'statement'],
-            'properties': {'name': {'type': 'string', 'maxLength': 200}, 'statement': {'type': 'string', 'maxLength': 800}}}},
-        'hypotheses': {'type': 'string', 'maxLength': 1500},
-        'gaps': {'type': 'string', 'maxLength': 1000},
+            'properties': {'name': {'type': 'string'}, 'statement': {'type': 'string'}}}},
+        'hypotheses': {'type': 'string'},
+        'gaps': {'type': 'string'},
     },
 }
 STEPS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['steps'],
-                'properties': {'steps': {'type': 'array', 'maxItems': 30, 'items': STEP}}}
+                'properties': {'steps': {'type': 'array', 'items': STEP}}}
 EXPLAIN_POLICY = """Explain the result and its proof below to a research mathematician from another field: precise,
 nothing hand-waved, but nothing assumed beyond a general graduate background. Return JSON:
 - says: what the statement says, in words and then precisely: the objects, the role of each hypothesis, the conclusion.
@@ -388,7 +388,7 @@ LOCATE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['kind', 'name', 'statement_start', 'statement_end', 'start_line', 'end_line'],
     'properties': {'kind': {'type': 'string', 'enum': ['result', 'passage', 'none']},
-                   'name': {'type': 'string', 'maxLength': 80},
+                   'name': {'type': 'string'},
                    'statement_start': {'type': 'integer'}, 'statement_end': {'type': 'integer'},
                    'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'}},
 }
@@ -406,10 +406,10 @@ Return kind "result", the statement lines as given, and in start_line and end_li
 argument that proves it. Return kind "none", with all lines 0, when the text does not prove it. name: "{name}"."""
 EXPLAIN_CHECK_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['problems'],
-    'properties': {'problems': {'type': 'array', 'maxItems': 8, 'items': {
+    'properties': {'problems': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['where', 'problem', 'fix'],
-        'properties': {'where': {'type': 'string', 'maxLength': 200}, 'problem': {'type': 'string', 'maxLength': 800},
-                       'fix': {'type': 'string', 'maxLength': 800}}}}},
+        'properties': {'where': {'type': 'string'}, 'problem': {'type': 'string'},
+                       'fix': {'type': 'string'}}}}},
 }
 EXPLAIN_CHECK_POLICY = """Check the explanation below against the source statement and proof. Report only real problems: a
 misstated hypothesis or conclusion, a false mathematical claim, a step explained wrongly, or a gap of the proof that
@@ -426,28 +426,28 @@ COMMENT_KINDS = ['typo', 'grammar', 'notation', 'definition', 'cross_reference',
 READ_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['summary', 'comments'],
     'properties': {
-        'summary': {'type': 'string', 'maxLength': 3000},
-        'comments': {'type': 'array', 'maxItems': 60, 'items': {
+        'summary': {'type': 'string'},
+        'comments': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False,
             'required': ['start_line', 'end_line', 'quote', 'check', 'is_problem', 'kind', 'importance', 'comment',
                          'suggestion'],
             'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'},
-                           'quote': {'type': 'string', 'maxLength': 200},
-                           'check': {'type': 'string', 'maxLength': 800},
+                           'quote': {'type': 'string'},
+                           'check': {'type': 'string'},
                            'is_problem': {'type': 'boolean'},
                            'kind': {'type': 'string', 'enum': COMMENT_KINDS},
                            'importance': {'type': 'string', 'enum': ['error', 'typo', 'suggestion']},
-                           'comment': {'type': 'string', 'maxLength': 1200},
-                           'suggestion': {'type': 'string', 'maxLength': 600}}}},
+                           'comment': {'type': 'string'},
+                           'suggestion': {'type': 'string'}}}},
     },
 }
 # A part read with a small context gets a small answer: it must fit the local output allowance.
 READ_PART_SCHEMA = {**READ_SCHEMA, 'properties': {
-    'summary': {'type': 'string', 'maxLength': 1500},
-    'comments': {**READ_SCHEMA['properties']['comments'], 'maxItems': 10, 'items': {
+    'summary': {'type': 'string'},
+    'comments': {**READ_SCHEMA['properties']['comments'], 'items': {
         **READ_SCHEMA['properties']['comments']['items'], 'properties': {
             **READ_SCHEMA['properties']['comments']['items']['properties'],
-            'comment': {'type': 'string', 'maxLength': 600}, 'suggestion': {'type': 'string', 'maxLength': 400}}}}}}
+            'comment': {'type': 'string'}, 'suggestion': {'type': 'string'}}}}}}
 _READ_COMMENTS = """- comments: what a careful referee asks the authors to fix in the writing: a formula or statement that is
   misprinted (the proof or the context shows what was meant), a symbol or notion used but never defined, notation
   that changes meaning, a cross-reference to the wrong theorem, lemma or equation, a misspelled word, broken
@@ -492,27 +492,27 @@ SCOPE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['overview', 'field', 'contribution', 'main', 'notation', 'closest', 'queries'],
     'properties': {
-        'overview': {'type': 'string', 'maxLength': 3500},
-        'field': {'type': 'string', 'maxLength': 200},
-        'contribution': {'type': 'string', 'maxLength': 1500},
-        'main': {'type': 'array', 'maxItems': 6, 'items': {'type': 'string', 'maxLength': 8}},
-        'notation': {'type': 'array', 'maxItems': 3, 'items': {
+        'overview': {'type': 'string'},
+        'field': {'type': 'string'},
+        'contribution': {'type': 'string'},
+        'main': {'type': 'array', 'items': {'type': 'string'}},
+        'notation': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['start_line', 'end_line'],
             'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'}}}},
-        'closest': {'type': 'array', 'maxItems': 6, 'items': {'type': 'string', 'maxLength': 40}},
-        'queries': {'type': 'array', 'maxItems': 6, 'items': {'type': 'string', 'maxLength': 100}},
+        'closest': {'type': 'array', 'items': {'type': 'string'}},
+        'queries': {'type': 'array', 'items': {'type': 'string'}},
     },
 }
 SCOPE_WHOLE_SCHEMA = {**SCOPE_SCHEMA, 'required': SCOPE_SCHEMA['required'] + ['proofs', 'prose_results'], 'properties': {
     **SCOPE_SCHEMA['properties'],
-    'proofs': {'type': 'array', 'maxItems': 12, 'items': {
+    'proofs': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['id', 'start_line', 'end_line'],
-        'properties': {'id': {'type': 'string', 'maxLength': 8}, 'start_line': {'type': 'integer'},
+        'properties': {'id': {'type': 'string'}, 'start_line': {'type': 'integer'},
                        'end_line': {'type': 'integer'}}}},
-    'prose_results': {'type': 'array', 'maxItems': 4, 'items': {
+    'prose_results': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False,
         'required': ['name', 'statement_start', 'statement_end', 'proof_start', 'proof_end', 'main'],
-        'properties': {'name': {'type': 'string', 'maxLength': 60}, 'statement_start': {'type': 'integer'},
+        'properties': {'name': {'type': 'string'}, 'statement_start': {'type': 'integer'},
                        'statement_end': {'type': 'integer'}, 'proof_start': {'type': 'integer'},
                        'proof_end': {'type': 'integer'}, 'main': {'type': 'boolean'}}}},
 }}
@@ -535,8 +535,7 @@ below, in order), with its abstract, the start of its introduction and the list 
 overview (your understanding of the paper as a referee, two to four paragraphs: the question it answers, its main
 results in words, the strategy of the proofs, how the sections fit together, and the assumptions that matter);
 field (the area, e.g. spectral theory of elliptic operators); contribution (what the paper claims to prove that is
-new, in its own terms); main (the ids, such as U4, of the main results); notation (up to three line ranges, at most
-60 lines each, where the setting and notation used throughout are defined); closest (bibliography keys of the
+new, in its own terms); main (the ids, such as U4, of the main results); notation (the line ranges where the setting and notation used throughout are defined); closest (bibliography keys of the
 prior works the paper presents as closest); queries (three to six short public search queries on the topic, in
 general mathematical words, never copied manuscript text)."""
 
@@ -545,18 +544,17 @@ CITATION = {
     'required': ['start_line', 'end_line', 'quote', 'source', 'used', 'known', 'assessment', 'severity', 'explanation'],
     'properties': {
         'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'},
-        'quote': {'type': 'string', 'maxLength': 200},
-        'source': {'type': 'string', 'maxLength': 200},
-        'used': {'type': 'string', 'maxLength': 800},
-        'known': {'type': 'string', 'maxLength': 1200},
+        'quote': {'type': 'string'},
+        'source': {'type': 'string'},
+        'used': {'type': 'string'},
+        'known': {'type': 'string'},
         'assessment': {'type': 'string', 'enum': ['consistent', 'misapplied', 'misstated', 'unknown']},
         'severity': {'type': 'string', 'enum': ['major', 'minor']},
-        'explanation': {'type': 'string', 'maxLength': 1500},
+        'explanation': {'type': 'string'},
     },
 }
-CITATIONS_LIMIT = 60
 CITATIONS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['citations'],
-                    'properties': {'citations': {'type': 'array', 'maxItems': CITATIONS_LIMIT, 'items': CITATION}}}
+                    'properties': {'citations': {'type': 'array', 'items': CITATION}}}
 CITATIONS_POLICY = """List every place where the manuscript above invokes a result from the literature, cited by
 reference or by name (a named theorem, inequality or lemma), and compare its use with the result as it is known.
 For each: the line range and a quote of at most twelve words copied exactly from those lines; source (the cited work
@@ -576,13 +574,13 @@ WRITE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['summary', 'significance', 'correctness', 'presentation', 'recommendation', 'reasons', 'confidential'],
     'properties': {
-        'summary': {'type': 'string', 'maxLength': 2500},
-        'significance': {'type': 'string', 'maxLength': 2000},
-        'correctness': {'type': 'string', 'maxLength': 2000},
-        'presentation': {'type': 'string', 'maxLength': 1200},
+        'summary': {'type': 'string'},
+        'significance': {'type': 'string'},
+        'correctness': {'type': 'string'},
+        'presentation': {'type': 'string'},
         'recommendation': {'type': 'string', 'enum': ['accept', 'minor_revision', 'major_revision', 'reject', 'no_recommendation']},
-        'reasons': {'type': 'string', 'maxLength': 1500},
-        'confidential': {'type': 'string', 'maxLength': 1500},
+        'reasons': {'type': 'string'},
+        'confidential': {'type': 'string'},
     },
 }
 WRITE_POLICY = """Write the prose parts of a referee report for a mathematics journal from the findings below. The
@@ -606,10 +604,10 @@ sentences; never end a field in the middle of a sentence."""
 
 MERGE_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['groups'],
-    'properties': {'groups': {'type': 'array', 'maxItems': 30, 'items': {
+    'properties': {'groups': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['ids', 'reason'],
-        'properties': {'ids': {'type': 'array', 'maxItems': 12, 'items': {'type': 'string', 'maxLength': 8}},
-                       'reason': {'type': 'string', 'maxLength': 300}}}}},
+        'properties': {'ids': {'type': 'array', 'items': {'type': 'string'}},
+                       'reason': {'type': 'string'}}}}},
 }
 MERGE_POLICY = """Below are the comments of a referee report on one manuscript, each with an id. Group the comments
 that describe the same underlying problem: the same wrong formula or misprint seen from two places, the same missing
@@ -623,29 +621,28 @@ RECOMMENDATIONS = {'accept': 'Accept', 'minor_revision': 'Minor revision', 'majo
 
 FOLLOWUP_PLAN_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['ranges'],
-    'properties': {'ranges': {'type': 'array', 'maxItems': 8, 'items': {
+    'properties': {'ranges': {'type': 'array', 'items': {
         'type': 'object', 'additionalProperties': False, 'required': ['start_line', 'end_line'],
         'properties': {'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'}}}}},
 }
 FOLLOWUP_PLAN_POLICY = """This is a focused follow-up to a saved manuscript review, not a new full referee report.
 Identify the manuscript passages needed to answer the user's reply to the previous review. A comment number in
 the reply is the number of that comment in the previous report. Use the previous
-report and manuscript outline only to navigate; neither is evidence that a claim is correct. Return up to eight
-line ranges of at most 120 lines each. Include relevant definitions and surrounding context. Choose no ranges
+report and manuscript outline only to navigate; neither is evidence that a claim is correct. Return the line ranges needed. Include relevant definitions and surrounding context. Choose no ranges
 when the intended comment or manuscript passage is unclear. The next call will read the actual selected lines.
 Do not check proofs or infer unseen source content."""
 
 FOLLOWUP_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['responses'],
-    'properties': {'responses': {'type': 'array', 'minItems': 1, 'maxItems': 12, 'items': {
+    'properties': {'responses': {'type': 'array', 'minItems': 1, 'items': {
         'type': 'object', 'additionalProperties': False,
         'required': ['prior_comment', 'decision', 'answer', 'start_line', 'end_line', 'quote'],
         'properties': {
-            'prior_comment': {'type': 'string', 'maxLength': 400},
+            'prior_comment': {'type': 'string'},
             'decision': {'type': 'string', 'enum': ['maintain', 'revise', 'withdraw', 'unresolved']},
-            'answer': {'type': 'string', 'maxLength': 2500},
+            'answer': {'type': 'string'},
             'start_line': {'type': 'integer'}, 'end_line': {'type': 'integer'},
-            'quote': {'type': 'string', 'maxLength': 200},
+            'quote': {'type': 'string'},
         }}}},
 }
 FOLLOWUP_POLICY = """Answer the user's response to the previous review, point by point, using the manuscript
