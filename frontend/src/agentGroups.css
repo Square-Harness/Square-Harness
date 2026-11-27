@@ -120,6 +120,10 @@
 
 .agent-results { align-items: start; }
 .agent-results > li { display: flex; align-items: center; }
+/* A finished write-up or review takes a row of its own: its chip, then View and its downloads. */
+.agent-results > li.agent-result-document { flex-basis: 100%; flex-wrap: wrap; gap: .35rem .6rem; }
+.agent-document-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.agent-lane-copy > .agent-document-actions { margin-top: .4rem; }
 .agent-observations > summary { cursor: pointer; color: var(--text-2); font: 600 .86rem/1.5 var(--font-ui); padding: .3rem 0; }
 .agent-observations[open] > summary { margin-bottom: .35rem; }
 @media(max-width: 760px) {

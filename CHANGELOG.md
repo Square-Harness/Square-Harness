@@ -24,6 +24,13 @@
   changes are unsaved. `GET /api/files/view`,
   `GET /api/files/raw` (PDFs and images; any listed file with `download=1`) and
   `POST /api/files/save` (with the SHA-256 the viewer read; 409 on a change).
+- A finished write-up, summary or literature review shows **View** and its
+  downloads (PDF, sources, LaTeX, review, BibTeX) in its box in the
+  conversation, as its card did before the notebook: **View** opens the document
+  in the notebook's Results. The card's buttons are one component,
+  `JobDownloads`, used by both.
+- The folder window is now **Select a workspace**, and says that the agent has
+  access to the files in the active workspace.
 - **Learn my writing style** moved from the sidebar to the top of
   **Personalization**, above the standing instructions.
 - File access is gone: the model lists, searches and reads every supported kind

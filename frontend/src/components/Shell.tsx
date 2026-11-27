@@ -393,7 +393,7 @@ function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; 
   )
 }
 
-/** The folder the harness works in, shown above the text window; click to open another. */
+/** The workspace the agent works in (it has access to its files), shown above the text window; click to select another. */
 export function WorkspaceSwitch() {
   const { status } = useApp()
   const [browsing, setBrowsing] = useState(false)
@@ -401,7 +401,7 @@ export function WorkspaceSwitch() {
   const folder = status.workspace.split('/').filter(Boolean).pop() || status.workspace
   return (
     <div className="workspace-switch">
-      <button type="button" className="workspace-open" title={status.workspace + ' (open another folder)'} onClick={() => setBrowsing(true)}>
+      <button type="button" className="workspace-open" title={status.workspace + ': the active workspace, whose files the agent can access (click to select another)'} onClick={() => setBrowsing(true)}>
         <FolderIcon size={15} /><span>{folder}</span>
       </button>
       {!status.online && <span className="pill" title="No external requests; local and cached sources only">Offline</span>}

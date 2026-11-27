@@ -438,9 +438,10 @@ one with a message.
   A skill forced onto a larger task can fail in unexpected ways (for example,
   `@writeup` on a whole 80-page paper). The start page therefore does not list
   the skills; it points to **About**, which does.
-- **Your folder** is shown above the text box. Click it to open another folder
-  (below `--gui-root`; by default only the workspace itself). Other open tabs
-  follow the new folder and say so. Drop files onto the
+- **Your workspace** is shown above the text box: the agent has access to the
+  files in the active workspace. Click it to select another workspace, a folder
+  below `--gui-root` (by default only the workspace itself). Other open tabs
+  follow the new workspace and say so. Drop files onto the
   window to add them to the folder (`.tex .sty .cls .bib .md .txt .pdf`, code
   such as `.py .jl .rs .c .cpp .r .m .js .sh`, data in `.json .yaml .toml .csv`,
   and `.png .jpg` figures for write-ups; up to 20 MB). An existing file is never
@@ -565,7 +566,11 @@ conversation. Select a specialist to follow its work or open its result. Timing
 bars share a scale so you can see when two tasks overlapped. A dependent task
 appears as waiting until its prerequisite returns. A finished agent’s answer
 can be opened while the other agents continue. If an answer reached its output
-limit, the agent shows the failure and its partial text remains readable.
+limit, the agent shows the failure and its partial text remains readable. A
+worker that produced a document (a write-up, a summary, a literature review)
+shows **View** and its downloads in its box once it is done: **View** opens the
+document in the notebook's **Results**, and the downloads are the PDF, the
+sources, the LaTeX file, the review or the BibTeX file it saved.
 
 - **Agents** shows what each specialist is doing. From a Literature task,
   **Open literature review** takes you into the review itself.

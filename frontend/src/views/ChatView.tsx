@@ -34,6 +34,7 @@ import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
+import { JobDownloads } from '../components/JobDownloads'
 import { AttachMenu } from '../components/FileExplorer'
 
 type ChatMode = 'critic' | 'explore' | 'free'
@@ -780,14 +781,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && <>
-            {item.outputs?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
-            {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
-            {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
-            {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
-            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
-            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={item.outputs.review ? api.reviewBibtexUrl(item.job_id) : api.researchBibDownloadUrl(item.job_id)} download>BibTeX (.bib)</a>}
-          </>}
+          {item.job_id && item.outputs && <JobDownloads job={item.job_id} outputs={item.outputs} partial={item.status === 'stopped'} />}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
             ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
             : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}

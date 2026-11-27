@@ -55,7 +55,8 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const recent = listing ? (listing.recent.includes('') ? listing.recent : [...listing.recent, '']) : []
   if (seeing) return <FilesDialog onClose={onClose} onBack={() => setSeeing(false)} />
   return (
-    <Modal title="Open a folder" icon={<FolderIcon />} onClose={onClose} wide>
+    <Modal title="Select a workspace" icon={<FolderIcon />} onClose={onClose} wide>
+      <p className="modal-lede">The agent will have access to the files in the active workspace.</p>
       <nav className="crumbs" aria-label="Folder path">
         <button type="button" className="crumb" onClick={() => setPath('')}>{rootName}</button>
         {crumbs.map((part, index) => (
@@ -74,11 +75,11 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
             {listing.holds_projects ? <span className="muted small">The file folders of your projects</span>
               : listing.project ? <span className="muted small">Files of the project <strong>{listing.project.name}</strong>{listing.project.deleted ? ' (deleted)' : ''}</span>
               : <button type="button" className="btn btn-primary" disabled={!!isCurrent || busy} onClick={() => open(listing.path)}>
-                {isCurrent ? 'This is the open folder' : 'Open this folder'}
+                {isCurrent ? 'This is the active workspace' : 'Select this workspace'}
               </button>}
           </div>
-          {listing.project && <p className="muted small">A project keeps its files here. {listing.project.deleted ? 'The project was deleted; its files were kept.' : 'Open the project from the conversation list to work with them; this folder cannot be opened as a workspace.'}</p>}
-          {busy && <p className="busy-note">Pause all active work and cancel queued turns before opening another folder. Chats and jobs belong to the folder they started in.</p>}
+          {listing.project && <p className="muted small">A project keeps its files here. {listing.project.deleted ? 'The project was deleted; its files were kept.' : 'Open the project from the conversation list to work with them; this folder cannot be selected as a workspace.'}</p>}
+          {busy && <p className="busy-note">Pause all active work and cancel queued turns before selecting another workspace. Chats and jobs belong to the folder they started in.</p>}
           <ul className="folder-list">
             {listing.folders.map((folder) => (
               <li key={folder.path}>
@@ -100,13 +101,13 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
           </form>
           {recent.length > 0 && (
             <div className="recent">
-              <p className="detail-label">Recently opened</p>
+              <p className="detail-label">Recent workspaces</p>
               {recent.map((item) => (
                 <button key={item || '.'} type="button" className="link-btn recent-item" onClick={() => setPath(item)}>{item || rootName}</button>
               ))}
             </div>
           )}
-          <p className="muted small">Only folders inside {listing.root} can be opened. Hidden folders are not shown.</p>
+          <p className="muted small">Only folders inside {listing.root} can be selected. Hidden folders are not shown.</p>
         </>
       )}
       <div className="modal-actions folder-actions">
