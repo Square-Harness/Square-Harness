@@ -29,7 +29,7 @@ export function FilePanel({ path }: { path: string }) {
 
 /**
  * The viewer beside a conversation, in the notebook's place (the notebook comes back when it closes): a workspace
- * file, or a document an agent produced (ResultPanel). It is resized like the notebook, up to 65% of the window,
+ * file, or a document an agent produced (ResultPanel). It is resized like the notebook, up to 75% of the window,
  * so that the reader can write a message while reading.
  */
 export function ViewerPanel({ label, children }: { label: string; children: ReactNode }) {
@@ -89,7 +89,6 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState('')
-  const editor = useRef<HTMLTextAreaElement>(null)
   const panel = !!onClose
 
   useEffect(() => {
@@ -126,7 +125,6 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
     return () => { window.removeEventListener('keydown', keys); window.removeEventListener('beforeunload', leave) }
   }, [save, dirty, file?.editable])
   useEffect(() => { if (dirty) setSaved('') }, [dirty])
-  useEffect(() => { if (editing) editor.current?.focus() }, [editing])
   // Unsaved changes: kept for a reopening, announced to whatever would replace the viewer.
   useEffect(() => {
     if (!file?.sha256) return
@@ -195,8 +193,7 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
         {file?.kind === 'pdf' && <iframe className="file-view-frame" title={file.name} src={fileRawUrl(path) + PDF_FIT} />}
         {file?.kind === 'image' && <div className="file-view-image"><img src={fileRawUrl(path)} alt={file.name} /></div>}
         {file?.kind === 'markdown' && (editing
-          ? <textarea ref={editor} className="file-view-editor" value={draft} spellCheck={false} aria-label={`Edit ${file.name}`}
-              onChange={(event) => setDraft(event.target.value)} />
+          ? <CodeEditor name={file.name} value={draft} onChange={setDraft} autoFocus />
           : <div className="file-view-markdown" title="Click to edit" role="button" tabIndex={0}
               onClick={() => setEditing(true)} onKeyDown={(event) => { if (event.key === 'Enter') setEditing(true) }}>
               {draft.trim() ? <Markdown>{draft}</Markdown> : <p className="muted">This file is empty. Click to write.</p>}

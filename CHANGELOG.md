@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Text files in the viewer (code, TeX, BibTeX, Markdown being edited) show line
+  numbers in a margin; a wrapped line keeps one number. Texts over 400,000
+  characters stay plain, without colours or numbers.
+- The notebook and the viewer can be widened to 75% of the window (was 65%).
+
 - Documents open in the file viewer beside the conversation, not inside the
   notebook: **View** in a worker's box, **Read literature review**, and the
   PDF, LaTeX, BibTeX, review and figure results of the notebook's **Results**
@@ -50,7 +55,7 @@
   comes from another folder), and **View file**, shown when the pointer is over
   a file, opens it in the file viewer beside the conversation; a double click on
   an attached file does the same. The viewer takes the notebook's place (the
-  notebook returns when it closes), resizes like it up to 65% of the window, and
+  notebook returns when it closes), resizes like it up to 75% of the window, and
   leaves the message box usable, so that one can write while reading
   (`?file=` in the conversation's address; on a page without a conversation,
   `#/file?path=` with a way back). The viewer shows a PDF in the browser's
@@ -85,7 +90,7 @@
   Existing workspaces keep saved file-type permissions. In folders with older
   restrictions, the new group starts disabled. `GET/POST /api/settings` and
   the `read` field of `/api/status` remain available.
-- The notebook can be widened to 65% of the window (was 600 px). The
+- The notebook can be widened to 75% of the window (was 600 px). The
   conversation narrows to make room; below 620 px it uses compact margins and
   composer controls, and below 420 px the Send button shows only its arrow.
 

@@ -462,7 +462,7 @@ one with a message.
   **View file**, or a double click on a file attached above the text box or in a
   message, opens the file viewer beside the conversation, in the notebook's
   place (the notebook comes back when you close the file). Resize it by its left
-  edge like the notebook, up to 65% of the window, and keep writing your message
+  edge like the notebook, up to 75% of the window, and keep writing your message
   while you read. It shows a PDF in the browser's PDF viewer, fitted to the
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,
@@ -474,7 +474,8 @@ one with a message.
   **Download** (the file as last saved) and the close button, on one line. The file
   keeps its encoding. If the file changed on disk after you opened it (the model
   edited it, for example), it is not overwritten: reload it, or copy your text
-  first. Closing the viewer, opening another file or leaving the conversation
+  first. Text files (code, TeX, Markdown being edited) show line numbers in the
+  margin. Closing the viewer, opening another file or leaving the conversation
   with unsaved changes asks first. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
@@ -592,7 +593,7 @@ are read in the notebook.
 On a wide screen the notebook opens beside the conversation. A file opened in
 the viewer takes its place until you close the file. Drag its divider
 or focus the divider and use the arrow keys to resize it (End widens it fully).
-It can cover up to 65% of the window; the conversation narrows to make room and
+It can cover up to 75% of the window; the conversation narrows to make room and
 switches to compact margins and controls. On a smaller screen
 the panel overlays the page. On a phone it fills the screen. Close it with
 Escape or its close button. The URL identifies the tab and selected item, so

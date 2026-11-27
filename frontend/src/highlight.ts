@@ -314,3 +314,36 @@ const SPECS: Record<Language, Spec> = {
 export function highlight(text: string, language: Language): string {
   return run(text, SPECS[language])
 }
+
+/** The text as HTML, coloured when its language is known and only escaped otherwise. */
+export function colour(text: string, language: Language | null): string {
+  return language ? highlight(text, language) : escape(text)
+}
+
+/**
+ * Coloured HTML cut into one block per line of the text (`<span class="code-line">`), which the viewer numbers.
+ * A token spanning several lines (a block comment, a verbatim environment) is closed at each line end and
+ * reopened on the next line; tokens never nest. The newlines themselves become the blocks' ends, so the copy
+ * keeps exactly the textarea's characters, and an empty line keeps its height with a zero-width space.
+ */
+export function numberedLines(html: string): { html: string; count: number } {
+  const lines: string[] = []
+  let line = ''
+  let open = ''  // the token span open across the current position, if any
+  for (const part of html.split(/(<span class="tok-[a-z-]+">|<\/span>|\n)/)) {
+    if (!part) continue
+    if (part === '\n') {
+      lines.push(line + (open ? '</span>' : ''))
+      line = open
+    } else {
+      if (part.startsWith('<span')) open = part
+      else if (part === '</span>') open = ''
+      line += part
+    }
+  }
+  lines.push(line)
+  return {
+    html: lines.map((text) => `<span class="code-line">${text.replace(/<span class="tok-[a-z-]+"><\/span>/g, '') || '​'}</span>`).join(''),
+    count: lines.length,
+  }
+}
