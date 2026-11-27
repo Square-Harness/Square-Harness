@@ -171,6 +171,12 @@ def literature_goal(value, head):
 _BRACED = r'\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}'
 
 
+def manuscript_has_title(manuscript, title):
+    """Does the published title match a title declared in this TeX manuscript?"""
+    titles, _ = _manuscript_names(manuscript)
+    return bool(titles and ' '.join(_words(title)) in titles)
+
+
 def _manuscript_names(manuscript):
     """(titles, surnames) of a LaTeX manuscript from its \\title and \\author commands (both arguments), or
     (None, None) when it has no \\author (a PDF or a text file)."""

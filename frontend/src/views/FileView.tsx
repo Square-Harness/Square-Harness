@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useCallback, useEffect, useEffectEvent, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { api, fileDownloadUrl, fileRawUrl, PDF_FIT, type CitedDocument, type ViewedFile } from '../api'
+import { api, fileDownloadUrl, fileRawUrl, PDF_FIT, REFRESH_CITATIONS, type CitedDocument, type ViewedFile } from '../api'
 import { CodeEditor, CodeView } from '../components/CodeEditor'
 import { ErrorNote, Loading } from '../components/common'
 import { CloseIcon, DownloadIcon, FileIcon } from '../components/Icons'
@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown'
 import { PanelGrip, usePanelWidth, usePublishedWidth, useWide } from '../components/PanelResize'
 import { ago, bytes, displayPath } from '../format'
 import { filePanelWidth, rememberFilePanelWidth } from '../panels'
-import { closeFile, leaveFile, parse, REVEAL_LINES, setUnsavedFile, type ViewerTarget } from '../router'
+import { citationChat, citationTarget, closeFile, leaveFile, openViewer, parse, REVEAL_LINES, setUnsavedFile, useRoute, type LineRange, type ViewerTarget } from '../router'
 
 // Unsaved edits of a file the viewer left without a decision (the browser's Back button): reopening the file
 // brings them back while the file on disk is unchanged.
@@ -91,60 +91,89 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose?
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState('')
-  const reference = useRef<CitedDocument | null>(null)
+  const [recheck, setRecheck] = useState(0)
   const file = snapshot ? null : original
   const path = original?.path || target.path
-  const { kind, path: requestedPath, lines } = target
+  const { kind, path: requestedPath } = target
+  const docId = kind === 'document' ? requestedPath : target.citation?.id
+  const cited = kind === 'document' ? target.lines : target.citation?.lines
+  const chat = citationChat(useRoute())
+  const [lines, setLines] = useState<LineRange>()
+  const dirty = !!original && original.text !== undefined && draft !== original.text
   const panel = !!onClose
+
+  // An in-flight source lookup or a second citation in this file must preserve the reader's live draft.
+  const showFile = useEffectEvent((value: ViewedFile) => {
+    const kept = drafts.get(value.path)
+    const current = dirty && original?.path === value.path ? { sha256: original.sha256, text: draft } : kept
+    if (docId && current && current.sha256 !== value.sha256) return false
+    const text = current && current.sha256 === value.sha256 ? current.text : value.text ?? ''
+    setFile(value); setDraft(text)
+    if (target.lines && value.kind === 'markdown') setEditing(true)
+    if (!panel) document.title = value.name + ' · Square Harness'
+    if (docId && target.lines && text !== value.text) {
+      const { start, end } = target.lines
+      const passage = (s: string) => s.split(/\r\n|[\n\r]/).slice(start - 1, end).join('\n')
+      if (passage(text) !== passage(value.text ?? '')) return false
+    }
+    setSnapshot(null); setLines(target.lines)
+    return true
+  })
+  const hasDraft = useEffectEvent(() => dirty || drafts.has(requestedPath))
 
   useEffect(() => {
     let active = true
     async function load() {
-      let value: ViewedFile
-      if (kind === 'document') {
-        const doc = await api.documentContent(requestedPath)
-        const original = doc.workspace_path && doc.sha256
-          ? await api.viewFile(doc.workspace_path).catch(() => null) : null
+      if (!docId) {
+        const value = await api.viewFile(requestedPath)
+        if (active) showFile(value)
+        return
+      }
+      if (chat && cited) {
+        const source = await api.document(docId, chat, cited).then(info => info.source, () => undefined)
         if (!active) return
-        reference.current = doc
-        // A workspace file may change between the two reads. Retain the exact cited text in that case.
-        if (!original?.editable || original.sha256 !== doc.sha256) {
-          setSnapshot(doc)
-          if (!panel) document.title = doc.title + ' · Square Harness'
-          return
+        if (source) {
+          const value = await api.viewFile(source.path).catch(() => null)
+          if (!active) return
+          if (value?.editable && value.sha256 === source.sha256) {
+            // Old document URLs and bookmarks whose TeX line numbers moved resolve to the current file URL.
+            if (kind !== 'file' || requestedPath !== source.path ||
+                target.lines?.start !== source.start || target.lines.end !== source.end) {
+              if (kind === 'file') window.dispatchEvent(new Event(REFRESH_CITATIONS))
+              openViewer(citationTarget({ id: docId, lines: cited }, source), { replace: true })
+              return
+            }
+            if (showFile(value)) return
+          }
         }
-        value = original
-      } else value = await api.viewFile(requestedPath)
+      }
+      if (kind === 'file' && cited && !hasDraft()) {
+        window.dispatchEvent(new Event(REFRESH_CITATIONS))
+        openViewer(citationTarget({ id: docId, lines: cited }), { replace: true })
+        return
+      }
+      const doc = await api.documentContent(docId)
       if (!active) return
-      const kept = drafts.get(value.path)
-      setFile(value)
-      setDraft(kept && kept.sha256 === value.sha256 ? kept.text : value.text ?? '')
-      if (!panel) document.title = value.name + ' · Square Harness'
+      // A local text originally cited on its own lines may still be identical to the archived edition.
+      if (kind === 'document' && doc.workspace_path && doc.sha256) {
+        const value = await api.viewFile(doc.workspace_path).catch(() => null)
+        if (!active) return
+        if (value?.editable && value.sha256 === doc.sha256 && showFile(value)) return
+      }
+      setSnapshot(doc); setLines(cited)
+      if (!panel) document.title = doc.title + ' · Square Harness'
     }
+    setError(''); setLines(undefined)
     load().catch((reason: Error) => { if (active) setError(reason.message) })
     return () => { active = false }
-  }, [kind, requestedPath, panel])
+  }, [kind, requestedPath, docId, chat, cited?.start, cited?.end, target.lines?.start, target.lines?.end, panel, recheck])
 
-  const dirty = !!original && original.text !== undefined && draft !== original.text
-  // A second citation can target this very editor. Preserve the draft when its edits moved the cited lines;
-  // display the archived passage and let the reader return to the draft without losing it.
-  const revealReference = useEffectEvent(() => {
-    if (!original || !lines) return
-    const doc = reference.current
-    if (doc) {
-      const passage = (text: string) => text.split(/\r\n|[\n\r]/).slice(lines.start - 1, lines.end).join('\n')
-      const stale = original.sha256 !== doc.sha256 || (dirty && passage(draft) !== passage(doc.text))
-      setSnapshot(stale ? doc : null)
-    }
-    if (original.kind === 'markdown') setEditing(true)
-  })
   useEffect(() => {
-    if (!original || !lines) return
-    const reveal = () => revealReference()
-    reveal()
+    if (!docId) return
+    const reveal = () => setRecheck((n) => n + 1)
     window.addEventListener(REVEAL_LINES, reveal)
     return () => window.removeEventListener(REVEAL_LINES, reveal)
-  }, [original?.path, lines?.start, lines?.end])
+  }, [docId])
 
   const save = useCallback(async () => {
     if (!file || !file.sha256 || !dirty || saving) return
@@ -153,6 +182,7 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose?
       const result = await api.saveFile(path, draft, file.sha256)
       setFile({ ...file, text: draft, sha256: result.sha256, size: result.size, updated_at: new Date().toISOString() })
       setSaved('Saved')
+      window.dispatchEvent(new Event(REFRESH_CITATIONS))
     } catch (reason) {
       setError((reason as Error).message)
     } finally {
@@ -200,7 +230,7 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose?
     drafts.delete(path)
     api.viewFile(path).then((value) => {
       setFile(value); setDraft(value.text ?? ''); setSaved('')
-      if (reference.current && reference.current.sha256 !== value.sha256) setSnapshot(reference.current)
+      if (docId) setRecheck((n) => n + 1)
     }, (reason: Error) => setError(reason.message))
   }
   const name = file?.name || snapshot?.title || (kind === 'document' ? 'Cited document' : path.split('/').pop() || 'File')
@@ -212,7 +242,7 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose?
   const conflict = error.includes('changed since it was opened')
   const state = saving ? 'Saving…' : dirty ? 'Unsaved changes' : saved
   const workingFile = snapshot && original && <button type="button" className="btn btn-quiet btn-small"
-    onClick={() => { setSnapshot(null); setEditing(true) }}>{dirty ? 'Return to draft' : 'Open working file'}</button>
+    onClick={() => { setSnapshot(null); setLines(undefined); setEditing(true) }}>{dirty ? 'Return to draft' : 'Open working file'}</button>
   const actions = <>
     {workingFile}
     {file?.kind === 'markdown' && <button type="button" className="btn btn-quiet btn-small file-view-mode" onClick={() => setEditing((on) => !on)}>

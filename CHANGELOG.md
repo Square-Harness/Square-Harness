@@ -11,9 +11,9 @@
   its separate verifier override and restores saved sampling settings on resume.
 
 - Paper citations in conversation answers now show the document name and line
-  range. Click one to open the cited passage beside the conversation. The
-  viewer highlights TeX formulas in saved arXiv passages just as it does in
-  workspace manuscripts.
+  range. When a published passage matches a TeX manuscript used in the chat,
+  the link shows the filename and its source lines and opens the manuscript
+  for editing. Other citations open the saved passage beside the conversation.
 
 - Restored image attachments and screenshot paste for DS4.1 Flash 1017 on
   OpenRouter. The chat and workers send the original images through the

@@ -35,6 +35,7 @@ from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_reco
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
 from ..review import variant_for_state
+from ..review_position import manuscript_has_title
 from ..review_export import review_bibtex, review_markdown
 from ..tools import FALLBACK, READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
@@ -42,6 +43,7 @@ from ..style import (delete_profile, edit_profile, list_profiles, load_choice, m
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
 from .. import images
 from .inference import MAX_CAPACITY
+from .source_lines import PaperSourceLines
 from . import agent_views, personalization, projects
 
 CHAT_MODES = ('explore', 'free')
@@ -1824,14 +1826,78 @@ def view_file(base, relative):
             'editable': True}
 
 
-def view_document(base, root, document_id, *, content=False):
-    """Resolve the immutable edition cited by a worker. A local plain-text original may also be editable."""
+def _chat_tex_files(root, chat_id):
+    """Consider the manuscripts actually attached or opened in this conversation."""
+    if not isinstance(chat_id, str) or not _ID.fullmatch(chat_id):
+        return ()
+    directory = _chats(root)
+    if directory is None or not (directory / (chat_id + '.json')).is_file():
+        return ()
+
+    def candidates():
+        chat = load_chat(root, chat_id)
+        paths = [path for item in chat['transcript'] if item.get('role') == 'user'
+                 for path in item.get('files', [])]
+        for item in chat['history']:
+            if item.get('role') != 'assistant':
+                continue
+            for call in item.get('tool_calls') or []:
+                function = call.get('function', {})
+                if function.get('name') == 'read_file':
+                    args = function.get('arguments')
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except ValueError:
+                            continue
+                    if isinstance(args, dict):
+                        paths.append(args.get('path'))
+        return tuple(dict.fromkeys(p for p in paths if isinstance(p, str) and Path(p).suffix.lower() == '.tex'))
+
+    return _cached(directory / (chat_id + '.json'), candidates, 'citation-manuscripts')
+
+
+def _locate_manuscript(base, library, meta, chat_id, start, end):
+    """A title identifies a candidate. Its corresponding source lines identify the cited passage."""
+    title = meta.get('title')
+    if not title or not chat_id:
+        return None
+    matches = []
+    for relative in _chat_tex_files(library.root, chat_id):
+        try:
+            path = root_file(library.root, relative)
+            if path != library.root / relative:
+                continue
+
+            def align():
+                source = view_file(library.root, relative)
+                if source.get('editable') and manuscript_has_title(source['text'], title):
+                    _, lines = library._document(meta['document_id'])
+                    return PaperSourceLines(lines, source['text']), source['sha256']
+
+            revision = ('citation-lines', meta['document_id'], meta['text_sha256'], title, path.stat().st_ctime_ns)
+            indexed = _cached(path, align, revision)
+            if indexed and (span := indexed[0].range(start, end)):
+                matches.append({'path': path.relative_to(base).as_posix(), 'start': span[0], 'end': span[1],
+                                'sha256': indexed[1]})
+        except (NotFound, OSError, ValueError):
+            continue
+    return matches[0] if len(matches) == 1 else None
+
+
+def view_document(base, root, document_id, *, content=False, chat_id=None, start=None, end=None):
+    """Resolve a citation to its workspace source when available, retaining the worker's saved edition."""
     library = LiteratureTools(root, online=False)
+    base = Path(base).resolve(strict=True)
+    root = library.root
     try:
         if content:
             meta, lines = library._document(document_id)
         else:
-            meta = library.document_metadata(document_id)
+            meta, lines = library.document_metadata(document_id), None
+        source = meta.get('source_url', '')
+        if lines is None and start is not None and source.startswith('workspace:'):
+            meta, lines = library._document(document_id)
     except LiteratureError as exc:
         if exc.code == 'document_not_found':
             raise NotFound('The cited document is no longer available in this workspace.') from None
@@ -1842,9 +1908,10 @@ def view_document(base, root, document_id, *, content=False):
         url = urlsplit(identifier)
         name = unquote(Path(url.path).name) or url.hostname
     result = {'id': document_id, 'title': name or identifier or 'Cited document'}
-    if not content:
+    if not content and start is None:
         return result
-    result['text'] = '\n'.join(lines)  # Same line breaks (including PDF page boundaries) as read_paper.
+    if content:
+        result['text'] = '\n'.join(lines)  # Same line breaks (including PDF page boundaries) as read_paper.
     # A paper title need not contain a file extension. Its cached original identifies
     # the representation whose line numbers the citation uses.
     suffix = source_suffix(meta.get('original_file') or '')
@@ -1852,7 +1919,6 @@ def view_document(base, root, document_id, *, content=False):
         result['syntax'] = 'latex'
     elif suffix in ('.html', '.pdf'):
         result['syntax'] = 'paper'
-    source = meta.get('source_url', '')
     if source.startswith('workspace:'):
         relative = source.removeprefix('workspace:')
         try:
@@ -1862,8 +1928,15 @@ def view_document(base, root, document_id, *, content=False):
         if original.get('editable') and original['sha256'] == meta.get('sha256'):
             original_text = original['text'].replace('\r\n', '\n').replace('\r', '\n')
             path = Path(root) / relative
-            if original_text.removesuffix('\n') == result['text'] and path.resolve() == path:
+            if original_text.removesuffix('\n') == '\n'.join(lines) and path.resolve() == path:
                 result.update(workspace_path=path.relative_to(base).as_posix(), sha256=original['sha256'])
+                if start is not None and end <= len(lines):
+                    result['source'] = {'path': result['workspace_path'], 'start': start, 'end': end,
+                                        'sha256': original['sha256']}
+    elif start is not None and result.get('syntax') == 'paper':
+        match = _locate_manuscript(base, library, meta, chat_id, start, end)
+        if match:
+            result['source'] = match
     return result
 
 

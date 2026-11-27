@@ -865,7 +865,14 @@ def files_view(h, body):
 @route('GET', '/api/documents/(?P<id>' + DOC_ID.pattern + ')')
 def document_view(h, body, id):
     hub = h.server.hub
-    return store.view_document(hub.base, hub.root, id, content=h.query.get('content') == ['1'])
+    start = end = None
+    if 'start' in h.query or 'end' in h.query:
+        start = int((h.query.get('start') or [''])[0])
+        end = int((h.query.get('end') or [start])[0])
+        if start < 1 or end < start:
+            raise ValueError('Give a valid citation line range')
+    return store.view_document(hub.base, hub.root, id, content=h.query.get('content') == ['1'],
+                               chat_id=(h.query.get('chat') or [None])[0], start=start, end=end)
 
 
 @route('GET', '/api/files/raw')

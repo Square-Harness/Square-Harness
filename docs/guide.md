@@ -464,10 +464,11 @@ one with a message.
   edge like the notebook, up to 75% of the window, and keep writing your message
   while you read. In a conversation answer, click a paper citation such as
   **draft.tex:42–48** to open the source at those lines. You can edit a matching
-  workspace text file there. For a published paper or a manuscript that has
-  since changed, the viewer shows the text the worker actually cited. The
-  numbered editor preserves the edition’s line numbers and colors LaTeX
-  formulas in arXiv passages.
+  workspace text file there. If the worker cited a published paper and the
+  passage can be located in a TeX manuscript used in this chat, the link
+  shows the manuscript filename and its TeX line numbers. It opens the same
+  editor as **View file**. When the source passage cannot be matched, the
+  citation opens the edition the worker read, at that edition’s lines.
   The file viewer shows a PDF in the browser's PDF viewer, fitted to the
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,

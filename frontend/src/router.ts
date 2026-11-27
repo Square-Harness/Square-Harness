@@ -12,31 +12,52 @@ export const WORK_TABS = ['agents', 'outputs', 'record', 'plan'] as const
 export type WorkTab = typeof WORK_TABS[number]
 export type WorkSelection = { tab: WorkTab; selected: string | null }
 export type LineRange = { start: number; end: number }
-export type ViewerTarget = { kind: 'file' | 'document'; path: string; lines?: LineRange }
+export type DocumentPassage = { id: string; lines: LineRange }
+export type ViewerTarget = { kind: 'file' | 'document'; path: string; lines?: LineRange; citation?: DocumentPassage }
 export type Route = { mode: Mode | 'about' | 'file'; id: string | null; tab: string | null; from: string | null; panel?: WorkSelection; viewer?: ViewerTarget; result?: string }
 
 const CHAT_MODES = ['free', 'critic', 'explore']
+const DOCUMENT_ID = /^doc-[a-f0-9]{24}$/
+
+/** The chat whose attachments can establish a citation's working source. */
+export function citationChat(route: Route) {
+  return CHAT_MODES.includes(route.mode) ? route.id : route.from
+}
+
+function readLines(value: string | null): LineRange | undefined {
+  const match = /^(\d+)(?:-(\d+))?$/.exec(value || '')
+  if (!match) return
+  const start = Number(match[1]), end = Number(match[2] || match[1])
+  if (Number.isSafeInteger(start) && start > 0 && Number.isSafeInteger(end) && end >= start) return { start, end }
+}
+
+function lineParam({ start, end }: LineRange) { return start === end ? String(start) : start + '-' + end }
 
 function readViewer(params: URLSearchParams, fileKey: string): ViewerTarget | undefined {
   const document = params.get('document')
   const file = params.get(fileKey)
-  const target: ViewerTarget | undefined = document && /^doc-[a-f0-9]{24}$/.test(document)
+  const target: ViewerTarget | undefined = document && DOCUMENT_ID.test(document)
     ? { kind: 'document', path: document } : file ? { kind: 'file', path: file } : undefined
   if (!target) return
-  const match = /^(\d+)(?:-(\d+))?$/.exec(params.get('lines') || '')
-  if (match) {
-    const start = Number(match[1]), end = Number(match[2] || match[1])
-    if (Number.isSafeInteger(start) && start > 0 && Number.isSafeInteger(end) && end >= start) target.lines = { start, end }
+  const range = readLines(params.get('lines'))
+  if (range) target.lines = range
+  if (target.kind === 'file' && target.lines) {
+    const [id, range] = (params.get('cite') || '').split(':')
+    const lines = readLines(range)
+    if (DOCUMENT_ID.test(id) && lines) target.citation = { id, lines }
   }
   return target
 }
 
 function setViewer(params: URLSearchParams, target: ViewerTarget, fileKey: string) {
   params.set(target.kind === 'document' ? 'document' : fileKey, target.path)
-  if (target.lines) {
-    const { start, end } = target.lines
-    params.set('lines', start === end ? String(start) : start + '-' + end)
-  }
+  if (target.lines) params.set('lines', lineParam(target.lines))
+  if (target.kind === 'file' && target.citation) params.set('cite', target.citation.id + ':' + lineParam(target.citation.lines))
+}
+
+export function citationTarget(passage: DocumentPassage, source?: LineRange & { path: string }): ViewerTarget {
+  return source ? { kind: 'file', path: source.path, lines: { start: source.start, end: source.end }, citation: passage }
+    : { kind: 'document', path: passage.id, lines: passage.lines }
 }
 
 export function parse(hash: string): Route {
@@ -146,7 +167,7 @@ export function viewHref(route: Route, path: string) {
 
 export const REVEAL_LINES = 'square-reveal-lines'
 
-export function openViewer(target: ViewerTarget) {
+export function openViewer(target: ViewerTarget, { replace = false } = {}) {
   const route = parse(window.location.hash)
   const url = viewerHref(route, target)
   if (url === window.location.hash) {
@@ -154,7 +175,10 @@ export function openViewer(target: ViewerTarget) {
     return
   }
   if (route.viewer && (route.viewer.kind !== target.kind || route.viewer.path !== target.path) && !leaveFile()) return
-  window.location.hash = url
+  if (replace) {
+    window.history.replaceState(null, '', url)
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  } else window.location.hash = url
 }
 
 export function openFile(path: string) {

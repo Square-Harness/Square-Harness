@@ -36,11 +36,19 @@ function useRevealLines(lines?: LineRange) {
   const box = useRef<HTMLDivElement>(null)
   const start = lines?.start, end = lines?.end
   useLayoutEffect(() => {
-    if (!start || !end) return
+    const scroller = box.current
+    if (!start || !end || !scroller) return
+    let following = true
+    const stopFollowing = () => { following = false }
+    const position = (onlyIfHidden: boolean) => {
+      const row = scroller.querySelector('.cited-source-selected')
+      if (!row) return
+      const top = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+      if (!onlyIfHidden || top < 0 || top >= scroller.clientHeight) scroller.scrollTop += top - scroller.clientHeight / 4
+    }
     const reveal = () => {
-      const scroller = box.current
-      const row = scroller?.querySelector('.cited-source-selected')
-      if (!row || !scroller) return
+      if (!scroller.querySelector('.cited-source-selected')) return
+      following = true
       const editor = scroller.querySelector('textarea')
       if (editor) {
         const source = editor.value.split('\n')
@@ -49,11 +57,22 @@ function useRevealLines(lines?: LineRange) {
         editor.focus({ preventScroll: true })
         editor.setSelectionRange(from, to, 'backward')
       }
-      scroller.scrollTop += row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight / 4
+      position(false)
     }
     reveal()
+    // Font loading or a resized panel can rewrap every preceding line. Respect manual scrolling and typing.
+    const afterLayout = () => { if (following) position(true) }
+    void document.fonts.ready.then(afterLayout)
+    const observer = new ResizeObserver(afterLayout)
+    observer.observe(scroller)
+    const inputs = ['pointerdown', 'wheel', 'keydown']
+    inputs.forEach(type => scroller.addEventListener(type, stopFollowing, { passive: true }))
     window.addEventListener(REVEAL_LINES, reveal)
-    return () => window.removeEventListener(REVEAL_LINES, reveal)
+    return () => {
+      stopFollowing(); observer.disconnect()
+      inputs.forEach(type => scroller.removeEventListener(type, stopFollowing))
+      window.removeEventListener(REVEAL_LINES, reveal)
+    }
   }, [start, end])
   return box
 }

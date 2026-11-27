@@ -651,6 +651,10 @@ export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' |
 export type CitedDocument = {
   id: string; title: string; text: string; syntax?: 'latex' | 'paper'; workspace_path?: string; sha256?: string
 }
+export type DocumentCitation = Pick<CitedDocument, 'id' | 'title'> & {
+  source?: { path: string; start: number; end: number; sha256: string }
+}
+export const REFRESH_CITATIONS = 'square-refresh-citations'
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
   size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
@@ -770,7 +774,10 @@ export const api = {
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   /** One file for the viewer, by its path relative to the interface root. */
-  document: (id: string) => get<Pick<CitedDocument, 'id' | 'title'>>('/api/documents/' + encodeURIComponent(id)),
+  document: (id: string, chat?: string | null, lines?: { start: number; end: number }) => {
+    const query = chat && lines ? '?' + new URLSearchParams({ chat, start: String(lines.start), end: String(lines.end) }) : ''
+    return get<DocumentCitation>('/api/documents/' + encodeURIComponent(id) + query)
+  },
   documentContent: (id: string) => get<CitedDocument>('/api/documents/' + encodeURIComponent(id) + '?content=1'),
   viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
   /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */

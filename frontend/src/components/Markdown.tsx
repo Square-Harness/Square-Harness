@@ -5,7 +5,7 @@
 // no raw HTML, no external images, KaTeX with trust disabled, and only http(s)/mailto links.
 // The one image source allowed is an image saved by a sandbox run in this folder, which the
 // authenticated /api/artifacts endpoint serves after validating its id and name.
-import { createContext, memo, useContext, useMemo, type ReactNode } from 'react'
+import { createContext, memo, useContext, useEffect, useMemo, type ReactNode } from 'react'
 import { renderToString } from 'katex'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -17,8 +17,8 @@ import 'katex/contrib/copy-tex'
 import { normalizeMath, remarkCitations, remarkDocumentLines, remarkPaperLinks, snippet, splitBlocks, type PaperLinks } from '../mathtext'
 import type { PluggableList } from 'unified'
 import { experimentImage } from '../artifacts'
-import { api } from '../api'
-import { openViewer, useRoute, viewerHref, type ViewerTarget } from '../router'
+import { api, REFRESH_CITATIONS, type DocumentCitation } from '../api'
+import { citationChat, citationTarget, openViewer, useRoute, viewerHref } from '../router'
 import { CopyButton, useLoad } from './common'
 import { FileIcon } from './Icons'
 
@@ -51,31 +51,37 @@ const inlineText = ({ children }: { children?: ReactNode }) => <>{children}</>
 type HastNode = { type: string; value?: string; children?: HastNode[] }
 const hastText = (node?: HastNode): string => node ? (node.value ?? (node.children || []).map(hastText).join('')) : ''
 
-// Several passages often cite the same paper. Only its title is needed until a link is opened.
-const documentTitles = new Map<string, Promise<string>>()
-function documentTitle(id: string) {
-  const known = documentTitles.get(id)
+// Share concurrent lookups. A working manuscript can change between openings of the chat.
+const citations = new Map<string, Promise<DocumentCitation>>()
+function citationInfo(id: string, chat: string | null, start: number, end: number) {
+  const key = chat ? [chat, id, start, end].join(':') : id
+  const known = citations.get(key)
   if (known) return known
-  const title = api.document(id).then(document => document.title).catch(error => {
-    documentTitles.delete(id)
-    throw error
-  })
-  documentTitles.set(id, title)
-  return title
+  const pending = api.document(id, chat, { start, end }).finally(() => citations.delete(key))
+  citations.set(key, pending)
+  return pending
 }
 
 function DocumentLink({ id, start, end, flagged, onPassage }: {
   id: string; start: number; end: number; flagged?: boolean; onPassage?: () => void
 }) {
   const route = useRoute()
-  const { data, error } = useLoad(() => documentTitle(id), [id])
-  const title = data || (error ? 'Unavailable document' : 'Document')
-  const target: ViewerTarget = { kind: 'document', path: id, lines: { start, end } }
-  const lines = start === end ? String(start) : `${start}–${end}`
+  const chat = citationChat(route)
+  const { data, error, reload } = useLoad(() => citationInfo(id, chat, start, end), [id, chat, start, end])
+  useEffect(() => {
+    if (!chat) return
+    window.addEventListener(REFRESH_CITATIONS, reload)
+    return () => window.removeEventListener(REFRESH_CITATIONS, reload)
+  }, [chat, reload])
+  const source = error ? undefined : data?.source
+  const title = source?.path.split('/').pop() || data?.title || (error ? 'Unavailable document' : 'Document')
+  const target = citationTarget({ id, lines: { start, end } }, source)
+  const shown = target.lines!
+  const lines = shown.start === shown.end ? String(shown.start) : `${shown.start}–${shown.end}`
   if (error && onPassage) return <button type="button" className={'cite' + (flagged ? ' cite-flagged' : '')}
     onClick={onPassage} title="Show the saved passage">Saved passage:{lines}</button>
   return <a className={'document-cite' + (flagged ? ' cite-flagged' : '')} href={viewerHref(route, target)}
-    title={error || (flagged ? 'Flagged citation. ' : '') + `Open ${title} at ${start === end ? 'line' : 'lines'} ${lines}`}
+    title={error || (flagged ? 'Flagged citation. ' : '') + `Open ${source?.path || title} at ${shown.start === shown.end ? 'line' : 'lines'} ${lines}`}
     onClick={event => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
       event.preventDefault()
@@ -122,7 +128,7 @@ export const Markdown = memo(function Markdown({ children, className, onCite, fl
       const bad = flagged?.has(ref)
       if (fields['data-document']) {
         const id = String(fields['data-document'])
-        return <DocumentLink key={id} id={id} start={Number(fields['data-start'])} end={Number(fields['data-end'])}
+        return <DocumentLink key={ref} id={id} start={Number(fields['data-start'])} end={Number(fields['data-end'])}
           flagged={bad} onPassage={onCite && (() => onCite(ref))} />
       }
       return (
