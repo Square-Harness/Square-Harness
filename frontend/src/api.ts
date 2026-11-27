@@ -873,6 +873,9 @@ export const api = {
 }
 
 /** The address of a PDF or an image for the browser to display (path relative to the interface root). */
+/** Opens a PDF frame fitted to its width (refitting when resized), without the thumbnail column: Chrome reads view
+ * and navpanes, Firefox zoom and pagemode; each ignores the others. */
+export const PDF_FIT = '#view=FitH&navpanes=0&pagemode=none&zoom=page-width'
 export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)
 /** The file as it is on disk, as a download. */
 export const fileDownloadUrl = (path: string) => fileRawUrl(path) + '&download=1'

@@ -567,8 +567,12 @@ can be opened while the other agents continue. If an answer reached its output
 limit, the agent shows the failure and its partial text remains readable. A
 worker that produced a document (a write-up, a summary, a literature review)
 shows **View** and its downloads in its box once it is done: **View** opens the
-document in the notebook's **Results**, and the downloads are the PDF, the
-sources, the LaTeX file, the review or the BibTeX file it saved.
+document in the file viewer beside the conversation, and the downloads are the
+PDF, the sources, the LaTeX file, the review or the BibTeX file it saved.
+Documents chosen in the notebook's **Results** (a PDF, LaTeX or BibTeX file, a
+review, a figure) open in the same viewer, which has more room than the
+notebook; closing it brings the notebook back. Answers, proofs and experiments
+are read in the notebook.
 
 - **Agents** shows what each specialist is doing. From a Literature task,
   **Open literature review** takes you into the review itself.

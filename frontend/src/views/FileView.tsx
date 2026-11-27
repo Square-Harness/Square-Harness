@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { api, fileDownloadUrl, fileRawUrl, type ViewedFile } from '../api'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { api, fileDownloadUrl, fileRawUrl, PDF_FIT, type ViewedFile } from '../api'
 import { CodeEditor } from '../components/CodeEditor'
 import { ErrorNote, Loading } from '../components/common'
 import { CloseIcon, DownloadIcon, FileIcon } from '../components/Icons'
@@ -11,10 +11,6 @@ import { PanelGrip, usePanelWidth, usePublishedWidth, useWide } from '../compone
 import { ago, bytes, displayPath } from '../format'
 import { filePanelWidth, rememberFilePanelWidth } from '../panels'
 import { closeFile, leaveFile, setUnsavedFile } from '../router'
-
-// The browser's PDF viewer opens fitted to the frame's width (and refits when the panel is resized), without its
-// thumbnail column: Chrome reads view and navpanes, Firefox zoom and pagemode; each ignores the others.
-const PDF_FIT = '#view=FitH&navpanes=0&pagemode=none&zoom=page-width'
 
 // Unsaved edits of a file the viewer left without a decision (the browser's Back button): reopening the file
 // brings them back while the file on disk is unchanged.
@@ -26,11 +22,17 @@ export function FileView({ path }: { path: string | null }) {
   return <FileViewer path={path} />
 }
 
-/**
- * The viewer beside a conversation, in the notebook's place (the notebook comes back when it closes). It is
- * resized like the notebook, up to 65% of the window, so that the reader can write a message while reading.
- */
+/** A workspace file in the viewer beside a conversation. */
 export function FilePanel({ path }: { path: string }) {
+  return <ViewerPanel label={'File ' + (path.split('/').pop() || path)}><FileViewer path={path} onClose={closeFile} /></ViewerPanel>
+}
+
+/**
+ * The viewer beside a conversation, in the notebook's place (the notebook comes back when it closes): a workspace
+ * file, or a document an agent produced (ResultPanel). It is resized like the notebook, up to 65% of the window,
+ * so that the reader can write a message while reading.
+ */
+export function ViewerPanel({ label, children }: { label: string; children: ReactNode }) {
   const wide = useWide()
   const [width, setWidth] = usePanelWidth(() => filePanelWidth() ?? Math.round(window.innerWidth * 0.45))
   const [dragging, setDragging] = useState(false)
@@ -46,10 +48,10 @@ export function FilePanel({ path }: { path: string }) {
   return <>
     {!wide && <div className="work-panel-scrim" onClick={closeFile} aria-hidden="true" />}
     <aside ref={pane} className={'work-panel file-panel' + (dragging ? ' file-panel-dragging' : '')}
-      role={wide ? 'complementary' : 'dialog'} aria-modal={!wide || undefined} aria-label={'File ' + (path.split('/').pop() || path)}
+      role={wide ? 'complementary' : 'dialog'} aria-modal={!wide || undefined} aria-label={label}
       style={{ '--work-panel-width': width + 'px' } as CSSProperties}>
       {wide && <PanelGrip label="File viewer width" width={width} onWidth={setWidth} onCommit={rememberFilePanelWidth} onDragging={setDragging} />}
-      <FileViewer path={path} onClose={closeFile} />
+      {children}
     </aside>
   </>
 }

@@ -712,6 +712,10 @@ select {
 .file-view-tools > .file-view-mode { margin-right: auto; }
 .file-view-tools .file-view-state { min-width: 0; }
 .file-panel-dragging { user-select: none; }
+/* A document an agent produced, in the viewer: its own title is the panel's, and a PDF fills the height. */
+.result-view > .work-output-preview { display: flex; flex-direction: column; flex: 1 0 auto; }
+.result-view > .work-output-preview > .work-section-head, .result-view > .work-output-preview > .work-result-byline { display: none; }
+.result-view .work-output-frame { flex: 1 1 0; height: auto; min-height: 320px; border-radius: 8px; }
 .file-panel-dragging iframe { pointer-events: none; }
 @media (max-width: 1199px) { .work-panel.file-panel { width: min(760px, 92vw); } }
 @media (max-width: 760px) { .work-panel.file-panel { width: 100%; } }
