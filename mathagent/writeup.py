@@ -706,6 +706,22 @@ _DEFINITION_LINE = re.compile(r'^[ \t]*\\(?:(?:re|provide)?newcommand|DeclareMat
 # Definitions moved to the preamble: \renewcommand stays where it is (it may be meant for one table or
 # one section, and it is allowed in the body), and so does anything inside an environment.
 _HOISTED_LINE = re.compile(r'^[ \t]*\\(?:(?:provide)?newcommand|DeclareMathOperator|DeclarePairedDelimiter|def|newtheorem)\b')
+_RENEWING = re.compile(r'\\renewcommand\*?\s*(?:\{\s*\\([A-Za-z]+)\s*\}|\\([A-Za-z]+))')
+
+
+def renewing(definition):
+    """A \\renewcommand that holds whether or not the command exists: an empty \\providecommand first.
+
+    \\renewcommand of a command LaTeX does not have stops the compile ("Command \\C undefined": \\C exists only
+    with a Cyrillic font encoding), and no repair call can fix it, since the preamble is rebuilt from the same
+    definitions. An empty \\providecommand defines the command only when it is missing. Other definitions are
+    returned unchanged."""
+    match = _RENEWING.match(definition.strip())
+    if not match:
+        return definition
+    return '\\providecommand{\\' + (match.group(1) or match.group(2)) + '}{}' + definition.strip()
+
+
 _WRAPPER_LINE = re.compile(r'^[ \t]*\\(?:documentclass|usepackage|maketitle|author|date|begin\{document\}|end\{document\})\b.*$', re.M)
 
 
@@ -3280,7 +3296,7 @@ class WriteupRunner(ResearchRunner):
         reported by the checks)."""
         defined = self._defined(preamble) | set(self._model_macros())
         renewed = _STANDARD_RENEWED | set(self.state.get('renewed_macros') or [])
-        lines = [definition.replace('\\newcommand', '\\renewcommand', 1) if name in renewed else definition
+        lines = [renewing(definition.replace('\\newcommand', '\\renewcommand', 1)) if name in renewed else definition
                  for name, definition in self._standard().items() if name not in defined and uses(body, name)]
         if any('\\mathbbm' in line for line in lines) and not re.search(_LOADED % 'bbm', preamble):
             lines.insert(0, '\\usepackage{bbm}')
@@ -5348,12 +5364,12 @@ class WriteupRunner(ResearchRunner):
         lines = []
         for name, definition in (self.state.get('request_macros') or {}).items():
             if name not in defined:
-                lines.append(grouped(definition))
+                lines.append(renewing(grouped(definition)))
                 continue
             # The request's notation outranks the template's: redefine the command after the template.
             renewed = re.sub(r'^\\(?:provide)?newcommand', r'\\renewcommand', definition.strip())
             if renewed.startswith(('\\renewcommand', '\\def')):
-                lines.append(grouped(renewed))
+                lines.append(renewing(grouped(renewed)))
                 note = f'Your request redefines \\{name}, which the template also defines; the request\'s meaning is used.'
             else:
                 note = f'Your request defines \\{name} with \\DeclareMathOperator, but the template defines it too; the template\'s is kept.'
@@ -5389,7 +5405,7 @@ class WriteupRunner(ResearchRunner):
             return ''
         defined = self._defined(preamble)
         macros = [m for m in needed_macros(style['macros'], body) if m['name'] not in defined]
-        lines = [grouped(m['definition']) for m in macros]
+        lines = [renewing(grouped(m['definition'])) for m in macros]
         for name in dict.fromkeys(p for m in macros for p in m.get('packages') or []):
             if re.search(_LOADED % re.escape(name), preamble):
                 continue
@@ -5412,7 +5428,7 @@ class WriteupRunner(ResearchRunner):
         clashes = set(self.state.get('renewed_macros') or [])
         renew = lambda name, d: (re.sub(r'^\\(?:provide)?newcommand', lambda m: '\\renewcommand', d, count=1)
                                  if name in clashes else d)
-        lines = [grouped(renew(name, d)) for name, d in self._model_macros().items() if name not in defined]
+        lines = [renewing(grouped(renew(name, d))) for name, d in self._model_macros().items() if name not in defined]
         lines += [d for name, d in environment_definitions(text).items() if name not in environments]
         return ('\n% Defined while writing\n' + '\n'.join(lines)) if lines else ''
 

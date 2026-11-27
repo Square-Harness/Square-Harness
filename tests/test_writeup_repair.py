@@ -49,6 +49,24 @@ a &= b \\
         self.assertNotRegex(state['document'], r'\n\s*\n\\end\{(equation|align)\*\}')
         self.assertTrue(any('\\H' in warning for warning in state['warnings']))
 
+    def test_standard_notation_that_latex_may_lack_compiles_without_a_repair_call(self):
+        # \P exists in LaTeX, \C only with a Cyrillic font encoding: \renewcommand alone stopped the compile on
+        # \C ("Command \C undefined"), in the preamble, where no repair call can reach (report 638715b7).
+        state = self.run_writeup(['\\title{Spectra}\n\\section{Setting}\nLet $z\\in\\C$ and let $\\P$ be a '
+                                  'probability on $\\C$.\n\n' + FILLER])
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertFalse(any(call['role'] == 'repair' for call in state['calls']))
+        self.assertIn('\\providecommand{\\C}{}\\renewcommand{\\C}{\\mathbb{C}}', state['document'])
+        self.assertIn('\\providecommand{\\P}{}\\renewcommand{\\P}{\\mathbb{P}}', state['document'])
+
+    def test_a_renewcommand_of_a_new_command_in_the_models_preamble_compiles(self):
+        state = self.run_writeup(['\\documentclass{article}\n\\renewcommand{\\cK}{\\mathcal{K}}\n\\begin{document}\n'
+                                  '\\title{Kernels}\n\\section{Setting}\nLet $\\cK$ be a compact set.\n\n' + FILLER
+                                  + '\n\\end{document}'])
+        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
+        self.assertFalse(any(call['role'] == 'repair' for call in state['calls']))
+        self.assertIn('\\providecommand{\\cK}{}\\renewcommand{\\cK}{{\\mathcal{K}}}', state['document'])
+
     def test_an_error_in_one_passage_is_repaired_there_and_the_rest_is_not_rewritten(self):
         broken = 'The bound is $a_1_2$ here.'
         state = self.run_writeup([f'\\title{{A note}}\n\\section{{Result}}\n{FILLER}\n\n{broken}\n\n{FILLER}',
@@ -148,6 +166,21 @@ The rates agree with Theorem~\ref{thm:convergence}."""
         self.assertIn('- References: clickable (hyperref is loaded)', report)
         self.assertIn('## Fixed automatically', report)
         self.assertIn('\\begin{abstract}', (job / 'artifacts' / 'body.tex').read_text())  # the body to paste keeps it
+
+
+class RenewingTests(unittest.TestCase):
+    def test_a_renewcommand_is_preceded_by_an_empty_providecommand_and_other_definitions_are_unchanged(self):
+        from mathagent.writeup import renewing
+        self.assertEqual(renewing('\\renewcommand{\\C}{\\mathbb{C}}'), '\\providecommand{\\C}{}\\renewcommand{\\C}{\\mathbb{C}}')
+        self.assertEqual(renewing('\\renewcommand*\\abs[1]{\\lvert #1\\rvert}'),
+                         '\\providecommand{\\abs}{}\\renewcommand*\\abs[1]{\\lvert #1\\rvert}')
+        self.assertEqual(renewing('\\newcommand{\\R}{\\mathbb{R}}'), '\\newcommand{\\R}{\\mathbb{R}}')
+
+    def test_reading_definitions_back_takes_the_renewcommand_not_the_empty_placeholder(self):
+        # The assembled preamble is read again (an earlier write-up attached, merged or learnt as a style).
+        from mathagent.style import macro_definitions
+        self.assertEqual(macro_definitions('\\providecommand{\\C}{}\\renewcommand{\\C}{\\mathbb{C}}'),
+                         {'C': '\\renewcommand{\\C}{\\mathbb{C}}'})
 
 
 if __name__ == '__main__':

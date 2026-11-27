@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A write-up whose text uses `\C` (or another command the harness redefines) no
+  longer fails to compile: the preamble wrote `\renewcommand{\C}{\mathbb{C}}`,
+  and `\C` exists only with a Cyrillic font encoding, so LaTeX stopped with
+  "Command \C undefined" before the text. No repair could fix it, because the
+  preamble is rebuilt from the same definitions. Every `\renewcommand` the
+  write-up puts in a preamble (standard notation, the model's definitions, the
+  request's and the saved style's) is now preceded by an empty
+  `\providecommand`, so it holds whether or not the command exists.
+
 - The numerical sandbox image is now version 3. It preserves long arrays and other structured results within the configured byte allowance. Builds serving numerical work need the new image.
 - Explore now receives the selected source files together when they fit. For larger
   requests it pages through the assigned text, saves findings and source positions,
