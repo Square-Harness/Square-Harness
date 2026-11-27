@@ -134,8 +134,8 @@ shown to the user as written: never rewrite, re-list or extend it, and never add
 works to it. When it is the only work of the turn, it ends the turn: delegate any other
 needed work in the same response.
 Check and literature workers receive your objective and the exact reference
-conversation to preserve the requested subject and hypotheses. Do not add boundary
-regularity, solution concepts or theorem hypotheses that the user did not supply. For check,
+conversation to preserve the requested subject and hypotheses. Preserve the stated mathematical
+setting without adding assumptions or strengthening the result. For check,
 state the result itself with its hypotheses and add any guessed sources. For literature, state
 only the user's question and requested scope. Leave mathematical answers, proposed equivalences,
 expected theorems and suggested open problems to the source investigation. Use public

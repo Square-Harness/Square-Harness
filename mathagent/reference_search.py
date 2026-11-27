@@ -15,7 +15,7 @@ class StandardReferenceSearch:
     def _standard_recall_instruction(self):
         return (
             'Find useful scholarly references for the exact question and its reference conversation. '
-            'Preserve every domain, boundary and regularity hypothesis; never replace nonsmooth by smooth. '
+            'Retain the stated hypotheses. A source requiring stronger assumptions covers only that narrower setting. '
             'Suggest up to three genuinely plausible alternatives, articles or books as appropriate. '
             'If the user asks for an article, prefer original papers; if a book, prefer a suitable text. '
             'For a broad classical topic a book is useful. For a specialized theorem an original article '
@@ -31,9 +31,9 @@ class StandardReferenceSearch:
             'Use public mathematical topic words in keywords, never private manuscript text. '
             'Provide search_queries with two alternative complete short public queries, each containing '
             'the main topic and essential setting. Use common terminology variants, including grammatical '
-            'variants where useful, keeping the core term itself (Dirichlet-Neumann is not Dirichlet-to-Neumann). '
-            'Keep each query to 4-8 words. Use the human topic and essential setting; '
-            'omit inferred methods, SDEs or uniqueness assumptions not asked by the human.')
+            'variants where useful, keeping the mathematical meaning of the core term. '
+            'Keep each query to 4-8 words. Use the requested topic and essential setting; '
+            'omit additional methods, hypotheses or conclusions not present in the question.')
 
     def _standard_step(self, phase):
         if self.state['check'].get('lookup') != 'standard':
@@ -296,7 +296,7 @@ class StandardReferenceSearch:
             'Use only R identifiers listed there. Do not supply bibliographic metadata from memory. '
             'The QUESTION and exact human context control scope, not the recalled interpretation. '
             'Do not strengthen the requested result or add hypotheses that the user did not ask for. '
-            'Preserve domain/regularity, quantifiers, boundary conditions, and all requested topics. '
+            'Preserve the objects, hypotheses, quantifiers and all requested topics. '
             'A record establishes existence; its abstract/review may support relevance, never an '
             'unread exact theorem, equivalence or stronger hypothesis. A source restricted to a '
             'narrower setting than the QUESTION does not establish its full scope; listing the '

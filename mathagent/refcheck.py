@@ -16,7 +16,6 @@ a level is lowered when the passages actually read do not support it.
 """
 import json
 import re
-import time
 import unicodedata
 
 from .jsonutil import loads
@@ -193,13 +192,13 @@ DISCOVER_SCHEMA = {
 VERIFY_METHOD = """Check ONE guessed reference for the result below. The controller has already looked up the
 work's record and how open papers quote the guessed place (see the evidence). Read it first: if a quote
 cites this work at this place for this result, you are done. Otherwise, ways to find more evidence:
-1. find_quotes with the author's surname, the work's title and another plausible number (e.g. locator "Theorem 9.25"),
-   or with a topic phrase instead of a number (e.g. topic "Neumann problem"): the quotes show which
+1. find_quotes with the author's surname, the work's title and a locator from the sources,
+   or with a topic phrase from the question: the quotes show which
    theorem papers use for this result.
 2. Confirm the work: search_papers with provider "zbmath" and a query such as "au:Surname ti:title words"
    (books included; the review often lists the chapters).
 3. If the work itself is open access (arXiv, lecture notes), open_paper it and search_paper for the statement.
-search_paper is a literal substring search: give ONE short term such as "9.26" or "Brezis", never a phrase.
+search_paper is a literal substring search: use one short term, such as the number in the citation or an author's surname.
 Guessed numbers are often wrong: if sources quote another number for this result, follow that number.
 Never repeat a call already in the evidence index: repeated calls are skipped. Use at most three tools
 per round. When you have enough evidence, or nothing more to try, reply with short notes and no tool calls."""
@@ -210,9 +209,9 @@ cite this work at a numbered place (a theorem, or a section such as "Sec. 5.7") 
 that place differs from the guess; located = the work exists (its record was found) and its contents fit
 the topic, but no read line cites a place for this result; contradicted = a source gives the guessed place
 to a different statement; not_found = no evidence.
-locator: the place as the read lines cite it (correct the guess if needed), e.g. "Theorem 9.26" or "Section 5.7".
+locator: the theorem, section or other place as the read lines cite it (correct the guess if needed).
 document_id and lines: where you read it, e.g. "doc-…" and "L120-L122"; empty if nothing was read.
-record: identifier of the work's record (e.g. "zbl:1220.46002" or a DOI), empty if none.
+record: identifier of the work's record (zbMATH ID or DOI), empty if none.
 statement_found: what the source says at that place, in one sentence. note: anything doubtful.
 Use only identifiers that appear in the evidence."""
 
@@ -571,11 +570,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             self.state['candidates'] = seeded + [c for c in self.state['candidates']
                                                  if (_fold(' '.join(c['authors'])), _fold(c['title'])) not in keep]
         instruction = ('Before searching, recall from memory. Restate precisely the result the question asks about '
-                       '(hypotheses, domain, boundary conditions, spaces). Then list up to three references where it is '
+                       '(objects, hypotheses and conclusion). Then list up to three references where it is '
                        'stated, best first: the places an expert in the field would cite for exactly this result (a '
                        'graduate textbook or monograph that proves it, or the founding paper), each with its '
-                       'authors\' surnames, title, year and ONE place you remember, written alone (e.g. "Theorem 9.26" '
-                       'or "Section 8.3"; comments go in why). If you do not know where it is stated, return no '
+                       'authors\' surnames, title, year and ONE place you remember, written alone (a theorem or '
+                       'section number; comments go in why). If you do not know where it is stated, return no '
                        'candidates rather than placeholders: an open-paper search follows. '
                        'Your numbers are guesses that will be checked; prefer an honest section over an invented '
                        'theorem number. Give 3 to 6 short search keywords.')
@@ -1449,16 +1448,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
 
-def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_source_budget=False, max_seconds=None):
+def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_source_budget=False,
+                   share_job_budget=False, max_seconds=None):
     """check_reference for an answering agent: a separate verifier with its own budget and context.
 
-    It shares the model client but not the answer's literature budget, and it is
-    never offered check_reference itself. ``max_seconds`` bounds each check: on DS4
-    the effort's own allowance is hours, and a quarter of the caller's time never binds.
+    The verifier has its own context and cannot start nested verifiers. A parent can share
+    its remaining retrieval and inference allowances, or explicitly bound a check's duration.
     """
-    from contextlib import nullcontext
     from .agent import Agent
-    from .explore_tasks import REFERENCE_SECONDS, TurnCancellation, active_check
+    from .explore_tasks import TurnCancellation, active_check
     from .literature import LiteratureTools
     from .tools import Workspace
 
@@ -1467,17 +1465,17 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
         literature = LiteratureTools(agent.workspace.root, online=bool(parent and parent.online),
                                      timeout=parent.timeout if parent else 15)
         background = active_check.get()
-        budget = nullcontext({})
         client = agent.client
         if parent is not None:
             literature.cancelled = parent.cancelled
+            if share_source_budget:
+                literature.share_budget_with(parent)
         if background:
             from .referee import MeteredClient
             from .peer_transport import fork_cancellable
             tasks, ident = background
-            deadline = time.monotonic() + REFERENCE_SECONDS
-            cancel = TurnCancellation(lambda: tasks.cancellations[ident].is_set() or time.monotonic() >= deadline
-                                      or (parent is not None and not parent.online))
+            cancel = TurnCancellation(lambda: tasks.cancellations[ident].is_set() or
+                                      (parent is not None and not parent.online))
             literature.cancelled = cancel.is_set
             # Transport cancellation is private to this check; model accounting stays in the original job.
             outer = client.client if isinstance(client, MeteredClient) else client
@@ -1490,18 +1488,6 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
                 client.client = transport
             else:
                 client = transport
-            if share_source_budget and parent is not None:
-                budget = tasks.reference_allowance(parent, literature)
-        elif share_source_budget and parent is not None:
-            # This synchronous nested lookup draws on the investigation child's
-            # remaining retrieval budget. Persist each reservation before HTTP.
-            before = dict(parent.stats)
-            def charge():
-                for key, used in before.items():
-                    parent.stats[key] = used + literature.stats[key]
-                if parent.on_budget_change:
-                    parent.on_budget_change()
-            literature.on_budget_change = charge
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())
         inner = Agent(client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
         inner.document_output_cap = getattr(agent, 'document_output_cap', None)
@@ -1511,23 +1497,20 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
             if not background and kind in ('notice', 'tool'):
                 emit('tool', ('↳ ' if kind == 'tool' else '↳ check: ') + str(value))
         runner = CheckRunner(inner, emit=relay)
-        # A quarter of what the answering agent has left, so that a check cannot use up its answer.
+        # Older callers reserve part of the answering agent's allowance for its own final response.
         limits, tokens = {}, getattr(agent.client, 'remaining_tokens', None)
         seconds = getattr(agent.client, 'remaining_seconds', None)
         if isinstance(tokens, (int, float)) and tokens != float('inf'):
-            limits['max_tokens'] = max(1024, int(tokens // 4))
+            limits['max_tokens'] = int(tokens) if share_job_budget else max(1024, int(tokens // 4))
         if isinstance(seconds, (int, float)) and seconds != float('inf'):
-            limits['max_seconds'] = max(20.0, seconds / 4)
+            limits['max_seconds'] = seconds if share_job_budget else max(20.0, seconds / 4)
         if max_seconds is not None:
             limits['max_seconds'] = min(limits.get('max_seconds', max_seconds), max_seconds)
-        if background:
-            limits['max_seconds'] = min(limits.get('max_seconds', REFERENCE_SECONDS), REFERENCE_SECONDS)
-        if not background and share_source_budget and parent is not None:
+        if share_source_budget and parent is not None:
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            with budget as lease:
-                runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits, **lease)
+            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()

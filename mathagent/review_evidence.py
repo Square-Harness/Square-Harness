@@ -145,9 +145,9 @@ def _locations(source, preamble, aux):
     return sorted(set(spans)), warnings, dependencies
 
 
-def _text(value, name, limit):
-    if not isinstance(value, str) or not 0 < len(value.strip()) <= limit:
-        raise ValueError(f'{name} must be nonempty text of at most {limit} characters.')
+def _text(value, name):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{name} must be nonempty text.')
     return value.strip()
 
 
@@ -183,7 +183,7 @@ class ReviewEvidence:
                     indexed.append(pinned[path])
                     queued.add(path)
             for n, (a, b, kind, name) in enumerate(spans, 1):
-                self.items[f'{s["id"]}.{n}'] = dict(path=s['path'], start_line=a, end_line=b, kind=kind, name=name[:200])
+                self.items[f'{s["id"]}.{n}'] = dict(path=s['path'], start_line=a, end_line=b, kind=kind, name=name)
             self.warnings.extend(f'{s["path"]}: {message}' for message in warnings)
         self.data = json.loads(_read(self.file)) if self.file.exists() else {'findings': {}, 'assessments': {}}
 
@@ -221,8 +221,8 @@ class ReviewEvidence:
         return dict(id=key, **item, **(assessment or {'status': self._access(item, ranges)}))
 
     def _page(self, view='items', offset=0, limit=12):
-        if type(offset) != int or offset < 0 or type(limit) != int or not 1 <= limit <= 24:
-            raise ValueError('Use offset >= 0 and limit between 1 and 24.')
+        if type(offset) != int or offset < 0 or type(limit) != int or limit < 1:
+            raise ValueError('Use a nonnegative integer offset and a positive integer limit.')
         if view == 'notebook':
             rows = list(self.data['findings'].values())
         elif view == 'warnings':
@@ -238,12 +238,12 @@ class ReviewEvidence:
         return {'total': len(rows), 'next_offset': offset + limit if offset + limit < len(rows) else None, 'entries': selected}
 
     def _assess(self, item_ids, status, basis):
-        if (not isinstance(item_ids, list) or not 1 <= len(item_ids) <= 24 or
+        if (not isinstance(item_ids, list) or not item_ids or
                 any(not isinstance(k, str) or k not in self.items for k in item_ids)):
-            raise ValueError('Supply 1 to 24 existing item ids from review_index.')
+            raise ValueError('Supply existing item ids from review_index.')
         if status not in ('assessed', 'unresolved'):
             raise ValueError('Choose assessed or unresolved.')
-        basis = _text(basis, 'basis', 650)
+        basis = _text(basis, 'basis')
         ranges = self._read()
         if any(self._access(self.items[k], ranges) != 'lines_returned' for k in item_ids):
             raise ValueError('Read all lines of each selected passage before assessing it.')
@@ -252,15 +252,15 @@ class ReviewEvidence:
         return {'updated_items': item_ids}
 
     def _finding(self, key, path, start_line, end_line, note, status='open'):
-        if not isinstance(key, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', key):
-            raise ValueError('Choose a short alphanumeric finding key.')
+        if not isinstance(key, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', key):
+            raise ValueError('Choose an alphanumeric finding key with optional underscores, dots or hyphens.')
         if (path not in self.sources or type(start_line) != int or type(end_line) != int or
                 not 1 <= start_line <= end_line <= self.sources[path][1]):
             raise ValueError('Use the exact pinned path and a valid source line range.')
         previous = self.data['findings'].get(key)
         if status not in ('open', 'retracted') or (status == 'retracted' and previous is None):
             raise ValueError('Use open for a new finding or retract an existing finding.')
-        note = _text(note, 'note', 1800)
+        note = _text(note, 'note')
         finding = dict(key=key, path=path, start_line=start_line, end_line=end_line, note=note, status=status)
         if self._access(finding, self._read()) != 'lines_returned':
             raise ValueError('Read the cited lines before recording a finding.')

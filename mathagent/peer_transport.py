@@ -17,16 +17,6 @@ class _PeerConnection:
         super().__init__(*args, **kwargs)
         self.cancel = cancel
 
-    def connect(self):
-        # There is no socket to interrupt until connection setup completes. Bound only that phase.
-        timeout = self.timeout
-        self.timeout = min(timeout, 5.0)
-        try:
-            super().connect()
-            self.sock.settimeout(timeout)
-        finally:
-            self.timeout = timeout
-
     def getresponse(self):
         # The regular Interruptible transport takes over once the response headers have arrived.
         # A server can accept a connection and queue a generation before sending any headers.

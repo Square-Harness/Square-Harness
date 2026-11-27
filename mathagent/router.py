@@ -64,8 +64,8 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   or verify a given citation or an explicitly requested exact locator. Ordinary reference requests
   need one bounded lookup and an honest qualified suggestion, not a mandatory theorem number.
   Do not add exact section/theorem/page requirements the human did not ask for.
-  Examples: "find a reference for elliptic regularity
-  with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
+  Examples: "suggest a textbook on graph coloring", "where is the spectral theorem proved?",
+  "does the cited Theorem 2.1 imply this lemma?".
 - literature: a written mathematical survey answering the user's question, with its central results,
   hypotheses, competing examples and sources. Preserve the topic and scope the user requested.
   Treat any proposed theorem or status as a question to investigate. Every literature review runs at high effort.

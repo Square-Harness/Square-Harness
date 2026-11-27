@@ -4,10 +4,11 @@
 
 - Whole-paper Review now gives the author a pre-submission report. The main
   referee tracks source coverage and findings, and an independent challenger
-  can examine one consequential step. The referee assesses any objection and
+  examines consequential steps and sends supported objections as it finds them. The referee assesses the evidence and
   writes the saved report. Earlier reviews resume with their original workflow.
 - Explore can submit independent calculations and reference lookups while
-  working on other passages, then use their results when needed.
+  working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
+- The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.
 
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns

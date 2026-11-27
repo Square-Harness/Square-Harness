@@ -983,8 +983,8 @@ class StyleRunner(ResearchRunner):
     def _classify(self):
         articles = self.state['articles']
         instruction = ('Sort these articles by the kind of mathematical writing they are, so the author gets one style per '
-                       'domain (for example numerical analysis, theoretical PDE, geometry, or mathematics written for '
-                       'physicists). Group articles whose aim and readership are alike: the same field, and the same '
+                       'domain represented in the supplied articles. Group articles whose aim and readership are alike: '
+                       'the same field, and the same '
                        'audience (specialists, the wider mathematical community, or readers from another science). Use a '
                        'single domain when they all are alike. Give each domain a short name and a one-sentence '
                        'description of its aim and readership, and list its article identifiers such as "M1". Every '

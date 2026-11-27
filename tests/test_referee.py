@@ -303,7 +303,7 @@ class JudgeTests(RefereeCase):
         self.assertIn('**Recommendation: Major revision.**', report)
         judge_prompt = next(p for p in client.payloads if 'THE REPORTED PROBLEM (I1' in json.dumps(p['messages']))
         text = json.dumps(judge_prompt['messages'])
-        self.assertIn('a density, a regularity up to the boundary or the initial', text)
+        self.assertIn('a fact the manuscript neither proves nor cites', text)
         self.assertIn('new_ingredient', text)
 
     def test_a_repair_with_a_new_ingredient_stays_an_error(self):

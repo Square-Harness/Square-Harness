@@ -611,7 +611,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Pre-submission review of results, proofs and references by a referee with an independent check of one consequential step | `@referee`, New review | `/referee` |
+| Review | Pre-submission review of results, proofs and references by a referee with an independent reader checking consequential steps | `@referee`, New review | `/referee` |
 | Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
@@ -1042,8 +1042,11 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   cross-references and bibliographic support. A private notebook holds located
   findings across tool calls. A source index helps the referee track which
   statements, proofs and references still need attention. For a new whole-paper
-  review an independent challenger can examine one consequential implication
-  alongside it. The referee evaluates any objection against the source and
+  review an independent challenger selects consequential steps and checks them
+  alongside the referee. It sends each supported objection as soon as it has
+  evidence, then can examine another step. When the referee is ready to
+  finish, it takes the available evidence and any specific outstanding check
+  and closes the challenger. The referee evaluates that evidence and
   writes the report you receive. When a full-paper report leaves indexed
   items unresolved or without a recorded assessment, a coverage note names the
   counts and sample locations.

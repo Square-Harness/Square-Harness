@@ -67,8 +67,8 @@ _EFFECT_SCALE = """- statement_false: the result as stated is false (a counterex
 - breaks_proof: a step fails and the proof cannot be completed without a new idea, an extra hypothesis or a
   different argument;
 - gap: a step is unjustified or incomplete, but an expert can fill it with standard arguments (say how); when filling
-  it needs a fact the manuscript neither proves nor cites (a density, a regularity up to the boundary or the initial
-  time, a uniform bound, a new lemma), the proof fails as written: breaks_proof;
+  it needs a fact the manuscript neither proves nor cites and no standard result applies directly,
+  the proof fails as written: breaks_proof;
 - imprecision: a wrong constant, a missing case, a quantifier or a dependence stated loosely, where the intended
   statement is clear and true;
 - misprint: a misprinted formula, sign, index or reference whose correct form is clear from the context (give it)."""
@@ -175,8 +175,8 @@ fails. valid: the problem is real; effect: its consequence for the result, on th
 """ + _EFFECT_SCALE + """
 When you judge it less serious than the allegation claims (for instance a gap instead of a broken proof), give in
 repair the complete argument that fixes it under the manuscript's hypotheses: without a repair the claimed
-consequence stands. A repair that needs a fact the manuscript neither proves nor cites (a density, a regularity up to
-the boundary or the initial time, a uniform bound, a new lemma), beyond a textbook theorem that applies verbatim, is
+consequence stands. A repair that needs a fact the manuscript neither proves nor cites,
+beyond a textbook theorem that applies verbatim, is
 a new ingredient: the proof fails as written (breaks_proof). rejected: the manuscript is right as written; give the derivation in argument. undecided: you
 cannot decide; say in argument what would decide it."""
 
@@ -274,8 +274,7 @@ twelve words copied exactly from those lines. In suggestion, say what would repa
 a needed hypothesis, a corrected inequality); do not rewrite the proof. Only report issues inside the PROOF lines;
 the statements of other results are context. If the proof refers to a step that is not shown, report it as
 missing_justification only when the step is not standard. Before giving a counterexample, check that it satisfies
-every hypothesis (boundedness in the right norm, regularity, boundary conditions); a wrong counterexample discredits
-a correct objection."""
+every hypothesis of the statement being challenged. An example outside its scope cannot refute it."""
 
 
 def check_prompt(lens, packet):
@@ -519,7 +518,7 @@ SCOPE_WHOLE_SCHEMA = {**SCOPE_SCHEMA, 'required': SCOPE_SCHEMA['required'] + ['p
 SCOPE_WHOLE_POLICY = """You referee the whole manuscript above for a mathematics journal; the list of its statements found
 by the controller follows. Return JSON: overview (your understanding of the paper as a referee, two to four
 paragraphs: the question it answers, its main results in words, the strategy of the proofs, how the sections fit
-together, and the assumptions that matter); field (the area, e.g. spectral theory of elliptic operators);
+together, and the assumptions that matter); field (the specific mathematical area of this manuscript);
 contribution (what the paper claims to prove that is new, in its own terms); main (the ids, such as U4, of the main
 results: those the abstract and the introduction announce, including results proved only in an appendix); notation
 (an empty list: every check sees the whole paper); closest (bibliography keys of the prior works the paper presents
@@ -534,7 +533,7 @@ SCOPE_POLICY = """You referee the manuscript below for a mathematics journal. Yo
 below, in order), with its abstract, the start of its introduction and the list of its statements. Return JSON:
 overview (your understanding of the paper as a referee, two to four paragraphs: the question it answers, its main
 results in words, the strategy of the proofs, how the sections fit together, and the assumptions that matter);
-field (the area, e.g. spectral theory of elliptic operators); contribution (what the paper claims to prove that is
+field (the specific mathematical area of this manuscript); contribution (what the paper claims to prove that is
 new, in its own terms); main (the ids, such as U4, of the main results); notation (up to three line ranges, at most
 60 lines each, where the setting and notation used throughout are defined); closest (bibliography keys of the
 prior works the paper presents as closest); queries (three to six short public search queries on the topic, in

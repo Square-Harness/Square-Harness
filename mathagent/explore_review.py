@@ -11,7 +11,7 @@ from .agent import Agent
 from .ledger import _atomic_write, _bytes, _read
 from .refcheck import nested_checker
 from .referee import MeteredClient, copies_manuscript
-from .research import ResearchBudget, ResearchRunner
+from .research import ResearchRunner
 from .review import EXPLORE_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
 from .review_challenge import Challenge
 from .review_evidence import ReviewEvidence, bibliographic_query
@@ -139,7 +139,8 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
             else:
                 reference_agent = copy.copy(reviewer)
                 reference_agent.client = MeteredClient(self, 'reference', 'reference')
-                workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True)
+                workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True,
+                                                   share_job_budget=self.PIPELINE == EXPLORE_PIPELINE)
 
         query = state['goal']
         if state.get('target'):
@@ -272,16 +273,10 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
 
     def _extra_state(self):
         state = super()._extra_state()
-        state['concurrency'] = min(2, self.concurrency)
+        state['concurrency'] = self.concurrency
+        state['tool_rounds'] = None
         state['challenge'] = {'status': 'new'}
         return state
-
-    def _admit_call(self, role, cap, input_tokens):
-        if role == 'challenge':
-            # Re-check under the metering lock, including reservations made by the lead between planning
-            # and admission. Keep room for a full native lead call and its next source context.
-            if self._tokens_left(cap) < self.agent.predict or self._input_left(input_tokens) < input_tokens:
-                raise ResearchBudget('Remaining review allowance reserved for the main referee.')
 
     def _run_reviewer(self, reviewer, query, display, checkpoint, after_tools):
         state = self.state
@@ -297,6 +292,16 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
             query += '\nSupporting material (consult where relevant): ' + ', '.join(s['path'] for s in support)
         reviewer.workspace.evidence = evidence
         challenge = Challenge(self)
+        if checkpoint and checkpoint.get('external_evidence'):
+            # Older v2 checkpoints injected their single challenge separately. Its saved note now lives
+            # in the replaceable snapshot. Preserve other external evidence, including background results.
+            legacy = {json.dumps(challenge.record[key], ensure_ascii=False) for key in ('finding', 'flag')
+                      if challenge.record.get(key)}
+            if legacy:
+                checkpoint = {**checkpoint, 'external_evidence': [
+                    text for text in checkpoint['external_evidence']
+                    if not (text.startswith(('Independent challenger objection;', 'Unresolved challenger observation;'))
+                            and text.partition('\n')[2] in legacy)]}
         followup = bool((state.get('review_reference') or {}).get('followup'))
         instruction = FOLLOWUP_PROMPT if followup else REVIEW_PROMPT
         def challenge_workspace(cancel, record):
@@ -317,7 +322,9 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
             return scope
 
         def at_boundary(final):
-            return {'snapshot': evidence.summary(), 'message': challenge.handoff(final)}
+            # A checkpoint saves one current view of the lead's notebook and the challenger's evidence.
+            # Restoring it replaces that view, including findings saved just before an interruption.
+            return {'snapshot': '\n\n'.join(filter(None, (evidence.summary(), challenge.snapshot(final))))}
 
         try:
             challenge.start(challenge_workspace)

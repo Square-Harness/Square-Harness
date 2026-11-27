@@ -8,16 +8,13 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from contextvars import ContextVar, copy_context
 
 from .ledger import _atomic_write, _bytes, _read
 from .tools import schema
 
 
-MAX_ACTIVE = 3
-MAX_TASKS = 16
-REFERENCE_SECONDS = 180
 RETRIEVAL = frozenset(('search_papers', 'search_web', 'find_quotes', 'lookup_identifier',
                        'open_paper', 'open_url', 'read_paper', 'search_paper', 'read_page',
                        'search_page', 'read_references'))
@@ -49,7 +46,7 @@ class ExploreTasks:
         self.workspace = workspace
         self.journal = journal
         self.cancel = TurnCancellation(getattr(workspace, 'cancelled', lambda: False))
-        self.pool = ThreadPoolExecutor(max_workers=MAX_ACTIVE, thread_name_prefix='explore-check')
+        self.pool = ThreadPoolExecutor(thread_name_prefix='explore-check')
         self.records = {}
         self.futures = {}
         self.cancellations = {}
@@ -136,10 +133,6 @@ class ExploreTasks:
                     if name not in allowed:
                         raise ValueError(f'Unknown or disabled tool: {name}')
                     return self.submit(name, args, required)
-            # A foreground nested checker can run while a background one holds a budget lease.
-            if name == 'check_reference':
-                with self.library_lock:
-                    return self.workspace.execute(name, args)
             with self._access(name, args):
                 return self.workspace.execute(name, args)
         except (TypeError, ValueError) as exc:
@@ -152,8 +145,6 @@ class ExploreTasks:
             if ident not in self.records:
                 if self.cancel.is_set():
                     raise KeyboardInterrupt
-                if len(self.records) >= MAX_TASKS or sum(not f.done() for f in self.futures.values()) >= MAX_ACTIVE:
-                    return 'Tool error: background check limit reached. Use available evidence or await a pending check.'
                 self.records[ident] = {'tool': name, 'required_for_report': required, 'submitted_at': time.time(), 'waits': []}
                 self.cancellations[ident] = TurnCancellation(self.cancel.is_set)
                 self._save()  # An interrupted dispatch can never be silently resubmitted on resume.
@@ -271,23 +262,3 @@ class ExploreTasks:
             # The process might have stopped after dispatch and before checkpointing the model's tool batch.
             orphaned = [self._evidence(i) for i in self.records.keys() - seen if 'result' in self.records[i]]
         return changed, orphaned
-
-    @contextmanager
-    def reference_allowance(self, parent, library):
-        """Reserve part of the shared retrieval allowance before starting a separate reference verifier."""
-        with self.library_lock:
-            reserved = {}
-            for k, limit in (('requests', parent.max_requests), ('returned_chars', parent.max_chars)):
-                remaining = max(0, limit - parent.stats[k])
-                reserved[k] = (remaining + MAX_ACTIVE - 1) // MAX_ACTIVE
-                parent.stats[k] += reserved[k]
-            if parent.on_budget_change:
-                parent.on_budget_change()
-        try:
-            yield {'max_requests': reserved['requests'], 'max_chars': reserved['returned_chars']}
-        finally:
-            with self.library_lock:
-                for k, cap in reserved.items():
-                    parent.stats[k] -= max(0, cap - library.stats[k])
-                if parent.on_budget_change:
-                    parent.on_budget_change()

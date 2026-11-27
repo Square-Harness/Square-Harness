@@ -507,6 +507,8 @@ class LiteratureTools:
         self.down = set()  # sources that kept failing: not asked again until DOWN_COOLDOWN has passed
         self._down_at, self._strikes = {}, {}
         self.on_budget_change = None
+        self._budget_lock = threading.RLock()
+        self._budget_parent = None
         self.deadline = None
         # A pause request (the interface sets the task's flag): rate-limit waits and an open request stop at once.
         self.cancelled = lambda: False
@@ -521,6 +523,27 @@ class LiteratureTools:
                 raise ValueError('Literature budgets must be nonnegative integers')
         self.max_requests, self.max_chars = max_requests, max_chars
         self.stats = {'requests': 0, 'returned_chars': 0}
+
+    def share_budget_with(self, parent):
+        # Independent verifiers debit their own persisted counters and the parent job on actual use.
+        self._budget_parent = parent
+        self._budget_lock = parent._budget_lock
+
+    def _remaining(self, key):
+        limit = self.max_requests if key == 'requests' else self.max_chars
+        left = limit - self.stats[key]
+        return min(left, self._budget_parent._remaining(key)) if self._budget_parent else left
+
+    def _charge(self, key, count):
+        self.stats[key] += count
+        if self._budget_parent:
+            self._budget_parent._charge(key, count)
+
+    def _persist_usage(self):
+        if self._budget_parent:
+            self._budget_parent._persist_usage()
+        if self.on_budget_change:
+            self.on_budget_change()
 
     def snapshot(self):
         return {'backend_version': BACKEND_VERSION, 'online': self.online,
@@ -549,7 +572,7 @@ class LiteratureTools:
         offline = ' Offline: cached data only.' if not self.online else ''
         return [
             _schema('search_papers', 'Search scholarly metadata; abstracts are not proof evidence. zbmath also finds '
-                    'books, and its reviews often list their chapters; query it with fields, e.g. "au:Brezis ti:Functional analysis". '
+                    'books, and its reviews often list their chapters. Use au: for the author and ti: for title words. '
                     'Crossref finds journal articles and books (plain author/title/topic query); Open Library is a book catalog. '
                     'For arXiv author searches use au:"Full Name"; sort=newest returns newest submissions first '
                     '(arXiv only). Max 8 results.' + offline,
@@ -559,8 +582,8 @@ class LiteratureTools:
                     {'query': string, 'limit': integer}, ['query']),
             _schema('find_quotes', 'See how open papers cite a work at a given place: finds papers that cite the work '
                     '(OpenCitations and Crossref reference lists) and are about the topic, opens their arXiv versions and '
-                    'returns the exact lines (with citation locators) that cite it at that number, e.g. author "Brezis", '
-                    'locator "Theorem 9.26"; without a number, the places they cite. Give the title: it identifies the work '
+                    'returns the exact lines that cite the requested place, or the places cited if no number was given. '
+                    'Give the title: it identifies the work '
                     '(not the author\'s other works). Also returns the bibliography entry.' + offline,
                     {'author': string, 'locator': string, 'topic': string, 'title': string}, ['author']),
             _schema('lookup_identifier', 'Registry record of one DOI (Crossref, else the DOI registry) or arXiv ID (arXiv API: '
@@ -576,7 +599,7 @@ class LiteratureTools:
         ]
 
     def execute(self, name, args):
-        if self.max_chars - self.stats['returned_chars'] < 100:
+        if self._remaining('returned_chars') < 100:
             return json.dumps({'error': 'Literature returned-character budget exhausted; use existing evidence.'})
         try:
             if name not in TOOL_NAMES:
@@ -594,11 +617,17 @@ class LiteratureTools:
         return self._emit(result)
 
     def _emit(self, result):
-        cap = min(MAX_RESULT, max(0, self.max_chars - self.stats['returned_chars']))
-        if cap < 100:
-            # Control errors contain no source data and remain valid JSON even when
-            # the evidence budget has no room left for a JSON envelope.
-            return json.dumps({'error': 'Literature output budget exhausted; use existing evidence.'})
+        with self._budget_lock:
+            cap = min(MAX_RESULT, self._remaining('returned_chars'))
+            if cap < 100:
+                return json.dumps({'error': 'Literature output budget exhausted; use existing evidence.'})
+            value = self._fit_result(result, cap)
+            self._charge('returned_chars', len(value))
+        self._persist_usage()
+        return value
+
+    @staticmethod
+    def _fit_result(result, cap):
         value = json.dumps(result, ensure_ascii=False)
         if len(value) > cap:
             # Source identity is immutable. Shorten descriptive fields first,
@@ -656,9 +685,6 @@ class LiteratureTools:
             value = json.dumps(result, ensure_ascii=False)
         if len(value) > cap:
             value = '{}' if cap >= 2 else ''
-        self.stats['returned_chars'] += len(value)
-        if self.on_budget_change:
-            self.on_budget_change()
         return value
 
     def _path(self, *parts, create=False):
@@ -1911,7 +1937,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             self._remaining_timeout()
             if _robots:
                 self._check_robots(url)
-            if self.stats['requests'] >= self.max_requests:
+            if self._remaining('requests') <= 0:
                 raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence')
             interval = 3.0 if host.endswith('arxiv.org') else 0.25
             origin = 'https://' + host
@@ -1928,12 +1954,12 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 if delay > 0:
                     self._pause(delay)
                 self._remaining_timeout()
-                if self.stats['requests'] >= self.max_requests:
-                    raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
-                self.stats['requests'] += 1
+                with self._budget_lock:
+                    if self._remaining('requests') <= 0:
+                        raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
+                    self._charge('requests', 1)
                 _LAST_REQUEST[rate_host] = time.monotonic()
-            if self.on_budget_change:
-                self.on_budget_change()
+            self._persist_usage()
             self._last_request[host] = time.monotonic()
             try:
                 status, response_headers, body = self._request_once(url, headers, max_bytes)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""One independent, time-bounded mathematical challenge to a pinned manuscript."""
+"""An independent manuscript reader that sends evidence while the main referee is working."""
 import json
 import threading
 import time
@@ -13,43 +13,46 @@ from .referee import MeteredClient
 from .research import ResearchBudget
 from .tools import schema
 
-CHALLENGE_SECONDS = 180
-VERIFICATION_GRACE = 15
-CHALLENGE_TOKENS = 16_384
-CHALLENGE_ROUNDS = 6
 
-CHALLENGE_PROMPT = """Independently select one consequential implication in the author's manuscript that a
-careful reader might accept too quickly. Choose from the manuscript itself, respecting the author's requested
-scope. Read the exact statement, hypotheses, argument and relevant dependencies. Try to derive the step as
-written or find a counterexample satisfying its hypotheses. A failure to find a proof is insufficient evidence.
-Use submit_challenge only for one located objection with checkable evidence. Distinguish a false statement
-from a failure of the proof, and state which later conclusion is affected. If a specific serious objection is
-already supported by evidence and one outstanding check will decide it, use flag_challenge with that evidence
-and name the check before doing it. These tools are private handoffs to the main referee. If you have no
-supported objection, finish with no finding. Your assignment is one challenge; the main referee writes the report."""
+CHALLENGE_PROMPT = """Independently examine steps that matter to the author's mathematical conclusions.
+Choose them from the manuscript, within the requested scope. Start with the implication whose failure would
+most affect a principal result. Read its exact hypotheses, argument and dependencies. Try to justify it as
+written or construct a counterexample satisfying its hypotheses. Distinguish a false statement from a gap in
+its proof. A failed proof attempt alone is insufficient evidence.
+Send each supported objection immediately with submit_challenge. Give the source lines, the mathematical
+reason and the conclusions affected. Combine consequences of the same underlying defect. Then examine the
+next distinct consequential step. If a step checks out, move on. Finish when you see no further consequential
+question worth pursuing. The main referee writes the report.
+If concrete evidence already indicates a serious objection and a specific outstanding check could change the
+verdict, flag_challenge records the evidence and that check. Use the returned check_id to update the flag,
+submit the confirmed objection, or withdraw_challenge if the concern is resolved. This lets the main referee
+take over an open question when it is ready to finish. All these handoffs are private."""
 
 
 class ChallengeCancellation(threading.Event):
-    def __init__(self, parent, until):
+    """The peer can be canceled independently or by pausing the enclosing review."""
+
+    def __init__(self, parent):
         super().__init__()
-        self.parent, self.until = parent, until
+        self.parent = parent
 
     def is_set(self):
-        return super().is_set() or bool(self.parent and self.parent.is_set()) or time.monotonic() >= self.until
+        return super().is_set() or bool(self.parent and self.parent.is_set())
 
     def wait(self, timeout=None):
-        end = self.until if timeout is None else min(self.until, time.monotonic() + timeout)
-        while not self.is_set() and time.monotonic() < end:
-            super().wait(min(0.1, max(0, end - time.monotonic())))
+        if self.parent is None:
+            return super().wait(timeout)
+        end = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            remaining = None if end is None else end - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                break
+            super().wait(0.1 if remaining is None else min(remaining, 0.1))
         return self.is_set()
 
 
-class _Submitted(Exception):
-    """The supported objection has reached the lead; no wrap-up generation is needed."""
-
-
 class ChallengeTools:
-    """Private read-only selection. This reader cannot access drafts, notes or lead experiment IDs."""
+    """Read only the selected manuscript and private computations, independently of the lead's work."""
     allowed = {'list_files', 'search_text', 'read_file', 'execute_python'}
 
     def __init__(self, workspace, challenge):
@@ -65,21 +68,29 @@ class ChallengeTools:
         tools = [s for s in self.workspace.schemas() if s['function']['name'] in self.allowed]
         text, integer = {'type': 'string'}, {'type': 'integer'}
         fields = dict(path=text, start_line=integer, end_line=integer, objection=text, evidence=text)
+        with_id = {**fields, 'check_id': text}
         return tools + [
-            schema('flag_challenge', 'Register one supported, consequential objection whose named outstanding check '
-                   'could change the verdict.', {**fields, 'pending_check': text}, [*fields, 'pending_check']),
-            schema('submit_challenge', 'Hand one supported objection to the main referee for independent verification.',
-                   fields, list(fields))]
+            schema('flag_challenge', 'Save a consequential open check backed by evidence. Use its check_id to update it.',
+                   {**with_id, 'pending_check': text}, [*fields, 'pending_check']),
+            schema('submit_challenge', 'Immediately hand a supported objection to the main referee. Include its '
+                   'check_id if previously flagged. You can continue examining other steps.', with_id, list(fields)),
+            schema('withdraw_challenge', 'Close a previously flagged check and record how the concern was resolved.',
+                   {'check_id': text, 'reason': text}, ['check_id', 'reason'])]
 
     def execute(self, name, arguments):
         if self.challenge.cancel.is_set():
             raise KeyboardInterrupt
         if name in self.allowed:
             return self.workspace.execute(name, arguments)
-        if name not in ('flag_challenge', 'submit_challenge'):
+        if name not in ('flag_challenge', 'submit_challenge', 'withdraw_challenge'):
             return 'Tool error: unavailable to this reader.'
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            if name == 'withdraw_challenge':
+                reason = args['reason']
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError('Explain how the flagged concern was resolved.')
+                return self.challenge.withdraw(args['check_id'], reason.strip())
             path = self.workspace.path(args['path'])
             lines = self.workspace.documents[path]['content'].splitlines()
             first, last = args['start_line'], args['end_line']
@@ -96,10 +107,10 @@ class ChallengeTools:
             keys = ('objection', 'evidence', 'pending_check') if name == 'flag_challenge' else ('objection', 'evidence')
             for key in keys:
                 value = args[key]
-                if not isinstance(value, str) or not value.strip() or len(value) > 3000:
-                    raise ValueError(f'Give a nonempty {key} of at most 3000 characters.')
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f'Give a nonempty {key}.')
                 note[key] = value.strip()
-            return self.challenge.receive(note, final=name == 'submit_challenge')
+            return self.challenge.receive(note, args.get('check_id'))
         except (TypeError, KeyError, ValueError) as exc:
             return 'Tool error: ' + str(exc)
 
@@ -114,37 +125,31 @@ class _ChallengeClient(MeteredClient):
     def stream(self, payload):
         if self.client.cancel.is_set():
             raise KeyboardInterrupt
-        if not _spare_inference(self.client):
-            raise ResearchBudget('Model capacity reserved for the main referee.')
         yield from super().stream(payload)
-
-    @property
-    def remaining_tokens(self):
-        r = self.runner
-        with r._mutex:
-            used = sum(c.get('stats', {}).get('eval_count', c['reserved_tokens']) for c in r.state['calls']
-                       if c['role'] == 'challenge')
-            return min(super().remaining_tokens, r.state['challenge']['output_allowance'] - used)
 
 
 class Challenge:
     def __init__(self, runner):
         self.runner = runner
-        seconds = min(CHALLENGE_SECONDS, max(0, runner.state['settings']['max_seconds'] - runner._elapsed()))
-        self.cancel = ChallengeCancellation(getattr(runner, 'cancel', None), time.monotonic() + seconds)
-        self.done = threading.Event()
+        self.cancel = ChallengeCancellation(getattr(runner, 'cancel', None))
         self.thread = None
-        self.delivered = False
         self.record = runner.state.setdefault('challenge', {'status': 'new'})
+        # Saved v2 reviews from the first implementation stored only one submitted or flagged observation.
+        if 'checks' not in self.record:
+            checks = []
+            if self.record.get('finding'):
+                checks.append({'status': 'submitted', 'note': self.record['finding']})
+            elif self.record.get('flag') and self.record['status'] != 'no_finding':
+                checks.append({'status': 'open', 'note': self.record['flag']})
+            self.record['checks'] = checks
 
     def start(self, make_workspace):
         r = self.runner
-        # Do not replay a possibly dispatched challenge after a crash. Any recorded objection is still available.
+        # Preserve existing evidence after a crash. Replaying a possibly dispatched model call could bill it twice.
         if self.record['status'] != 'new':
             if self.record['status'] in ('running', 'verifying'):
                 self.record['status'] = 'interrupted'
                 r._save()
-            self.done.set()
             return
         if r.concurrency < 2:
             reason = 'one review inference slot'
@@ -157,96 +162,98 @@ class Challenge:
         peer = None if reason else fork_cancellable(r.agent.client, self.cancel)
         if peer is None:
             self.record.update(status='skipped', reason=reason or 'transport has no independently cancelable stream')
-            self.done.set()
             r._save()
             return
-        available = min(r._tokens_left(), getattr(peer, 'remaining_tokens', float('inf')))
-        usable = int(max(0, min(CHALLENGE_TOKENS, available * 0.15, available - r.agent.predict)))
-        if usable < 256:
-            self.record.update(status='skipped', reason='output allowance reserved for main referee')
-            self.done.set()
-            r._save()
-            return
-        self.record.update(status='running', experiments=[], output_allowance=usable)
+        self.record.update(status='running', experiments=[])
         r._save()
         self.thread = threading.Thread(target=self._run, args=(peer, make_workspace), name='review-challenger')
         self.thread.start()
 
     def _run(self, peer, make_workspace):
         r = self.runner
-        status = 'interrupted'
+        status = 'finished'
         try:
-            peer.timeout = min(peer.timeout, max(0.1, self.cancel.until - time.monotonic()))
             client = _ChallengeClient(r, 'challenge', 'challenger')
             client.client = peer
             workspace = make_workspace(self.cancel, self.record)
             tools = ChallengeTools(workspace, self)
-            budget = min(r.agent.predict, CHALLENGE_TOKENS)
-            agent = Agent(client, tools, r.agent.model, r.agent.ctx, budget, r.state['thinking'], 'explore',
-                          min(r.state['tool_rounds'], CHALLENGE_ROUNDS), seed=r.agent.seed,
-                          temperature=r.state['temperature'], top_p=r.state['top_p'])
+            agent = Agent(client, tools, r.agent.model, r.agent.ctx, r.agent.predict, r.state['thinking'], 'explore',
+                          r.state['tool_rounds'], seed=r.agent.seed, temperature=r.state['temperature'],
+                          top_p=r.state['top_p'])
             agent.turn_image_refs = r.state.get('images', [])
             scope = r.state['goal'] + ('\nRequested focus: ' + r.state['target'] if r.state.get('target') else '')
             files = ', '.join(s['path'] for s in r.state['sources'])
             agent.run(scope + '\n\nPrimary manuscript: ' + r.state['sources'][0]['path'] + '\nFiles: ' + files,
-                      instruction=CHALLENGE_PROMPT,
-                      background_tools=False)
-            status = 'no_finding'
-        except _Submitted:
-            status = 'submitted'
+                      instruction=CHALLENGE_PROMPT, background_tools=False)
+            if agent.last_stop_reason:
+                status = 'stopped'
+                with r._mutex:
+                    self.record['reason'] = agent.last_stop_reason
         except (KeyboardInterrupt, ResearchBudget):
             status = 'stopped'
         except Exception as exc:
-            status = 'unavailable'
-            with r._mutex:
-                self.record['reason'] = type(exc).__name__
+            status = 'stopped' if self.cancel.is_set() else 'unavailable'
+            if status == 'unavailable':
+                with r._mutex:
+                    self.record['reason'] = type(exc).__name__
         finally:
             with r._mutex:
-                if self.record['status'] != 'submitted':
-                    self.record['status'] = status
+                self.record['status'] = status
                 r._save()
-            self.done.set()
 
-    def receive(self, note, *, final):
+    def _open_check(self, check_id):
+        for index, check in enumerate(self.record['checks'], 1):
+            if check_id == f'C{index}' and check['status'] == 'open':
+                return check
+        raise ValueError('Use the check_id of an open flagged concern.')
+
+    def receive(self, note, check_id=None):
         with self.runner._mutex:
-            if self.cancel.is_set() or self.record['status'] not in ('running', 'verifying'):
-                return 'The handoff is closed.'
-            if not final and 'flag' in self.record:
-                return 'One potential objection has already been flagged.'
-            self.record['finding' if final else 'flag'] = note
-            self.record['status'] = 'submitted' if final else 'verifying'
+            if self.cancel.is_set():
+                return 'The main referee has closed the handoff.'
+            status = 'open' if 'pending_check' in note else 'submitted'
+            checks = self.record['checks']
+            if check_id is None:
+                for index, check in enumerate(checks, 1):
+                    if check['status'] == status and check['note'] == note:
+                        return f'Already recorded as C{index}.'
+                check = {}
+                checks.append(check)
+                check_id = f'C{len(checks)}'
+            else:
+                check = self._open_check(check_id)
+            check.update(status=status, note=note)
             self.runner._save()
-            if final:
-                self.cancel.set()
-                self.done.set()
-                raise _Submitted
-            return 'Recorded.'
+            return f'Recorded as {check_id}.'
 
-    def handoff(self, final):
-        if final:
-            with self.runner._mutex:
-                flagged = self.record['status'] == 'verifying'
-                if not flagged:
-                    self.cancel.set()
-            if flagged:
-                end = min(self.cancel.until, time.monotonic() + VERIFICATION_GRACE)
-                while not self.cancel.is_set() and time.monotonic() < end:
-                    if self.done.wait(min(0.10, max(0, end - time.monotonic()))):
-                        break
-                self.cancel.set()
+    def withdraw(self, check_id, reason):
         with self.runner._mutex:
-            finding = self.record.get('finding')
-            unresolved = final and self.record['status'] != 'no_finding' and self.record.get('flag')
-            if self.delivered or not (finding or unresolved):
+            if self.cancel.is_set():
+                return 'The main referee has closed the handoff.'
+            self._open_check(check_id).update(status='withdrawn', reason=reason)
+            self.runner._save()
+            return f'Closed {check_id}.'
+
+    def snapshot(self, final):
+        with self.runner._mutex:
+            if final:
+                # The referee is ready to report. Close intake and take its evidence in the same critical section.
+                self.cancel.set()
+            notes = []
+            for index, check in enumerate(self.record['checks'], 1):
+                if check['status'] == 'submitted':
+                    label = 'Supported objection. Verify against the manuscript before using it.'
+                elif check['status'] == 'open' and self.cancel.is_set():
+                    label = 'Unresolved challenger observation. Verify the outstanding check or disclose it as open.'
+                else:
+                    continue
+                notes.append(f'C{index}. {label}\n' + json.dumps(check['note'], ensure_ascii=False))
+            if not notes:
                 return ''
-            self.delivered = True
-            label = ('Independent challenger objection; verify it against the manuscript before using it.' if finding
-                     else 'Unresolved challenger observation; its decisive check is incomplete. Verify independently '
-                          'or identify the outstanding check as unresolved.')
-            return label + '\n' + json.dumps(finding or self.record['flag'], ensure_ascii=False)
+            return 'Private evidence from the independent challenger:\n' + '\n'.join(notes)
 
     def close(self):
         self.cancel.set()
         if self.thread is not None:
-            # Wait only for cancellation/usage settlement. Never release the saved job's lock with a metered writer.
+            # Settle usage before releasing the saved job's lock.
             self.thread.join()

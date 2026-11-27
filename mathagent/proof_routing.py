@@ -158,9 +158,8 @@ does not by itself request an investigation.
 Use route=prove when the user asks to prove, establish, derive rigorously, repair
 or complete a NONTRIVIAL mathematical statement. This includes an implicit
 request to finish a specified gap or 'prove it' referring to prior context.
-Research lemmas, proofs using substantive analytic/probabilistic/geometric
-arguments, operator or PDE estimates, asymptotic rates, and multistep arguments
-belong in Proof mode. A familiar theorem or a statement you think you can solve
+Research lemmas, arguments requiring a substantive theorem, and proofs with
+several dependent steps belong in Proof mode. A familiar theorem or a statement you think you can solve
 is not automatically elementary. When the requested deliverable is one
 nontrivial proof, use prove even if the proof looks difficult.
 When the statement to prove is a famous open problem or a major unsolved

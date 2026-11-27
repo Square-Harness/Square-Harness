@@ -1299,13 +1299,16 @@ judgment about a passage whose lines were supplied. It is not a proof certificat
 Follow-ups use their own instruction, the original manuscript and its saved report.
 
 `review_challenge.py` gives one independent reader the manuscript and scope.
-It can check one implication using source tools and an available sandbox.
-It sees no lead draft or notebook. A private scoped transport shares provider
-and budget accounting. The challenger has a 180-second deadline. At delivery
-the main reader stops speculation; a located serious objection with an identified
-decisive check can receive up to 15 seconds within the original deadline.
-The reviewer evaluates submitted evidence. A slot, transport or budget limit
-may leave the main reader working alone. Saved jobs record which case occurred.
+It selects consequential implications independently, using source tools and an
+available sandbox, and sends each supported objection immediately. It can
+continue with another independent question. It sees the manuscript and its own
+evidence. A private transport uses the shared provider and job accounting.
+At finalization the referee closes the handoff, collects available evidence
+and explicitly flagged unfinished checks, and cancels speculative work. The
+referee can independently finish a check that bears on the verdict. The
+challenger adds no private clock, output allowance or tool-round count. A single
+inference slot or a transport without independent cancellation can leave the
+referee working alone. Saved jobs record which case occurred.
 
 Explore can use eligible tools synchronously or request background execution
 through `explore_tasks.py`. Independent work can continue until a model boundary
@@ -2230,8 +2233,6 @@ Fix these when you touch the code nearby, or ask before a larger change:
   container isolation checks skip where their local tools are unavailable.
 - No documented command regenerates
   `mathagent/numerics/docker/requirements.lock` from `requirements.in`.
-- `prompts.SYSTEM` (ordinary chat) names specific research areas (PDE, control,
-  spectral theory, geometric analysis) instead of a general mathematician.
 - Reviews do not expand TeX `\input`/`\include`. The missing text is reported
   as unread.
 - The solver and the verifier use the same model, so they can share errors.

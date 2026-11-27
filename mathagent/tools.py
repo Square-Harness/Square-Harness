@@ -607,7 +607,7 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         if self.checker is not None and self.literature is not None and self.literature.online:
             guess = {'type': 'object', 'properties': {
                 'authors': {'type': 'array', 'items': string}, 'title': string, 'year': string,
-                'locator': {'type': 'string', 'description': 'Theorem, proposition or section, e.g. "Theorem 9.26"'}}}
+                'locator': {'type': 'string', 'description': 'The theorem, proposition or section named in the citation.'}}}
             result.append(schema('check_reference',
                 'Find and verify a precise reference (book or paper, and the theorem or section) for a known result. '
                 'Give the result and your best guesses of where it is stated; a separate verifier checks them against '
