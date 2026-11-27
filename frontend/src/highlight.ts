@@ -326,7 +326,7 @@ export function colour(text: string, language: Language | null): string {
  * reopened on the next line; tokens never nest. The newlines themselves become the blocks' ends, so the copy
  * keeps exactly the textarea's characters, and an empty line keeps its height with a zero-width space.
  */
-export function numberedLines(html: string): { html: string; count: number } {
+export function numberedLines(html: string, start?: number, end?: number): { html: string; count: number } {
   const lines: string[] = []
   let line = ''
   let open = ''  // the token span open across the current position, if any
@@ -343,7 +343,12 @@ export function numberedLines(html: string): { html: string; count: number } {
   }
   lines.push(line)
   return {
-    html: lines.map((text) => `<span class="code-line">${text.replace(/<span class="tok-[a-z-]+"><\/span>/g, '') || '​'}</span>`).join(''),
+    html: lines.map((text, index) => {
+      const line = index + 1
+      const cited = start && end && line >= start && line <= end
+      const content = text.replace(/<span class="tok-[a-z-]+"><\/span>/g, '') || '\u200b'
+      return `<span class="code-line${cited ? ' cited-source-selected' : ''}" data-line="${line}">${content}</span>`
+    }).join(''),
     count: lines.length,
   }
 }

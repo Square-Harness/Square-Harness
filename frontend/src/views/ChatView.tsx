@@ -97,7 +97,7 @@ const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isL
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
-  const { file: viewing, result } = useRoute()
+  const { viewer: viewing, result } = useRoute()
   const tick = useTick(id)
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
@@ -247,7 +247,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       setSelectedCall(null)
       setAttachments([])
       pinned.current = true
-      if (!id) go(mode, chatId, undefined, undefined, parse(window.location.hash).file)  // an open file stays open
+      if (!id) go(mode, chatId, undefined, undefined, parse(window.location.hash).viewer)  // an open file stays open
     } catch (reason) {
       setSendError((reason as Error).message)
       setBusyError(reason instanceof ApiError && reason.status === 409)
@@ -446,7 +446,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       </form>
     </div>
     {/* An open file takes the notebook's place; the notebook comes back when it closes. */}
-    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && result ? <ResultPanel key={result} chat={data} id={result} />
+    {viewing ? <FilePanel key={viewing.kind + viewing.path} target={viewing} /> : data && result ? <ResultPanel key={result} chat={data} id={result} />
       : data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>

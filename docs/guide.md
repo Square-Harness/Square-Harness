@@ -462,7 +462,11 @@ one with a message.
   message, opens the file viewer beside the conversation, in the notebook's
   place (the notebook comes back when you close the file). Resize it by its left
   edge like the notebook, up to 75% of the window, and keep writing your message
-  while you read. It shows a PDF in the browser's PDF viewer, fitted to the
+  while you read. In a conversation answer, click a paper citation such as
+  **draft.tex:42–48** to open the source at those lines. You can edit a matching
+  workspace text file there. For a published paper or a manuscript that has
+  since changed, the viewer shows the text the worker actually cited.
+  The file viewer shows a PDF in the browser's PDF viewer, fitted to the
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,
   Julia, Rust, JavaScript, C and C++, shell, JSON, TOML and YAML. Archives and

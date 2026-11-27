@@ -1722,18 +1722,23 @@ class LiteratureTools:
         except SourceArchiveError as exc:
             raise LiteratureError(str(exc), code='unsupported_source_archive') from None
 
-    def _document(self, document_id):
+    def document_metadata(self, document_id):
+        """Read the cited edition's cache record without loading its full extraction."""
         if not isinstance(document_id, str) or not DOC_ID.fullmatch(document_id):
             raise LiteratureError('Invalid document_id; use the ID returned by open_paper')
         raw = self._read(('documents', document_id + '.json'), DOCUMENT_META_BYTES)
         if raw is None:
-            raise LiteratureError('Document not found in this workspace cache; use open_paper first')
+            raise LiteratureError('Document not found in this workspace cache; use open_paper first', code='document_not_found')
         metadata = json.loads(raw)
         if self.assigned_sources is not None and not ({document_id, metadata.get('source_url')} & self.assigned_sources):
             raise LiteratureError('This request limits evidence to the assigned sources.')
+        return metadata
+
+    def _document(self, document_id):
+        metadata = self.document_metadata(document_id)
         text = self._read(('documents', document_id + '.txt'))
         if text is None:
-            raise LiteratureError('Document not found in this workspace cache; use open_paper first')
+            raise LiteratureError('Document not found in this workspace cache; use open_paper first', code='document_not_found')
         if metadata.get('text_sha256') != _digest(text):
             raise LiteratureError('Cached extraction changed; source hash verification failed')
         # Both local PDF extractors terminate every extracted page with a form

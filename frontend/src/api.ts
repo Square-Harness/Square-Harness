@@ -648,6 +648,7 @@ export type Artifact = {
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
 /** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
+export type CitedDocument = { id: string; title: string; text: string; workspace_path?: string; sha256?: string }
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
   size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
@@ -767,6 +768,8 @@ export const api = {
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   /** One file for the viewer, by its path relative to the interface root. */
+  document: (id: string) => get<Pick<CitedDocument, 'id' | 'title'>>('/api/documents/' + encodeURIComponent(id)),
+  documentContent: (id: string) => get<CitedDocument>('/api/documents/' + encodeURIComponent(id) + '?content=1'),
   viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
   /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
   saveFile,

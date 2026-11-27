@@ -24,12 +24,13 @@ import threading
 import time
 import unicodedata
 import uuid
+from urllib.parse import unquote, urlsplit
 
 from ..reporting import one_line
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
-from ..literature import LiteratureTools, UNLIMITED_SOURCE
+from ..literature import LiteratureError, LiteratureTools, UNLIMITED_SOURCE
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
@@ -1821,6 +1822,42 @@ def view_file(base, relative):
         return {**result, 'kind': 'unsupported', 'note': str(exc)}
     return {**result, 'text': text, 'encoding': encoding or 'utf-8', 'sha256': hashlib.sha256(data).hexdigest(),
             'editable': True}
+
+
+def view_document(base, root, document_id, *, content=False):
+    """Resolve the immutable edition cited by a worker. A local plain-text original may also be editable."""
+    library = LiteratureTools(root, online=False)
+    try:
+        if content:
+            meta, lines = library._document(document_id)
+        else:
+            meta = library.document_metadata(document_id)
+    except LiteratureError as exc:
+        if exc.code == 'document_not_found':
+            raise NotFound('The cited document is no longer available in this workspace.') from None
+        raise
+    identifier = meta.get('canonical_identifier') or meta.get('source_url') or ''
+    name = meta.get('title')
+    if not name and identifier.startswith(('https://', 'http://')):
+        url = urlsplit(identifier)
+        name = unquote(Path(url.path).name) or url.hostname
+    result = {'id': document_id, 'title': name or identifier or 'Cited document'}
+    if not content:
+        return result
+    result['text'] = '\n'.join(lines)  # Same line breaks (including PDF page boundaries) as read_paper.
+    source = meta.get('source_url', '')
+    if source.startswith('workspace:'):
+        relative = source.removeprefix('workspace:')
+        try:
+            original = view_file(root, relative)
+        except (NotFound, OSError, ValueError):
+            return result
+        if original.get('editable') and original['sha256'] == meta.get('sha256'):
+            original_text = original['text'].replace('\r\n', '\n').replace('\r', '\n')
+            path = Path(root) / relative
+            if original_text.removesuffix('\n') == result['text'] and path.resolve() == path:
+                result.update(workspace_path=path.relative_to(base).as_posix(), sha256=original['sha256'])
+    return result
 
 
 def raw_file(base, relative, download=False):

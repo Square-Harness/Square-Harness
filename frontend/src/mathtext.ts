@@ -215,16 +215,41 @@ function splitCitations(node: MdNode): MdNode[] {
   return out
 }
 
-function walk(node: MdNode, split: (node: MdNode) => MdNode[]) {
+function walk(node: MdNode, split: (node: MdNode) => MdNode[], includeInlineCode = false) {
   if (!node.children) return
   node.children = node.children.flatMap((child) => {
-    if (child.type === 'text') return split(child)
-    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link', 'linkReference', 'citation'].includes(child.type)) walk(child, split)
+    if (child.type === 'text' || (includeInlineCode && child.type === 'inlineCode')) return split(child)
+    if (!['code', 'inlineCode', 'math', 'inlineMath', 'link', 'linkReference', 'citation'].includes(child.type)) walk(child, split, includeInlineCode)
     return [child]
   })
 }
 
 export const remarkCitations = () => (tree: MdNode) => walk(tree, splitCitations)
+
+// Saved answers can cite a paper in prose, in brackets, or as a single inline code span.
+// The id is the literature store's document id; its line numbers belong to that specific text.
+const DOCUMENT_LINES = /(?<![\w/-])(doc-[0-9a-f]{24}):L([1-9]\d*)(?:[-–]L?([1-9]\d*))?(?![\w/–-])/g
+
+export const remarkDocumentLines = () => (tree: MdNode) => walk(tree, node => {
+  const value = node.value || ''
+  const children: MdNode[] = []
+  let last = 0
+  for (const match of value.matchAll(DOCUMENT_LINES)) {
+    const start = Number(match[2]), end = Number(match[3] ?? match[2])
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) continue
+    let from = match.index!, to = from + match[0].length
+    if (value[from - 1] === '[' && value[to] === ']') { from--; to++ }
+    if (node.type === 'inlineCode' && (from !== 0 || to !== value.length)) return [node]
+    if (from > last) children.push({ type: 'text', value: value.slice(last, from) })
+    children.push({ type: 'citation', data: { hName: 'cite', hProperties: {
+      dataDocument: match[1], dataStart: start, dataEnd: end, dataCite: match[0],
+    } }, children: [{ type: 'text', value: match[0] }] })
+    last = to
+  }
+  if (!children.length) return [node]
+  if (last < value.length) children.push({ type: 'text', value: value.slice(last) })
+  return children
+}, true)
 
 export type PaperLinks = Map<number, { url: string; title: string }>
 /** Only link numbers that the saved review assigns to an actual paper. */

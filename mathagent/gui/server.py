@@ -43,7 +43,7 @@ from ..ledger import _directory
 from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
 from ..model_limits import HOSTED_DS4
 from .. import images
-from ..literature import UNLIMITED_SOURCE
+from ..literature import DOC_ID, UNLIMITED_SOURCE
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
@@ -860,6 +860,12 @@ def upload(h, body):
 def files_view(h, body):
     """A file for the viewer (path relative to the interface root): its kind, and the text of a text file."""
     return store.view_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+
+
+@route('GET', '/api/documents/(?P<id>' + DOC_ID.pattern + ')')
+def document_view(h, body, id):
+    hub = h.server.hub
+    return store.view_document(hub.base, hub.root, id, content=h.query.get('content') == ['1'])
 
 
 @route('GET', '/api/files/raw')

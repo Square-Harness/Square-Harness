@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Paper citations in conversation answers now show the document name and line
+  range. Click one to open the cited passage beside the conversation.
+
 - Restored image attachments and screenshot paste for DS4.1 Flash 1017 on
   OpenRouter. The chat and workers send the original images through the
   configured provider route, including when a follow-up refers to an earlier
