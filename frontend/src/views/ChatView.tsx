@@ -26,8 +26,9 @@ import { MODES } from '../modes'
 import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
+import { FilePanel } from './FileView'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { fileHref, go, href, openFile, useRoute } from '../router'
+import { go, href, openFile, parse, useRoute, viewHref } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
@@ -96,6 +97,7 @@ const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isL
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
+  const viewing = useRoute().file
   const tick = useTick(id)
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
@@ -257,7 +259,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       setSelectedCall(null)
       setAttachments([])
       pinned.current = true
-      if (!id) go(mode, chatId)
+      if (!id) go(mode, chatId, undefined, undefined, parse(window.location.hash).file)  // an open file stays open
     } catch (reason) {
       setSendError((reason as Error).message)
       setBusyError(reason instanceof ApiError && reason.status === 409)
@@ -456,7 +458,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
     </div>
-    {data && <WorkPanel key={data.id} chat={data} />}
+    {/* An open file takes the notebook's place; the notebook comes back when it closes. */}
+    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>
   )
@@ -919,7 +922,7 @@ function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutp
   )
 }
 
-/** An attached file (path relative to the open folder): a double click opens it in the viewer, in a new tab. */
+/** An attached file (path relative to the open folder): a double click opens it in the viewer, beside the conversation. */
 function AttachedChip({ path, size = 13, children }: { path: string; size?: number; children?: ReactNode }) {
   const { status } = useApp()
   const route = useRoute()
@@ -928,7 +931,7 @@ function AttachedChip({ path, size = 13, children }: { path: string; size?: numb
     <span className={'chip chip-viewable' + (children ? '' : ' chip-static')} title={`${path} (double-click to view)`}
       onDoubleClick={() => openFile(fromRoot)}>
       <FileIcon size={size} /><span>{displayPath(path)}</span>
-      <a className="sr-only" href={fileHref(fromRoot, route.id)} target="_blank" rel="noopener">View {displayPath(path)}</a>
+      <a className="sr-only" href={viewHref(route, fromRoot)}>View {displayPath(path)}</a>
       {children}
     </span>
   )

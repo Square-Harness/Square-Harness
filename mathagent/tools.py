@@ -18,11 +18,14 @@ import tempfile
 import time
 from threading import Lock
 
-TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', '.yml', '.toml', '.csv'}
-# File groups the user can let the model discover and read. Pinned sources are
-# explicit choices and stay readable whatever is enabled here.
+# Code in other languages than Python (Julia, Rust, C/C++, R, MATLAB, JavaScript, shell) and settings, read as
+# text. Not .ts: it is as often a video file as TypeScript.
+CODE = {'.jl', '.rs', '.c', '.h', '.cpp', '.hpp', '.r', '.m', '.js', '.sh', '.ini', '.cfg'}
+TEXT = {'.tex', '.bib', '.sty', '.cls', '.md', '.txt', '.py', '.json', '.yaml', '.yml', '.toml', '.csv'} | CODE
+# File groups a workspace discovers and reads. The interface allows every group; a nested workspace may allow
+# fewer (the reference checker's allows none). Pinned sources stay readable whatever is allowed.
 READ_GROUPS = {'tex': {'.tex', '.bib', '.sty', '.cls'}, 'pdf': {'.pdf'}, 'py': {'.py'},
-               'text': {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv'}}
+               'text': {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv'}, 'code': CODE}
 SKIP = {'__pycache__', 'node_modules', 'venv', 'build', 'dist'}
 MAX_BYTES = 1_000_000
 MAX_RESULT = 6000
@@ -193,7 +196,7 @@ def _file_title(path, deadline):
 
 def workspace_overview(workspace, max_files=300, max_chars=14000, title_seconds=2.0):
     """What the open folder holds, for the planners (the routing step and the main agent): one line per file the
-    model may be given (the kinds File access allows, plus the attachments), with its kind, size, date and a
+    model may be given (the kinds its workspace allows, plus the attachments), with its kind, size, date and a
     title when cheap. Files from earlier conversations are there too. With more files than fit, the most
     recently modified are kept. Returns (text, paths)."""
     root, allowed = workspace.root, workspace.allowed_types | {'.png', '.jpg', '.jpeg', '.webp'}
@@ -258,9 +261,9 @@ class Workspace:
         self.cancelled = lambda: False
         groups = set(READ_GROUPS) if read_types is None else set(read_types)
         if groups - set(READ_GROUPS):
-            raise ValueError('Unknown file group; use tex, pdf, py or text')
+            raise ValueError('Unknown file group; use tex, pdf, py, text or code')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
-        # The kinds of files File access allows, kept when a message's attachments narrow `readable`:
+        # The kinds of files this workspace allows, kept when a message's attachments narrow `readable`:
         # the workspace overview (workspace_overview) lists those, never more.
         self.allowed_types = set(self.readable)
         self.index = None
@@ -293,15 +296,14 @@ class Workspace:
         if any(part.startswith('.') for part in p.relative_to(self.root).parts):
             raise ValueError('Hidden paths are excluded, including symlink targets')
         if source_suffix(p) not in TEXT and not (pdf and p.suffix.lower() == '.pdf'):
-            raise ValueError('Unsupported extension; use text/LaTeX/Markdown/Python files or a TeX source archive (.tar.gz/.tgz/.tar/.gz)')
+            raise ValueError('Unsupported extension; use text, LaTeX, Markdown or code files, or a TeX source archive (.tar.gz/.tgz/.tar/.gz)')
         return p
 
     def _readable(self, p):
         if self.selected_files_only and p not in self.pinned:
             raise ValueError('This file is outside the document selection for this request')
         if source_suffix(p) not in self.readable and p not in self.pinned:
-            raise ValueError(f'The user has not allowed reading {p.suffix} files in this workspace; '
-                             'ask them to pin the file or enable that file type')
+            raise ValueError(f'{p.suffix} files cannot be read in this task; ask the user to attach the file')
 
     def text(self, p, *, deadline=None):
         name = p.relative_to(self.root).as_posix() if p.is_relative_to(self.root) else p.name

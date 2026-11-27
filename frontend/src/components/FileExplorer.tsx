@@ -75,14 +75,16 @@ function compare(sort: Sort) {
  * Folders open on a double click (or Enter); the breadcrumb and Up go back. A click selects a file; with
  * `multiple`, Ctrl/⌘-click adds or removes one file and Shift-click selects the range from the last file
  * clicked. Typing in the search box searches every folder. Hovering a file shows "Download" and "View file", which
- * opens it in the viewer in a new tab. A double click (or Enter) on a file calls `onOpen`; both dialogs attach the
- * file with it. Files of kind `other` (code the model is not given) are listed for the viewer only.
+ * opens it in the viewer beside the conversation (`onView`, by default openFile). A double click (or Enter) on a
+ * file calls `onOpen`; both dialogs attach the file with it.
  */
-export function FileExplorer({ selected, onSelect, multiple = false, onOpen, unavailable, badge, startFolder, folderNote }: {
+export function FileExplorer({ selected, onSelect, multiple = false, onOpen, onView, unavailable, badge, startFolder, folderNote }: {
   selected: string[]
   onSelect: (paths: string[]) => void
   multiple?: boolean
   onOpen?: (file: WorkspaceFile) => void
+  /** View file: the dialogs close first. */
+  onView?: (file: WorkspaceFile) => void
   /** Why a file cannot be selected here (for instance an image the model cannot read), or nothing. */
   unavailable?: (file: WorkspaceFile) => string | undefined
   /** A short label shown after a file's name (for instance "Attached"). */
@@ -261,8 +263,8 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
               <a className="btn btn-quiet btn-small ws-file-view" href={fileDownloadUrl(file.path)} download={part.name}
                 title="Download the file" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
                 <DownloadIcon size={13} /> Download</a>
-              <button type="button" className="btn btn-quiet btn-small ws-file-view" title="Open the file in the viewer, in a new tab"
-                onClick={(event) => { event.stopPropagation(); openFile(file.path) }} onDoubleClick={(event) => event.stopPropagation()}>
+              <button type="button" className="btn btn-quiet btn-small ws-file-view" title="Open the file in the viewer, beside the conversation"
+                onClick={(event) => { event.stopPropagation(); if (onView) onView(file); else openFile(file.path) }} onDoubleClick={(event) => event.stopPropagation()}>
                 View file <ExternalIcon size={13} /></button>
               {part.extension && <span className={'ws-file-ext ws-file-ext-' + file.kind}>.{part.extension}</span>}
               <span className="ws-file-size">{bytes(file.size)}</span>
@@ -298,9 +300,6 @@ async function attachable(paths: string[], prefix: string, projectId?: string | 
   return { attached, failed }
 }
 
-/** Why a file the explorer lists cannot be attached: the viewer opens it, the model is not given it. */
-const notForTheModel = (file: WorkspaceFile) => file.kind === 'other' ? 'The model cannot read this kind of file; you can view or download it' : undefined
-
 const failures = (failed: { source: string; error: string }[]) =>
   failed.map((item) => `${item.source.split('/').pop()}: ${item.error}`).join(' · ')
 
@@ -328,7 +327,8 @@ export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?:
   return (
     <Modal title="My files" icon={<FileIcon />} onClose={onClose} wide>
       <p className="modal-lede">Your folders and their files, starting in the open folder, whose files the model can be given. Double-click a file to attach it to your next message; point at it to view or download it.</p>
-      <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={notForTheModel} onOpen={(file) => void attach(file)} />
+      <FileExplorer selected={selected} onSelect={setSelected} multiple onOpen={(file) => void attach(file)}
+        onView={(file) => { onClose(); openFile(file.path) }} />
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         {onBack && <button type="button" className="btn action-start" onClick={onBack}><BackIcon size={15} /> Back to folders</button>}
@@ -339,7 +339,7 @@ export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?:
 }
 
 /** The kinds of files an upload accepts: only those can be copied into the open folder. */
-const COPYABLE = /\.(tex|sty|cls|bib|md|txt|pdf|py|png|jpe?g|webp|tar\.gz|tgz|tar|gz)$/i
+const COPYABLE = /\.(tex|sty|cls|bib|md|txt|py|json|ya?ml|toml|csv|jl|rs|c|h|cpp|hpp|r|m|js|sh|ini|cfg|pdf|png|jpe?g|webp|tar\.gz|tgz|tar|gz)$/i
 
 /**
  * Choose files and attach them to the next message. A file of another folder is copied into the open folder
@@ -360,11 +360,10 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
   const openName = status?.workspace.split('/').filter(Boolean).pop() || 'the open folder'
   const project = projects?.find((item) => item.id === projectId)
   const destination = project ? `the folder of the project ${project.name}` : openName
-  const unavailable = (file: WorkspaceFile) => notForTheModel(file)
-    || (fromRoot.includes(file.path) ? 'Already attached to your next message'
+  const unavailable = (file: WorkspaceFile) => fromRoot.includes(file.path) ? 'Already attached to your next message'
     : isImagePath(file.path) && !status?.image_support ? 'This model cannot read images'
     : inOpenFolder(file.path) === null && !COPYABLE.test(file.path) ? 'Only the kinds of files you can upload can be copied into the open folder'
-    : undefined)
+    : undefined
   const outside = selected.filter((path) => inOpenFolder(path) === null)
   const attach = async (paths: string[]) => {
     setBusy(true); setError('')
@@ -384,7 +383,7 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
     <Modal title="Attach files from the workspace" icon={<FileIcon />} onClose={busy ? undefined : onClose} wide>
       <p className="modal-lede">Select the files to attach to your next message.</p>
       <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={unavailable}
-        onOpen={(file) => { if (!busy) void attach([file.path]) }}
+        onOpen={(file) => { if (!busy) void attach([file.path]) }} onView={(file) => { onClose(); openFile(file.path) }}
         startFolder={startFolder ? prefix + startFolder.replace(/\/+$/, '') : undefined}
         badge={(file) => fromRoot.includes(file.path) ? 'Attached' : undefined}
         folderNote={(folder) => inOpenFolder(folder + '/') === null

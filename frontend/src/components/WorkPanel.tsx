@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { agentLabels, skillName } from '../agents'
 import type { Chat } from '../api'
 import { rememberWorkPanel, workPreferences } from '../panels'
@@ -12,16 +12,11 @@ import { PlanTab } from './PlanTab'
 import { RecordTab } from './RecordTab'
 import { CloseIcon, NotebookIcon } from './Icons'
 import { Glyph } from './Glyph'
+import { PanelGrip, usePanelWidth, usePublishedWidth, useWide } from './PanelResize'
 import './WorkPanel.css'
 
-const WIDE = '(min-width: 1200px)'
 const DEFAULT_WIDTH = 380
-const MIN_WIDTH = 304
-// The notebook may cover up to 65% of the window; the conversation column narrows to make room.
-const MAX_SHARE = 0.65
-const maxWidth = () => Math.max(MIN_WIDTH, Math.round(window.innerWidth * MAX_SHARE))
 const LABELS = { agents: 'Agents', outputs: 'Results', record: 'Findings', plan: 'Plan' }
-const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(maxWidth(), Math.round(value)))
 
 export function WorkPanel({ chat }: { chat: Chat }) {
   const route = useRoute()
@@ -29,19 +24,12 @@ export function WorkPanel({ chat }: { chat: Chat }) {
   const investigation = chat.investigation?.phase === 'clarification' ? null : chat.investigation
   const tabs = WORK_TABS.filter((tab) => tab !== 'plan' || !!investigation)
   const tab = selection && tabs.includes(selection.tab) ? selection.tab : 'agents'
-  const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches)
-  const [width, setWidth] = useState(() => clampWidth(workPreferences().width ?? DEFAULT_WIDTH))
+  const wide = useWide()
+  const [width, setWidth] = usePanelWidth(() => workPreferences().width ?? DEFAULT_WIDTH)
   const pane = useRef<HTMLElement>(null)
   const tablist = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
   const autoTurn = useRef('')
-  const drag = useRef<{ x: number; width: number } | null>(null)
-  // A narrower window lowers the ceiling: the width follows it, and the stored preference is kept.
-  useEffect(() => {
-    const fit = () => setWidth((current) => clampWidth(Math.max(current, workPreferences().width ?? DEFAULT_WIDTH)))
-    window.addEventListener('resize', fit)
-    return () => window.removeEventListener('resize', fit)
-  }, [])
   const activeLanes = (chat.agents || []).filter((agent) => agent.status === 'running' || agent.status === 'waiting')
   const currentTurn = activeLanes.length >= 2 ? activeLanes[0].turn_id : ''
   const running = activeLanes.filter(lane => lane.status === 'running').length
@@ -61,12 +49,6 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     if (changes.length) announce(changes.map(lane => skillName(lane.mode) + ': ' + agentLabels[lane.status].toLowerCase() + '.').join(' '))
   }, [chat.agents])
   useEffect(() => {
-    const query = window.matchMedia(WIDE)
-    const changed = () => setWide(query.matches)
-    query.addEventListener('change', changed)
-    return () => query.removeEventListener('change', changed)
-  }, [])
-  useEffect(() => {
     const first = !initialized.current
     initialized.current = true
     if (selection || route.id !== chat.id) return
@@ -78,12 +60,7 @@ export function WorkPanel({ chat }: { chat: Chat }) {
       openWorkPanel(tab === 'plan' && !chat.investigation ? 'agents' : tab, null, true)
     }
   }, [selection, route.id, chat.id, chat.investigation, currentTurn, wide])
-  useLayoutEffect(() => {
-    const main = pane.current?.closest('main')
-    if (!main) return
-    main.style.setProperty('--work-panel-width', width + 'px')
-    return () => { main.style.removeProperty('--work-panel-width') }
-  }, [width, !!selection])
+  usePublishedWidth(pane, selection ? width : 0)
   const returnFocus = useRef<HTMLElement | null>(null)
   useEffect(() => {
     if (!selection) return
@@ -142,18 +119,7 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     {!wide && <div className="work-panel-scrim" onClick={closeWorkPanel} aria-hidden="true" />}
     <aside className="work-panel" ref={pane} role={wide ? 'complementary' : 'dialog'} aria-modal={!wide || undefined}
       aria-labelledby="work-panel-title" style={{ '--work-panel-width': width + 'px' } as CSSProperties}>
-      {wide && <div role="separator" aria-label="Research panel width" aria-orientation="vertical" tabIndex={0}
-        aria-valuemin={MIN_WIDTH} aria-valuemax={maxWidth()} aria-valuenow={width} className="work-panel-grip"
-        onPointerDown={(e) => { if (e.button !== 0) return; drag.current = { x: e.clientX, width }; e.currentTarget.setPointerCapture(e.pointerId) }}
-        onPointerMove={(e) => { if (drag.current) setWidth(clampWidth(drag.current.width + drag.current.x - e.clientX)) }}
-        onPointerUp={(e) => { if (drag.current) { const value = clampWidth(drag.current.width + drag.current.x - e.clientX); setWidth(value); rememberWorkPanel({ width: value }) } drag.current = null }}
-        onPointerCancel={() => { drag.current = null }}
-        onKeyDown={(e) => {
-          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
-          e.preventDefault()
-          const value = e.key === 'Home' ? MIN_WIDTH : e.key === 'End' ? maxWidth() : clampWidth(width + (e.key === 'ArrowLeft' ? 1 : -1) * (e.shiftKey ? 64 : 16))
-          setWidth(value); rememberWorkPanel({ width: value })
-        }} />}
+      {wide && <PanelGrip label="Research panel width" width={width} onWidth={setWidth} onCommit={(value) => rememberWorkPanel({ width: value })} />}
       <header className="work-panel-head">
         <span className="notebook-header-mark" aria-hidden="true">{investigation ? <Glyph mode="investigate" /> : <NotebookIcon size={18} />}</span>
         <div className="notebook-heading"><h2 id="work-panel-title">Notebook</h2>

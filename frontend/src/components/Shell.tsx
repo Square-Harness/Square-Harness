@@ -13,10 +13,10 @@ import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus,
 import { ProjectNav } from './Projects'
 import { CellScale, ErrorNote, Meter, Modal } from './common'
 import { PersonalizationSettings } from './Personalization'
-import { FileAccess, FolderBrowser } from './FolderBrowser'
+import { FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, StopIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, StopIcon, SunIcon, TrashIcon } from './Icons'
 import { clearDrafts } from '../drafts'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
@@ -486,7 +486,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
   const limits = concurrencyLimits(app.snapshot, status)
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
-  const [access, setAccess] = useState(false)
   const [personalization, setPersonalization] = useState(false)
   const [account, setAccount] = useState<Account | null>(null)
   const accountEmail = useRef<string | null>(null)
@@ -522,8 +521,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
   }, [hasAllowance])
   if (!status) return null
   const allowance = status.tester_allowance
-  const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
-  const readValue = readable.length === 4 ? 'all types' : readable.length ? readable.join(', ') : 'none'
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
   const ollama = status.backend === 'ollama'
@@ -560,10 +557,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
           <span className="side-menu-label">Parallel work</span>
           {(active > 0 || queued > 0) && <span className="side-menu-value">{active}/{limits.chats}{queued > 0 && ` +${queued}`}</span>}
         </button>
-        <button type="button" className="side-menu-item" title={`Choose which kinds of files the model may read by itself in this folder. Now: ${readValue}.`} onClick={() => setAccess(true)}>
-          <FileIcon size={16} />
-          <span className="side-menu-label">File access</span>
-        </button>
         <button type="button" className="side-menu-item" title="Standing instructions and LaTeX macros for every conversation" onClick={() => setPersonalization(true)}>
           <SlidersIcon size={16} />
           <span className="side-menu-label">Personalization</span>
@@ -576,7 +569,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
-      {access && <FileAccess onClose={() => setAccess(false)} />}
       {personalization && <PersonalizationSettings onClose={() => setPersonalization(false)} />}
       {pairing && (
         <Modal title="Connect a phone" icon={<PhoneIcon />} onClose={() => setPairing(false)}>

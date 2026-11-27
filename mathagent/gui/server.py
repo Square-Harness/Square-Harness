@@ -288,7 +288,7 @@ def status(h, body):
                         'research_chars': args.research_chars},
            'ollama': hub.models(), 'root': str(hub.base),
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
-           'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
+           'latex': shutil.which('latexmk') is not None,
            'recent': store.recent_folders(hub.base)}
     if os.environ.get('SH_DEEPINFRA_QUOTA_FILE'):
         from ..hosted_quota import quota_status
@@ -398,7 +398,7 @@ def files(h, body):
     # explorer's search), relative to the interface root.
     hub = h.server.hub
     everywhere = (h.query.get('scope') or [''])[0] == 'root'
-    records = store.list_files(hub.base if everywhere else hub.root, limit=2001, viewable=everywhere)
+    records = store.list_files(hub.base if everywhere else hub.root, limit=2001)
     return {'files': records[:2000], 'truncated': len(records) > 2000}
 
 
@@ -809,16 +809,6 @@ def workspace_open(h, body):
                          'Open the project from the conversation list instead; opening it as a folder would start an empty workspace inside it.')
     h.server.switch(path)
     return {'workspace': str(h.server.hub.root)}
-
-
-@route('GET', '/api/settings')
-def settings(h, body):
-    return store.load_settings(h.server.hub.root)
-
-
-@route('POST', '/api/settings')
-def settings_save(h, body):
-    return store.save_settings(h.server.hub.root, body.get('read'))
 
 
 @route('GET', '/api/personalization')

@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, type FolderListing, type ReadSettings } from '../api'
+import { api, type FolderListing } from '../api'
 import { workspaceBusy } from '../concurrency'
 import { markOwnFolderSwitch, refreshStatus, useApp } from '../store'
-import { ErrorNote, Loading, Modal, Toggle } from './common'
+import { ErrorNote, Loading, Modal } from './common'
 import { FilesDialog } from './FileExplorer'
 import { ChevronIcon, FileIcon, FolderIcon } from './Icons'
 
@@ -112,41 +112,6 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
       <div className="modal-actions folder-actions">
         <button type="button" className="btn" onClick={() => setSeeing(true)}><FileIcon size={15} /> See my files</button>
       </div>
-    </Modal>
-  )
-}
-
-const GROUPS: { key: keyof ReadSettings; label: string; hint: string }[] = [
-  { key: 'tex', label: 'LaTeX', hint: '.tex .bib .sty .cls and TeX source archives' },
-  { key: 'pdf', label: 'PDF', hint: 'text extracted locally' },
-  { key: 'py', label: 'Python', hint: '.py' },
-  { key: 'text', label: 'Other text', hint: '.md .txt .json .yaml .csv' },
-]
-
-export function FileAccess({ onClose }: { onClose: () => void }) {
-  const { status } = useApp()
-  const [error, setError] = useState('')
-  if (!status) return null
-  const toggle = async (key: keyof ReadSettings, value: boolean) => {
-    setError('')
-    try {
-      await api.saveSettings({ [key]: value })
-      await refreshStatus()
-    } catch (reason) {
-      setError((reason as Error).message)
-    }
-  }
-  return (
-    <Modal title="File access" icon={<FileIcon />} onClose={onClose}>
-      <p className="modal-lede">The kinds of files the model may list, search and read by itself in this folder. Files you attach or drop into a job are always available to that job.</p>
-      <div className="option-list">
-        {GROUPS.map((group) => (
-          <Toggle key={group.key} label={group.label} hint={group.hint} checked={status.read[group.key]} onChange={(value) => { void toggle(group.key, value) }} />
-        ))}
-      </div>
-      <ErrorNote>{error}</ErrorNote>
-      <p className="muted small">Saved for this folder as you change it, and applied to new work. Nothing leaves your computer when the model reads a file.</p>
-      <div className="modal-actions"><button type="button" className="btn btn-primary" onClick={onClose}>Done</button></div>
     </Modal>
   )
 }

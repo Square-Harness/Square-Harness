@@ -97,7 +97,7 @@ def _tool_experiment(message):
         return None
     return experiment_item(value.get('experiment_id'), value.get('status'),
                            list(value.get('figures') or []) + list(value.get('files') or []))
-UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg', '.webp'}
+UPLOAD_SUFFIXES = TEXT | {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # what the model reads (archives apart)
 BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # figures and visual inputs, and PDFs to read
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -709,26 +709,20 @@ def research_artifact(root, job_id, name, stream_from=None):
 
 # -- workspace files that can be pinned ------------------------------------
 
-# Code and logs the file viewer shows as text, although the model is not given them.
-VIEW_ONLY = {'.jl', '.rs', '.js', '.mjs', '.ts', '.c', '.h', '.cpp', '.hpp', '.sh', '.r', '.m', '.ini', '.cfg', '.log'}
-
-
-def _listable(path, viewable=False):
-    """A file the model can be given: text, PDF or an image; with `viewable`, also the files only the viewer
-    opens (VIEW_ONLY), which the file explorer lists with the kind 'other'."""
+def _listable(path):
+    """A file the model can be given: text (code included), PDF or an image."""
     suffix = source_suffix(path)
-    return (suffix in TEXT or suffix == '.pdf' or images.is_image(path)
-            or viewable and Path(path).suffix.lower() in VIEW_ONLY)
+    return suffix in TEXT or suffix == '.pdf' or images.is_image(path)
 
 
 def _file_record(path, root, info):
     suffix = source_suffix(path)
     return {'path': path.relative_to(root).as_posix(), 'size': info.st_size,
-            'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text' if suffix in TEXT else 'other',
+            'kind': 'image' if images.is_image(path) else 'pdf' if suffix == '.pdf' else 'text',
             'updated_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
 
 
-def list_files(root, limit=2000, viewable=False):
+def list_files(root, limit=2000):
     root = Path(root)
     found = []
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -736,7 +730,7 @@ def list_files(root, limit=2000, viewable=False):
                          and not (Path(folder) / d).is_symlink())
         for name in sorted(files):
             path = Path(folder) / name
-            if name.startswith('.') or path.is_symlink() or not _listable(path, viewable):
+            if name.startswith('.') or path.is_symlink() or not _listable(path):
                 continue
             try:
                 info = path.stat()
@@ -750,7 +744,7 @@ def list_files(root, limit=2000, viewable=False):
 
 def browse_files(root, relative='', limit=2000):
     """One folder at or below `root` (the interface root), for the file explorer: its subfolders (empty ones
-    too) and the files the model can be given or the viewer opens, with size and modification time. A project's folder carries the project's name and
+    too) and the files the model can be given, with size and modification time. A project's folder carries the project's name and
     hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
     root = Path(root).resolve(strict=True)
     target = resolve_folder(root, relative)
@@ -774,12 +768,12 @@ def browse_files(root, relative='', limit=2000):
             try:
                 inside = sum(1 for child in itertools.islice(os.scandir(path), 1000) if not child.name.startswith('.')
                              and not child.is_symlink() and (child.is_dir(follow_symlinks=False) and child.name not in SKIP
-                                                             or child.is_file(follow_symlinks=False) and _listable(child.name, True)))
+                                                             or child.is_file(follow_symlinks=False) and _listable(child.name)))
             except OSError:
                 inside = 0
             folders.append({'name': label(path) or entry.name, 'path': path.relative_to(root).as_posix(),
                             'project': bool(label(path)), 'items': inside})
-        elif entry.is_file(follow_symlinks=False) and entry.name not in notebook and _listable(path, True):
+        elif entry.is_file(follow_symlinks=False) and entry.name not in notebook and _listable(path):
             try:
                 files.append(_file_record(path, root, entry.stat(follow_symlinks=False)))
             except OSError:
@@ -1539,27 +1533,6 @@ def _private_json(path):
     return value if isinstance(value, dict) else None
 
 
-def load_settings(workspace):
-    value = _private_json(Path(workspace) / '.mathagent' / 'gui-settings.json') or {}
-    saved = value.get('read') if isinstance(value.get('read'), dict) else {}
-    return {'read': {group: saved.get(group) is not False for group in READ_GROUPS}}
-
-
-def save_settings(workspace, read):
-    if not isinstance(read, dict) or any(k not in READ_GROUPS or type(v) is not bool for k, v in read.items()):
-        raise ValueError('read must map tex, pdf, py and text to true or false')
-    settings = load_settings(workspace)
-    settings['read'].update(read)
-    base = Path(workspace) / '.mathagent'
-    _directory(base, create=True)
-    _atomic_write(base / 'gui-settings.json', json.dumps(settings, indent=1).encode())
-    return settings
-
-
-def read_types(workspace):
-    return [group for group, allowed in load_settings(workspace)['read'].items() if allowed]
-
-
 def resolve_folder(root, relative=''):
     """A folder at or below the interface root: no hidden parts, no symlink escape."""
     root = Path(root).resolve(strict=True)
@@ -1704,7 +1677,7 @@ def save_upload(workspace, name, data):
     archive = is_source_archive(base)
     suffix = next((ext for ext in ('.tar.gz', '.tgz', '.tar', '.gz') if base.lower().endswith(ext)), '') if archive else Path(base).suffix.lower()
     if not base or base.startswith('.') or not archive and suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop text/LaTeX, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDF, Python or PNG/JPEG/WebP image files')
+        raise ValueError('Drop text, LaTeX, Markdown or code files, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDFs or PNG/JPEG/WebP images')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
     if not data:
@@ -1792,7 +1765,7 @@ def view_kind(path):
         return 'image'
     if Path(path).suffix.lower() in MARKDOWN:
         return 'markdown'
-    if suffix in TEXT and not is_source_archive(path) or Path(path).suffix.lower() in VIEW_ONLY:
+    if suffix in TEXT and not is_source_archive(path):
         return 'text'
     return 'unsupported'
 
@@ -1822,7 +1795,7 @@ def raw_file(base, relative, download=False):
     file the file explorer lists, to save as it is on disk."""
     path = root_file(base, relative)
     kind = view_kind(path)
-    if download and not _listable(path, viewable=True):
+    if download and not _listable(path):
         raise ValueError('Only the files the file explorer lists can be downloaded')
     if not download and kind not in ('pdf', 'image'):
         raise ValueError('Only PDFs and images are sent as files; other files are shown as text')

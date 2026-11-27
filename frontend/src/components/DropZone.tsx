@@ -138,7 +138,7 @@ export function DropZone() {
           <div className="drop-card">
             <p className="drop-title">Drop to add to {folder}</p>
             <p className="drop-hint">{target ? target.label : 'Files are saved in the folder; nothing is replaced.'}{project ? ` · ${project.name}` : ''}</p>
-            <p className="drop-types">.tex .sty .cls .bib .tar.gz .tgz .tar .gz .md .txt .pdf .py{status?.image_support ? ' · PNG JPEG WebP' : ''}</p>
+            <p className="drop-types">.tex .sty .cls .bib .tar.gz .md .txt .pdf · code (.py .jl .rs .c .cpp .r .m …) · .json .yaml .toml .csv{status?.image_support ? ' · PNG JPEG WebP' : ''}</p>
           </div>
         </div>
       )}

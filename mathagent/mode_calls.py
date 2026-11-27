@@ -629,8 +629,8 @@ class ModeOrchestrator(Orchestrator):
         return payload
 
     def _routing_inspect(self, tool, arguments):
-        """A search or read the routing step asks for, through this turn's workspace (File access and the
-        message's attachments still apply)."""
+        """A search or read the routing step asks for, through this turn's workspace (the message's
+        attachments still apply)."""
         workspace = getattr(self.agent, 'workspace', None)
         if workspace is None or tool not in ('search_text', 'read_file'):
             return 'Tool error: file inspection is unavailable here'

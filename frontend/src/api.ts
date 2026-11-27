@@ -110,12 +110,9 @@ export type Status = {
   pair_urls?: string[]
   root: string
   workspace_path: string
-  read: ReadSettings
   latex: boolean
   recent: string[]
 }
-
-export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
 
 export type FolderProject = { id: string; name: string; deleted?: boolean }
 export type FolderListing = {
@@ -648,8 +645,7 @@ export type Artifact = {
   stream?: { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; stats: Record<string, unknown> }
 }
 
-/** `other`: code or a log that only the file viewer opens; the model is not given it. */
-export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image' | 'other'; updated_at?: string }
+export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
 /** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
@@ -789,7 +785,6 @@ export const api = {
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
   openFolder: (path: string) => post<{ workspace: string }>('/api/workspace', { path }),
-  saveSettings: (read: Partial<ReadSettings>) => post<{ read: ReadSettings }>('/api/settings', { read }),
   personalization: () => get<Personalization>('/api/personalization'),
   savePersonalization: (value: Personalization) => post<Personalization>('/api/personalization', value),
   upload: async (file: File, project_id?: string | null) => {

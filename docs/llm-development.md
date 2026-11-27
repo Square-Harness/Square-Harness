@@ -296,8 +296,12 @@ Version 1.1.0. The source of truth for the machine-readable version is
   root using a private atomic write and revision check. The Assistant captures
   the preferences at turn admission and keeps that context on resume. The
   personalization event refreshes conversation math definitions in the GUI.
-- **File tools.** Inferred source names must exist locally and obey read-type
-  settings; a URL or a missing filename is not an implicit attachment. File and
+- **File tools.** The interface's workspaces read every group of `tools.READ_GROUPS`
+  (TeX, PDF, Python, other text, code); there is no per-folder setting any more
+  (the former `gui-settings.json` is ignored). A nested workspace may still allow
+  fewer groups (`read_types`, e.g. none for the reference checker). Inferred
+  source names must exist locally and be of a readable kind; a URL or a missing
+  filename is not an implicit attachment. File and
   directory responses expose pagination, including columns within long lines.
   `replace_text` makes one exact targeted replacement through the same approval
   and encoding path as `write_file`; preserve CRLF and existing file modes. New files remain private.
@@ -545,13 +549,13 @@ Version 1.1.0. The source of truth for the machine-readable version is
   - the token travels in an HttpOnly, SameSite=Strict cookie;
   - unexpected `Host` headers and cross-site requests are refused;
   - the CSP is strict, and uploads never overwrite a file;
-  - the file viewer (`#/file?path=`) replaces a text or Markdown file only on the
-    user's Save, and only if its SHA-256 still matches what the viewer loaded
-    (`store.save_text`, 409 otherwise), atomically and in the file's encoding;
-    `GET /api/files/raw` sends only PDFs and PNG/JPEG/WebP images, with a fixed
-    content type, except with `download=1`: any file the explorer lists (`store._listable`
-    with `viewable`), as an `application/octet-stream` attachment. Files only the viewer
-    opens (`store.VIEW_ONLY`, kind `other`) are never attached or copied for the model;
+  - the file viewer (the `?file=` panel beside a conversation, or the `#/file?path=`
+    page elsewhere) replaces a text or Markdown file only on the user's Save, and
+    only if its SHA-256 still matches what the viewer loaded (`store.save_text`,
+    409 otherwise), atomically and in the file's encoding; `GET /api/files/raw`
+    sends only PDFs and PNG/JPEG/WebP images, with a fixed content type, except
+    with `download=1`: any file the explorer lists (`store._listable`), as an
+    `application/octet-stream` attachment;
   - folders are confined to `--gui-root`.
 - In the terminal, the model `--host` must be loopback unless `--online`. Online
   research is opt-in in the terminal and on by default in the web app, except
@@ -1761,8 +1765,7 @@ Keep the old call roles renderable for saved jobs.
 - `checks/<id>/`: literature checks;
 - `chats/`: conversations and Assistant checkpoints;
 - `experiments/`: sandbox runs (at most 200 runs or 256 MB, oldest pruned);
-- `literature/`: source cache;
-- `gui-settings.json`: per-folder file access.
+- `literature/`: source cache.
 
 The `--gui-root` folder's `.mathagent/` also holds `gui-token`, `gui-state.json`,
 `templates/`, `styles/` and `style-choice.json` (writing styles and which one
