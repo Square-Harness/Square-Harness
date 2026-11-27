@@ -16,6 +16,7 @@ a level is lowered when the passages actually read do not support it.
 """
 import json
 import re
+import time
 import unicodedata
 
 from .jsonutil import loads
@@ -1455,7 +1456,9 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
     never offered check_reference itself. ``max_seconds`` bounds each check: on DS4
     the effort's own allowance is hours, and a quarter of the caller's time never binds.
     """
+    from contextlib import nullcontext
     from .agent import Agent
+    from .explore_tasks import REFERENCE_SECONDS, TurnCancellation, active_check
     from .literature import LiteratureTools
     from .tools import Workspace
 
@@ -1463,9 +1466,33 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
         parent = agent.workspace.literature
         literature = LiteratureTools(agent.workspace.root, online=bool(parent and parent.online),
                                      timeout=parent.timeout if parent else 15)
+        background = active_check.get()
+        budget = nullcontext({})
+        client = agent.client
         if parent is not None:
             literature.cancelled = parent.cancelled
-        if share_source_budget and parent is not None:
+        if background:
+            from .referee import MeteredClient
+            from .peer_transport import fork_cancellable
+            tasks, ident = background
+            deadline = time.monotonic() + REFERENCE_SECONDS
+            cancel = TurnCancellation(lambda: tasks.cancellations[ident].is_set() or time.monotonic() >= deadline
+                                      or (parent is not None and not parent.online))
+            literature.cancelled = cancel.is_set
+            # Transport cancellation is private to this check; model accounting stays in the original job.
+            outer = client.client if isinstance(client, MeteredClient) else client
+            transport = fork_cancellable(outer, cancel)
+            if transport is None:
+                return json.dumps({'error': 'This transport cannot cancel an independent verifier. '
+                                   'Run check_reference in the foreground.'})
+            if isinstance(client, MeteredClient):
+                client = MeteredClient(client.runner, client.role, ident)
+                client.client = transport
+            else:
+                client = transport
+            if share_source_budget and parent is not None:
+                budget = tasks.reference_allowance(parent, literature)
+        elif share_source_budget and parent is not None:
             # This synchronous nested lookup draws on the investigation child's
             # remaining retrieval budget. Persist each reservation before HTTP.
             before = dict(parent.stats)
@@ -1476,12 +1503,12 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
                     parent.on_budget_change()
             literature.on_budget_change = charge
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())
-        inner = Agent(agent.client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
+        inner = Agent(client, workspace, agent.model, agent.ctx, agent.predict, False, 'check', seed=agent.seed)
         inner.document_output_cap = getattr(agent, 'document_output_cap', None)
 
         def relay(kind, value):
             # Shown live under the tool call; the saved answer keeps the tool's result.
-            if kind in ('notice', 'tool'):
+            if not background and kind in ('notice', 'tool'):
                 emit('tool', ('↳ ' if kind == 'tool' else '↳ check: ') + str(value))
         runner = CheckRunner(inner, emit=relay)
         # A quarter of what the answering agent has left, so that a check cannot use up its answer.
@@ -1493,11 +1520,14 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='low', *, share_
             limits['max_seconds'] = max(20.0, seconds / 4)
         if max_seconds is not None:
             limits['max_seconds'] = min(limits.get('max_seconds', max_seconds), max_seconds)
-        if share_source_budget and parent is not None:
+        if background:
+            limits['max_seconds'] = min(limits.get('max_seconds', REFERENCE_SECONDS), REFERENCE_SECONDS)
+        if not background and share_source_budget and parent is not None:
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits)
+            with budget as lease:
+                runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits, **lease)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()

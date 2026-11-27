@@ -611,7 +611,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Mathematical review of a manuscript by one Explore agent with access to the source, Python and references | `@referee`, New review | `/referee` |
+| Review | Pre-submission review of results, proofs and references by a referee with an independent check of one consequential step | `@referee`, New review | `/referee` |
 | Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
@@ -1037,10 +1037,19 @@ The review kinds work on a proof you paste, or on a manuscript you attach
 - **Review** (`@referee`) reads a whole manuscript. Attach the paper in an
   Assistant conversation and say “review that paper”, or choose Review from the
   form. You can specify a focus such as “check the proof of Theorem 1.4”.
-  One reviewer uses the same mathematical agent as Explore. It reads the
-  manuscript, can run computations when the sandbox is available, and can
-  consult references under the selected online settings. Its written response
-  is the saved report. You can reopen it and discuss a particular finding.
+  The main referee checks the manuscript for the author. It starts with threats
+  to the main results, identifies missing arguments and checks notation,
+  cross-references and bibliographic support. A private notebook holds located
+  findings across tool calls. A source index helps the referee track which
+  statements, proofs and references still need attention. For a new whole-paper
+  review an independent challenger can examine one consequential implication
+  alongside it. The referee evaluates any objection against the source and
+  writes the report you receive. When a full-paper report leaves indexed
+  items unresolved or without a recorded assessment, a coverage note names the
+  counts and sample locations.
+  Available Python and online tools can run independent checks in the
+  background while the referee examines another passage. You can reopen the
+  report and discuss a particular finding.
   If the reviewer stops before it finishes, the job records the interruption.
   An empty answer after tool use gets one opportunity to recover.
 

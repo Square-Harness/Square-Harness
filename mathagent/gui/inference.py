@@ -71,6 +71,15 @@ class InferencePool:
         with self._condition:
             return not self._waiters and sum(self._active.values()) < self._capacity
 
+    def room_for_peer(self, owner: Hashable) -> bool:
+        """Whether this owner could run a second reader while retaining capacity for its first."""
+        with self._condition:
+            if owner not in self._owners or self._waiters:
+                return False
+            fair_share = (self._capacity + len(self._owners) - 1) // len(self._owners)
+            other_streams = sum(self._active.values()) - self._active[owner]
+            return min(fair_share, self._capacity - other_streams) >= 2
+
     def register(self, owner: Hashable) -> None:
         """Register an active task. Repeated registration is harmless."""
         with self._condition:

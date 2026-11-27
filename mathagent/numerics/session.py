@@ -192,7 +192,10 @@ class NumericsSession:
                 self.on_run_change(self.runs)
         try:
             image = self.executor.probe()
-            result = self.executor.run(code, limits, seed=seed, parameters=parameters, cancel=self.cancel)
+            from ..explore_tasks import active_check
+            background = active_check.get()
+            cancel = background[0].cancellations[background[1]] if background else self.cancel
+            result = self.executor.run(code, limits, seed=seed, parameters=parameters, cancel=cancel)
         except (SandboxUnavailable, OSError, ValueError) as exc:
             with self._lock:
                 self.runs -= 1

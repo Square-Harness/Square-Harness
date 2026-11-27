@@ -812,7 +812,7 @@ documented together when releasing these features.
    ┌───────────── controllers ("runners"), one per skill ─────────────────────────┐
    │ proof.ProofRunner    research.ResearchRunner ─┬ litreview.ReviewRunner (literature review)
    │ orchestrator (Assistant) ─ delegates to ──────┤ refcheck.CheckRunner (literature check)
-   │ agent.Agent (Explore, chat, referees)        ├ review.QuickReviewRunner / single-agent manuscript review
+   │ agent.Agent (Explore, chat, referees)        ├ review.QuickReviewRunner / author manuscript review
    │ numerics.session (sandbox skills)             │   / ExplainRunner
    │                                               ├ writeup.WriteupRunner (write-up, summary)
    │                                               └ style.StyleRunner (writing styles)
@@ -1288,12 +1288,34 @@ requests more often). The tester ledger charges a failed stream with unknown usa
 an estimate (`HostedQuota.charge(..., estimated=True)`: input bytes plus framing,
 streamed characters plus 256). Proof gives every replacement a fresh dispatch key.
 
-New whole-paper reviews (mode `referee`, pipeline `review-explore-v1`) use
-one `agent.Agent` in Explore mode. The job owns the pinned manuscript, model
-and tool allowances, saved report and completion state. The agent chooses its
-reads, calculations and reference checks. Its answer is the report delivered
-to the user. The plan, review and done phases distinguish preparation, the
-reviewer's tool loop and delivery.
+New whole-paper reviews (mode `referee`, pipeline `review-explore-v2`) use
+the normal Explore tool loop with a dedicated pre-submission instruction.
+The main referee owns the manuscript and the final Markdown. The
+`ExploreReviewRunner` in `explore_review.py` adds a read-only source index
+and an atomic notebook (`review_evidence.py`). Completed full-paper reports
+append the computed coverage disclosure when needed, before saving and returning
+the same Markdown. An assessment is a reported
+judgment about a passage whose lines were supplied. It is not a proof certificate.
+Follow-ups use their own instruction, the original manuscript and its saved report.
+
+`review_challenge.py` gives one independent reader the manuscript and scope.
+It can check one implication using source tools and an available sandbox.
+It sees no lead draft or notebook. A private scoped transport shares provider
+and budget accounting. The challenger has a 180-second deadline. At delivery
+the main reader stops speculation; a located serious objection with an identified
+decisive check can receive up to 15 seconds within the original deadline.
+The reviewer evaluates submitted evidence. A slot, transport or budget limit
+may leave the main reader working alone. Saved jobs record which case occurred.
+
+Explore can use eligible tools synchronously or request background execution
+through `explore_tasks.py`. Independent work can continue until a model boundary
+delivers a result or the agent explicitly waits for the check it needs. Checks
+default to required for the verdict. A pending check submitted with
+`required_for_report=false` is canceled at finalization. A saved
+Review journals submissions and outcomes. Resuming a possibly dispatched
+experiment exposes its interrupted state instead of blindly running it again.
+Older `review-explore-v1` jobs use `LegacyExploreReviewRunner` and the original
+single-agent prompt and execution path.
 
 Saved v4 reviews use `referee.RefereeRunner` and saved v2 reviews use
 `PaperReviewRunner`. Their historical execution and report formats follow.

@@ -51,7 +51,8 @@ LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
 # The Review with free referees and an independent judge (referee.RefereeRunner); it keeps 'review-v2' (the pipeline of
 # this module) when the whole paper does not fit the model's context.
 V4_PIPELINE = 'review-v4'
-EXPLORE_PIPELINE = 'review-explore-v1'
+LEGACY_EXPLORE_PIPELINE = 'review-explore-v1'
+EXPLORE_PIPELINE = 'review-explore-v2'
 SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
 TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
 MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
@@ -180,7 +181,7 @@ def variant_for_state(state):
     effort, when the typo check was the review's lowest effort, is a typo check."""
     variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
                    LEGACY_PIPELINES.get(state.get('pipeline')))
-    if state.get('pipeline') in (V4_PIPELINE, EXPLORE_PIPELINE):
+    if state.get('pipeline') in (V4_PIPELINE, LEGACY_EXPLORE_PIPELINE, EXPLORE_PIPELINE):
         variant = 'review'
     return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
@@ -191,6 +192,9 @@ def runner_for_state(state):
     if variant == 'review' and state.get('pipeline') == V4_PIPELINE:
         from .referee import RefereeRunner
         return RefereeRunner
+    if variant == 'review' and state.get('pipeline') == LEGACY_EXPLORE_PIPELINE:
+        from .explore_review import LegacyExploreReviewRunner
+        return LegacyExploreReviewRunner
     if variant == 'review' and state.get('pipeline') != EXPLORE_PIPELINE:
         return PaperReviewRunner  # saved v2/v3 jobs resume with their own pipeline
     return runner_class(variant) if variant else ResearchRunner

@@ -1747,7 +1747,10 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                     except (OSError, ValueError):
                         pass
                     return
-        threading.Thread(target=stop_on_pause, daemon=True, name='mathagent-literature-pause').start()
+        # A background lookup can have its own cancellation scope inside an active Explore turn.
+        from contextvars import copy_context
+        threading.Thread(target=copy_context().run, args=(stop_on_pause,), daemon=True,
+                         name='mathagent-literature-pause').start()
         try:
             # Pin the validated IP while retaining the original TLS verification name.
             deadline = time.monotonic() + timeout

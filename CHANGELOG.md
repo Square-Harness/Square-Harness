@@ -2,13 +2,12 @@
 
 ## Unreleased
 
-- Whole-paper Review now gives the pinned manuscript and the user's request to
-  one Explore agent. Its written report is saved and returned directly in the
-  conversation. Asking “review that paper” runs Review; asking also to compare
-  it with prior work adds a literature review. Earlier reviews retain their
-  saved workflows. This replaces the timed v4 referee and judge workflow for
-  new reports after the plain agent found more planted defects in the
-  six-manuscript comparison.
+- Whole-paper Review now gives the author a pre-submission report. The main
+  referee tracks source coverage and findings, and an independent challenger
+  can examine one consequential step. The referee assesses any objection and
+  writes the saved report. Earlier reviews resume with their original workflow.
+- Explore can submit independent calculations and reference lookups while
+  working on other passages, then use their results when needed.
 
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns

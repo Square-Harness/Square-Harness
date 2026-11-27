@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""A saved manuscript review, written directly by the ordinary Explore agent."""
+"""Saved manuscript reviews written by Explore, with versioned prompts and tool environments."""
 import copy
 import json
 import time
@@ -11,8 +11,10 @@ from .agent import Agent
 from .ledger import _atomic_write, _bytes, _read
 from .refcheck import nested_checker
 from .referee import MeteredClient, copies_manuscript
-from .research import ResearchRunner
-from .review import EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
+from .research import ResearchBudget, ResearchRunner
+from .review import EXPLORE_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
+from .review_challenge import Challenge
+from .review_evidence import ReviewEvidence, bibliographic_query
 from .review_position import _words
 from .source_tasks import excludes_external_sources
 from .tools import Workspace
@@ -21,6 +23,8 @@ from .worker_errors import WorkerInputError
 
 class ManuscriptWorkspace(Workspace):
     """Explore's normal file tools, reading the immutable attachments by their original names."""
+    immutable_excerpts = True
+
     def __init__(self, workspace, sources, numerics, mark_read):
         super().__init__(workspace.root, literature=workspace.literature, read_types=(), numerics=numerics)
         self.cancelled = workspace.cancelled
@@ -66,8 +70,9 @@ class ManuscriptWorkspace(Workspace):
         return super().execute(name, arguments, on_result=on_result)
 
 
-class ExploreReviewRunner(PaperReviewRunner):
-    PIPELINE = EXPLORE_PIPELINE
+class LegacyExploreReviewRunner(PaperReviewRunner):
+    PIPELINE = LEGACY_EXPLORE_PIPELINE
+    workspace_class = ManuscriptWorkspace
     sandbox = None
 
     def _extra_state(self):
@@ -113,13 +118,14 @@ class ExploreReviewRunner(PaperReviewRunner):
         if numerics is not None:
             previous = numerics.on_record
             def record(run):
-                state['experiments'].append({'id': run['id'], 'status': run['status'], 'purpose': run['purpose']})
-                self._save()
+                with self._mutex:
+                    state['experiments'].append({'id': run['id'], 'status': run['status'], 'purpose': run['purpose']})
+                    self._save()
                 if previous:
                     previous(run)
             numerics.on_record = record
             numerics.runs = len(state['experiments'])
-        workspace = ManuscriptWorkspace(base.workspace, state['sources'], numerics, self._mark)
+        workspace = self.workspace_class(base.workspace, state['sources'], numerics, self._mark)
         client = MeteredClient(self, 'review', 'reviewer')
         reviewer = Agent(client, workspace, base.model, base.ctx, base.predict, state['thinking'], 'explore',
                          state['tool_rounds'], seed=base.seed, temperature=state['temperature'], top_p=state['top_p'])
@@ -150,12 +156,20 @@ class ExploreReviewRunner(PaperReviewRunner):
             state['rounds_started'] = data['round'] + 1
             self._save()
 
-        chunks, last_write = [], time.monotonic()
+        chunks, partial, last_write = [], [], time.monotonic()
 
         def display(kind, value):
             nonlocal last_write
             if kind == 'start':
                 chunks.clear()
+                partial.clear()
+            elif kind == 'draft':
+                partial.append(value)
+                if time.monotonic() - last_write >= 2:
+                    state['draft'] = ''.join(partial)
+                    self._save()
+                    last_write = time.monotonic()
+                return
             elif kind == 'text':
                 chunks.append(value)
                 if time.monotonic() - last_write >= 2:
@@ -166,11 +180,10 @@ class ExploreReviewRunner(PaperReviewRunner):
 
         self.emit('notice', 'Reviewing the pinned manuscript.')
         try:
-            answer = reviewer.run(query, display, recover_empty_answer=True, tool_checkpoint=checkpoint,
-                                  after_tools=after_tools)
+            answer = self._run_reviewer(reviewer, query, display, checkpoint, after_tools)
         finally:
-            if chunks:
-                state['draft'] = ''.join(chunks)
+            if chunks or partial:
+                state['draft'] = ''.join(chunks or partial)
             if numerics is not None:
                 numerics.on_record = previous
         if answer.strip():
@@ -180,6 +193,10 @@ class ExploreReviewRunner(PaperReviewRunner):
         if finish and finish != 'stop' and not state['review_stop']:
             state['review_stop'] = f'The provider ended the review with finish reason {finish}.'
         state['phase'] = 'done'
+
+    def _run_reviewer(self, reviewer, query, display, checkpoint, after_tools):
+        return reviewer.run(query, display, recover_empty_answer=True, tool_checkpoint=checkpoint,
+                            after_tools=after_tools, background_tools=False)
 
     def _finish(self):
         s = self.state
@@ -209,3 +226,110 @@ class ExploreReviewRunner(PaperReviewRunner):
     def _result(self):
         # Preserve all the reviewer's Markdown, including any user-requested headings or horizontal rules.
         return ResearchRunner._result(self)
+
+
+REVIEW_PROMPT = """You are the author's pre-submission referee. Review the whole selected manuscript unless
+the author specifies a narrower scope. Check each proof against the printed statement and its exact hypotheses.
+First identify any fatal flaw and the results it affects. Distinguish an admissible counterexample to a theorem
+from a failure of its proof. If the conclusion remains open, say so. Record repairable missing justifications
+even when you can supply the argument yourself. Give a correction only if you can justify it independently.
+Check formulas, notation, cross-references, typographical errors and the bibliography. For a citation used in
+a proof, separate existence and bibliographic identity from support for this precise theorem and its hypotheses.
+Identify unavailable sources as unverified. Honor the author's requested focus, language and source restrictions.
+When a computation or reference check can run while you examine another passage, submit it in the background
+and continue reading. Await it when the next inference depends on it. Mark ancillary checks optional for the report.
+Use the private index to track proofs, other passages and references. Reading lines establishes access; record
+your actual assessment with assess_review_items. Group related items when they have the same specific basis.
+Use record_review_finding for concrete located findings that should survive subsequent tool calls. Validate any
+independent challenger evidence before using it. Open with the mathematical consequence most relevant to the
+author, give the locations, reasons and justified actions, and disclose material unresolved or unchecked scope.
+The author knows the paper. Write one useful report in your own words."""
+
+FOLLOWUP_PROMPT = """Answer the author's follow-up on the pinned manuscript and earlier report. Respect its
+scope, distinguish a false statement from a gap, give the evidence for any correction, and identify uncertainty."""
+
+
+class ReviewWorkspace(ManuscriptWorkspace):
+    evidence = None
+
+    def schemas(self):
+        return super().schemas() + (self.evidence.schemas() if self.evidence else [])
+
+    def execute(self, name, arguments, *, on_result=None):
+        if self.evidence and name in self.evidence.tool_names:
+            return self.evidence.execute(name, arguments)
+        if name in ('search_papers', 'search_web', 'open_url', 'open_paper', 'find_quotes', 'check_reference',
+                    'lookup_identifier'):
+            allowed, arguments = bibliographic_query(name, arguments, self.source_words, self.documents.values())
+            if not allowed:
+                return 'Tool error: public lookups must use bibliographic details or a query in your own words.'
+        return super().execute(name, arguments, on_result=on_result)
+
+
+class ExploreReviewRunner(LegacyExploreReviewRunner):
+    PIPELINE = EXPLORE_PIPELINE
+    workspace_class = ReviewWorkspace
+
+    def _extra_state(self):
+        state = super()._extra_state()
+        state['concurrency'] = min(2, self.concurrency)
+        state['challenge'] = {'status': 'new'}
+        return state
+
+    def _admit_call(self, role, cap, input_tokens):
+        if role == 'challenge':
+            # Re-check under the metering lock, including reservations made by the lead between planning
+            # and admission. Keep room for a full native lead call and its next source context.
+            if self._tokens_left(cap) < self.agent.predict or self._input_left(input_tokens) < input_tokens:
+                raise ResearchBudget('Remaining review allowance reserved for the main referee.')
+
+    def _run_reviewer(self, reviewer, query, display, checkpoint, after_tools):
+        state = self.state
+        artifacts = self.directory / 'artifacts'
+        def read_ranges():
+            with self._mutex:
+                return copy.deepcopy(state['manuscript_ranges'])
+        primary, *support = state['sources']
+        indexed = [primary, *(s for s in support if Path(s['path']).suffix.lower() in {'.bib', '.bbl'})]
+        evidence = ReviewEvidence(indexed, artifacts, read_ranges, support=support)
+        query += '\nPrimary manuscript: ' + primary['path']
+        if support:
+            query += '\nSupporting material (consult where relevant): ' + ', '.join(s['path'] for s in support)
+        reviewer.workspace.evidence = evidence
+        challenge = Challenge(self)
+        followup = bool((state.get('review_reference') or {}).get('followup'))
+        instruction = FOLLOWUP_PROMPT if followup else REVIEW_PROMPT
+        def challenge_workspace(cancel, record):
+            numerics = None
+            if self.sandbox is not None and reviewer.workspace.numerics is not None:
+                numerics = self.sandbox.automatic_session(reviewer.workspace.root, cancel=cancel, ctx=reviewer.ctx)
+                if numerics is not None:
+                    def saved(experiment):
+                        with self._mutex:
+                            record['experiments'].append(experiment['id'])
+                            self._save()
+                    numerics.on_record = saved
+            # No shared pointer to the lead's notebook, literature, or list of lines the lead has inspected.
+            selected = Workspace(reviewer.workspace.root, read_types=(), numerics=numerics)
+            scope = ManuscriptWorkspace(selected, state['sources'], numerics, lambda *args: None)
+            scope.cancelled = cancel.is_set
+            scope.result_chars = reviewer.workspace.result_chars
+            return scope
+
+        def at_boundary(final):
+            return {'snapshot': evidence.summary(), 'message': challenge.handoff(final)}
+
+        try:
+            challenge.start(challenge_workspace)
+            answer = reviewer.run(query, display, instruction=instruction, recover_empty_answer=True,
+                                  tool_checkpoint=checkpoint, after_tools=after_tools, background_tools=True,
+                                  evidence_hook=at_boundary, task_journal=artifacts / 'review-background.json')
+            if (answer.strip() and not followup and not state.get('target') and not reviewer.last_stop_reason
+                    and reviewer.last_stats.get('done_reason') in (None, 'stop')):
+                note = evidence.coverage_note()
+                if note:
+                    state['coverage_disclosure'] = note
+                    answer = answer.rstrip() + '\n\n' + note
+            return answer
+        finally:
+            challenge.close()

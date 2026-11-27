@@ -513,6 +513,12 @@ class ChatCapture:
             if self.calls:
                 self.calls[-1]['stats'] = dict(self.agent.last_stats)
             self._publish('end')
+        elif kind == 'superseded':
+            # This draft was withheld because new asynchronous evidence arrived. Align the metadata for
+            # the actual delivered answer with the committed history, which omits the abandoned draft.
+            if self.calls:
+                self.calls[-1]['discarded'] = True
+            self._publish('notice', text=value)
         elif kind == 'progress':  # shown while it lasts, never saved in the transcript
             self._flush()
             self._publish('progress', text=str(value)[:4000])
