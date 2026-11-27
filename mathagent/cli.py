@@ -15,17 +15,18 @@ from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
+from .call_policy import MIN_PROOF_REVIEW_TOKENS
 from .api_profiles import API_PROFILES, create_profile_client, profile_class, resolve_api_profile
 from .format_request import markdown_conversion_request
 from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
 from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
-from .numerics import PythonSandbox, SandboxUnavailable
-from .numerics.session import MIN_AUTOMATIC_CONTEXT
+from .numerics import IMAGE, PythonSandbox, SandboxUnavailable
 from . import skill_catalog
 from .proof import ProofRunner
+from .proof_support import complete_proof_evidence
 from .ledger import ProofStore
 from .tools import Workspace
-from .literature import LiteratureTools
+from .literature import LiteratureTools, UNLIMITED_SOURCE
 from .litreview import ReviewRunner
 from .refcheck import CheckRunner, nested_checker, precise_reference_request
 from .research import ResearchRunner
@@ -144,12 +145,12 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in Explore and /review.
+Sandboxed Python (Docker, no network or files): /python-lab, and automatic checks in Explore, Proof and /review.
 Unsandboxed Python is opt-in (--allow-python) and approved per call.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
-Offline is the default: a loopback model server and cached/local sources only.
-External research requires --online. Proof mode uses pinned text and no tools.
+Literature searches use online sources. You can specify the permitted sources in your request.
+Proof can consult papers and request evidence.
 Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
 
@@ -178,13 +179,13 @@ def parser():
                    help='Ordinary-chat output limit, including thinking; specialist workflows allocate output separately')
     p.add_argument('--specialist-output-tokens', type=int,
                    help='Optional explicit output cap per specialist model call, including thinking (default: phase and physical context)')
-    p.add_argument('--max-rounds', type=int, default=8, help='Tool rounds per ordinary chat query (not proof rounds)')
+    p.add_argument('--max-rounds', type=int, help='Optional explicit maximum tool rounds per ordinary chat query')
     p.add_argument('--assistant-concurrency', type=int, default=2,
                    help='Simultaneous Assistant workers (1–5 for DS4, 1–4 for other OpenAI-compatible servers; other backends use 1)')
     p.add_argument('--assistant-tokens', type=int, help='Optional hard shared generated-token ceiling (default: no cumulative ceiling)')
     p.add_argument('--assistant-input-tokens', type=int, help='Optional hard shared input-token ceiling (default: no cumulative ceiling)')
     p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort and model profile)')
-    p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
+    p.add_argument('--proof-rounds', type=int, default=5, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification '
                    '(default: no cumulative ceiling; hosted DS4 profiles: proof-rounds x (solve + 2 x verify) tokens)')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof '
@@ -203,23 +204,20 @@ def parser():
                    help='Verifier sampling temperature (default: --temperature)')
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
                    help='Pin a workspace theorem source, PDF or cached doc-ID; repeat for multiple sources')
-    network = p.add_mutually_exclusive_group()
-    network.add_argument('--online', action='store_true', help='Allow external literature/search requests; queries leave this computer')
-    network.add_argument('--offline', action='store_true', help='Use local/cached research sources only; model stays loopback unless --allow-remote-model (default)')
-    p.add_argument('--allow-remote-model', action='store_true',
-                   help='Allow prompts, attached source text and tool context to be sent to the remote model --host; does not enable web research')
+    p.add_argument('--allow-remote-model', '--online', dest='allow_remote_model', action='store_true',
+                   help='Allow prompts, attached source text and tool context to be sent to the remote model --host')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--template-file', action='append', default=[], metavar='PATH',
                    help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
-    p.add_argument('--research-rounds', type=int, default=6, help='Report effort: 1/3/5 rounds map to Low/Medium/High (default: 3 for Quick review/Explain, 6 otherwise). Literature Review always uses High. Review and Typo Check each have one depth.')
+    p.add_argument('--research-rounds', type=int, default=5, help='Maximum report rounds (default: 5, High).')
     p.add_argument('--research-tokens', type=int, help='Cumulative generated-token ceiling per report (default: effort-based for DS4, unlimited for local profiles)')
     p.add_argument('--research-input-tokens', type=int, help='Optional cumulative input-token ceiling per report (default: no cumulative ceiling)')
     p.add_argument('--resume-add-seconds', type=float, default=0, help='Explicit additional working seconds for /resume and /research-resume, recorded in the job')
-    p.add_argument('--resume-add-tokens', type=int, default=0, help='Explicit additional output tokens for /resume and /research-resume, recorded in the job (up to 20000000)')
-    p.add_argument('--resume-add-rounds', type=int, default=0, help='Explicit additional proof attempts for /resume, recorded in the job (up to 20)')
-    p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
-    p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: sized to survey breadth, otherwise 12)')
-    p.add_argument('--research-chars', type=int, default=30000, help='Maximum response characters for model-invoked literature tools (survey synthesis uses the input-token budget)')
+    p.add_argument('--resume-add-tokens', type=int, default=0, help='Explicit additional output tokens for /resume and /research-resume, recorded in the job')
+    p.add_argument('--resume-add-rounds', type=int, default=0, help='Explicit additional proof attempts for /resume, recorded in the job')
+    p.add_argument('--research-seconds', type=float, default=1800, help='Total time budget per new report')
+    p.add_argument('--research-requests', type=int, default=None, help='Maximum external HTTP requests per new report (default: no cumulative source-request limit)')
+    p.add_argument('--research-chars', type=int, default=UNLIMITED_SOURCE, help='Maximum response characters for model-invoked literature tools (survey synthesis uses the input-token budget)')
     p.add_argument('--output', metavar='PATH', help='Export the research/referee Markdown report inside the workspace')
     p.add_argument('--mode', choices=MODES, default='prove')
     p.add_argument('--no-think', action='store_true')
@@ -230,7 +228,7 @@ def parser():
                          help='Do not offer automatic numerical sanity checks in chat (/python-lab and /sanity-check remain)')
     sandbox.add_argument('--no-python-sandbox', action='store_true',
                          help='Disable the Docker Python sandbox entirely (python-lab and numerical checks)')
-    sandbox.add_argument('--python-image', metavar='TAG', help='Sandbox image (default: square-harness/python-numerics:2)')
+    sandbox.add_argument('--python-image', metavar='TAG', help=f'Sandbox image (default: {IMAGE})')
     sandbox.add_argument('--python-limits', type=Path, metavar='FILE',
                          help='JSON file with sanity-check and python-lab limits, bounded by built-in maxima')
     sandbox.add_argument('--python-concurrency', type=int, default=2, metavar='N',
@@ -261,7 +259,7 @@ def select_proof(workspace_root, proof_id=''):
     jobs = sorted(ProofStore.list(workspace_root), key=lambda job: job.get('updated_at', ''), reverse=True)
     if not jobs:
         raise ValueError('No saved proof jobs in this workspace. Start one with /prove <goal>.')
-    active = [job for job in jobs if job.get('status') in {'ready', 'active', 'running', 'paused', 'interrupted', 'error', 'pending'}]
+    active = [job for job in jobs if job.get('status') in {'ready', 'active', 'running', 'waiting_for_evidence', 'paused', 'interrupted', 'error', 'pending'}]
     return ProofStore.load(workspace_root, (active or jobs)[0]['id'])
 
 
@@ -309,16 +307,16 @@ def main():
             or args.assistant_input_tokens is not None and args.assistant_input_tokens < 4096
             or args.assistant_seconds is not None and (not math.isfinite(args.assistant_seconds) or args.assistant_seconds <= 0)):
         p.error(f'Use assistant-concurrency 1–{assistant_limit}, assistant token budgets >= 4096, and finite assistant-seconds > 0')
-    if args.ctx < 2048 or not 128 <= args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
-        p.error('Use ctx >= 2048, 128 <= predict < ctx - 1024, and 1 <= max-rounds <= 32')
+    if args.ctx < 2048 or not 128 <= args.predict < args.ctx - 1024 or (args.max_rounds is not None and args.max_rounds < 1):
+        p.error('Use ctx >= 2048, 128 <= predict < ctx - 1024, and a positive explicit --max-rounds')
     if args.specialist_output_tokens is not None and args.specialist_output_tokens < 128:
         p.error('Use specialist-output-tokens >= 128')
-    if not 0 <= args.resume_add_tokens <= 20_000_000 or not 0 <= args.resume_add_rounds <= 20:
-        p.error('Use resume-add-tokens from 0 to 20000000 and resume-add-rounds from 0 to 20')
-    if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens is not None and args.proof_tokens < 512
+    if not 0 <= args.resume_add_tokens <= (1 << 53) - 1 or not 0 <= args.resume_add_rounds <= (1 << 53) - 1:
+        p.error('Use nonnegative JSON-safe integers for resume-add-tokens and resume-add-rounds')
+    if (not 1 <= args.proof_rounds <= (1 << 53) - 1 or args.proof_tokens is not None and args.proof_tokens < 512
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
-        p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
+        p.error('Use a positive JSON-safe proof-rounds value, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
     if remote_profile and max(args.predict, args.proof_solve_tokens, args.proof_verify_tokens) > MODEL_OUTPUT_TOKENS:
         p.error(f'DS4 chat, solve and verify limits cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     if args.proof_repair_tokens is not None and not 128 <= args.proof_repair_tokens <= args.proof_solve_tokens:
@@ -328,32 +326,32 @@ def main():
     if args.proof_verify_temperature is not None and (not math.isfinite(args.proof_verify_temperature)
                                                       or not 0 <= args.proof_verify_temperature <= 2):
         p.error('--proof-verify-temperature must be between 0 and 2')
-    if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= 86400:
-        p.error('Use resume-add-seconds between 0 and 86400')
+    if not math.isfinite(args.resume_add_seconds) or not 0 <= args.resume_add_seconds <= (1 << 53) - 1:
+        p.error('Use finite, nonnegative resume-add-seconds within the JSON-safe range')
     args.gui_concurrency_explicit = any(value.split('=')[0] == '--gui-concurrency' for value in sys.argv[1:])
     args.gui_model_concurrency_explicit = any(value.split('=')[0] == '--gui-model-concurrency' for value in sys.argv[1:])
     args.research_seconds_explicit = any(value.split('=')[0] == '--research-seconds' for value in sys.argv[1:])
     args.research_tokens_explicit = any(value.split('=')[0] == '--research-tokens' for value in sys.argv[1:])
+    args.proof_rounds_explicit = any(value.split('=')[0] == '--proof-rounds' for value in sys.argv[1:])
+    args.proof_seconds_explicit = any(value.split('=')[0] == '--proof-seconds' for value in sys.argv[1:])
     args.research_rounds_explicit = any(value == '--research-rounds' or value.startswith('--research-rounds=') for value in sys.argv[1:])
-    if (not 1 <= args.research_rounds <= 50 or args.research_tokens is not None and args.research_tokens < 1024
+    if (not 1 <= args.research_rounds <= (1 << 53) - 1 or args.research_tokens is not None and args.research_tokens < 1024
             or args.research_input_tokens is not None and args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
-            or args.research_seconds <= 0 or args.research_requests is not None and not 0 <= args.research_requests <= 1000
-            or not 1000 <= args.research_chars <= 1_000_000):
-        p.error('Use research-rounds 1–50, research-tokens >= 1024, research-input-tokens >= 2048, positive finite research-seconds, research-requests 0–1000, and research-chars 1000–1000000')
+            or args.research_seconds <= 0 or args.research_requests is not None and not 0 <= args.research_requests <= UNLIMITED_SOURCE
+            or not 1000 <= args.research_chars <= UNLIMITED_SOURCE):
+        p.error('Use positive JSON-safe research-rounds, research-tokens >= 1024, research-input-tokens >= 2048, positive finite research-seconds, nonnegative research-requests, and research-chars >= 1000 (safe integers)')
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         p.error('--host must be an http(s) model URL without credentials, query or fragment')
-    if not args.online and not args.allow_remote_model:
+    if not args.allow_remote_model:
         try:
             local_host = host.hostname == 'localhost' or ipaddress.ip_address(host.hostname).is_loopback
         except ValueError:
             local_host = False
         if not local_host:
-            p.error('Offline mode requires a localhost/loopback model --host; use --allow-remote-model explicitly, or --online for model and web research')
+            p.error('A remote model host requires --allow-remote-model')
     if not 1 <= args.python_concurrency <= 8:
         p.error('Use python-concurrency from 1 to 8')
-    if not args.online and args.allow_python:
-        p.error('--allow-python requires --online: unrestricted Python can access the network')
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
@@ -367,8 +365,8 @@ def main():
             return 2
     ui = UI(args.show_thinking)
     try:
-        literature = LiteratureTools(args.workspace, online=args.online,
-            max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
+        literature = LiteratureTools(args.workspace,
+            max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
         sandbox = PythonSandbox.from_args(args)
         client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
@@ -383,7 +381,7 @@ def main():
         return 2
     ui.say(f'╭─ SQUARE HARNESS · v{__version__}\n│ {agent.model} · {args.host}\n'
            f'│ Workspace: {workspace.root}\n│ Context {agent.ctx} · max output {agent.predict} · mode {agent.mode}\n'
-           f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof: solve → verify → repair\n'
+           '│ Research: online · proof: solve → verify → repair\n'
            '╰─ /help for commands · proof progress saved automatically · manuscript edits require approval')
     if args.allow_python:
         ui.say('Python enabled: each snippet requires approval and runs with your account permissions.')
@@ -396,11 +394,10 @@ def main():
     one_shot = args.prompt is not None or args.resume is not None or args.research_resume is not None
 
     def fresh_library():
-        # A job restores its own counters and restrictions. Do not let an
-        # offline resume or another job's exhausted budget alter later jobs.
+        # Every new job starts with fresh source counters and its own request scope.
         nonlocal literature
-        literature = LiteratureTools(workspace.root, online=args.online,
-            max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
+        literature = LiteratureTools(workspace.root,
+            max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
         workspace.literature = literature
 
     def ensure_model():
@@ -437,7 +434,7 @@ def main():
             ui.say(result['report'])
         ui.say('A model review is not a mathematical certificate. See the report for unresolved issues.')
         ui.say(f'Report: {Path(result["directory"]) / "report.md"}')
-        if result['status'] in {'ready', 'running', 'paused', 'interrupted', 'error'}:
+        if result['status'] in {'ready', 'running', 'waiting_for_evidence', 'paused', 'interrupted', 'error'}:
             ui.say(f'Saved job: /resume {result["id"]} (uses the remaining original budget)')
         else:
             ui.say(f'Inspect: /proof-report {result["id"]}. A new /prove starts a separate job.')
@@ -480,12 +477,12 @@ def main():
                 return sandbox.bind(skill, workspace.root, explicit=True, approve=ui.approve)
             except SandboxUnavailable as exc:
                 raise ValueError(f'{skill} needs the Python sandbox. {exc}') from None
-        if mode != 'explore':
+        if mode not in ('explore', 'prove'):
             return None
         session = sandbox.automatic_session(workspace.root, ctx=agent.ctx)
         if session is None and sandbox.enabled and sandbox.automatic and not sandbox_noted:
             sandbox_noted = True
-            reason = sandbox.unavailable() or f'they need --ctx {MIN_AUTOMATIC_CONTEXT} or more'
+            reason = sandbox.unavailable() or 'the numerical skill is unavailable'
             ui.say(f'Note: automatic numerical checks are off: {reason}')
         return session
 
@@ -503,22 +500,23 @@ def main():
         if agent.mode == 'prove':
             if args.output:
                 raise ValueError('--output is for literature/referee reports; proof reports save automatically')
-            proof_allowance = sum(min(limit, args.specialist_output_tokens or limit)
-                                  for limit in (args.proof_solve_tokens, args.proof_verify_tokens))
-            if args.proof_tokens is not None and args.proof_tokens < proof_allowance:
-                raise ValueError('--proof-tokens must cover one full solve and verification; reduce their explicit limits or raise the total')
+            if args.proof_tokens is not None and args.proof_tokens < (args.proof_min_solve_tokens or MIN_PROOF_REVIEW_TOKENS) + MIN_PROOF_REVIEW_TOKENS:
+                raise ValueError('The proof token allowance must cover the solver and verifier minimums.')
             unpinned = unpinned_files(query)
             if unpinned:
-                ui.say('Note: proof mode has no file tools; the model sees only pinned text. Not pinned: '
+                ui.say('These workspace files are mentioned but have not been pinned: '
                        + ', '.join(unpinned) + '. Relaunch with --proof-file to include them.')
             ensure_model()
             last_proof_id = ''
             proof_running = True
-            result = ProofRunner(agent, ui.emit).start(query, max_rounds=args.proof_rounds,
+            workspace.numerics = bind_numerics('prove')
+            runner = ProofRunner(agent, ui.emit, evidence_coordinator=True)
+            result = runner.start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
                 min_solve_tokens=args.proof_min_solve_tokens, repair_tokens=args.proof_repair_tokens,
                 verify_temperature=args.proof_verify_temperature, source_files=args.proof_file)
+            result = complete_proof_evidence(runner, result)
             proof_running = False
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
@@ -537,24 +535,23 @@ def main():
                 runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
                 runner.sandbox = sandbox  # the Review's referees compute in the sandbox (policy "review")
             result = runner.start(query, kind=kind,
-                source_files=args.research_file, max_rounds=(args.research_rounds if args.research_rounds_explicit or agent.mode not in ('quick_review', 'explain') else 3),
+                source_files=args.research_file, max_rounds=args.research_rounds,
                 max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
                 max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds if args.research_seconds_explicit or
                     (agent.mode != 'literature' and not remote_profile) else None,
-                max_requests=args.research_requests if args.research_requests is not None or agent.mode == 'literature' else 12,
+                max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE,
                 max_chars=args.research_chars)
             research_running = False
             research_result(result)
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
         elif agent.mode == 'check':
             ensure_model()
-            if not args.online:
-                ui.say('Note: research is offline, so the check can only use cached sources. Relaunch with --online.')
             runner = CheckRunner(agent, ui.emit)
             result = runner.start(query, lookup='precise' if precise_reference_request(query) else 'standard',
                                   max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
-                                  max_seconds=args.research_seconds if args.research_seconds_explicit else None)
+                                  max_seconds=args.research_seconds if args.research_seconds_explicit else None,
+                                  max_requests=args.research_requests, max_chars=args.research_chars)
             ui.say('\n' + (runner.state.get('answer') or runner._compose()))
             ui.say(f'Check {result["id"]} · {result["status"]} · log: {Path(result["directory"]) / "report.md"}')
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': runner.state.get('answer', '')}])
@@ -572,15 +569,24 @@ def main():
                 max_tokens=args.research_tokens if not remote_profile or args.research_tokens_explicit else None,
                 max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds if not remote_profile or args.research_seconds_explicit else None,
-                max_requests=args.research_requests if args.research_requests is not None else 12, max_chars=args.research_chars)
+                max_requests=args.research_requests if args.research_requests is not None else UNLIMITED_SOURCE, max_chars=args.research_chars)
             research_running = False
             research_result(result, export=False)
         else:
             if args.output:
                 raise ValueError('--output is for literature/referee reports')
-            ensure_model()
-            workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
-            chat(agent, query)
+            from .gui import projects
+            inspection = projects.inspection_source(workspace.root, query)
+            agent.notebook_source = projects.quoted_inspection(inspection)
+            agent.notebook_answer = projects.verbatim_inspection(query, inspection)
+            try:
+                if not agent.notebook_answer:
+                    ensure_model()
+                workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
+                chat(agent, query)
+            finally:
+                agent.notebook_source = ''
+                agent.notebook_answer = None
 
     while True:
         try:
@@ -608,7 +614,7 @@ def main():
                     for name in ('check', 'literature', 'review', 'typo-check', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                     for skill in skill_catalog.catalog():
-                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore and /review, or /sanity-check'
+                        how = '/python-lab only' if skill.invocation == 'explicit' else 'automatic in Explore, Proof and /review, or /sanity-check'
                         ui.say(f'{skill.name} ({how}): {Path(__file__).parent / "skills" / skill.name / "SKILL.md"}')
                 elif command == '/experiments':
                     from .numerics.artifacts import ExperimentStore
@@ -692,9 +698,12 @@ def main():
                     # validate an unrelated CLI default model before resuming.
                     resume_agent = copy.copy(agent)
                     resume_agent.client = copy.copy(agent.client)
-                    result = ProofRunner(resume_agent, ui.emit).resume(
+                    workspace.numerics = bind_numerics('prove')
+                    runner = ProofRunner(resume_agent, ui.emit, evidence_coordinator=True)
+                    result = runner.resume(
                         last_proof_id, add_tokens=args.resume_add_tokens, add_seconds=args.resume_add_seconds,
                         add_rounds=args.resume_add_rounds)
+                    result = complete_proof_evidence(runner, result)
                     proof_running = False
                     model_checked = False
                     proof_result(result)

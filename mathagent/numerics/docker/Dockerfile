@@ -9,7 +9,7 @@
 # The harness accepts only an image labelled with the digest of this build context
 # (org.squareharness.sandbox.content, computed by numerics.executor.content_digest);
 # the build command adds it. A manual or multi-architecture build must pass it too:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:2 \
+#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/python-numerics:3 \
 #     --label org.squareharness.sandbox.content=<digest> --push mathagent/numerics/docker
 #
 # The base image is pinned by its multi-architecture index digest and every wheel by
@@ -39,7 +39,7 @@ RUN mkdir -p /opt/sandbox/mplconfig \
  && chmod -R a+rX /opt/sandbox
 
 LABEL org.squareharness.sandbox="python-numerics" \
-      org.squareharness.sandbox.version="2" \
+      org.squareharness.sandbox.version="3" \
       org.opencontainers.image.title="Square Harness Python sandbox" \
       org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0"
 

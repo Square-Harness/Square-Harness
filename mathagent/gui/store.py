@@ -13,7 +13,6 @@ import copy
 import errno
 import fcntl
 import hashlib
-import itertools
 import json
 import os
 from pathlib import Path
@@ -30,13 +29,13 @@ from ..reporting import one_line
 from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..worker_errors import WorkerInputError
-from ..literature import LiteratureTools
+from ..literature import LiteratureTools, UNLIMITED_SOURCE
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
-from ..research import _job_directory, _read_state as _read_research
+from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
 from ..review import variant_for_state
 from ..review_export import review_bibtex, review_markdown
-from ..tools import READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
+from ..tools import FALLBACK, READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
 from ..style import (delete_profile, edit_profile, list_profiles, load_choice, macro_definitions, public_profile, read_template,
                      rename_profile, save_choice, scan, set_template)
 from ..writeup import SOURCE_BUNDLE_BYTES, TEMPLATE_SUFFIXES, download_name, entry_identifiers
@@ -97,7 +96,7 @@ def _tool_experiment(message):
         return None
     return experiment_item(value.get('experiment_id'), value.get('status'),
                            list(value.get('figures') or []) + list(value.get('files') or []))
-UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py', '.png', '.jpg', '.jpeg', '.webp'}
+UPLOAD_SUFFIXES = TEXT | {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # what the model reads (archives apart)
 BINARY_UPLOADS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}  # figures and visual inputs, and PDFs to read
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -127,14 +126,14 @@ def _cached(path, load, revision=None):
     return value
 
 
-def locked(directory):
+def locked(directory, filename='run.lock'):
     """True while an engine process holds the job's run lock.
 
     Probing takes a shared lock for microseconds and is only used for jobs whose
     saved status says running, to tell live work from an interrupted process.
     """
     try:
-        fd = os.open(directory / 'run.lock', os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(directory / filename, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return False
     try:
@@ -279,6 +278,13 @@ def proof_request_text(state):
     return request_text(state)
 
 
+def _proof_active(state, directory, active):
+    status = state['status']
+    if status not in ('running', 'waiting_for_evidence'):
+        return False
+    return state['id'] == active or locked(directory, 'evidence-service.lock' if status == 'waiting_for_evidence' else 'run.lock')
+
+
 def list_proofs(root, active=None):
     root = Path(root)
     base = root / '.mathagent' / 'proofs'
@@ -292,7 +298,7 @@ def list_proofs(root, active=None):
             state = _cached(path / 'state.json', lambda: ProofStore.load(root, path.name).state)
         except (OSError, ValueError):
             continue
-        running = state['status'] == 'running' and (path.name == active or locked(path))
+        running = _proof_active(state, path, active)
         jobs.append({'id': state['id'], 'kind': 'proof', 'version': state['version'], 'status': state['status'],
                      'title': one_line(proof_request_text(state), 140), 'updated_at': state['updated_at'],
                      'created_at': state['created_at'], 'running': running,
@@ -307,7 +313,7 @@ def proof_detail(root, proof_id, active=None):
     directory = _proof_directory(root, proof_id)
     store = ProofStore.load(root, proof_id)
     s = store.state
-    running = s['status'] == 'running' and (proof_id == active or locked(directory))
+    running = _proof_active(s, directory, active)
     call = next((c for c in reversed(s['calls']) if c.get('status') == 'running'), None) if running else None
     settings = s['settings']
     detail = {
@@ -316,6 +322,7 @@ def proof_detail(root, proof_id, active=None):
         'recovery_notice': s.get('recovery_notice'),
         'created_at': s['created_at'], 'updated_at': s['updated_at'], 'revision': s['revision'],
         'settings': settings,
+        'evidence_request': s.get('evidence_request'),
         'images': s.get('images', []),
         'budget': {'rounds': _budget(s['rounds_started'], settings['max_rounds']),
                    'tokens': job_output_budget(s, running),
@@ -358,7 +365,8 @@ def trash_proof(root, proof_id):
     target = trash / 'proofs' / f'{proof_id}-{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}'
     if target.exists() or target.is_symlink():
         target = target.with_name(target.name + '-' + uuid.uuid4().hex[:6])
-    with ProofStore.load(root, proof_id).lock():
+    store = ProofStore.load(root, proof_id)
+    with store._file_lock('evidence-service.lock'), store.lock():
         os.rename(directory, target)
     _sync_directory(directory.parent)
     return target
@@ -459,8 +467,8 @@ def research_detail(root, job_id, active=None):
                    'tokens': job_output_budget(s, running),
                    'input_tokens': _budget(s['input_tokens_charged'], settings['max_input_tokens']),
                    'seconds': _working_time(s, running),
-                   'requests': _budget(usage.get('requests', 0), settings['max_requests']),
-                   'chars': _budget(usage.get('returned_chars', 0), settings['max_chars']),
+                   'requests': _budget(usage.get('requests', 0), None if settings['max_requests'] == UNLIMITED_SOURCE else settings['max_requests']),
+                   'chars': _budget(usage.get('returned_chars', 0), None if settings['max_chars'] == UNLIMITED_SOURCE else settings['max_chars']),
                    **_live_context(call)},
         'progress': s.get('progress'),
         'sources': [{'id': src['id'], 'path': src['path'], 'sha256': src['sha256'],
@@ -625,7 +633,7 @@ def _legacy_review_passages(root, record, document, results):
     if not document.get('document_id') or not results:
         return []
     try:
-        meta, lines = LiteratureTools(root)._document(document['document_id'])
+        meta, lines = LiteratureTools(root, online=False)._document(document['document_id'])
     except (OSError, ValueError, TypeError):
         return []
     canon = str(meta.get('canonical_identifier') or '')
@@ -710,7 +718,7 @@ def research_artifact(root, job_id, name, stream_from=None):
 # -- workspace files that can be pinned ------------------------------------
 
 def _listable(path):
-    """A file the model can be given: text, PDF or an image."""
+    """A file the model can be given: text (code included), PDF or an image."""
     suffix = source_suffix(path)
     return suffix in TEXT or suffix == '.pdf' or images.is_image(path)
 
@@ -722,7 +730,7 @@ def _file_record(path, root, info):
             'updated_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
 
 
-def list_files(root, limit=2000):
+def list_files(root, limit=None):
     root = Path(root)
     found = []
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -737,12 +745,12 @@ def list_files(root, limit=2000):
             except OSError:
                 continue
             found.append(_file_record(path, root, info))
-            if len(found) >= limit:
+            if limit is not None and len(found) >= limit:
                 return found
     return found
 
 
-def browse_files(root, relative='', limit=2000):
+def browse_files(root, relative='', limit=None):
     """One folder at or below `root` (the interface root), for the file explorer: its subfolders (empty ones
     too) and the files the model can be given, with size and modification time. A project's folder carries the project's name and
     hides its notebook. Hidden entries and symlinks are left out, as in list_files."""
@@ -759,14 +767,14 @@ def browse_files(root, relative='', limit=2000):
         if entry.name.startswith('.') or entry.is_symlink():
             continue
         path = Path(entry.path)
-        if len(folders) + len(files) >= limit:
+        if limit is not None and len(folders) + len(files) >= limit:
             truncated = True
             break
         if entry.is_dir(follow_symlinks=False):
             if entry.name in SKIP:
                 continue
             try:
-                inside = sum(1 for child in itertools.islice(os.scandir(path), 1000) if not child.name.startswith('.')
+                inside = sum(1 for child in os.scandir(path) if not child.name.startswith('.')
                              and not child.is_symlink() and (child.is_dir(follow_symlinks=False) and child.name not in SKIP
                                                              or child.is_file(follow_symlinks=False) and _listable(child.name)))
             except OSError:
@@ -824,7 +832,7 @@ def _save_chat(root, chat):
     _atomic_write(_chats(root, create=True) / (chat['id'] + '.json'), data)
 
 
-def create_chat(root, mode, think=True, model='', online=False, project_id=None):
+def create_chat(root, mode, think=True, model='', *, project_id=None):
     if mode not in CHAT_MODES:
         raise ValueError('Chat mode must be explore or free')
     if project_id is not None:
@@ -832,7 +840,7 @@ def create_chat(root, mode, think=True, model='', online=False, project_id=None)
     now = _now()
     chat = {'version': 1, 'id': str(uuid.uuid4()), 'mode': mode, 'title': '',
             'created_at': now, 'updated_at': now,
-            'settings': {'think': bool(think), 'model': model, 'online': bool(online)},
+            'settings': {'think': bool(think), 'model': model},
             'history': [], 'transcript': [], 'project_id': project_id}
     _save_chat(root, chat)
     return chat
@@ -986,6 +994,7 @@ def load_chat(root, chat_id):
             or chat.get('mode') not in SAVED_CHAT_MODES or not isinstance(chat.get('history'), list)
             or not isinstance(chat.get('transcript'), list) or not isinstance(chat.get('settings'), dict)):
         raise ValueError('Invalid or unsupported chat file')
+    chat['settings'].pop('online', None)  # Task-specific source restrictions come from the user's request.
     # Preserve the maximum budget of route cards saved before the effort rename.
     for item in chat['transcript']:
         if isinstance(item, dict) and item.get('role') == 'route' and item.get('effort') == 'brezis':
@@ -1041,12 +1050,9 @@ def delete_chat(root, chat_id):
 
 
 @_locked_chat
-def update_chat_settings(root, chat_id, *, think=None, online=None):
+def update_chat_settings(root, chat_id, *, think):
     chat = load_chat(root, chat_id)
-    if think is not None:
-        chat['settings']['think'] = bool(think)
-    if online is not None:
-        chat['settings']['online'] = bool(online)
+    chat['settings']['think'] = bool(think)
     _save_chat(root, chat)
     return chat
 
@@ -1169,8 +1175,15 @@ def list_chats(root, templates_root=None, *, query=None, search=None):
 
 
 @_locked_chat
+def save_direct_reading(root, chat_id, record):
+    chat = load_chat(root, chat_id)
+    chat['direct_reading'] = record
+    _save_chat(root, chat)
+
+
+@_locked_chat
 def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
-                project_snapshot=None, image_refs=(), job_id=None):
+                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None, display_answer=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -1196,6 +1209,11 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
         if mode and message['role'] != 'user':
             item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
+            if display_answer is not None and message is history[-1]:
+                item['content'] = display_answer
+                item['notebook_display'] = True
+            if source_coverage is not None and message is history[-1]:
+                item['source_coverage'] = source_coverage
             if job_id and mode == 'check':
                 item['job_id'] = job_id
             if message.get('tool_calls'):
@@ -1213,6 +1231,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     if notices:
         items.append({'role': 'notice', 'content': '\n'.join(dict.fromkeys(notices)), 'time': stamp})
     # The model context may drop old turns to fit; the transcript never does.
+    chat.pop('direct_reading', None)
     chat['history'] = history
     chat['transcript'].extend(items)
     if not chat['title']:
@@ -1536,12 +1555,16 @@ def _private_json(path):
 def load_settings(workspace):
     value = _private_json(Path(workspace) / '.mathagent' / 'gui-settings.json') or {}
     saved = value.get('read') if isinstance(value.get('read'), dict) else {}
-    return {'read': {group: saved.get(group) is not False for group in READ_GROUPS}}
+    read = {group: saved.get(group) is not False for group in READ_GROUPS}
+    # Older restricted folders never opted into the newly supported languages.
+    if 'code' not in saved and not all(read.values()):
+        read['code'] = False
+    return {'read': read}
 
 
 def save_settings(workspace, read):
     if not isinstance(read, dict) or any(k not in READ_GROUPS or type(v) is not bool for k, v in read.items()):
-        raise ValueError('read must map tex, pdf, py and text to true or false')
+        raise ValueError('read must map supported file groups to true or false')
     settings = load_settings(workspace)
     settings['read'].update(read)
     base = Path(workspace) / '.mathagent'
@@ -1571,23 +1594,12 @@ def resolve_folder(root, relative=''):
 
 
 def _counts(folder):
-    counts = {'tex': 0, 'pdf': 0, 'py': 0}
+    """Count the visible regular files directly in a folder, including unsupported file types."""
     try:
-        entries = list(os.scandir(folder))
+        with os.scandir(folder) as found:
+            return sum(1 for entry in found if not entry.name.startswith('.') and entry.is_file(follow_symlinks=False))
     except OSError:
-        return counts
-    for entry in entries[:5000]:
-        if entry.name.startswith('.') or not entry.is_file(follow_symlinks=False):
-            continue
-        suffix = source_suffix(entry.name)
-        key = 'tex' if suffix in READ_GROUPS['tex'] else 'pdf' if suffix == '.pdf' else 'py' if suffix == '.py' else None
-        if key:
-            counts[key] += 1
-    return counts
-
-
-def _add_counts(total, more):
-    return {key: total[key] + more[key] for key in total}
+        return 0
 
 
 def list_folders(root, relative=''):
@@ -1604,9 +1616,9 @@ def list_folders(root, relative=''):
         project = projects.folder_label(path)
         counts = _counts(path)
         if projects.holds_projects(path):
-            for child in sorted(path.iterdir())[:200]:
+            for child in path.iterdir():
                 if projects.folder_label(child):
-                    counts = _add_counts(counts, _counts(child))
+                    counts += _counts(child)
         folders.append({'name': project['name'] if project else entry.name, 'path': path.relative_to(root).as_posix(),
                         'files': counts, 'project': project,
                         'jobs': (path / '.mathagent' / 'proofs').is_dir() or (path / '.mathagent' / 'research').is_dir()})
@@ -1698,7 +1710,7 @@ def save_upload(workspace, name, data):
     archive = is_source_archive(base)
     suffix = next((ext for ext in ('.tar.gz', '.tgz', '.tar', '.gz') if base.lower().endswith(ext)), '') if archive else Path(base).suffix.lower()
     if not base or base.startswith('.') or not archive and suffix not in UPLOAD_SUFFIXES:
-        raise ValueError('Drop text/LaTeX, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDF, Python or PNG/JPEG/WebP image files')
+        raise ValueError('Drop text, LaTeX, Markdown or code files, a TeX source archive (.tar.gz/.tgz/.tar/.gz), PDFs or PNG/JPEG/WebP images')
     if len(data) > UPLOAD_BYTES:
         raise ValueError('Files are limited to 20 MB')
     if not data:
@@ -1747,6 +1759,130 @@ def save_upload(workspace, name, data):
     finally:
         os.unlink(temporary)
     return target.name
+
+
+# -- the file viewer and editor -------------------------------------------------------------------------
+
+VIEW_TEXT_BYTES = UPLOAD_BYTES
+VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser, or a file downloaded
+MARKDOWN = {'.md', '.markdown'}
+
+
+def root_file(base, relative):
+    """A regular file at or below the interface root: no hidden part, no symlink, nothing outside the root."""
+    base = Path(base).resolve(strict=True)
+    if not isinstance(relative, str) or not relative.strip('/') or len(relative) > 1000:
+        raise ValueError('Give the file path relative to the interface root')
+    parts = Path(relative.strip('/')).parts
+    if Path(relative).is_absolute() or any(part in ('', '.', '..') or part.startswith('.') for part in parts):
+        raise ValueError('Files are relative to the interface root; hidden files and folders are excluded')
+    folder = base.joinpath(*parts[:-1]).resolve(strict=True)
+    if not folder.is_relative_to(base) or any(part.startswith('.') for part in folder.relative_to(base).parts):
+        raise ValueError('That file is outside the interface root')
+    path = folder / parts[-1]
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise NotFound('No such file') from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Only regular files can be opened')
+    return path
+
+
+def view_kind(path):
+    """How the viewer shows a file: pdf, markdown, text (TeX, code, data...), image, or unsupported."""
+    suffix = source_suffix(path)
+    if Path(path).suffix.lower() == '.pdf':
+        return 'pdf'
+    if images.is_image(path):
+        return 'image'
+    if Path(path).suffix.lower() in MARKDOWN:
+        return 'markdown'
+    if suffix in TEXT and not is_source_archive(path):
+        return 'text'
+    return 'unsupported'
+
+
+def view_file(base, relative):
+    """What the viewer needs: the file's kind and size, and for text its content, encoding and digest (the
+    digest guards a save against a change made meanwhile, by the user elsewhere or by the model)."""
+    path = root_file(base, relative)
+    kind, size = view_kind(path), path.stat().st_size
+    result = {'path': relative.strip('/'), 'name': path.name, 'kind': kind, 'size': size,
+              'updated_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
+    if kind not in ('text', 'markdown'):
+        return result
+    if size > VIEW_TEXT_BYTES:
+        return {**result, 'kind': 'too_large', 'note': f'Text files up to {VIEW_TEXT_BYTES // (1024 * 1024)} MiB can be opened here.'}
+    data = path.read_bytes()
+    try:
+        text, encoding = decode_text(data, path.name)
+    except ValueError as exc:  # a file named .txt that holds binary data
+        return {**result, 'kind': 'unsupported', 'note': str(exc)}
+    return {**result, 'text': text, 'encoding': encoding or 'utf-8', 'sha256': hashlib.sha256(data).hexdigest(),
+            'editable': True}
+
+
+def raw_file(base, relative, download=False):
+    """The bytes and content type of a PDF or an image, for the browser to display; with `download`, of any
+    file the file explorer lists, to save as it is on disk."""
+    path = root_file(base, relative)
+    kind = view_kind(path)
+    if download and not _listable(path):
+        raise ValueError('Only the files the file explorer lists can be downloaded')
+    if not download and kind not in ('pdf', 'image'):
+        raise ValueError('Only PDFs and images are sent as files; other files are shown as text')
+    if path.stat().st_size > VIEW_RAW_BYTES:
+        raise ValueError(f'That file is larger than {VIEW_RAW_BYTES // (1024 * 1024)} MB')
+    if download:
+        return path.read_bytes(), 'application/octet-stream', path.name
+    types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+    return path.read_bytes(), 'application/pdf' if kind == 'pdf' else types.get(path.suffix.lower(), 'application/octet-stream'), path.name
+
+
+def save_text(base, relative, content, sha256):
+    """Save the viewer's edit of a text file, in the encoding it was read in, if nobody changed it since
+    (`sha256` is the digest the viewer read). The replacement is atomic and keeps the file's permissions."""
+    path = root_file(base, relative)
+    if view_kind(path) not in ('text', 'markdown'):
+        raise ValueError('Only text files can be edited here')
+    too_large = f'The text file must be at most {VIEW_TEXT_BYTES // (1024 * 1024)} MiB in its saved encoding'
+    if not isinstance(content, str) or len(content) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
+    with path.open('rb') as stream:
+        current = stream.read(VIEW_TEXT_BYTES + 1)
+    if len(current) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
+    if not isinstance(sha256, str) or hashlib.sha256(current).hexdigest() != sha256:
+        raise FileExistsError('The file changed since it was opened; reload it before saving')
+    old, encoding = decode_text(current, path.name)
+    prefix = b''
+    if encoding == 'utf-16':
+        prefix = current[:2]
+        encoding = 'utf-16-le' if prefix == codecs.BOM_UTF16_LE else 'utf-16-be'
+    elif encoding == FALLBACK:
+        # Preserve ordinary Windows-1252 files. Mixed legacy and UTF-8 input has no single original codec.
+        encoding = 'cp1252' if current.decode('cp1252', errors='replace') == old else 'utf-8'
+    elif current.startswith(codecs.BOM_UTF8):
+        prefix = codecs.BOM_UTF8
+    try:
+        data = prefix + content.encode(encoding or 'utf-8')
+    except UnicodeEncodeError:
+        raise ValueError(f'The text has characters that {encoding} cannot store; '
+                         'remove them or save the file as UTF-8 elsewhere') from None
+    if len(data) > VIEW_TEXT_BYTES:
+        raise ValueError(too_large)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix='.edit-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
 
 
 def copy_into(base, workspace, destination, relative):
@@ -1989,8 +2125,8 @@ def previous_writeup_source(root, chat, *, before=None):
         name = 'previous-answer.md'
     else:
         return None
-    if len(content.encode()) + len(bibliography.encode()) > 2_000_000:
-        raise WorkerInputError('The selected answer and bibliography exceed Write-Up’s 2 MB pinned-source limit. '
+    if len(content.encode()) + len(bibliography.encode()) > PINNED_SOURCE_BYTES:
+        raise WorkerInputError('The selected answer and bibliography exceed the pinned-source storage allowance. '
                                'Split the Markdown into smaller files to convert it.', code='writeup_source_too_large')
     origin['transcript_index'] = answers[0][0] if answers else index
     source = {'id': 'M1', 'path': name, 'content': content, 'sha256': hashlib.sha256(content.encode()).hexdigest(),
@@ -2173,7 +2309,7 @@ def saved_chat_experiment(root, chat_id, experiment_id):
         try:
             base = Path(root) / '.mathagent' / 'index' / 'experiments'
             _directory(base)
-            copy = json.loads(_read(base / (experiment_id + '.json'), 65536))
+            copy = json.loads(_read(base / (experiment_id + '.json')))
             shown = {key: copy.get(key) for key in DETAIL_FIELDS}
         except (OSError, ValueError, TypeError, AttributeError):
             shown = {}
@@ -2241,7 +2377,7 @@ def conversation_record(root, chat_id, before=None, skip=None):
             delegated.setdefault(value.get('mode') or arguments.get('mode'), []).append(value)
     parts, results = [], set()
     for index, item in enumerate(chat['transcript'][:before]):
-        if index == skip:
+        if index == skip or item.get('notebook_display'):
             continue
         role, content = item.get('role'), (item.get('content') or '').strip()
         if role == 'user' and content:

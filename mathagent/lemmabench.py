@@ -130,8 +130,8 @@ def prepare(input_path, output, *, selection, exclude_lines=(), name='LemmaBench
         raise ValueError('Choose selection all-accepted or all explicitly')
     raw = _bytes(input_path)
     rows = _rows(raw)
-    if not rows or len(rows) > 1000:
-        raise ValueError('Provide 1–1000 LemmaBench records')
+    if not rows:
+        raise ValueError('Provide at least one LemmaBench record')
     exclusions = set(exclude_lines)
     if any(type(i) is not int or i < 1 for i in exclusions) or not exclusions <= {n for n, _ in rows}:
         raise ValueError('Each excluded source line must identify an existing JSONL record')
@@ -165,8 +165,6 @@ def prepare(input_path, output, *, selection, exclude_lines=(), name='LemmaBench
             raise ValueError(f'Proof environment in solver input at source line {number} ({problem_id}); review it or explicitly use --exclude-line {number}. No text was stripped.')
         statement, composition = _statement(row)
         encoded = statement.encode('utf-8')
-        if len(statement) > 59000 or len(encoded) > 240000:
-            raise ValueError(f'Statement exceeds benchmark limits at source line {number}')
         statements[problem_id] = encoded
         compositions[composition] += 1
         metadata.append({'problem_id': problem_id, 'source_line': number,

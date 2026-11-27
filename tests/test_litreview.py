@@ -14,7 +14,7 @@ from mathagent.assistant_budget import BudgetClient
 from mathagent.backends import MeasuredStreamCancellation
 from mathagent.call_policy import count_input
 from mathagent.deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient
-from mathagent.literature import LiteratureTools
+from mathagent.literature import LiteratureTools, UNLIMITED_SOURCE
 from mathagent.litreview import ReviewRunner, _cutoff_supported
 from mathagent.tools import Workspace
 from tests.test_research import FakeClient, response
@@ -187,7 +187,7 @@ class LiteratureReviewTests(unittest.TestCase):
         with patch.object(runner, '_step', side_effect=step):
             paused = runner.start('Review observation.', max_tokens=5000, max_rounds=1)
             self.assertEqual(runner.state['settings']['max_rounds'], 5)
-            self.assertEqual(runner.state['settings']['max_requests'], 165)
+            self.assertEqual(runner.state['settings']['max_requests'], UNLIMITED_SOURCE)
             self.assertEqual(paused['status'], 'paused')
             self.assertEqual(paused['worker_error']['code'], 'provider_rate_limit')
             self.assertEqual([note['text'] for note in runner.state['notes']], ['first'])

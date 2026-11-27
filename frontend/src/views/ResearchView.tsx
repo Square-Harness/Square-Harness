@@ -135,7 +135,6 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
           {data.unit && <span>{data.unit}</span>}
           {data.level && !(data.variant && FIXED_VARIANTS.includes(data.variant)) && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
           <span>{String(data.settings.model)}</span>
-          <span>{data.settings.online ? 'Online' : 'Offline'}</span>
           <span>Started {ago(data.created_at)}</span>
         </div>
       </details>

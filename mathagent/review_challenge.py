@@ -53,7 +53,7 @@ class ChallengeCancellation(threading.Event):
 
 class ChallengeTools:
     """Read only the selected manuscript and private computations, independently of the lead's work."""
-    allowed = {'list_files', 'search_text', 'read_file', 'execute_python'}
+    allowed = {'list_files', 'search_text', 'read_file', 'execute_python', 'read_experiment', 'read_skill_reference'}
 
     def __init__(self, workspace, challenge):
         self.workspace, self.challenge = workspace, challenge
@@ -81,6 +81,13 @@ class ChallengeTools:
         if self.challenge.cancel.is_set():
             raise KeyboardInterrupt
         if name in self.allowed:
+            if name == 'read_experiment':
+                try:
+                    args = json.loads(arguments) if isinstance(arguments, str) else arguments
+                    if args['experiment_id'] not in self.challenge.record['experiments']:
+                        return 'Tool error: only this reader’s own experiments are available.'
+                except (TypeError, KeyError, ValueError):
+                    return 'Tool error: provide this reader’s experiment_id.'
             return self.workspace.execute(name, arguments)
         if name not in ('flag_challenge', 'submit_challenge', 'withdraw_challenge'):
             return 'Tool error: unavailable to this reader.'
@@ -180,6 +187,8 @@ class Challenge:
             agent = Agent(client, tools, r.agent.model, r.agent.ctx, r.agent.predict, r.state['thinking'], 'explore',
                           r.state['tool_rounds'], seed=r.agent.seed, temperature=r.state['temperature'],
                           top_p=r.state['top_p'])
+            agent.stop_on_stalled_tools = False
+            agent.project_context = r.state.get('project_context', '')
             agent.turn_image_refs = r.state.get('images', [])
             scope = r.state['goal'] + ('\nRequested focus: ' + r.state['target'] if r.state.get('target') else '')
             files = ', '.join(s['path'] for s in r.state['sources'])

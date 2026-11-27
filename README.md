@@ -85,7 +85,7 @@ also works on a phone, and shares its jobs with the terminal. The
 
 ## Documentation
 
-- [Guide](docs/guide.md): philosophy, every skill, how skills are made, effort,
+- [Guide](docs/guide.md): philosophy, every skill, how skills are made, High workflow defaults and numeric budgets,
   data and privacy.
 - [Install guide](docs/llm-install.md): local self-hosting, remote GPU/cluster,
   and the optional API trial, written for a coding agent.

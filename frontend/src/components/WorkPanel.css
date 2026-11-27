@@ -82,3 +82,35 @@
   .main:has(.chat-workspace) > .feedback-open { padding: 0; width: 40px; height: 40px; min-height: 40px; top: calc(4px + env(safe-area-inset-top)); justify-content: center; }
   .main:has(.chat-workspace) .topbar { padding-right: 148px; }
 }
+/* A wide notebook narrows the conversation column. Below 620px the column takes the phone layout's
+   tighter margins and compact composer, whatever the window size; below 420px the send button keeps
+   only its arrow, so the message box keeps the room. */
+.chat-workspace > .chat { container: chat / inline-size; }
+@container chat (max-width: 620px) {
+  .chat-scroll, .composer { --margin-x: 34px; --gap-x: 14px; --content-x: calc(var(--margin-x) + var(--gap-x)); }
+  .chat-scroll .sheet-inner { padding: 20px 16px 64px var(--content-x); }
+  .chat-scroll .in-margin { padding-right: 7px; }
+  .chat-scroll .margin-glyph { font-size: 22px; }
+  .chat-scroll .speaker-model { width: 24px; height: 24px; margin-right: 8px; border-radius: 6px; font-size: 14px; }
+  .chat-scroll .page-title { font-size: 25px; overflow-wrap: anywhere; }
+  .chat-scroll .lede { font-size: 16px; }
+  .composer { padding: 8px 12px calc(12px + env(safe-area-inset-bottom)); }
+  .composer .composer-top { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; overflow-x: auto; scrollbar-width: none; }
+  .composer .composer-top::-webkit-scrollbar { display: none; }
+  .composer .composer-top > *, .composer-top .project-selector { flex: none; }
+  .composer-top .project-selector { display: flex; gap: 6px; align-items: center; }
+  .composer-chip-label, .composer-long-label { display: none; }
+  .composer-chip select { max-width: 132px; }
+  .composer-bar { flex-wrap: wrap; margin-top: 4px; }
+  .composer-hint { display: none; }
+}
+@container chat (max-width: 420px) {
+  .chat-scroll, .composer { --margin-x: 28px; --gap-x: 10px; }
+  .chat-scroll .sheet-inner { padding-right: 10px; }
+  .chat-scroll .prose { font-size: 16px; }
+  .composer-box { gap: 6px; }
+  .composer-send { padding-inline: 12px; }
+  .composer-send-label { display: none; }
+  .chat-scroll .agent-results li { min-width: 0; max-width: 100%; }
+  .chat-scroll .agent-chip { max-width: 100%; flex-wrap: wrap; text-align: start; }
+}

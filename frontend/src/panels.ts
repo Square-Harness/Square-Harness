@@ -64,3 +64,16 @@ export function rememberWorkPanel(change: WorkPreference) {
   try { localStorage.setItem('square-work-panel', JSON.stringify({ ...workPreferences(), ...change })) }
   catch { /* Navigation and resizing still work without browser storage. */ }
 }
+
+/** The file viewer's width beside a conversation, in pixels, once the reader has set it. */
+export function filePanelWidth(): number | undefined {
+  try {
+    const value = JSON.parse(localStorage.getItem('square-file-panel') || '{}')?.width
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  } catch { return undefined }
+}
+
+export function rememberFilePanelWidth(width: number) {
+  try { localStorage.setItem('square-file-panel', JSON.stringify({ width })) }
+  catch { /* Resizing still works without browser storage. */ }
+}

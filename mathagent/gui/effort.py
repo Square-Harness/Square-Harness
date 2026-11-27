@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Effort levels: depth and time behind Low, Medium and High.
+"""High workflow defaults and historical allowances for saved work.
 
 The interface's forms use the same legacy table (frontend/src/effort.ts).
 DS4 presets come from model_limits and are sent to the interface by the server.
 """
+from ..literature import UNLIMITED_SOURCE
 from ..litreview import breadth
 from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget, HOSTED_DS4
-from ..router import effort_for
 
 # Token estimates remain for older integrations. New jobs have no cumulative
 # token ceiling unless one was explicitly supplied at launch or in the form.
@@ -30,12 +30,12 @@ REVIEW_MODES = ('referee', 'detailed_review', 'typo_check')
 REVIEW_INPUT = 4
 
 
-def level(mode, name, args=None, *, review_companion=False):
+def level(mode, name, args=None, *, saved=False):
     """Legacy workload estimates; a review (which checks every proof) allows twice the working time on a local model and
     four times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
     table = DS4_EFFORTS if getattr(args, 'api_profile', None) in HOSTED_DS4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
-    name = 'low' if review_companion and mode == 'literature' else effort_for(mode, name)
+    name = name if saved else 'high'
     value = dict(table.get(name, legacy.get(name, table['medium'])))
     if table is DS4_EFFORTS:
         if mode == 'prove':
@@ -59,64 +59,68 @@ def level(mode, name, args=None, *, review_companion=False):
             value.update(input=REVIEW_INPUT * value['input'])
         else:
             value.update(tokens=2 * value['tokens'], input=2 * value['input'], minutes=2 * value['minutes'])
+    if not saved:
+        value['requests'] = getattr(args, 'research_requests', None)
+        if value['requests'] is None:
+            value['requests'] = UNLIMITED_SOURCE
+        value['chars'] = getattr(args, 'research_chars', None) or UNLIMITED_SOURCE
+        key = 'proof' if mode == 'prove' else 'research'
+        if getattr(args, key + '_rounds_explicit', False):
+            value['tries'] = getattr(args, key + '_rounds')
+        if getattr(args, key + '_seconds_explicit', False):
+            value['minutes'] = min(value['minutes'], getattr(args, key + '_seconds') / 60)
     return value
 
 
-def _proof_ceilings(args, tokens, effort=None):
-    """Fit one full solve and its review in the budget, keeping the launch repair floors."""
-    solve, verify = args.proof_solve_tokens, args.proof_verify_tokens
-    if effort is not None:
-        solve = min(solve, effort['solve_tokens'])
-        verify = min(verify, effort['verify_tokens'])
-    if tokens is None or tokens >= solve + verify:
-        return tokens, solve, verify
-    floor = max(128, args.proof_repair_tokens or 0, args.proof_min_solve_tokens or 0)
-    fitted = min(solve, max(floor, tokens * solve // (solve + verify)))
-    review = min(verify, max(128, tokens - fitted))
-    return tokens, fitted, review
-
-
-def limits(mode, level, args, *, review_companion=False):
+def limits(mode, level, args, *, saved=False):
     """Budget keyword arguments for Hub.start_route; answers in the conversation have none."""
     ds4 = getattr(args, 'api_profile', None) in HOSTED_DS4
     table = DS4_EFFORTS if ds4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if ds4 else LEGACY_EFFORTS
-    level = 'low' if review_companion and mode == 'literature' else effort_for(mode, level)
-    effort = table.get(level, legacy.get(level, table['medium']))
+    level = level if saved else 'high'
+    effort = dict(table.get(level, legacy.get(level, table['high'])))
+    key = 'proof' if mode == 'prove' else 'research'
+    if not saved and getattr(args, key + '_rounds_explicit', False):
+        effort['tries'] = getattr(args, key + '_rounds')
     seconds = effort['minutes'] * 60
     def ceiling(name, value):
         configured = getattr(args, name, None)
         return min(value, configured) if configured is not None else value
+    requests = ceiling('research_requests', effort['requests'] if saved else UNLIMITED_SOURCE)
+    chars = ceiling('research_chars', effort['chars'] if saved else UNLIMITED_SOURCE)
     if mode == 'prove':
         if ds4:
             return proof_limits(level, args)
-        tokens, solve, verify = _proof_ceilings(args, getattr(args, 'proof_tokens', None))
-        return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds, solve_tokens=solve, verify_tokens=verify)
+        if getattr(args, 'proof_seconds_explicit', False):
+            seconds = ceiling('proof_seconds', seconds)
+        return dict(rounds=effort['tries'], tokens=getattr(args, 'proof_tokens', None), seconds=seconds,
+                    solve_tokens=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens)
     output = getattr(args, 'research_tokens', None)
     if ds4:
         work = workflow_budget(level, args)
         output, seconds = work['tokens'], work['seconds']
+    elif getattr(args, 'research_seconds_explicit', False):
+        seconds = ceiling('research_seconds', seconds)
     input_tokens = ceiling('research_input_tokens', effort['input']) if ds4 else getattr(args, 'research_input_tokens', None)
     if mode in ('writeup', 'summarize'):
         return dict(tokens=output, input_tokens=input_tokens, seconds=seconds)
     if mode == 'check':
-        # A literature check has its own small budgets (refcheck.EFFORTS), chosen by level.
-        return dict(effort=level if level in EFFORTS else 'medium')
+        return dict(effort=level)
     if mode in REVIEW_MODES:
         # More checking time and input, without silently increasing an explicit token cap.
         if ds4:
             input_tokens = ceiling('research_input_tokens', REVIEW_INPUT * effort['input'])
         return dict(rounds=effort['tries'], tokens=output,
-                    input_tokens=input_tokens, seconds=seconds if ds4 else 2 * seconds,
-                    requests=effort['requests'], chars=effort['chars'])
+                    input_tokens=input_tokens, seconds=seconds if ds4 else (ceiling('research_seconds', 2 * seconds) if getattr(args, 'research_seconds_explicit', False) else 2 * seconds),
+                    requests=requests, chars=chars)
     if mode == 'literature':
         review = breadth(effort['tries'])
         if not ds4:
             seconds = ceiling('research_seconds', review['seconds']) if getattr(args, 'research_seconds_explicit', False) else review['seconds']
         return dict(rounds=effort['tries'], tokens=output, input_tokens=input_tokens, seconds=seconds,
-                    requests=ceiling('research_requests', review['requests']), chars=effort['chars'])
+                    requests=requests, chars=chars)
     if mode in ('quick_review', 'explain'):
         return dict(rounds=effort['tries'], tokens=output,
                     input_tokens=input_tokens, seconds=seconds,
-                    requests=effort['requests'], chars=effort['chars'])
+                    requests=requests, chars=chars)
     return {}

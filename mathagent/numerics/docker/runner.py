@@ -49,28 +49,55 @@ def _alarm(signum, frame):
     raise ExperimentTimeout()
 
 
-def jsonable(value, depth=0):
-    """A JSON-safe rendering of a result value (NumPy, SymPy and mpmath included)."""
-    if depth > 6:
-        return repr(value)[:200]
-    if value is None or isinstance(value, (bool, str)):
-        return value[:20000] if isinstance(value, str) else value
-    if isinstance(value, int):
-        return value if abs(value) < 2 ** 63 else str(value)
-    if isinstance(value, float):
-        return value if math.isfinite(value) else repr(value)
-    if isinstance(value, complex):
-        return {'re': jsonable(value.real), 'im': jsonable(value.imag)}
-    if isinstance(value, dict):
-        return {str(k)[:200]: jsonable(v, depth + 1) for k, v in list(value.items())[:200]}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [jsonable(v, depth + 1) for v in list(value)[:1000]]
-    module = type(value).__module__ or ''
-    if module.startswith('numpy') and hasattr(value, 'tolist'):
-        if getattr(value, 'size', 1) > 10000:
-            return f'<array shape={getattr(value, "shape", "?")} dtype={getattr(value, "dtype", "?")}>'
-        return jsonable(value.tolist(), depth + 1)
-    return str(value)[:20000]
+def structured_result(value, limit):
+    """Return the full JSON value within the return-byte allowance. Stop traversal at the first excess."""
+    body = bytearray()
+    active = set()
+
+    def write(text):
+        if len(text) > limit - len(body):
+            raise ValueError('the structured result exceeds its byte allowance')
+        raw = text.encode('utf-8')
+        if len(raw) > limit - len(body):
+            raise ValueError('the structured result exceeds its byte allowance')
+        body.extend(raw)
+
+    def visit(item):
+        if isinstance(item, (dict, tuple, list, set, frozenset)):
+            if id(item) in active:
+                raise ValueError('circular structured result')
+            active.add(id(item))
+            mapping = isinstance(item, dict)
+            write('{' if mapping else '[')
+            for index, child in enumerate(item):
+                if index:
+                    write(',')
+                if mapping:
+                    visit(str(child))
+                    write(':')
+                    child = item[child]
+                visit(child)
+            write('}' if mapping else ']')
+            active.remove(id(item))
+        elif isinstance(item, complex):
+            visit({'re': item.real, 'im': item.imag})
+        elif type(item).__module__.startswith('numpy') and hasattr(item, 'tolist'):
+            if getattr(item, 'size', 1) > limit - len(body):
+                raise ValueError('the array exceeds its byte allowance')
+            visit(item.tolist())
+        else:
+            if isinstance(item, int) and abs(item) >= 2 ** 63:
+                item = str(item)
+            elif isinstance(item, float) and not math.isfinite(item):
+                item = repr(item)
+            elif item is not None and not isinstance(item, (str, int, float, bool)):
+                item = str(item)
+            if isinstance(item, str) and len(item) > limit - len(body):
+                raise ValueError('the structured string exceeds its byte allowance')
+            write(json.dumps(item, ensure_ascii=False, allow_nan=False))
+
+    visit(value)
+    return json.loads(body), len(body)
 
 
 def read_capped(path, limit):
@@ -90,26 +117,26 @@ def read_capped(path, limit):
     return head.decode('utf-8', 'replace') + marker + tail.decode('utf-8', 'replace'), True
 
 
-def format_error(exc):
+def format_error(exc, limit):
     frames = traceback.extract_tb(exc.__traceback__)
     # Keep the experiment's frames and anything it called; drop this driver's exec frame.
     while frames and frames[0].filename != SOURCE:
         frames.pop(0)
     lines = traceback.format_list(frames) + traceback.format_exception_only(type(exc), exc)
     text = ''.join(lines)
-    return {'type': type(exc).__name__, 'message': str(exc)[:4000],
-            'traceback': text[-6000:]}
+    return {'type': type(exc).__name__, 'message': str(exc)[:limit],
+            'traceback': text[-limit:]}
 
 
 def describe(figure):
     """A textual summary of a figure, so a text-only model can read what was plotted."""
     axes = []
-    for ax in figure.get_axes()[:6]:
-        item = {'title': ax.get_title()[:200], 'xlabel': ax.get_xlabel()[:200], 'ylabel': ax.get_ylabel()[:200],
+    for ax in figure.get_axes():
+        item = {'title': ax.get_title(), 'xlabel': ax.get_xlabel(), 'ylabel': ax.get_ylabel(),
                 'xlim': [float(v) for v in ax.get_xlim()], 'ylim': [float(v) for v in ax.get_ylim()],
                 'xscale': ax.get_xscale(), 'yscale': ax.get_yscale(), 'lines': []}
-        for line in ax.get_lines()[:10]:
-            entry = {'label': '' if str(line.get_label()).startswith('_') else str(line.get_label())[:100]}
+        for line in ax.get_lines():
+            entry = {'label': '' if str(line.get_label()).startswith('_') else str(line.get_label())}
             try:
                 ys = [float(y) for y in line.get_ydata()]
                 finite = [y for y in ys if math.isfinite(y)]
@@ -122,7 +149,7 @@ def describe(figure):
         if ax.collections:
             item['collections'] = len(ax.collections)
         axes.append(item)
-    return jsonable({'axes': axes})
+    return {'axes': axes}
 
 
 def track_saved_figures():
@@ -174,8 +201,15 @@ def collect(limits, warnings):
         if total + len(data) > budget:
             warnings.append(f'Skipped {name}: the artifact budget ({budget} bytes) is exhausted')
             return
-        names.add(name)
         total += len(data)
+        if summary is not None:
+            try:
+                summary, size = structured_result(summary, budget - total)
+                total += size
+            except (ValueError, RecursionError):
+                warnings.append(f'The full metadata for {name} exceeds the remaining artifact bytes; its file was kept.')
+                summary = None
+        names.add(name)
         artifacts.append({'name': name, 'kind': kind, 'b64': base64.b64encode(data).decode('ascii'),
                           'summary': summary})
 
@@ -271,13 +305,13 @@ def run_experiment(request, code, timeout, seed, limits, streams):
             signal.signal(signal.SIGALRM, signal.SIG_IGN)
             signal.signal(signal.SIGXCPU, signal.SIG_IGN)
     except ExperimentTimeout as exc:
-        status, error = 'timeout', format_error(exc)
+        status, error = 'timeout', format_error(exc, output_bytes)
         error.update(type='TimeoutError', message=f'Execution exceeded the {timeout:g} s limit')
     except SystemExit as exc:
         if exc.code not in (None, 0):
             status, error = 'error', {'type': 'SystemExit', 'message': f'exit status {exc.code!r}', 'traceback': ''}
     except BaseException as exc:  # Report every user failure, MemoryError included.
-        status, error = 'error', format_error(exc)
+        status, error = 'error', format_error(exc, output_bytes)
     elapsed = time.perf_counter() - started
 
     try:
@@ -287,9 +321,15 @@ def run_experiment(request, code, timeout, seed, limits, streams):
         pass
     result = {'status': status, 'error': error, 'elapsed_seconds': round(elapsed, 4)}
     if 'RESULT' in namespace:
-        value = jsonable(namespace['RESULT'])
-        text = json.dumps(value, ensure_ascii=False)
-        result['result'] = value if len(text) <= 20000 else {'truncated_repr': text[:20000]}
+        artifact_bytes = int(limits.get('artifact_bytes', 0))
+        capacity = max(output_bytes, artifact_bytes)
+        try:
+            result['result'], size = structured_result(namespace['RESULT'], capacity)
+            if size > output_bytes:
+                limits = dict(limits, artifact_bytes=artifact_bytes - size)
+        except (ValueError, RecursionError, OverflowError, TypeError) as exc:
+            result['result'] = {'unavailable': True, 'reason': str(exc), 'byte_limit': capacity}
+            warnings.append('RESULT could not be returned in full. Return smaller pieces in separate runs.')
     try:
         result['artifacts'] = collect(limits, warnings)
     except Exception as exc:
@@ -297,7 +337,20 @@ def run_experiment(request, code, timeout, seed, limits, streams):
         result['artifacts'] = []
     for label, path in streams.items():
         result[label], result[label + '_truncated'] = read_capped(path, output_bytes)
-    result['warnings'] = warnings[:20]
+    result['warnings'] = bounded_warnings(warnings, int(limits.get('output_bytes', 20000)))
+    return result
+
+
+
+def bounded_warnings(warnings, budget):
+    result, remaining = [], budget
+    for index, warning in enumerate(warnings):
+        size = len(warning.encode('utf-8'))
+        if size > remaining:
+            result.append(f'{len(warnings) - index} further warnings exceeded the diagnostic byte limit.')
+            break
+        result.append(warning)
+        remaining -= size
     return result
 
 
@@ -322,7 +375,7 @@ def stopped_result(status_code, timeout, elapsed, limits, streams, killed_at_dea
         result['artifacts'] = []
     for label, path in streams.items():
         result[label], result[label + '_truncated'] = read_capped(path, int(limits.get('output_bytes', 20000)))
-    result['warnings'] = warnings[:20]
+    result['warnings'] = bounded_warnings(warnings, int(limits.get('output_bytes', 20000)))
     return result
 
 

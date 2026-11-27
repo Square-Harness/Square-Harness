@@ -25,7 +25,6 @@ from .executor import ARTIFACT_NAME
 from ..ledger import _atomic_write, _directory, _read, _regular
 
 EXPERIMENT_ID = re.compile(r'^exp-\d{8}-\d{6}-[0-9a-f]{6}$')
-STORED_OUTPUT = 200_000
 
 
 def _write(path, data):
@@ -35,7 +34,7 @@ def _write(path, data):
 
 
 class ExperimentStore:
-    def __init__(self, workspace_root, max_records=200, max_bytes=256_000_000):
+    def __init__(self, workspace_root, max_records=None, max_bytes=256_000_000):
         self.root = Path(workspace_root).resolve(strict=True)
         self.directory = self.root / '.mathagent' / 'experiments'
         self.max_records, self.max_bytes = max_records, max_bytes
@@ -58,15 +57,20 @@ class ExperimentStore:
             raise ValueError('Invalid experiment file name')
         return folder / name
 
+    @staticmethod
+    def new_id():
+        return f'exp-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
+
     def save(self, *, code, result, limits, policy, image, seed=None, parameters=None, purpose='',
-             explicit=False, invocation=None, harness_version=''):
+             explicit=False, invocation=None, harness_version='', experiment_id=None):
         """Persist one run and return its record (with relative artifact paths)."""
         if invocation is None:
             invocation = 'explicit' if explicit else 'automatic'
         if invocation not in ('explicit', 'routed', 'automatic'):
             raise ValueError('Unknown experiment invocation')
         now = datetime.now(timezone.utc)
-        experiment_id = f'exp-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}'
+        if experiment_id is None:
+            experiment_id = self.new_id()
         with self._lock:
             self._ensure()
             folder = self.path(experiment_id)
@@ -78,20 +82,20 @@ class ExperimentStore:
                               'path': (folder / artifact.name).relative_to(self.root).as_posix()})
             _write(self.path(experiment_id, 'code.py'), code.encode('utf-8'))
             record = {
-                'id': experiment_id, 'created': now.isoformat(timespec='seconds'),
+                'evidence_version': 2, 'id': experiment_id, 'created': now.isoformat(timespec='seconds'),
                 'skill': policy, 'invocation': invocation,
                 'purpose': purpose, 'code': code, 'seed': seed, 'parameters': parameters or {},
                 'image': image, 'limits': limits.as_dict(), 'harness_version': harness_version,
                 'status': result.status, 'exit_code': result.exit_code,
                 'elapsed_seconds': result.elapsed_seconds, 'wall_seconds': result.wall_seconds,
-                'stdout': result.stdout[:STORED_OUTPUT], 'stderr': result.stderr[:STORED_OUTPUT],
-                'stdout_truncated': result.stdout_truncated or len(result.stdout) > STORED_OUTPUT,
-                'stderr_truncated': result.stderr_truncated or len(result.stderr) > STORED_OUTPUT,
+                'stdout': result.stdout, 'stderr': result.stderr,
+                'stdout_truncated': result.stdout_truncated,
+                'stderr_truncated': result.stderr_truncated,
                 'error': result.error, 'result': result.result, 'artifacts': files,
                 'warnings': result.warnings, 'message': result.message,
             }
             _write(self.path(experiment_id, 'record.json'),
-                   json.dumps(record, ensure_ascii=False, indent=1, default=str).encode('utf-8'))
+                   _encode(record))
             try:
                 self._retain(record)
             except (OSError, ValueError) as exc:
@@ -107,6 +111,19 @@ class ExperimentStore:
         if record.get('id') != experiment_id:
             raise ValueError('Invalid experiment identity')
         return record
+
+    def read_saved(self, experiment_id):
+        """Prefer the native run, then its retained evidence after artifact rotation."""
+        path = self.path(experiment_id)
+        if path.exists() or path.is_symlink():
+            return self.load(experiment_id)
+        directory = self.root / '.mathagent' / 'index' / 'experiments'
+        for folder in (directory.parent.parent, directory.parent, directory):
+            _directory(folder)
+        saved = json.loads(_read(directory / (experiment_id + '.json')))
+        if saved.get('id') != experiment_id:
+            raise ValueError('Invalid retained experiment identity')
+        return saved
 
     def figure(self, experiment_id, name):
         """A declared, unchanged graphic of this run, addressed by filename or experiment/filename."""
@@ -131,15 +148,19 @@ class ExperimentStore:
             pass
         return None
 
-    def list(self, limit=50):
-        if not self.directory.is_dir():
-            return []
-        names = sorted((p.name for p in self.directory.iterdir()
-                        if EXPERIMENT_ID.match(p.name) and p.is_dir() and not p.is_symlink()), reverse=True)
+    def list(self, limit=None):
+        native = self.directory
+        kept = self.root / '.mathagent' / 'index' / 'experiments'
+        names = set()
+        if kept.is_dir() and not kept.is_symlink():
+            names.update(p.stem for p in kept.glob('*.json') if EXPERIMENT_ID.fullmatch(p.stem) and not p.is_symlink())
+        if native.is_dir() and not native.is_symlink():
+            names.update(p.name for p in native.iterdir() if EXPERIMENT_ID.fullmatch(p.name) and not p.is_symlink())
+        names = sorted(names, reverse=True)
         records = []
         for name in names[:limit]:
             try:
-                record = self.load(name)
+                record = self.read_saved(name)
             except (ValueError, OSError):
                 continue
             records.append({k: record.get(k) for k in ('id', 'created', 'skill', 'status', 'purpose',
@@ -162,7 +183,7 @@ class ExperimentStore:
         sizes = {p: sum(f.stat().st_size for f in p.iterdir() if f.is_file() and not f.is_symlink()) for p in folders}
         total = sum(sizes.values())
         older = sorted((p for p in folders if p.name != keep), key=lambda p: (p.stat().st_mtime_ns, p.name))
-        while older and (len(older) + 1 > self.max_records or total > self.max_bytes):
+        while older and ((self.max_records is not None and len(older) + 1 > self.max_records) or total > self.max_bytes):
             oldest = older.pop(0)
             try:
                 original = self.load(oldest.name)
@@ -178,7 +199,7 @@ class ExperimentStore:
                 _directory(copy.parent.parent, create=True)
                 _directory(copy.parent, create=True)
                 try:
-                    intact = _encode(kept(json.loads(_read(copy, 65536)))) == compact
+                    intact = _encode(kept(json.loads(_read(copy)))) == compact
                 except (OSError, ValueError, TypeError, AttributeError):
                     intact = False
                 if not intact:
@@ -195,7 +216,13 @@ def _encode(value):
 
 
 def kept(record):
-    """Keep an independently readable, 64 KiB maximum description; binaries remain in the live store."""
+    """Stable scientific evidence for index snapshots. V1 retains its original digest."""
+    if record.get('evidence_version') == 2:
+        fields = ('evidence_version', 'id', 'created', 'skill', 'invocation', 'purpose', 'code', 'seed',
+                  'parameters', 'status', 'exit_code', 'stdout', 'stderr', 'result', 'artifacts',
+                  'stdout_truncated', 'stderr_truncated', 'warnings', 'error', 'limits', 'image',
+                  'message', 'elapsed_seconds', 'wall_seconds', 'harness_version')
+        return {key: record.get(key) for key in fields}
     out = {k: record.get(k) for k in ('id', 'created', 'skill', 'invocation', 'purpose', 'code', 'seed',
                                       'parameters', 'status', 'exit_code', 'stdout', 'stderr', 'result')}
     for key in ('id', 'created', 'skill', 'invocation', 'status'):
@@ -251,11 +278,11 @@ def details(record):
 
 
 def retained(record):
-    """The kept copy under .mathagent/index: kept() plus the run's details, within 64 KiB.
-
-    kept(retained(r)) == kept(r), so the evidence digest does not depend on the details."""
+    """The kept scientific evidence and display details. Preserve the historical 64 KiB encoding for V1."""
     out = kept(record)
     extra = details(record)
+    if out.get('evidence_version') == 2:
+        return {**extra, **out}
     for _ in range(3):
         if len(_encode({**out, **extra})) <= 65536:
             return {**out, **extra}
@@ -288,6 +315,7 @@ def export_evidence(record):
     return [{'kind': 'experiment', 'mode': 'numerics',
              'status': 'ran' if status == 'ok' else _STOPPED.get(status, FAILED_RUNS[0]),
              'text': record.get('purpose') or '', 'summary': summary,
-             'qualifiers': ['bounded record'] if record.get('truncated') else [],
+             'qualifiers': ['bounded record'] if (record.get('truncated') or record.get('stdout_truncated') or record.get('stderr_truncated')) else [],
              'evidence': {'sha256': hashlib.sha256(_encode(kept(record))).hexdigest(),
-                          'artifacts': record.get('artifacts', [])}}]
+                          'artifacts': [{k: a.get(k) for k in ('name', 'sha256', 'bytes')}
+                                        for a in record.get('artifacts', [])]}}]

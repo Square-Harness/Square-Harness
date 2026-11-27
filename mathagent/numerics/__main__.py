@@ -55,9 +55,11 @@ def main(argv=None):
             for item in experiments.list():
                 print(f'{item["id"]}  {item["skill"]:<24} {item["status"]:<12} {item.get("purpose") or ""}')
         elif args.command == 'show':
-            print(json.dumps(experiments.load(args.experiment_id), indent=1, ensure_ascii=False))
+            print(json.dumps(experiments.read_saved(args.experiment_id), indent=1, ensure_ascii=False))
         elif args.command == 'rerun':
-            record = experiments.load(args.experiment_id)
+            record = experiments.read_saved(args.experiment_id)
+            if not all(f.name in (record.get('limits') or {}) for f in fields(Limits)) or record.get('truncated'):
+                raise ValueError('This historical record lacks the original code, parameters or complete resource limits for a rerun.')
             limits = Limits(**{f.name: record['limits'][f.name] for f in fields(Limits)})
             result = executor.run(record['code'], limits, seed=record.get('seed'), parameters=record.get('parameters'))
             saved = experiments.save(code=record['code'], result=result, limits=limits, policy=record['skill'],

@@ -8,6 +8,7 @@ certificate, and preservation of an answer does not establish its correctness.
 """
 import copy
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -17,34 +18,38 @@ import re
 import time
 
 from . import __version__, briefs, images
-from .literature import LiteratureTools
 from .jsonutil import loads_single
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, TokenBudgetError
-from .call_policy import (CONTEXT_MARGIN, CallContextError, allocate_call, count_input, interrupted_charge,
+from .call_policy import (CONTEXT_MARGIN, MIN_PROOF_REVIEW_TOKENS, CallContextError, allocate_call, count_input, interrupted_charge,
                           streamed_characters)
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
-from .ledger import LedgerError, ProofStore
+from .ledger import MAX_FILE_BYTES, LedgerError, ProofStore
 from .model_limits import is_ds4, HOSTED_DS4, ProviderChanged
+from .numerics.artifacts import EXPERIMENT_ID
+from .proof_tools import ProofDesk
+from .proof_turns import ProofTurns, SUBMIT
 from .proof_policy import (
     CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
-    VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request, review_request,
+    VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, VERIFIER_SCHEMA_V3, initial_request, review_request,
 )
 
-POLICY_VERSION = 11
+POLICY_VERSION = 13
 PREVIOUS_POLICY_SHA256 = '750e8ec2e4de9092d8faeb0d9f1d377276259a9657d87dbf2981759377f039a6'
 RECOGNIZED_POLICY_HASHES = {
     7: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
     8: '9db7973f207e9e84accb6bbcd54fa029e5d2f54c9c40c266928d28b5bcee11cb',
     9: 'aabe8adeba577d4de0bf4788f22e3cb3c8401092443d8190588be57ae095727d',
     10: PREVIOUS_POLICY_SHA256,
+    11: '9a3a7016a41ce8cec6103caa27c111b007c7054f67bc75e39bedf1d3b6564fc6',
+    12: 'e0460c4a5e4b895622d495902d440bc3e81ec80c5cc9adac7ecd98c3a36b380f',
 }
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 # Explicit extra allowance on resume ("Resume with more budget"): bounds of one addition.
-MAX_ADD_TOKENS, MAX_ADD_SECONDS, MAX_ADD_ROUNDS = 20_000_000, 86400, 20
-# Proof calls have no tools; solver and reviewer read this beside the task (controller text, not proof policy).
+MAX_ADD_TOKENS = MAX_ADD_SECONDS = MAX_ADD_ROUNDS = (1 << 53) - 1  # JSON-safe operator input
+# Saved tool-free proof jobs keep this controller note.
 NO_CODE_NOTE = ('No code is run in this proof job: neither the solver nor the reviewer has tools. The output of a '
                 'program that was not actually computed in the text is unverified and cannot support an essential step.')
 DELIVERABLE_NOTE = ('The deliverable is a proof or a refutation of the task. A response that declares the target missing, '
@@ -73,12 +78,12 @@ def _validate(value, spec, path='response'):
         for key, child in spec['properties'].items():
             _validate(value[key], child, path + '.' + key)
     elif kind == 'array':
-        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec['maxItems']:
+        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec.get('maxItems', math.inf):
             raise ValueError(f'{path}: invalid list')
         for item in value:
             _validate(item, spec['items'], path)
     elif kind == 'string':
-        if not isinstance(value, str) or not value.strip() or len(value) > spec.get('maxLength', 10000):
+        if not isinstance(value, str) or not value.strip() or len(value) > spec.get('maxLength', math.inf):
             raise ValueError(f'{path}: expected nonempty bounded text')
         if 'enum' in spec and value not in spec['enum']:
             raise ValueError(f'{path}: invalid value')
@@ -87,18 +92,20 @@ def _validate(value, spec, path='response'):
             raise ValueError(f'{path}: invalid integer')
 
 
-def validate_review(text, *, schema_version=3):
+def validate_review(text, *, schema_version=3, bounded_v3=False):
     """Validate the requested contract; legacy calls retain their original semantics."""
     if type(schema_version) is not int or schema_version not in (1, 2, 3):
         raise ValueError('Unknown review schema version')
     schema = {1: LEGACY_VERIFIER_SCHEMA, 2: VERIFIER_SCHEMA_V2, 3: VERIFIER_SCHEMA}[schema_version]
+    if bounded_v3:
+        schema = VERIFIER_SCHEMA_V3
     value = loads_single(text)
     def bounded(value, limit):
         marker = ' [truncated; full review in journal]'
         return value if len(value) <= limit else value[:limit - len(marker)] + marker
     # Old contracts normalize cosmetic extra fields; v3 has one assessment and
     # forbids an additional model verdict. All raw output remains in the journal.
-    if isinstance(value, dict) and all(k in value for k in schema['properties']):
+    if (schema_version < 3 or bounded_v3) and isinstance(value, dict) and all(k in value for k in schema['properties']):
         if schema_version < 3:
             value = {k: value[k] for k in schema['properties']}
         if isinstance(value['explanation'], str):
@@ -215,14 +222,16 @@ _CODE_WORDS = re.compile(r'\b(?:def|import|print|range|while|lambda|return)\b|\b
 _OUTPUT_CLAIM = re.compile(r"""\bthe\s+(?:program'?s?\s+|code'?s?\s+|script'?s?\s+)?output\s+(?:is|was|will\s+be|reads)\b
   | \bthe\s+(?:above\s+)?(?:program|code|script)\s+(?:prints|outputs)\b
   | \b(?:running|executing)\s+(?:this|the\s+(?:above\s+)?(?:code|program|script))\b""", re.I | re.X)
+_SCALAR_OUTPUT = re.compile(r'\s*[:=]?\s*([`$]?)([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\1'
+                            r'(?=\s*(?:[.!?](?:\s|$)|$))')
+_EXPERIMENT_REFERENCE = re.compile(r'(?<![\w-])(?:' + EXPERIMENT_ID.pattern.strip('^$') + r')(?![\w-])')
 NOT_ATTEMPTED = ('Not accepted as a reviewed proof: the response does not prove or refute the stated target (it says '
                  'the target is missing, open or out of reach), although the model review raised no objection.')
-UNRUN_PROGRAM = ('Not accepted as a reviewed proof: the response relies on the stated output of a program, but Proof '
-                 'runs no code, so that output was never computed or checked. Check the computation separately, '
-                 'for example with Python Lab.')
+UNRUN_PROGRAM = ('Not accepted as a reviewed proof: a claimed program output could not be matched to the code '
+                 'and a successful recorded experiment checked by the verifier.')
 
 
-def not_a_proof(text, review):
+def not_a_proof(text, review, experiments=None):
     """The controller's reason a review that found no issue still does not make ``text`` a reviewed proof, or None."""
     dependencies = [d for d in review.get('critical_dependencies') or [] if isinstance(d, dict)]
     said = ' '.join([str(review.get('explanation') or ''), *map(str, review.get('notes') or []),
@@ -231,8 +240,32 @@ def not_a_proof(text, review):
     # mentions an open problem in passing ("the general case remains open; here n = 3") keeps its review.
     if _NON_ATTEMPT.search(text) and (_NON_ATTEMPT.search(said) or _NOT_A_PROOF.search(said)):
         return NOT_ATTEMPTED
-    if any(_CODE_WORDS.search(block) for block in _CODE_BLOCK.findall(text)) and _OUTPUT_CLAIM.search(text):
-        return UNRUN_PROGRAM
+    if experiments is not None:
+        recorded = {e['experiment_id'] for e in experiments if e.get('kind') == 'experiment' and e.get('status') == 'ok'}
+        missing = set(_EXPERIMENT_REFERENCE.findall(text)) - recorded
+        if missing:
+            return 'No successful inspected experiment record for the cited ID(s): ' + ', '.join(sorted(missing))
+    if _OUTPUT_CLAIM.search(text):
+        blocks = list(_CODE_BLOCK.finditer(text))
+        for i, block in enumerate(blocks):
+            if not _CODE_WORDS.search(block[1]):
+                continue
+            matched = [e for e in experiments or () if e.get('kind') == 'experiment' and e.get('status') == 'ok'
+                       and e['code'].strip() == block[1].strip() and e['experiment_id'] in said]
+            if not matched:
+                return UNRUN_PROGRAM
+            # For an explicit scalar output, compare the stated observation with stdout. General mathematical
+            # conclusions and structured observations still require the independent check of the recorded result.
+            following = text[block.end():blocks[i+1].start() if i+1 < len(blocks) else len(text)]
+            for claim in _OUTPUT_CLAIM.finditer(following):
+                scalar = _SCALAR_OUTPUT.match(following, claim.end())
+                if scalar:
+                    try:
+                        values = [Decimal(str(e.get('stdout') or '').strip()) for e in matched]
+                    except InvalidOperation:
+                        continue
+                    if Decimal(scalar[2]) not in values:
+                        return UNRUN_PROGRAM
     return None
 
 
@@ -272,9 +305,11 @@ def unsettled_interrupts(state):
 
 
 class ProofRunner:
-    def __init__(self, agent, emit=lambda kind, value: None):
+    def __init__(self, agent, emit=lambda kind, value: None, *, evidence_coordinator=False):
         self.agent, self.emit = agent, emit
+        self.turns = ProofTurns(self, ProofDesk(agent), evidence_coordinator or getattr(agent, 'proof_evidence_coordinator', False))
         self.store = None
+        self._private_sources = ()
         self._clock = None
         self._seconds_before = 0
 
@@ -311,19 +346,22 @@ class ProofRunner:
             value['model_limits_sha256'] = hashlib.sha256(Path(__file__).with_name('model_limits.py').read_bytes()).hexdigest()
         return value
 
-    def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
+    def start(self, goal, *, max_rounds=5, max_tokens=None, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
               min_solve_tokens=None, verify_temperature=None, repair_tokens=None, reference_context=None,
               initial_min_solve_tokens=None, solver_leads=None, verifier_reference=None, source_passages=(), job_id=None,
-              statement=None):
+              statement=None, fixed_call_budgets=False):
         """``goal`` is the task as the user reads it; ``statement``, when given, is the fuller text the solver
         receives (and the reviewer reads as the solver's task) in its place."""
+        # A caller may reuse its runner for an independent new job. Preflight cannot see the last job's state.
+        self.store = None
+        self.turns.desk.scope(None, None, None, ())
         for text in (goal, statement if statement is not None else goal):
-            if not isinstance(text, str) or not text.strip() or len(text) > 60000:
-                raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
+            if not isinstance(text, str) or not text.strip() or len(text.encode('utf-8')) > MAX_FILE_BYTES:
+                raise ValueError(f'Provide a nonempty proof goal within the saved-file limit of {MAX_FILE_BYTES:,} bytes')
         for name, value, lower, upper in (
-            ('max_rounds', max_rounds, 1, 100),
-            ('max_predict', max_predict, 128, 1000000), ('verify_tokens', verify_tokens, 128, 1000000),
+            ('max_rounds', max_rounds, 1, MAX_ADD_ROUNDS),
+            ('max_predict', max_predict, 128, MAX_ADD_TOKENS), ('verify_tokens', verify_tokens, MIN_PROOF_REVIEW_TOKENS, MAX_ADD_TOKENS),
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError(f'{name} must be an integer between {lower} and {upper}')
@@ -354,7 +392,7 @@ class ProofRunner:
             raise ValueError('No statement to prove was given. Write the statement after @prove, or attach the file '
                              'that contains it.')
         sources = []
-        library = self.agent.workspace.literature or LiteratureTools(self.agent.workspace.root, online=False)
+        library = self.turns.desk.literature
         def pin_document(document_id, locator=None, expected_sha=None, name=None):
             metadata, lines = library._document(document_id)
             if expected_sha is not None and metadata['text_sha256'] != expected_sha:
@@ -403,7 +441,12 @@ class ProofRunner:
                         repair_tokens=repair_tokens, reference_context=copy.deepcopy(reference_context))
         # Save this rule with new jobs; older paused jobs retain their original
         # allocation behaviour as well as their original numeric allowances.
-        settings['full_output_ceiling'] = is_ds4(self.agent)
+        settings['fit_remaining_budget'] = not fixed_call_budgets
+        settings['full_output_ceiling'] = fixed_call_budgets and is_ds4(self.agent)
+        self.turns.desk.scope(goal, statement, reference_context, sources)
+        if not fixed_call_budgets:
+            settings['evidence_tools'] = [s['function']['name'] for s in self.turns.available()]
+        self.turns.configure(settings)
         if verifier_reference is not None:
             settings['verifier_reference'] = copy.deepcopy(verifier_reference)
         if solver_leads and solver_leads.get('text'):
@@ -411,23 +454,23 @@ class ProofRunner:
         if statement is not None and statement != goal:
             settings['statement'] = statement
         task = settings.get('statement', goal)
-        if verifier_reference is not None or any(src.get('document_id') for src in sources):
+        if not fixed_call_budgets or verifier_reference is not None or any(src.get('document_id') for src in sources):
             self._fits('The first solve', initial_request(task, sources), reference_context, max_predict,
                        initial_min_solve_tokens, settings, sources)
             # The verifier must be able to read the candidate as well as generate a
             # review. Share the remaining window in the requested solve/review ratio,
-            # respecting both output floors. DS4 requires both full allowances.
+            # respecting both output floors. Fixed benchmark calls keep their configured allowances.
             explicit = settings['specialist_output_cap']
             candidate = min(max_predict, explicit or max_predict)
             review = min(verify_tokens, explicit or verify_tokens)
             floor = max(initial_min_solve_tokens, min_solve_tokens)
             combined = candidate + review
-            required = combined if settings['full_output_ceiling'] else floor + 128
+            required = combined if settings['full_output_ceiling'] else floor + MIN_PROOF_REVIEW_TOKENS
             room = self._fits('The whole-candidate review', review_request(task, sources, ''),
                               reference_context if verifier_reference is None else verifier_reference,
-                              verify_tokens, 128, settings, sources, VERIFIER_SCHEMA, window_floor=required)
+                              verify_tokens, MIN_PROOF_REVIEW_TOKENS, settings, sources, VERIFIER_SCHEMA, window_floor=required)
             if room < combined:
-                settings['reviewable_candidate_tokens'] = min(candidate, room - 128,
+                settings['reviewable_candidate_tokens'] = min(candidate, room - MIN_PROOF_REVIEW_TOKENS,
                     max(floor, room * candidate // combined))
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources, job_id=job_id)
         if getattr(self.agent, 'image_refs', None):
@@ -438,19 +481,29 @@ class ProofRunner:
 
     def _fits(self, call, messages, context, cap, floor, settings, sources, format_schema=None, *, window_floor=0):
         """Dry run of one call of a job that is not created yet, under the rule its dispatch will apply."""
+        role = 'verifier' if format_schema is not None else 'solver'
         messages = self._append_reference(messages, context, reviewer=format_schema is not None)
         if getattr(self.agent, 'image_refs', None):
             messages[0]['images'] = copy.deepcopy(self.agent.image_refs)
         explicit = settings['specialist_output_cap']
         minimum = min(cap, explicit or cap) if settings['full_output_ceiling'] else floor
         try:
-            # Only the counted input matters here: the solver's sampling options stand in for either role.
-            _, allocation = allocate_call(self.agent.client, self._payload('solver', messages, cap, format_schema),
-                                          cap, minimum=minimum, explicit_cap=explicit)
+            payload = self._payload(role, messages, cap, format_schema)
+            try:
+                _, allocation = allocate_call(self.agent.client, payload, cap, minimum=minimum, explicit_cap=explicit)
+                if allocation['available_output_tokens'] < window_floor and payload.get('tools'):
+                    raise CallContextError('Optional tools leave insufficient room for the whole candidate.', allocation)
+            except CallContextError:
+                if not payload.get('tools'):
+                    raise
+                _, allocation = allocate_call(self.agent.client, self._payload(role, messages, cap, format_schema, tools=False),
+                                              cap, minimum=minimum, explicit_cap=explicit)
             room = allocation['available_output_tokens']
             if room < window_floor:
                 raise CallContextError(f'The complete review request leaves {room} tokens for its candidate '
                                        f'and response together, below the required {window_floor}.', allocation)
+            if role == 'verifier' and self.turns.names:
+                settings['empty_review_input_tokens'] = allocation['input_tokens']
             return room
         except CallContextError as exc:
             largest = max(sources, key=lambda source: len(source['content']), default=None)
@@ -458,7 +511,7 @@ class ProofRunner:
                     if largest else '')
             raise CallContextError(f'{call} does not fit this model. {exc}{hint}', exc.details) from exc
 
-    def resume(self, proof_id, *, add_tokens=0, add_seconds=0, add_rounds=0):
+    def resume(self, proof_id, *, add_tokens=0, add_seconds=0, add_rounds=0, evidence=None):
         """Continue a saved proof. ``add_*`` is an explicit extra allowance the user chose, recorded in the job."""
         self.store = ProofStore.load(self.agent.workspace.root, proof_id)
         if self.state['version'] != 2:
@@ -469,7 +522,7 @@ class ProofRunner:
         additions = {k: v for k, v in additions.items() if v}
         if additions:
             self.check_additions(self.state, additions)
-        elif self.state['status'] in TERMINAL and not (budget_stop(self.state) and unsettled_interrupts(self.state)):
+        elif evidence is None and self.state['status'] in TERMINAL and not (budget_stop(self.state) and unsettled_interrupts(self.state)):
             return self._run()  # Viewing a finished run never needs its model server.
         saved = self.state['settings']
         current_provenance = self._provenance()
@@ -506,7 +559,7 @@ class ProofRunner:
                 'original_controller_sha256': saved.get('controller_sha256'),
                 'controller_sha256': current_provenance['controller_sha256']})
             saved.update(policy_version=POLICY_VERSION, policy_sha256=current_provenance['policy_sha256'])
-            self.emit('notice', 'Resuming with calibrated Proof policy 11; original calls and all saved allowances are retained. The policy change is recorded in the report.')
+            self.emit('notice', f'Resuming with Proof policy {POLICY_VERSION}; original calls and all saved allowances are retained. The policy change is recorded in the report.')
         if saved.get('transport_sha256') != current_provenance['transport_sha256']:
             self.state.setdefault('transport_migration', {
                 'original_controller_sha256': saved.get('controller_sha256'),
@@ -514,6 +567,8 @@ class ProofRunner:
                 'controller_sha256': current_provenance['controller_sha256'],
                 'transport_sha256': copy.deepcopy(current_provenance['transport_sha256'])})
         with self.store.lock():
+            if evidence is not None:
+                self.turns.accept(evidence)
             reopen = self.state['status'] in TERMINAL
             settled = any([self._settle_unknown(call) for call in unsettled_interrupts(self.state)])
             if additions:
@@ -546,8 +601,8 @@ class ProofRunner:
                              'Start a new proof instead.')
         if additions.get('tokens') and settings.get('max_tokens') is None:
             raise ValueError('This proof has no cumulative token ceiling, so add_tokens does not apply.')
-        if settings['max_rounds'] + additions.get('rounds', 0) > 100:
-            raise ValueError('A proof can have at most 100 attempts in total.')
+        if settings['max_rounds'] + additions.get('rounds', 0) > MAX_ADD_ROUNDS:
+            raise ValueError('The total attempt allowance must be a JSON-safe integer.')
         if status == 'attempts_exhausted' and not additions.get('rounds'):
             raise ValueError('This proof used all its attempts: add attempts (add_rounds) to continue it.')
 
@@ -564,8 +619,14 @@ class ProofRunner:
         self.state['status'], self.state['stop_reason'] = status, reason
 
     def _remaining(self):
-        limit = self.state['settings']['max_tokens']
-        return math.inf if limit is None else limit - self.state['tokens_charged']
+        settings = self.state['settings']
+        limit = settings['max_tokens']
+        remaining = math.inf if limit is None else limit - self.state['tokens_charged']
+        if settings.get('fit_remaining_budget'):
+            shared = getattr(self.agent.client, 'remaining_tokens', math.inf)
+            if isinstance(shared, (int, float)):
+                remaining = min(remaining, shared)
+        return remaining
 
     def _call_cap(self, cap):
         explicit = self.state['settings'].get('specialist_output_cap')
@@ -576,16 +637,35 @@ class ProofRunner:
         cap = settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
         return min(cap, settings.get('reviewable_candidate_tokens', cap))
 
+    def _fitted_solver_cap(self, kind):
+        """Share a short output budget between a solver and its whole-candidate verifier."""
+        settings = self.state['settings']
+        solve = self._call_cap(self._attempt_cap(kind))
+        requested = self._call_cap(settings['max_predict'] if kind == 'initial' else settings['repair_tokens'])
+        verify = self._call_cap(settings['verify_tokens'])
+        floor = settings['initial_min_solve_tokens'] if kind in ('initial', 'retry') else settings['min_solve_tokens']
+        remaining = self._remaining()
+        if solve < floor or verify < MIN_PROOF_REVIEW_TOKENS or remaining < floor + MIN_PROOF_REVIEW_TOKENS:
+            raise ProofBudget(f'This attempt needs at least {floor} solver tokens and {MIN_PROOF_REVIEW_TOKENS} verifier tokens.')
+        if remaining >= solve + verify:
+            return solve
+        return min(solve, int(remaining) - MIN_PROOF_REVIEW_TOKENS, max(floor, int(remaining) * requested // (requested + verify)))
+
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']
-        solve = (self._attempt_cap(kind) if kind == 'initial' or settings.get('full_output_ceiling')
-                 else settings['min_solve_tokens'])
-        needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
-        if self._remaining() < needed:
-            raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
+        if settings.get('fit_remaining_budget'):
+            self._fitted_solver_cap(kind)
+        else:
+            solve = (self._attempt_cap(kind) if kind == 'initial' or settings.get('full_output_ceiling')
+                     else settings['min_solve_tokens'])
+            needed = self._call_cap(solve) + self._call_cap(settings['verify_tokens'])
+            if self._remaining() < needed:
+                raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted')
-        # After one full cycle, its measured duration estimates the next one.
+        if settings.get('fit_remaining_budget'):
+            return  # Each new call observes the actual active-time deadline.
+        # Saved strict runs also require the estimated time for a complete cycle.
         solver = next((c for c in self.state['calls'] if c['role'] == 'solver' and 'seconds' in c and c['status'] != 'rejected'), None)
         verifier = next((c for c in self.state['calls'] if c['role'] == 'verifier' and 'seconds' in c and c['status'] != 'rejected'), None)
         if solver and verifier:
@@ -603,6 +683,20 @@ class ProofRunner:
                 return self._result()
             if self.state['status'] in TERMINAL:
                 return self._result()
+            settings = self.state['settings']
+            self.turns.desk.scope(self.state['goal'], self._statement(), settings.get('reference_context'), self.state['sources'])
+            self.turns.configure(self.state['settings'])
+            private = [self._statement(), *(s['content'] for s in self.state['sources'])]
+            private.append(json.dumps(self.state['settings'].get('reference_context'), ensure_ascii=False))
+            self._private_sources = private
+            self.turns.desk.protect(private)
+            pending = self.state.get('pending') or {}
+            if pending.get('phase') == 'review' and pending.get('candidate'):
+                self.turns.desk.protect([*private, self._candidate_text(self._get_candidate(pending['candidate']))])
+            if self.state.get('evidence_literature'):
+                self.turns.desk.literature.restore(self.state['evidence_literature'])
+            if self.state['status'] == 'waiting_for_evidence':
+                return self._result()
             # Only checkpointed active work is charged after an unclean stop.
             # Wall-clock downtime is not evidence of computation; a journal
             # written after the last checkpoint is (see _crashed_call_seconds).
@@ -611,27 +705,8 @@ class ProofRunner:
             self._clock = time.monotonic()
             self.state['status'] = 'running'
             try:
-                self._recover_calls()
-                if self.state['pending'] is None:
-                    self._new_attempt('initial')
-                while self.state['status'] == 'running':
-                    pending = self.state['pending']
-                    if pending['phase'] == 'solve':
-                        if self._find_call(self._call_key('solver')) is not None:
-                            result = self._call('solver', None, pending.get('solver_cap', self.state['settings']['max_predict']))
-                        else:
-                            messages = self._solve_messages(pending)
-                            result = self._call('solver', messages, self._solver_cap(messages, pending))
-                        candidate = self._candidate(result, pending)
-                        pending['candidate'] = candidate['id']
-                        pending['phase'] = 'review' if candidate['transport_complete'] else 'continue'
-                        self._save()
-                    elif pending['phase'] == 'review':
-                        self._review(pending)
-                    elif pending['phase'] in {'continue', 'repair'}:
-                        self._new_attempt(pending['phase'], pending['candidate'], pending.get('review'))
-                    else:
-                        raise LedgerError('Invalid saved proof phase')
+                with self.turns.meter():
+                    self._advance()
             except ProofContext as exc:
                 self._stop('needs_context', str(exc))
             except ProofBudget as exc:
@@ -658,6 +733,43 @@ class ProofRunner:
                 self.state['active_checkpoint_wall'] = None
                 self._save()
             return self._result()
+
+    def _advance(self):
+        self._recover_calls()
+        if self.state['pending'] is None:
+            self._new_attempt('initial')
+        while self.state['status'] == 'running':
+            pending = self.state['pending']
+            if pending['phase'] == 'solve':
+                if self._find_call(self._call_key('solver')) is not None:
+                    result = self._call('solver', None, pending.get('solver_cap', self.state['settings']['max_predict']))
+                else:
+                    messages = self._solve_messages(pending)
+                    result = self._call('solver', messages, self._solver_cap(messages, pending))
+                if self.turns.process('solver', result) or self._finish_limited_turn('solver', result):
+                    continue
+                candidate = self._candidate(result, pending)
+                pending['candidate'] = candidate['id']
+                pending['phase'] = 'review' if candidate['transport_complete'] else 'continue'
+                self._save()
+            elif pending['phase'] == 'review':
+                self._review(pending)
+            elif pending['phase'] in {'continue', 'repair'}:
+                self._new_attempt(pending['phase'], pending['candidate'], pending.get('review'))
+            else:
+                raise LedgerError('Invalid saved proof phase')
+
+    def _finish_limited_turn(self, role, result):
+        """A truncated optional lookup gets the already reserved final call in the same attempt."""
+        if result['stats'].get('done_reason') != 'length':
+            return False
+        key = self._call_key(role)
+        if not self._find_call(key).get('evidence_surplus_limited'):
+            return False
+        self.state['pending'][role + '_finish_after'] = key
+        self.emit('notice', f'{role.capitalize()} evidence generation reached its allowance; finishing the same attempt with saved evidence.')
+        self._save()
+        return True
 
     def _crashed_call_seconds(self):
         """After a killed process, charge the in-flight call's active time up to its journal's last write.
@@ -714,15 +826,36 @@ class ProofRunner:
     def _find_call(self, key):
         return next((c for c in self.state['calls'] if c['key'] == key), None)
 
-    def _payload(self, role, messages, cap, format_schema=None):
+    def _payload(self, role, messages, cap, format_schema=None, *, tools=True):
+        schemas = self.turns.schemas(role) if tools and self.turns.names else []
+        if self.turns.names and self.store and self.state.get('pending'):
+            pending = self.state['pending']
+            initial = pending['kind'] in ('initial', 'retry')
+            required = self.state['settings']['initial_min_solve_tokens' if initial else 'min_solve_tokens'] if role == 'solver' else MIN_PROOF_REVIEW_TOKENS
+            tool_room = self.turns.available_for_turn(role) if pending.get(role + '_turns') else self.turns.remaining(role)
+            if tool_room < required or pending.get(role + '_finish_after'):
+                schemas = []
+            if not pending.get(role + '_indexed'):
+                if role == 'verifier' and pending.get('candidate'):
+                    candidate = self._get_candidate(pending['candidate'])
+                    primary = self.turns.primary(self.turns.lineage(candidate))
+                    if primary:
+                        messages = [*messages, {'role': 'user', 'content': 'Recorded primary evidence (inspect '
+                                     'independently):\n' + json.dumps(primary, ensure_ascii=False)}]
+                messages = [*messages, *self.turns.history(role)]
+            if pending.get(role + '_turns'):
+                progress = self.turns.resource_note(role, tools=bool(schemas))
+                messages = [*messages, {'role': 'user', 'content': progress}]
         payload = {'model': self.agent.model, 'messages': messages, 'stream': True, 'think': True,
                    'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
-                               'temperature': self.agent.temperature if role == 'solver'
+                               'temperature': self.agent.temperature if role == 'solver' or not self.store
                                else self.state['settings'].get('verify_temperature', 0),
                                'top_p': self.agent.top_p}}
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + (len(self.state['calls']) if self.store else 0)) % (2 ** 31)
-        if format_schema is not None:
+        if schemas:
+            payload['tools'] = schemas
+        elif format_schema is not None:
             payload['format'] = format_schema
         return payload
 
@@ -743,6 +876,9 @@ class ProofRunner:
         """The initial solve keeps the direct-call allowance; later calls use the repair
         allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
+        if settings.get('fit_remaining_budget'):
+            pending['solver_cap'] = self._fitted_solver_cap(pending['kind'])
+            return pending['solver_cap']
         cap = self._attempt_cap(pending['kind'])
         if settings.get('full_output_ceiling') or pending['kind'] == 'initial':
             if self._remaining() < self._call_cap(cap) + self._call_cap(settings['verify_tokens']):
@@ -758,10 +894,12 @@ class ProofRunner:
         pending['solver_cap'] = cap
         return cap
 
-    @staticmethod
-    def _append_reference(messages, context, *, reviewer=False):
+    def _append_reference(self, messages, context, *, reviewer=False):
         # A solve without context keeps the exact first request of direct inference (proof_policy.initial_request).
-        if context or reviewer:
+        if self.turns.names:
+            role = 'verifier' if reviewer else 'solver'
+            messages[0]['content'] += '\n\n' + self.turns.desk.instructions(role)
+        elif context or reviewer:
             messages[0]['content'] += '\n\n' + NO_CODE_NOTE
         if context:
             messages[0]['content'] += (
@@ -794,7 +932,9 @@ class ProofRunner:
         earlier = self.state['reviews'][:self.state['reviews'].index(review)]
         records = []
         seen = {(i['kind'], i['location'], i['evidence']) for i in review['response']['issues']}
-        for old in reversed([r for r in earlier if r.get('response') and r['response']['issues']][-3:]):
+        for old in reversed(earlier):
+            if not old.get('response'):
+                continue
             for issue in old['response']['issues']:
                 identity = (issue['kind'], issue['location'], issue['evidence'])
                 if identity in seen:
@@ -802,11 +942,7 @@ class ProofRunner:
                 item = {'candidate': old['candidate'], 'review': old['id'], 'kind': issue['kind'],
                         'disposition': 'not_reassessed',
                         'reason': 'No resolution established by this record; check the written candidate.'}
-                for field, limit in (('location', 200), ('evidence', 800)):
-                    value = issue[field]
-                    item[field] = value if len(value) <= limit else value[:limit] + ' [excerpt; full review saved]'
-                if len(json.dumps(records + [item], ensure_ascii=False)) > 3000 or len(records) >= 6:
-                    continue
+                item.update(location=issue['location'], evidence=issue['evidence'])
                 records.append(item)
                 seen.add(identity)
         return json.dumps(records, ensure_ascii=False) if records else ''
@@ -851,7 +987,8 @@ class ProofRunner:
             raise ProofContext('The previous generation reached its output limit without reusable written text or working notes. '
                                'Repeating the same allowance cannot advance this proof; its artifacts were retained.')
         settings = self.state['settings']
-        floor = self._call_cap(self._attempt_cap('continue'))
+        floor = (settings['min_solve_tokens'] if settings.get('fit_remaining_budget')
+                 else self._call_cap(self._attempt_cap('continue')))
         ctx = self.agent.ctx
         observed_context = getattr(self.agent.client, 'observed_context_tokens', None)
         if type(observed_context) is int and observed_context > 0:
@@ -884,8 +1021,8 @@ class ProofRunner:
                 keep = int(keep * 0.75)
         if length_limited:
             settings = self.state['settings']
-            desired = self._attempt_cap('retry')
-            desired = min(desired, self._remaining() - self._call_cap(settings['verify_tokens']))
+            desired = (self._fitted_solver_cap('retry') if settings.get('fit_remaining_budget') else
+                       min(self._attempt_cap('retry'), self._remaining() - self._call_cap(settings['verify_tokens'])))
             fresh = self._payload('solver', self._initial_messages(goal, sources), desired)
             try:
                 _, allocation = allocate_call(self.agent.client, fresh, desired,
@@ -936,36 +1073,50 @@ class ProofRunner:
 
     def _review(self, pending):
         candidate = self._get_candidate(pending['candidate'])
-        messages = self._reference_messages(review_request(self._statement(), self.state['sources'], self._candidate_text(candidate)), reviewer=True)
+        candidate_text = self._candidate_text(candidate)
+        self.turns.desk.protect([*self._private_sources, candidate_text])
+        messages = self._reference_messages(review_request(self._statement(), self.state['sources'], candidate_text), reviewer=True)
+        primary = self.turns.primary(self.turns.lineage(candidate))
         if pending.get('protocol_error'):
             messages[0]['content'] += ('\n\nYour previous review could not be interpreted: ' + pending['protocol_error'] +
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
         cap = self.state['settings']['verify_tokens']
         cached = self._find_call(self._call_key('verifier'))
-        if not cached and self._remaining() < self._call_cap(cap):
-            self._stop('review_unavailable', 'Insufficient budget for a full verifier call; the candidate was retained without rewriting it.')
-            return
+        flexible = self.state['settings'].get('fit_remaining_budget')
+        minimum = MIN_PROOF_REVIEW_TOKENS if flexible else self._call_cap(cap)
+        if not cached:
+            if self._remaining() < minimum:
+                self._stop('review_unavailable', 'Insufficient budget for a verifier response. The candidate was retained.')
+                return
+            if flexible:
+                cap = min(self._call_cap(cap), self._remaining())
         result = self._call('verifier', messages, cap, format_schema=VERIFIER_SCHEMA)
+        if self.turns.process('verifier', result):
+            return
         # A pre-upgrade call may have finished before its review was committed.
         # Its immutable request, not the migrated job policy, owns that contract.
-        schema_version = 3
+        schema_version, bounded_v3 = 3, False
         if cached:
             saved_request = json.loads(self.store.read_artifact(cached['request']))
             if saved_request.get('format') == LEGACY_VERIFIER_SCHEMA:
                 schema_version = 1
             elif saved_request.get('format') == VERIFIER_SCHEMA_V2:
                 schema_version = 2
-            elif saved_request.get('format') != VERIFIER_SCHEMA:
+            elif saved_request.get('format') == VERIFIER_SCHEMA_V3:
+                bounded_v3 = True
+            elif saved_request.get('format') != VERIFIER_SCHEMA and SUBMIT not in saved_request.get('tools', []):
                 raise ValueError('Unrecognized saved verifier schema; original artifacts retained')
         try:
             if not result['done'] or result['calls']:
                 raise ValueError('Review generation did not finish a standalone response')
-            response = validate_review(result['text'], schema_version=schema_version)
+            response = validate_review(result['text'], schema_version=schema_version, bounded_v3=bounded_v3)
         except (ValueError, TypeError, RecursionError) as exc:
             response = None
             error = str(exc)
         else:
             error = None
+        if error and self._finish_limited_turn('verifier', result):
+            return
         review = {'id': f'V{len(self.state["reviews"]) + 1}', 'candidate': candidate['id'],
                   'candidate_sha256': candidate['sha256'], 'call': self._call_key('verifier'),
                   'response': response, 'protocol_error': error,
@@ -975,7 +1126,7 @@ class ProofRunner:
         pending['review'] = review['id']
         if error:
             candidate['review_status'] = 'review_unavailable'
-            if pending['review_attempt'] == 0 and self._remaining() >= self._call_cap(cap):
+            if pending['review_attempt'] == 0 and self._remaining() >= minimum:
                 pending['review_attempt'] = 1
                 pending['protocol_error'] = error
                 self.emit('notice', 'Clarifying an unavailable review on the same candidate; no proof rewrite was requested')
@@ -983,7 +1134,10 @@ class ProofRunner:
                 self._stop('review_unavailable', 'No consistent verifier verdict after the bounded review attempt(s). Candidate retained unchanged.')
         else:
             verdict = response['verdict']
-            override = not_a_proof(self._candidate_text(candidate), response) if verdict == 'no_issue_found' else None
+            own = [e for e in self.state.get('evidence', []) if e['role'] == 'verifier'
+                   and e['attempt'] == pending['index'] and e.get('primary')]
+            experiments = [*primary, *(v for e in own for v in json.loads(self.store.read_artifact(e['primary'])))]
+            override = not_a_proof(candidate_text, response, experiments if self.turns.names else None) if verdict == 'no_issue_found' else None
             if override:
                 # The model's assessment stays as written; the controller does not accept it as a proof.
                 review['controller_override'] = {'review_status': 'uncertain', 'reason': override}
@@ -1006,6 +1160,11 @@ class ProofRunner:
     def _call_key(self, role):
         pending = self.state['pending']
         base = f'{pending["index"]}-{role}-{pending["review_attempt"] if role == "verifier" else 0}'
+        turns = len(pending.get(role + '_turns', []))
+        if turns:
+            base += f'-turn-{turns}'
+        if pending.get(role + '_finish_after'):
+            base += '-final'
         dispatch = pending.get(role + '_dispatch', 0)
         return base + (f'-resume-{dispatch}' if dispatch else '')
 
@@ -1031,7 +1190,8 @@ class ProofRunner:
             result['calls'].extend(message.get('tool_calls') or [])
             if event.get('done') is True:
                 result['done'] = True
-                result['complete'] = event.get('done_reason') == 'stop'
+                reason = event.get('done_reason')
+                result['complete'] = reason == 'stop' or (reason == 'tool_calls' and bool(result['calls']))
                 result['stats'] = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'eval_duration', 'done_reason', 'accounting_warning') if k in event}
         result.update({key: ''.join(parts) for key, parts in fragments.items()})
         return result
@@ -1087,7 +1247,7 @@ class ProofRunner:
                 pending = self.state.get('pending')
                 role = call['role']
                 if pending and call['key'] == self._call_key(role):
-                    if role == 'solver' and (result['text'] or result['thinking']):
+                    if role == 'solver' and not pending.get('solver_turns') and not result['calls'] and (result['text'] or result['thinking']):
                         candidate = self._candidate(result, pending)
                         pending.update(kind='continue', parent=candidate['id'])
                     # A transport interruption is neither a mathematical attempt
@@ -1131,8 +1291,12 @@ class ProofRunner:
         previous = next((c for c in self.state['calls'] if c['key'] == key), None)
         if previous is not None:
             return self._read_stream(previous['stream'])
-        if self._remaining() < self._call_cap(cap):
-            raise ProofBudget('Insufficient budget for the full role allowance; no reduced-cap call was dispatched')
+        if self.state['settings'].get('fit_remaining_budget'):
+            cap = min(cap, self._fitted_solver_cap(self.state['pending']['kind']) if role == 'solver' else self._remaining())
+            if cap < 128:
+                raise ProofBudget('Insufficient remaining output allowance for this model call.')
+        elif self._remaining() < self._call_cap(cap):
+            raise ProofBudget('Insufficient budget for the saved full role allowance')
         remaining_seconds = self.state['settings']['max_seconds'] - self._elapsed()
         if remaining_seconds <= 0:
             raise ProofBudget('Elapsed-time budget exhausted')
@@ -1142,7 +1306,6 @@ class ProofRunner:
             # A retried dispatch is handed the first attempt's messages: build them again without what was omitted.
             messages = self._solve_messages(pending)
         leads = optional and self.state['settings'].get('solver_leads') and not pending.get('solver_leads_omitted')
-        payload = self._payload(role, messages, cap, format_schema)
         client = self.agent.client
         old_timeout = getattr(client, 'timeout', None)
         if old_timeout is not None:
@@ -1150,12 +1313,47 @@ class ProofRunner:
         try:
             minimum = (self.state['settings'].get('initial_min_solve_tokens', self.state['settings']['min_solve_tokens'])
                        if role == 'solver' and pending['kind'] in {'initial', 'retry'} else
-                       self.state['settings']['min_solve_tokens'] if role == 'solver' else 128)
+                       self.state['settings']['min_solve_tokens'] if role == 'solver' else MIN_PROOF_REVIEW_TOKENS)
             if self.state['settings'].get('full_output_ceiling'):
                 minimum = self._call_cap(cap)
+            def fit(base):
+                # When tools are offered, the model might spend its full call on a request.
+                # Preserve room for the requesting role's final response and independent review.
+                def allocate(payload):
+                    ceiling = min(cap, self.turns.available_for_turn(role)) if payload.get('tools') else cap
+                    return allocate_call(client, payload, ceiling, minimum=min(minimum, cap),
+                                         explicit_cap=self.state['settings'].get('specialist_output_cap'))
+
+                payload = self._payload(role, base, cap, format_schema)
+                if not pending.get(role + '_indexed'):
+                    try:
+                        return allocate(payload)
+                    except CallContextError:
+                        if not (self.turns.names and self.turns.visible(role)):
+                            return allocate(self._payload(role, base, cap, format_schema, tools=False))
+                    self.emit('notice', f'{role.capitalize()} evidence history exceeds the context; '
+                              'preserving the exact task and candidate and fitting the latest observation.')
+                    pending[role + '_indexed'] = True
+                    payload = self._payload(role, base, cap, format_schema)
+
+                def choices():
+                    if payload.get('tools'):
+                        yield payload
+                        previous = payload['tools']
+                        for keep in (('read_proof_evidence', 'read_paper', 'read_experiment', 'submit_review'),
+                                     ('read_proof_evidence', 'read_paper', 'read_experiment'),
+                                     ('read_proof_evidence',)):
+                            readers = [s for s in previous if s['function']['name'] in keep]
+                            if readers and readers != previous:
+                                yield {**payload, 'tools': readers}
+                            previous = readers
+                        yield self._payload(role, base, cap, format_schema, tools=False)
+                    else:
+                        yield payload
+
+                return self.turns.fit_indexed(role, choices(), allocate)
             try:
-                payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
-                                                 explicit_cap=self.state['settings'].get('specialist_output_cap'))
+                payload, context = fit(messages)
             except CallContextError as exc:
                 if role != 'solver' or not (pending.get('repair_history_chars') or leads):
                     raise ProofContext(str(exc) + ' Candidate retained.') from exc
@@ -1165,10 +1363,8 @@ class ProofRunner:
             if leads and (payload is None or payload['options']['num_predict'] < self._call_cap(cap)):
                 pending['solver_leads_omitted'] = 'context'
                 self.emit('notice', 'Earlier research leads omitted to preserve the statement and solver output allowance')
-                payload = self._payload(role, self._solve_messages(pending), cap, format_schema)
                 try:
-                    payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
-                        explicit_cap=self.state['settings'].get('specialist_output_cap'))
+                    payload, context = fit(self._solve_messages(pending))
                 except CallContextError as exc:
                     if not pending.get('repair_history_chars'):
                         raise ProofContext(str(exc) + ' Candidate retained.') from exc
@@ -1176,14 +1372,28 @@ class ProofRunner:
             if role == 'solver' and pending.get('repair_history_chars') and (
                     payload is None or payload['options']['num_predict'] < self._call_cap(cap)):
                 pending['repair_history_omitted'] = 'context'
-                payload = self._payload(role, self._solve_messages(pending), cap, format_schema)
                 self.emit('notice', 'Earlier repair history omitted to preserve the original inputs and solver output allowance')
                 try:
-                    payload, context = allocate_call(client, payload, cap, minimum=min(minimum, cap),
-                        explicit_cap=self.state['settings'].get('specialist_output_cap'))
+                    payload, context = fit(self._solve_messages(pending))
                 except CallContextError as exc:
                     raise ProofContext(str(exc) + ' Candidate retained.') from exc
+            surplus_limited = bool(payload.get('tools') and pending.get(role + '_turns') and
+                                   context['requested_output_tokens'] < self._call_cap(cap))
             cap = payload['options']['num_predict']
+            if prior := pending.get(role + '_finish_after'):
+                result = self._read_stream(self._find_call(prior)['stream'])
+                working = '\n'.join(part for part in (result['thinking'], result['text']) if part)
+                if working:
+                    message = {'role': 'user', 'content': 'Your preceding evidence turn reached its output limit. '
+                               'These are your own unfinished working notes; check them before relying on them.\n' + working}
+                    with_notes = {**payload, 'messages': [*payload['messages'], message]}
+                    try:
+                        with_notes, note_fit = allocate_call(client, with_notes, cap, minimum=cap)
+                    except CallContextError:
+                        pass  # The partial generation stays in its journal. Preserve the whole final answer allowance.
+                    else:
+                        if note_fit['input_tokens'] <= getattr(client, 'remaining_input_tokens', math.inf):
+                            payload, context = with_notes, note_fit
             if role == 'solver':
                 pending['solver_cap'] = cap
         finally:
@@ -1198,6 +1408,8 @@ class ProofRunner:
         stream_file = self.store.start_stream(role)
         call = {'key': key, 'role': role, 'round': self.state['rounds_started'], 'status': 'running',
                 'reserved_tokens': cap, 'request': request, 'stream': stream_file, 'context': context}
+        if surplus_limited:
+            call['evidence_surplus_limited'] = True
         self.state['calls'].append(call)
         self.state['tokens_charged'] += cap
         self._save()  # Durable reservation precedes inference.
@@ -1274,7 +1486,8 @@ class ProofRunner:
                     result = self._read_stream(call['stream'])
                 except AgentError:
                     result = None  # Keep malformed transport evidence in its journal.
-                if result is not None and (result['text'] or result['thinking']):
+                if (result is not None and not result['calls'] and (result['text'] or result['thinking']) and
+                        not (call.get('evidence_surplus_limited') and result['stats'].get('done_reason') == 'length')):
                     self._candidate(result, pending)
         selected_id, initial_id = self.state['selected_candidate'], self.state['initial_candidate']
         selected = self._get_candidate(selected_id) if selected_id else None
@@ -1307,6 +1520,11 @@ class ProofRunner:
                       'Earlier objections below remain attributed to their candidate; a later pass does not erase their history.', '']
         for selection in self.state.get('selection_history', []):
             lines.append(f'- Selection: {selection["previous"] or "none"} → {selection["selected"]}; {selection["reason"]}.')
+        if self.state.get('evidence'):
+            lines += ['', '## Evidence', '']
+            for entry in self.state['evidence']:
+                target = f'[result](artifacts/{entry["result"]})' if entry.get('result') else entry['status']
+                lines.append(f'- {entry["id"]} · {entry["role"]} · {entry["name"]} · {target}')
         lines += ['', '## Reviews', '']
         for review in self.state['reviews']:
             lines += [f'### {review["id"]} on {review["candidate"]}', '']
@@ -1339,6 +1557,7 @@ class ProofRunner:
                 'claim_outcome': (_direction(selected, _own_review(self.state, selected)) if selected else None) or 'unclassified',
                 'initial_candidate': copy.deepcopy(initial), 'selected_candidate': copy.deepcopy(selected),
                 'tokens_charged': self.state['tokens_charged'], 'seconds_used': self.state['seconds_used'],
+                **({'evidence_request': copy.deepcopy(self.state['evidence_request'])} if self.state.get('evidence_request') else {}),
                 'rounds_started': self.state['rounds_started']}
 
 
@@ -1374,6 +1593,9 @@ def export_evidence(state):
     """Export only the selected candidate and its own hash-matched whole-task review."""
     qualifiers = [] if state.get('status') in TERMINAL else ['unfinished']
     row = {'mode': 'prove', 'kind': 'proof', 'qualifiers': qualifiers, 'status': 'no candidate', 'text': request_text(state)}
+    links = [e['job_link'] for e in state.get('evidence', []) if e.get('job_link')]
+    if links:
+        row['links'] = links
     if state.get('version') == 1:
         return [{**row, 'status': 'legacy proof, not classified', 'qualifiers': ['legacy format', *qualifiers]}]
     candidate = next((c for c in state['candidates'] if c['id'] == state.get('selected_candidate')), None)

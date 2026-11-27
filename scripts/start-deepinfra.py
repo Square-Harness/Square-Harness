@@ -37,8 +37,8 @@ def main():
                         help='DS4 common per-call working-time allowance (default: 10800 seconds)')
     parser.add_argument('--workspace', type=Path,
                         help='Research workspace (default: the existing private profile workspace)')
-    parser.add_argument('--online', action='store_true',
-                        help='Enable online literature tools for the local test (off by default)')
+    parser.add_argument('--allow-remote-model', '--online', dest='allow_remote_model', action='store_true',
+                        help='Allow the selected remote model host to receive prompts and files')
     parser.add_argument('--no-browser', action='store_true')
     options = parser.parse_args()
     ds4 = options.profile == 'ds4'
@@ -109,16 +109,16 @@ def main():
     command = [sys.executable, '-m', 'mathagent', '--gui', '--no-browser',
                '--gui-host', '127.0.0.1', '--gui-port', str(options.port),
                '--workspace', str(workspace), '--backend', 'openai',
-               '--api-profile', options.provider if ds4 else 'default', '--online' if options.online else '--offline',
+               '--api-profile', options.provider if ds4 else 'default',
                '--gui-concurrency', '5' if ds4 else '1',
                '--gui-model-concurrency', '200' if ds4 else '1',  # DeepInfra's account limit; shared fairly
                '--assistant-concurrency', '5' if ds4 else '1']
     model = 'deepseek-ai/DeepSeek-V4.1-Flash-1017' if ds4 else options.model or 'qwen3.8-27b'
-    if ds4:
+    if ds4 or options.allow_remote_model:
         command.append('--allow-remote-model')
-        if options.proof_call_seconds is not None:
-            command += ['--proof-call-seconds', str(options.proof_call_seconds)]
-    else:
+    if ds4 and options.proof_call_seconds is not None:
+        command += ['--proof-call-seconds', str(options.proof_call_seconds)]
+    if not ds4:
         command += ['--host', options.host or 'http://127.0.0.1:18020', '--model', model,
                     '--ctx', str(options.ctx or 65536), '--proof-solve-tokens', '32768',
                     '--proof-verify-tokens', '16384', '--request-timeout', '1800']
@@ -151,7 +151,7 @@ def main():
         import webbrowser
         webbrowser.open(url)
     print(f'Square Harness is running at http://127.0.0.1:{options.port}/ (PID {process.pid}).')
-    print('Model: ' + model + '; web research is ' + ('on.' if options.online else 'off.'))
+    print(f'Model: {model}. Web research is online.')
     if ds4 and options.provider == 'deepinfra':
         print('DeepInfra service tier: ' + environment['SH_DEEPINFRA_SERVICE_TIER'])
     elif ds4:

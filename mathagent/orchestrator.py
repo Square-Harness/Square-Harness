@@ -29,7 +29,8 @@ from .backends import MeasuredStreamCancellation, ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
-from .tools import schema
+from .prompts import NOTEBOOK_DISPLAY_RECEIPT, PROJECT_SCOPE, with_notebook_evidence
+from .tools import is_project_notebook, schema
 from .refcheck import standalone_reference_request
 from .model_limits import output_limit, input_limit, is_ds4, HOSTED_DS4, ProviderChanged
 
@@ -64,9 +65,7 @@ You can delegate a precise objective to an existing worker when sustained proof
 search, independent proof review, exploration, a precise reference, a literature review,
 manuscript review or a write-up will help. The available modes are prove,
 explore, check, literature, referee, typo_check, quick_review, explain, writeup and summarize.
-Delegation is required for nontrivial proof search and otherwise optional. Prefer the
-least effort suitable for the objective: low, medium or high. Every literature review runs at high effort.
-High is the maximum effort. State the complete objective and its hypotheses. Children cannot
+Delegation is required for nontrivial proof search and otherwise optional. Every new worker runs at high effort. State the complete objective and its hypotheses. Children cannot
 create other children. The controller also gives prove, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request. A prove worker and
@@ -85,7 +84,7 @@ facts: first look for each one in the conversation and the files (read the place
 a need they already meet needs nothing. Obtain only what is really missing (check
 for a reference; literature for earlier work on a topic: it writes a survey and does
 not complete a given list of references; prove only when a main result of the
-document has no proof at all, at the lowest effort, never for a routine step; or ask
+document has no proof at all, never for a routine step; or ask
 the user a question), then delegate the write-up once more with the same request: it
 then writes with what there is and marks what is still missing. Report unresolved
 needs if further delegation is unavailable. Never write the document yourself in the reply. A delivered
@@ -195,12 +194,6 @@ such as worker or delegate are for tool calls only and never appear in the answe
 An error with retryable=false is a permanent blocker for unchanged inputs.
 Do not paraphrase the same objective, raise effort, or use another worker to
 evade it. Use an available independent capability or explain the blocker.
-"""
-
-POLICY_OFFLINE = """
-Web research is locked off in this interface (it was launched with --offline). Never offer an
-online search, a web lookup or a later check online; answer from the conversation, attached
-files, the workspace and cached sources, and say plainly what could not be checked.
 """
 
 POLICY_WRITE = """
@@ -425,7 +418,7 @@ class Orchestrator:
         if hasattr(self.agent, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.agent.turn_image_refs)
         self.state = {
-            'version': STATE_VERSION, 'id': 'assistant_' + uuid.uuid4().hex,
+            'version': STATE_VERSION, 'high_effort': True, 'id': 'assistant_' + uuid.uuid4().hex,
             'status': 'running', 'query': query, 'transport': assistant_transport(self.agent.client),
             'files': list(files), 'history': original,
             'messages': self._working_history(original) + [message],
@@ -445,6 +438,8 @@ class Orchestrator:
         project = getattr(self.agent, 'project_snapshot', None)
         if project is not None:
             self.state['project_snapshot'] = copy.deepcopy(project)
+        if getattr(self.agent, 'notebook_source', ''):
+            self.state['notebook_source'] = self.agent.notebook_source
         workspace = getattr(self.agent, 'workspace', None)
         if workspace is not None and hasattr(workspace, 'allowed_types'):
             # The planners' view of the open folder (the routing step and this agent), frozen for the turn.
@@ -484,7 +479,7 @@ class Orchestrator:
         messages, archived = [], []
         for index, original in enumerate(history):
             item = copy.deepcopy(original)
-            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > input_limit(self.agent, 'working_note', 6000)):
+            if item['role'] == 'tool' or (item['role'] == 'assistant' and len(item.get('content', '').encode()) > getattr(getattr(self.agent, 'workspace', None), 'result_chars', 6000)):
                 text = self._conversation_text(item)
                 archived.append({'index': index, 'tool': item.get('tool_name'),
                     'role': item['role'], 'lines': len(text.splitlines()),
@@ -512,7 +507,10 @@ class Orchestrator:
         for key in ('messages', 'history', 'files', 'children', 'pending_calls', 'warnings'):
             if not isinstance(state.get(key), list):
                 raise ValueError('Malformed assistant checkpoint: ' + key)
-        if query != state.get('query') or list(files) != state['files']:
+        # Historical checkpoints could also pin a managed notebook as an ordinary source.
+        # Keep the native conversation intact, but do not re-open such a pin on resume.
+        state['files'] = [p for p in state['files'] if not is_project_notebook(p)]
+        if query != state.get('query') or [p for p in files if not is_project_notebook(p)] != state['files']:
             raise ValueError('Resume must use the original query and attached sources')
         if any(type(state.get(key)) is not int or state[key] < 0 for key in ('actions', 'main_calls')):
             raise ValueError('Malformed assistant checkpoint accounting')
@@ -520,6 +518,13 @@ class Orchestrator:
         if limits.get('actions') != self.max_actions or limits.get('children') != self.max_children:
             raise ValueError('Resume must preserve the assistant action and child limits')
         state['limits']['concurrency'] = self.concurrency
+        # Older checkpoints listed project notebooks alongside ordinary papers. Keep the
+        # original frozen inventory for the turn, excluding those entries and their titles.
+        if 'workspace_paths' in state:
+            state['workspace_paths'] = [p for p in state['workspace_paths'] if not is_project_notebook(p)]
+            state['workspace_overview'] = '\n'.join(
+                row for row in state.get('workspace_overview', '').splitlines()
+                if not is_project_notebook(row.partition(' · ')[0]))
         self.state = state
         self.state['resumed_checkpoint'] = True
         from . import images
@@ -550,6 +555,8 @@ class Orchestrator:
         material = {key: self.state[key] for key in ('query', 'history', 'files')}
         if self.state.get('project_snapshot') is not None:
             material['project_snapshot'] = self.state['project_snapshot']
+        if self.state.get('notebook_source'):
+            material['notebook_source'] = self.state['notebook_source']
         if self.state.get('images'):
             material['images'] = self.state['images']
         material.update(ctx=self.agent.ctx, online=bool(library and library.online))
@@ -741,7 +748,7 @@ class Orchestrator:
             system = self._policy(tools) + instruction
         payload = {
             'model': self.agent.model, 'stream': True, 'think': False,
-            'messages': [{'role': 'system', 'content': system + self._numerics_policy(tools) + (
+            'messages': [{'role': 'system', 'content': system + '\n' + PROJECT_SCOPE + '\n' + self._numerics_policy(tools) + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
                 'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (
@@ -762,7 +769,8 @@ class Orchestrator:
                    (getattr(self.agent, 'personal_context', ''), getattr(self.agent, 'project_context', ''),
                     WORKSPACE_FILES + self.state['workspace_overview'] if self.state.get('workspace_overview') else '')
                    if value]
-                + copy.deepcopy(self.state['messages']),
+                + with_notebook_evidence(copy.deepcopy(self.state['messages']), self.state.get('notebook_source'),
+                                         self.state.get('history_prefix_count', 0)),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
         }
@@ -862,13 +870,24 @@ class Orchestrator:
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
         explicit = getattr(self.agent, 'document_output_cap', None)
-        payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        try:
+            payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
+        except CallContextError:
+            essential = [t for t in tools if t['function']['name'] not in NUMERICS_TOOLS]
+            if len(essential) == len(tools):
+                raise
+            payload['tools'] = essential
+            numerical_note = self._numerics_policy(tools)
+            if numerical_note:
+                payload['messages'][0]['content'] = payload['messages'][0]['content'].replace(numerical_note, '', 1)
+            payload, allocation = allocate_call(self.agent.client, payload, predict, explicit_cap=explicit)
         view = self.state.get('index_view') or {}
-        if view.get('entries'):
-            from .briefs import for_worker
+        if view.get('entries') or view.get('pages'):
+            from .briefs import for_worker, load_view
+            view = load_view(self.agent.workspace.root, view)
             digest = for_worker(self.agent.workspace.root, view, self.state['query'], 'assistant',
                                 chat_id=getattr(self.agent, 'scope_chat_id', None),
-                                max_chars=input_limit(self.agent, 'brief_index', 3000))['text']
+                                max_chars=self.agent.workspace.result_chars)['text']
             if digest:
                 system = payload['messages'][0]
                 augmented = dict(payload, messages=[dict(system, content=system['content'] + PROJECT_RECORDS + digest),
@@ -915,8 +934,6 @@ class Orchestrator:
                  'Use the reported preview restriction or compiler error to explain a missing PDF.\n']
         if 'write_file' in names:
             parts.append(POLICY_WRITE)
-        if getattr(getattr(getattr(self.agent, 'workspace', None), 'literature', None), 'offline_locked', False):
-            parts.append(POLICY_OFFLINE)
         return ''.join(parts)
 
     def _numerics_policy(self, tools):
@@ -1036,8 +1053,6 @@ class Orchestrator:
 
     def _prepare_calls(self, assistant):
         calls = assistant['tool_calls']
-        if len(calls) > 16:
-            raise AgentError('The main agent returned too many tool calls')
         previous_ids = {call.get('id') for message in self.state['messages']
                         for call in message.get('tool_calls', [])}
         pending = []
@@ -1056,7 +1071,8 @@ class Orchestrator:
                     raise AgentError('Malformed JSON main-agent tool arguments') from exc
             if not isinstance(arguments, dict):
                 raise AgentError('Main-agent tool arguments must be an object')
-            if function['name'] == 'delegate' and arguments.get('effort') in EFFORTS:
+            if (function['name'] == 'delegate' and arguments.get('effort') in EFFORTS
+                    and (not self.state.get('resumed_checkpoint') or self.state.get('high_effort'))):
                 arguments = {**arguments, 'effort': effort_for(arguments.get('mode'), arguments['effort'])}
             function['arguments'] = arguments
             call_id = call.get('id') or f'{self.state["id"]}_{self.state["main_calls"]}_{index}'
@@ -1084,13 +1100,14 @@ class Orchestrator:
                 args['effort'] in LEGACY_EFFORTS and args['effort'] == saved_effort
                 and self.state.get('resumed_checkpoint')):
             raise ValueError('Unknown worker effort; choose low, medium or high')
-        args['effort'] = effort_for(args['mode'], args['effort'])
-        for key, maximum in (('request', 8000), ('reason', 400)):
-            if not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > maximum:
-                raise ValueError(f'{key} must be nonempty text of at most {maximum} characters; no text was truncated')
+        if not self.state.get('resumed_checkpoint') or self.state.get('high_effort'):
+            args['effort'] = effort_for(args['mode'], args['effort'])
+        for key in ('request', 'reason'):
+            if not isinstance(args[key], str) or not args[key].strip():
+                raise ValueError(f'{key} must be nonempty text')
         files = args['files']
-        if not isinstance(files, list) or len(files) > 20:
-            raise ValueError('files must contain at most 20 workspace references')
+        if not isinstance(files, list):
+            raise ValueError('files must be a list of workspace references')
         workspace = getattr(self.agent, 'workspace', None)
         sandbox_files = set()
         experiments = None
@@ -1107,8 +1124,8 @@ class Orchestrator:
                 except (ValueError, TypeError, KeyError):
                     continue
         for filename in files:
-            if not isinstance(filename, str) or not filename or len(filename) > 300:
-                raise ValueError('Each file must be a nonempty workspace reference of at most 300 characters')
+            if not isinstance(filename, str) or not filename:
+                raise ValueError('Each file must be a nonempty workspace reference')
             from . import images
             if images.is_image(filename):
                 frozen = next((ref for ref in self.state.get('images', []) if ref['name'] == filename), None)
@@ -1178,6 +1195,8 @@ class Orchestrator:
             child['context'].update(project_snapshot=copy.deepcopy(self.state['project_snapshot']),
                 project_note_status='User-maintained context; not a proof certificate. Current request takes precedence. '
                                     'Preserve assumptions and conjectures; verify mathematical claims when needed.')
+        if self.state.get('notebook_source'):
+            child['context']['notebook_source'] = self.state['notebook_source']
         if shared_proof_objective:
             child['shared_proof_objective'] = shared_proof_objective
         child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
@@ -1257,8 +1276,8 @@ class Orchestrator:
                 record = self.state['history'][index]
                 text = self._conversation_text(record)
                 lines = text.splitlines()
-                if start > len(lines) or end > len(lines) or end - start >= 200:
-                    raise ValueError('Read an existing range of at most 200 complete lines')
+                if start > len(lines) or end > len(lines):
+                    raise ValueError('Read an existing range of complete lines')
                 key = self._tool_key(name, args)
                 if key in self.state['tool_cache']:
                     pending['cached'] = True
@@ -1808,6 +1827,16 @@ class Orchestrator:
         self.state['status'] = 'running'
         self._save()
         try:
+            answer = self.state.pop('notebook_answer', None)
+            if answer:
+                self.state['answer_source'] = {'kind': 'notebook_display'}
+                self.state['messages'].append({'role': 'assistant', 'content': NOTEBOOK_DISPLAY_RECEIPT})
+                self.agent.history = self.conversation_history()
+                self.agent.last_stats = {}
+                self.emit('start', '')
+                self.emit('text', answer)
+                self.emit('end', '')
+                return self._finish('complete', answer)
             last = self.state.get('last_call') or {}
             # Recover checkpoints written by versions that paused on malformed
             # JSON before saving transport details. Do not reset their budgets.

@@ -10,6 +10,95 @@
   working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
 - The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.
 
+- Restored image attachments and screenshot paste for DS4.1 Flash 1017 on
+  OpenRouter. The chat and workers send the original images through the
+  configured provider route, including when a follow-up refers to an earlier
+  attachment.
+
+- Scholarly search is available in the terminal, web app and nested workers.
+  The old offline launcher option and per-job switches have been retired.
+  Existing workspaces can search online when reopened. Users can still specify
+  which sources a mathematical task may use.
+- The Proof solver and verifier can consult papers, use the automatic numerical
+  sandbox and request a focused reference check or a literature review during
+  an attempt. Both roles see their remaining resources after using tools.
+  Python experiments share the Proof job budget, with an optional operator
+  run count. Proof reserves output for writing and independent review, and can continue
+  with partial evidence when a reference check exhausts its own allowance.
+  Pre-upgrade proofs retain their tool-free protocol and saved allowances.
+
+- Project instructions apply only to chats assigned to that project and their
+  workers. An unassigned chat no longer discovers another project's notebook
+  while looking through the workspace. Asking about a named notebook quotes
+  its contents for that turn.
+
+- A write-up whose text uses `\C` (or another command the harness redefines) no
+  longer fails to compile: the preamble wrote `\renewcommand{\C}{\mathbb{C}}`,
+  and `\C` exists only with a Cyrillic font encoding, so LaTeX stopped with
+  "Command \C undefined" before the text. No repair could fix it, because the
+  preamble is rebuilt from the same definitions. Every `\renewcommand` the
+  write-up puts in a preamble (standard notation, the model's definitions, the
+  request's and the saved style's) is now preceded by an empty
+  `\providecommand`, so it holds whether or not the command exists.
+
+- The numerical sandbox image is now version 3. It preserves long arrays and other structured results within the configured byte allowance. Builds serving numerical work need the new image.
+- Explore now receives the selected source files together when they fit. For larger
+  requests it pages through the assigned text, saves findings and source positions,
+  checks the source identities on resume and reports exactly what remained unread.
+- New jobs use High. Proof, Investigation and their writers fit their calls to the
+  available job and model budgets. Saved explicit allowances remain meaningful on
+  resume. Independent proof verification and the tester's settled-spend cutoff remain
+  in force.
+- Bibliography checks process the supplied entries. Referee readers are planned for
+  every mapped proof. Source readers report continuation positions, including within
+  long lines. Reviews, outlines and style profiles retain the requested items across
+  the older list boundaries. The GUI and the Assistant can pass larger file selections,
+  tool batches and prior-work indexes without dropping the tail.
+
+- View and edit workspace files. In the file browser, a double click on a file
+  attaches it to the next message (copied into the open folder first when it
+  comes from another folder), and **View file**, shown when the pointer is over
+  a file, opens it in the file viewer beside the conversation; a double click on
+  an attached file does the same. The viewer takes the notebook's place (the
+  notebook returns when it closes), resizes like it up to 65% of the window, and
+  leaves the message box usable, so that one can write while reading
+  (`?file=` in the conversation's address; on a page without a conversation,
+  `#/file?path=` with a way back). The viewer shows a PDF in the browser's
+  viewer fitted to its width, Markdown rendered with its mathematics, images,
+  other text files as text, and says when a file is not supported or too large
+  (over the 20 MiB upload allowance for text). Markdown and text files are edited
+  in place: click, type, then **Save** or Ctrl+S. The file keeps its encoding and
+  permissions; a file that changed on disk since it was opened is not
+  overwritten. Text files are coloured as in VS Code's Light+ and Dark+ themes
+  (LaTeX Workshop's scopes for TeX): TeX, BibTeX, Python, Julia, Rust,
+  JavaScript, C/C++, shell, JSON, TOML and YAML. **Download**, next to **View
+  file** and in the viewer, saves a file as it is on disk. Closing the viewer,
+  opening another file, opening the notebook or following a link asks first when
+  changes are unsaved. `GET /api/files/view`,
+  `GET /api/files/raw` (PDFs and images; any listed file with `download=1`) and
+  `PUT /api/files/save` (UTF-8 text) and `POST /api/files/save` (JSON) use the SHA-256
+  the viewer read and return HTTP 409 on a change.
+- A finished write-up, summary or literature review shows **View** and its
+  downloads (PDF, sources, LaTeX, review, BibTeX) in its box in the
+  conversation, as its card did before the notebook: **View** opens the document
+  in the notebook's Results. The card's buttons are one component,
+  `JobDownloads`, used by both.
+- The folder window is now **Select a workspace**, and says that the agent has
+  access to the files in the active workspace. Each folder shows how many files
+  it holds, of any type (was: its TeX, PDF and Python files); `GET /api/folders`
+  gives `files` as a number.
+- **Learn my writing style** moved from the sidebar to the top of
+  **Personalization**, above the standing instructions.
+- The File access control was removed from the sidebar. New workspaces include a
+  `code` group for Julia, Rust, C/C++, R, MATLAB, JavaScript, shell and
+  `.ini`/`.cfg` files. These can be browsed, uploaded and attached.
+  Existing workspaces keep saved file-type permissions. In folders with older
+  restrictions, the new group starts disabled. `GET/POST /api/settings` and
+  the `read` field of `/api/status` remain available.
+- The notebook can be widened to 65% of the window (was 600 px). The
+  conversation narrows to make room; below 620 px it uses compact margins and
+  composer controls, and below 420 px the Send button shows only its arrow.
+
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns
   with images. Older turns can confirm their destination when it is unknown.
@@ -25,7 +114,7 @@
   replaced by the next one; every request asks for zero data retention, no data collection, 8-bit (fp8) serving,
   the standard tier and a price cap, and turns OpenRouter's context compression off. Its key is saved by
   `scripts/setup-openrouter.py`. Everything built for DeepInfra (busy waits, retries, silent-start detection, the
-  tester ledger) applies to both; DeepInfra's requests are unchanged. Native images stay DeepInfra-only for now.
+  tester ledger) applies to both; DeepInfra's requests are unchanged.
 
 - The tester allowance no longer reserves anything before a call. A tester can run any number of calls at once
   while the allowance is not spent; a new call is refused only once it is, and calls already running finish (so a

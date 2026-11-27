@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-// Effort levels: one control instead of budget fields (no React; testable with node).
+// Fresh work uses High. Earlier levels can still be displayed on saved jobs.
 import type { Defaults } from './api'
 
 export type EffortKind = 'proof' | 'literature' | 'research' | 'writeup' | 'style'
@@ -21,7 +21,7 @@ export const EFFORTS: {
 export const LEVELS = EFFORTS.map((effort) => effort.id)
 
 export type Limits = {
-  rounds?: number; tokens: number | null; seconds: number; input_tokens?: number | null; requests?: number; chars?: number
+  rounds?: number; tokens: number | null; seconds: number; input_tokens?: number | null; requests?: number | null; chars?: number | null
   solve_tokens?: number; verify_tokens?: number
 }
 
@@ -36,39 +36,28 @@ export function isDS4(defaults: Defaults): boolean {
   return !!defaults.budget_profile && defaults.budget_profile !== 'default'
 }
 
-/** A proof needs room for one full solve and its review: fit the per-call ceilings in the budget. */
-function proofCeilings(defaults: Defaults, tokens: number | null, preset?: { solve_tokens: number; verify_tokens: number }) {
-  const solve = Math.min(defaults.proof_solve_tokens, preset?.solve_tokens ?? defaults.proof_solve_tokens)
-  const verify = Math.min(defaults.proof_verify_tokens, preset?.verify_tokens ?? defaults.proof_verify_tokens)
-  // DS4 keeps its full role ceilings even when an explicit total cannot fund
-  // them. Admission reports that constraint; selecting effort never hides it.
-  if (isDS4(defaults)) return { tokens, solve_tokens: solve, verify_tokens: verify }
-  if (tokens === null || tokens >= solve + verify) return { tokens, solve_tokens: solve, verify_tokens: verify }
-  // Launch floors for repairs stay valid: the solve ceiling never goes below them.
-  const floor = Math.max(128, defaults.proof_repair_tokens ?? 0, defaults.proof_min_solve_tokens ?? 0)
-  const fitted = Math.min(solve, Math.max(floor, Math.floor((tokens * solve) / (solve + verify))))
-  const review = Math.min(verify, Math.max(128, tokens - fitted))
-  return { tokens, solve_tokens: fitted, verify_tokens: review }
-}
-
-export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLevel: EffortLevel, wholeManuscript = false): Limits {
-  const level = kind === 'literature' ? 'high' : requestedLevel
+export function effortLimits(kind: EffortKind, defaults: Defaults, wholeManuscript = false): Limits {
+  const level = 'high'
   const preset = defaults.effort_presets?.[level]
-  const effort = preset || EFFORTS.find((item) => item.id === level) || EFFORTS[1]
+  const effort = preset || EFFORTS.find((item) => item.id === level)!
   // Whole-manuscript reviews and typo checks read the full paper each time (gui/effort.py).
   const ds4 = isDS4(defaults)
   const seconds = effort.minutes * 60 * (wholeManuscript && !ds4 ? 2 : 1)
   const cap = (configured: number | null, value: number) => configured === null ? value : Math.min(configured, value)
   if (kind === 'proof') {
     const tokens = preset ? cap(defaults.proof_tokens, preset.tokens) : defaults.proof_tokens
-    return { rounds: effort.tries, seconds: preset?.proof_seconds ?? seconds,
-      ...proofCeilings(defaults, tokens, preset) }
+    return { rounds: defaults.proof_rounds, seconds: Math.min(preset?.proof_seconds ?? seconds, defaults.proof_seconds), tokens,
+      solve_tokens: preset?.solve_tokens ?? defaults.proof_solve_tokens, verify_tokens: preset?.verify_tokens ?? defaults.proof_verify_tokens }
   }
   const base: Limits = { tokens: preset ? cap(defaults.research_tokens, preset.research_tokens) : defaults.research_tokens,
     input_tokens: preset ? cap(defaults.research_input_tokens, preset.input * (wholeManuscript && ds4 ? 4 : 1)) : defaults.research_input_tokens, seconds }
   if (kind === 'writeup' || kind === 'style') return base
   const survey = kind === 'literature' ? defaults.literature_presets?.[level] : undefined
-  return { ...base, rounds: effort.tries, seconds: survey?.seconds ?? seconds, requests: survey?.requests ?? effort.requests, chars: effort.chars }
+  return { ...base, rounds: defaults.research_rounds, seconds: survey?.seconds ?? seconds, requests: sourceLimit(defaults.research_requests), chars: sourceLimit(defaults.research_chars) }
+}
+
+function sourceLimit(value: number | null | undefined) {
+  return value == null || value === Number.MAX_SAFE_INTEGER ? null : value
 }
 
 export function minutesLabel(seconds: number) {
@@ -83,7 +72,7 @@ export function describeLimits(kind: EffortKind, limits: Limits) {
   const tokenCap = limits.tokens === null ? '' : `; output capped at ${count(limits.tokens)} tokens`
   if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')} with independent review; ${count(limits.solve_tokens!)} tokens per solve and ${count(limits.verify_tokens!)} per review; time limit ${minutesLabel(limits.seconds)}${tokenCap}`
   if (kind === 'writeup') return `One writing call (in parts if the material is long), then compiled; ${minutesLabel(limits.seconds)} working time${tokenCap}`
-  if (kind === 'literature') return `Up to ${minutesLabel(limits.seconds)} working time and ${count(limits.requests!)} source requests${tokenCap}`
+  if (kind === 'literature') return `Up to ${minutesLabel(limits.seconds)} working time${limits.requests == null ? '' : ` and ${count(limits.requests)} source requests`}${tokenCap}`
   const depth = EFFORTS.find((effort) => effort.tries === limits.rounds)?.label || 'Custom'
   return `Checking depth: ${depth}; ${minutesLabel(limits.seconds)} working time${tokenCap}`
 }

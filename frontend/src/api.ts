@@ -47,7 +47,7 @@ export type Defaults = {
   research_tokens: number | null
   research_input_tokens: number | null
   research_seconds: number
-  research_requests: number
+  research_requests: number | null
   research_chars: number
 }
 
@@ -99,8 +99,6 @@ export type Status = {
   host: string
   backend: 'ollama' | 'openai' | 'llamacpp'
   image_support?: boolean
-  online: boolean
-  online_locked: boolean
   allow_python: boolean
   lan: boolean
   defaults: Defaults
@@ -110,12 +108,9 @@ export type Status = {
   pair_urls?: string[]
   root: string
   workspace_path: string
-  read: ReadSettings
   latex: boolean
   recent: string[]
 }
-
-export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
 
 export type FolderProject = { id: string; name: string; deleted?: boolean }
 export type FolderListing = {
@@ -123,8 +118,9 @@ export type FolderListing = {
   path: string
   current: string
   recent: string[]
-  files: { tex: number; pdf: number; py: number }
-  folders: { name: string; path: string; files: { tex: number; pdf: number; py: number }; jobs: boolean
+  /** How many files the folder holds directly, of any type. */
+  files: number
+  folders: { name: string; path: string; files: number; jobs: boolean
     /** A project's own file folder: shown by its name, never opened as a workspace. */
     project?: FolderProject | null }[]
   /** Set when the listed folder itself is a project's file folder. */
@@ -347,6 +343,7 @@ export type ProofDetail = {
   status: string
   stop_reason: string | null
   recovery_notice: string | null
+  evidence_request?: { question: string; role: string } | null
   created_at: string
   updated_at: string
   revision: number
@@ -470,7 +467,7 @@ export type ResearchDetail = {
   stop_reason: string | null
   created_at: string
   updated_at: string
-  settings: Record<string, unknown> & { online?: boolean; model: string }
+  settings: Record<string, unknown> & { model: string }
   budget: { rounds: Budget; tokens: Budget; input_tokens: Budget; seconds: Budget; requests: Budget; chars: Budget; context?: Budget }
   progress?: WorkProgress | null
   sources: { id: string; path: string; sha256: string; lines: number }[]
@@ -606,7 +603,7 @@ export type Chat = {
   id: string
   mode: 'critic' | 'explore' | 'free'
   title: string
-  settings: { think: boolean; model: string; online?: boolean }
+  settings: { think: boolean; model: string }
   created_at: string
   updated_at: string
   transcript: TranscriptItem[]
@@ -650,6 +647,9 @@ export type Artifact = {
 
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
+/** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
+export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
+  size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
 export type FolderFiles = { path: string; crumbs: { name: string; path: string }[]; folders: WorkspaceFolder[]; files: WorkspaceFile[]; truncated: boolean }
 export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
@@ -670,8 +670,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     response = await fetch(path, {
       method,
       credentials: 'same-origin',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: body === undefined || body instanceof Blob ? {} : { 'Content-Type': 'application/json' },
+      body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
     throw new ApiError(0, 'The harness is not reachable. Check that square-harness --gui is still running.')
@@ -713,6 +713,16 @@ export function onUnauthorized(listener: () => void) {
 
 const get = <T,>(path: string) => request<T>('GET', path)
 const post = <T,>(path: string, body: unknown = {}) => request<T>('POST', path, body)
+
+async function saveFile(path: string, content: string, sha256: string) {
+  let body = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  // Text that fits on disk in a legacy encoding can expand beyond the gateway's 32 MiB request limit in UTF-8.
+  if (body.size > 32 * 1024 * 1024) {
+    const compressed = await new Response(body.stream().pipeThrough(new CompressionStream('gzip'))).blob()
+    body = new Blob([compressed], { type: 'application/gzip' })
+  }
+  return request<{ sha256: string; size: number }>('PUT', '/api/files/save?' + new URLSearchParams({ path, sha256 }), body)
+}
 
 async function zip(path: string, body: unknown): Promise<Blob> {
   let response: Response
@@ -756,6 +766,10 @@ export const api = {
     post<{ files: { source: string; path?: string; copied?: boolean; error?: string }[] }>('/api/files/copy', { paths, project_id }),
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
+  /** One file for the viewer, by its path relative to the interface root. */
+  viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
+  /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
+  saveFile,
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 
@@ -781,7 +795,6 @@ export const api = {
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
   openFolder: (path: string) => post<{ workspace: string }>('/api/workspace', { path }),
-  saveSettings: (read: Partial<ReadSettings>) => post<{ read: ReadSettings }>('/api/settings', { read }),
   personalization: () => get<Personalization>('/api/personalization'),
   savePersonalization: (value: Personalization) => post<Personalization>('/api/personalization', value),
   upload: async (file: File, project_id?: string | null) => {
@@ -846,8 +859,8 @@ export const api = {
   chatTitle: (id: string, title: string) => post<Chat>(`/api/chats/${id}/title`, { title }),
   chatProject: (id: string, project_id: string | null) => post<Chat>(`/api/chats/${id}/project`, { project_id }),
   deleteChat: (id: string) => request<{ deleted: string }>('DELETE', `/api/chats/${id}`),
-  createChat: (mode: string, think?: boolean, online?: boolean, project_id: string | null = null) => post<Chat>('/api/chats', { mode, think, online, project_id }),
-  chatSettings: (id: string, settings: { think?: boolean; online?: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
+  createChat: (mode: string, think?: boolean, project_id: string | null = null) => post<Chat>('/api/chats', { mode, think, project_id }),
+  chatSettings: (id: string, settings: { think: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
   send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files, queue: true }),
   review: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/review`, { queue: true }),
   feedbackConfig: () => get<FeedbackConfig>('/api/feedback/config'),
@@ -857,3 +870,8 @@ export const api = {
     post<FeedbackResult>('/api/feedback', { ...value, chat_id: value.include_trace ? value.chat_id : null }),
   feedbackArchiveUrl: (id: string) => `/api/feedback/${encodeURIComponent(id)}/archive`,
 }
+
+/** The address of a PDF or an image for the browser to display (path relative to the interface root). */
+export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)
+/** The file as it is on disk, as a download. */
+export const fileDownloadUrl = (path: string) => fileRawUrl(path) + '&download=1'

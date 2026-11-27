@@ -18,7 +18,7 @@ const nearLimit = (budget: Budget) => budget.limit !== null && budget.limit > 0
   && budget.used + (budget.reserved ?? 0) + (budget.uncertain ?? 0) >= 0.8 * budget.limit
 
 // The server's bounds for one addition (proof.py, research.py).
-const MAX_TOKENS = 20_000_000, MAX_MINUTES = 1440, MAX_ROUNDS = 20
+const MAX_TOKENS = Number.MAX_SAFE_INTEGER, MAX_MINUTES = Math.floor(Number.MAX_SAFE_INTEGER / 60), MAX_ROUNDS = Number.MAX_SAFE_INTEGER
 
 /** A sensible first proposal: one more solve and review for a proof, a quarter of the allowance for research.
     Without a cumulative token ceiling there is nothing to raise, so no tokens are proposed. */

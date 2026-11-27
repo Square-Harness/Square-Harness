@@ -52,7 +52,7 @@ def markdown_conversion_request(query, files, *, style_mode='auto'):
     Unknown instructions (including editorial edits and section selection) use
     the ordinary writer. Only the user's words and the supplied name are read.
     """
-    if (not isinstance(query, str) or len(query) > 1500 or len(files) != 1
+    if (not isinstance(query, str) or len(files) != 1
             or style_mode not in ('auto', 'none')):
         return False
     name = files[0]

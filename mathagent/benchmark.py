@@ -22,6 +22,7 @@ from .backends import create_client, TokenBudgetError, openai_thinking_budget_po
 from .api_profiles import create_profile_client, profile_class
 from .deepinfra import (BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL,
                         CONTEXT_TOKENS as DEEPINFRA_CONTEXT, MAX_OUTPUT_TOKENS as DEEPINFRA_OUTPUT)
+from .ledger import MAX_FILE_BYTES
 from .model_limits import DEFAULTS as DS4_DEFAULTS, HOSTED_DS4
 from .proof import ProofRunner, ProofContext, check_context
 from .proof_policy import COMMON_INSTRUCTION, initial_request
@@ -44,15 +45,17 @@ def _json(path, value):
 def load_manifest(filename):
     """Allowlisted schema deliberately has no answer, solution, or grading field."""
     filename = Path(filename).resolve(strict=True)
+    if filename.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError('Benchmark manifest exceeds the record storage allowance')
     value = json.loads(filename.read_text(encoding='utf-8'))
     if (not isinstance(value, dict) or set(value) - {'version', 'name', 'problems'}
             or type(value.get('version')) is not int or value['version'] != 1
-            or not isinstance(value.get('problems'), list) or not value['problems']
-            or len(value['problems']) > 1000):
+            or not isinstance(value.get('problems'), list) or not value['problems']):
         raise ValueError('Expected version 1 manifest with a nonempty problems list and no answer fields')
     if 'name' in value and not isinstance(value['name'], str):
         raise ValueError('Manifest name must be text')
     problems, ids, paths = [], set(), set()
+    total_bytes = 0
     for item in value['problems']:
         if not isinstance(item, dict) or set(item) - {'id', 'statement', 'sha256'}:
             raise ValueError('Problem fields are id, statement, and optional sha256 only')
@@ -67,11 +70,14 @@ def load_manifest(filename):
         path = (filename.parent / path).resolve(strict=True)
         if not path.is_relative_to(filename.parent) or path in paths or not path.is_file():
             raise ValueError('Statement paths must be unique files contained in the manifest directory')
-        if path.suffix.lower() not in {'.md', '.txt', '.tex'} or path.stat().st_size > 240000:
-            raise ValueError('Statements must be UTF-8 md/txt/tex files up to 240000 bytes')
+        total_bytes += path.stat().st_size
+        if total_bytes > MAX_FILE_BYTES:
+            raise ValueError('Benchmark statements exceed the corpus storage allowance')
+        if path.suffix.lower() not in {'.md', '.txt', '.tex'}:
+            raise ValueError('Statements must be UTF-8 md/txt/tex files')
         content = path.read_text(encoding='utf-8')
-        if not content.strip() or '\x00' in content or len(content) > 59000:
-            raise ValueError('Statement must be nonempty text, at most 59000 characters')
+        if not content.strip() or '\x00' in content:
+            raise ValueError('Statement must be nonempty text without NUL characters')
         digest = hashlib.sha256(content.encode()).hexdigest()
         if 'sha256' in item and item['sha256'] != digest:
             raise ValueError(f'Statement checksum mismatch: {identifier}')
@@ -395,7 +401,7 @@ def _proof(agent, goal, path, args):
         max_seconds=args.seconds, source_files=(), max_predict=args.predict,
         verify_tokens=args.verify_tokens, min_solve_tokens=args.min_solve_tokens,
         verify_temperature=args.verify_temperature, repair_tokens=args.repair_tokens,
-        initial_min_solve_tokens=args.predict)
+        initial_min_solve_tokens=args.predict, fixed_call_budgets=True)
     usage, states = _proof_usage(agent.workspace.root)
     answer_path = path / 'answer.md'
     answer_path.write_text(result['answer'], encoding='utf-8')

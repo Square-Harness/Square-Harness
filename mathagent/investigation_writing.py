@@ -4,16 +4,25 @@
 """Compose a research answer from the same scoped native records the reader can open."""
 import copy
 import json
+import math
+import time
 import re
 from concurrent.futures import ThreadPoolExecutor
 
 from .agent import AgentError
-from .call_policy import allocate_call
+from .call_policy import CallContextError, allocate_call
+from .ledger import MAX_FILE_BYTES
+from .model_limits import substantive_output
 from .project_index import read_text
 
-WRITING_OUTPUT = 1800
-WRITING_INPUT = 24576
-WRITING_SECONDS = 120
+# Earlier approved plans allocated these amounts for each writing attempt.
+LEGACY_WRITING = {'tokens': 1800, 'input_tokens': 24576, 'seconds': 120}
+
+
+def writer_output_limit(agent):
+    return min(substantive_output(agent, agent.predict), getattr(agent, 'document_output_cap', None) or agent.ctx)
+
+
 POLICY = """Write the research answer to the original user in their language. Start with the most specific answer
 supported so far, then explain the mathematics that matters. Integrate the branches into a single readable answer.
 Use Markdown and delimited LaTeX. Discuss assumptions, conflicting evidence and the precise remaining gap.
@@ -112,8 +121,9 @@ def _excerpt(text, limit):
     return text[:head] + '\n[… excerpt omitted …]\n' + text[-(limit - head):]
 
 
-def evidence_excerpt(root, slot, store, chat_id):
+def evidence_excerpt(root, slot, store, chat_id, *, complete=False):
     """Only the receipt's job and its index-authorized experiments are eligible."""
+    excerpt = (lambda text, limit: text.strip()) if complete else _excerpt
     job = slot.get('job_id')
     if not job:
         return ''
@@ -128,47 +138,105 @@ def evidence_excerpt(root, slot, store, chat_id):
             _, review = store.research_review_file(root, job, 'review')
         except (OSError, LookupError, ValueError):
             review = b''
-        return _excerpt(review.decode('utf-8'), 4400) + '\nSource coverage:\n' + _excerpt('\n'.join(labels), 1300)
+        return excerpt(review.decode('utf-8'), 4400) + '\nSource coverage:\n' + excerpt('\n'.join(labels), 1300)
     text = read_text(root, view, first['id'])
-    parts = [first['status'], _excerpt(text, 4600)]
+    parts = [first['status'], excerpt(text, 4600)]
     linked = first.get('linked_job_ids', [])
     for e in view['entries']:
         if e['job_id'] in linked and e['kind'] == 'experiment':
-            parts.extend(['Recorded computation: ' + e['status'], _excerpt(read_text(root, view, e['id']), 850)])
-    return _excerpt('\n'.join(parts), 6000)
+            parts.extend(['Recorded computation: ' + e['status'], excerpt(read_text(root, view, e['id']), 850)])
+    return excerpt('\n'.join(parts), 6000)
 
 
-def write_answer(agent, context):
-    # The run shares metering and admission with native workers. Use a separate
-    # transport facade so its timeout or stream accounting cannot change a concurrent decision.
+def _writing_payload(agent, client, context, cap, input_cap):
+    """Use complete evidence when it fits. Bound only findings and the prior draft when necessary."""
+    def packet(value):
+        return {'model': agent.model, 'messages': [{'role': 'system', 'content': POLICY},
+                    {'role': 'user', 'content': json.dumps(value, ensure_ascii=False)}],
+                'stream': True, 'think': False,
+                'options': {'num_ctx': agent.ctx, 'temperature': 0, 'num_predict': cap}}
+
+    def fit(value):
+        try:
+            payload, info = allocate_call(client, packet(value), cap)
+        except CallContextError as exc:
+            return None, exc.details
+        return (payload if info['input_tokens'] <= input_cap else None), info
+
+    payload, _ = fit(context)
+    if payload:
+        return payload
+    # Preserve the original question, examined statements and reviewed scopes. Each
+    # omitted evidence span is marked, and each branch gets space before a long draft.
+    fields = [row.get('finding', '') for row in context['findings']] + [context.get('previous draft', '')]
+    empty = {**context, 'findings': [{**row, 'finding': ''} for row in context['findings']], 'previous draft': ''}
+    _, base = fit(empty)
+    physical = min(input_cap, base['context_tokens'] - base['context_margin_tokens'] - 128)
+    available = int(physical - base['input_tokens'])
+    if available <= 0:
+        raise AgentError('The original question and evidence labels exceed the available writing context.')
+    lengths = [len(text) for text in fields]
+    high = max(lengths, default=0)
+    low = 0
+    # Allocate equally to long records; redistribute the room that short records do not need.
+    while low < high:
+        mid = (low + high + 1) // 2
+        if sum(min(size, mid) for size in lengths) <= available:
+            low = mid
+        else:
+            high = mid - 1
+    width = low
+    while width > 0:
+        parts = [_excerpt(text, width) for text in fields]
+        value = {**context, 'findings': [{**row, 'finding': part} for row, part in zip(context['findings'], parts)],
+                 'previous draft': parts[-1]}
+        payload, info = fit(value)
+        if payload:
+            return payload
+        width = int(width * min(.8, physical / max(1, info['input_tokens'])))
+    raise AgentError('The available writing context cannot carry excerpts from the findings.')
+
+
+def write_answer(agent, context, *, budget=None, usage=None, shares=1):
     pool = agent.client
-    client = pool.fork(copy.copy(pool.client), allowance=WRITING_OUTPUT, input_allowance=WRITING_INPUT,
-                       usage={'tokens': 0, 'input_tokens': 0}, max_seconds=WRITING_SECONDS)
-    messages = [{'role': 'system', 'content': POLICY},
-                {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}]
-    payload = {'model': agent.model, 'messages': messages, 'stream': True, 'think': False,
-               'options': {'num_ctx': agent.ctx, 'temperature': 0, 'num_predict': WRITING_OUTPUT}}
-    payload, allocation = allocate_call(client, payload, WRITING_OUTPUT, explicit_cap=getattr(agent, 'document_output_cap', None))
-    if allocation['input_tokens'] > WRITING_INPUT:
-        raise AgentError('The evidence exceeds the research answer input allowance.')
+    usage = usage if usage is not None else {'tokens': 0, 'input_tokens': 0}
+    if budget is None:
+        limits = dict(LEGACY_WRITING)
+    else:
+        limits = {}
+        for key, available in (('tokens', pool.remaining_tokens), ('input_tokens', pool.remaining_input_tokens),
+                               ('seconds', pool.remaining_seconds)):
+            limits[key] = math.floor(min(budget[key] - usage.get(key, 0), available) / shares)
+        limits['tokens'] = min(limits['tokens'], writer_output_limit(agent))
+    if limits['tokens'] < 128 or limits['input_tokens'] < 1 or limits['seconds'] <= 0:
+        raise AgentError('The research answer has exhausted its remaining writing allowance.')
+    client = pool.fork(copy.copy(pool.client), allowance=usage['tokens'] + limits['tokens'],
+                       input_allowance=usage['input_tokens'] + limits['input_tokens'],
+                       usage=usage, max_seconds=limits['seconds'])
+    payload = _writing_payload(agent, client, context, limits['tokens'], limits['input_tokens'])
     pieces, size, finish = [], 0, None
     # Wait for a shared slot before starting the generation clock, as Proof does.
     with client.inference_slot():
-        for event in client.stream(payload):
-            if agent.workspace.cancelled():
-                raise KeyboardInterrupt
-            if not isinstance(event, dict) or (event.get('message') is not None and not isinstance(event['message'], dict)):
-                raise AgentError('The research answer stream contained an invalid message.')
-            message = event.get('message') or {}
-            piece = message.get('content') or ''
-            if message.get('tool_calls') or not isinstance(piece, str):
-                raise AgentError('The research answer contained an unexpected tool request or message.')
-            size += len(piece)
-            if size > 8 * WRITING_OUTPUT:
-                raise AgentError('The research answer exceeded its text allowance.')
-            pieces.append(piece)
-            if event.get('done'):
-                finish = event.get('done_reason')
+        started = time.monotonic()
+        try:
+            for event in client.stream(payload):
+                if agent.workspace.cancelled():
+                    raise KeyboardInterrupt
+                if not isinstance(event, dict) or (event.get('message') is not None and not isinstance(event['message'], dict)):
+                    raise AgentError('The research answer stream contained an invalid message.')
+                message = event.get('message') or {}
+                piece = message.get('content') or ''
+                if message.get('tool_calls') or not isinstance(piece, str):
+                    raise AgentError('The research answer contained an unexpected tool request or message.')
+                size += len(piece.encode('utf-8'))
+                if size > MAX_FILE_BYTES:
+                    raise AgentError('The research answer exceeds the saved record size.')
+                pieces.append(piece)
+                if event.get('done'):
+                    finish = event.get('done_reason')
+        finally:
+            if budget is not None:
+                usage['seconds'] = usage.get('seconds', 0) + time.monotonic() - started
     answer = ''.join(pieces).strip()
     if not answer or finish != 'stop':
         raise AgentError('The research answer did not finish. The worker findings remain available.')
@@ -229,17 +297,22 @@ class ProgressiveAnswer:
             # When explicit launch caps fund only one more revision, save it for the final evidence.
             if len(attempts) + 1 == limit and not settled:
                 return
+            writing_budget = inv.get('writing_budget')
+            usage = (inv.setdefault('writing_usage', {'tokens': 0, 'input_tokens': 0, 'seconds': 0})
+                     if writing_budget is not None else None)
             slots = {key: copy.deepcopy(inv['tasks'][key]) for key in keys}
             children = {c['id']: c.get('result') or {} for c in run.state['children']}
             variants = {v['task']: v for v in inv['variants']}
         evidence = []
         for key, slot in slots.items():
             try:
-                body = evidence_excerpt(run.root, slot, store, run.chat_id)
+                body = evidence_excerpt(run.root, slot, store, run.chat_id, complete=writing_budget is not None)
             except (OSError, ValueError, LookupError):
                 body = ''
             if not body:
-                body = _excerpt(children.get(slot.get('child_id'), {}).get('answer') or '', 4600)
+                body = children.get(slot.get('child_id'), {}).get('answer') or ''
+                if writing_budget is None:
+                    body = _excerpt(body, 4600)
             finding = {'source': slot['mode'], 'finding': body, 'completion': slot.get('native_status')}
             if slot.get('evidence_status') and slot['mode'] != 'literature':
                 finding['evidence'] = slot['evidence_status']
@@ -263,6 +336,10 @@ class ProgressiveAnswer:
                    'saved Proof reviews of special cases': [{'statement': case['statement examined'], 'ruling': case['review']}
                                                            for case in cases],
                    'findings': findings, 'previous draft': previous}
+        def compose():
+            return write_answer(run.agent, context, budget=writing_budget, usage=usage,
+                                shares=1 if settled else max(2, len(inv['tasks']) - len(keys) + 1))
+
         answer = ''
         if can_write:
             with run._state_lock:
@@ -270,7 +347,7 @@ class ProgressiveAnswer:
                 inv['writing_pending'] = list(keys)
                 run._save()
             try:
-                answer = write_answer(run.agent, context)
+                answer = compose()
             except Exception:
                 if run.agent.workspace.cancelled():
                     raise
@@ -294,7 +371,7 @@ class ProgressiveAnswer:
                                                    'its source. Omit all sentences about verification or review status; '
                                                    'the interface already displays the exact saved ruling.')
                 try:
-                    answer = write_answer(run.agent, context)
+                    answer = compose()
                     if cases:
                         answer = _case_prose(answer, verdicts)
                 except Exception:

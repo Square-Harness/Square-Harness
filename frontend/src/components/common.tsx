@@ -162,13 +162,13 @@ export function CellScale({ label, value, onChange, min = 1, max, hint, values }
   )
 }
 
-export function OptionalNumberField({ label, value, onChange, step = 1000, hint }: {
-  label: string; value: number | null; onChange: (value: number | null) => void; step?: number; hint?: string
+export function OptionalNumberField({ label, value, onChange, step = 1000, min = step, hint }: {
+  label: string; value: number | null; onChange: (value: number | null) => void; step?: number; min?: number; hint?: string
 }) {
   return <label className="field">
     <span className="field-label">{label}</span>
     <span className="field-input">
-      <input type="number" inputMode="numeric" value={value === null ? '' : value} min={step} step={step} placeholder="No limit"
+      <input type="number" inputMode="numeric" value={value === null ? '' : value} min={min} step={step} placeholder="No limit"
         onChange={(event) => onChange(event.target.value === '' ? null : event.target.valueAsNumber)} />
     </span>
     {hint && <span className="field-hint">{hint}</span>}

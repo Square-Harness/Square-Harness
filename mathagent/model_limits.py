@@ -28,10 +28,10 @@ OUTPUTS.update(review_check=131_072, review_confirm=131_072, review_scope=131_07
                review_write=32_768)
 INPUTS = {
     'brief_index': 24_000, 'brief_solver': 60_000,
-    'source_overview': 224_000, 'review_packet': 56_000, 'review_lines': 600, 'review_whole': 400_000,
-    'research_excerpt': 36_000, 'research_lines': 400, 'style_packet': 1_000_000, 'style_guidelines': 12_000,
-    'working_note': 10_000, 'recovery_note': 16_000,
-    'writeup_conversation': 800_000, 'router_context': 32_768,
+    'source_overview': 224_000,
+    'style_packet': 1_000_000, 'style_guidelines': 12_000,
+    'recovery_note': 16_000,
+    'router_context': 32_768,
 }
 DEFAULTS = {
     'ctx': 1_048_576, 'predict': MODEL_OUTPUT_TOKENS, 'temperature': 1.0,
@@ -39,7 +39,7 @@ DEFAULTS = {
     'proof_call_seconds': PROOF_CALL_SECONDS,
     'proof_tokens': 5_760_000, 'proof_seconds': 15 * PROOF_CALL_SECONDS,
     'research_tokens': 15 * MODEL_OUTPUT_TOKENS, 'research_input_tokens': 33_554_432,
-    'research_seconds': 15 * PROOF_CALL_SECONDS, 'research_chars': 200_000,
+    'research_seconds': 15 * PROOF_CALL_SECONDS,
     'assistant_tokens': 12_568_576, 'assistant_input_tokens': 33_554_432,
     'gui_model_concurrency': 200, 'gui_concurrency': 5, 'assistant_concurrency': 5,
 }
@@ -65,30 +65,31 @@ LEGACY_EFFORTS = {
 
 
 def proof_limits(name, args):
-    """Full call ceilings; a smaller total never silently shrinks a DS4 call.
+    """Requested per-call ceilings and the cumulative working allowance.
 
     One solver pass may have one review-format retry, so its durable allowance
     covers a solve and two reviews. A repair is itself another solver pass.
     """
-    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['medium']))
+    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['high']))
     solve = min(args.proof_solve_tokens, effort['solve_tokens'])
     verify = min(args.proof_verify_tokens, effort['verify_tokens'])
-    tokens = effort['tries'] * (solve + 2 * verify)
+    rounds = args.proof_rounds if getattr(args, 'proof_rounds_explicit', False) else effort['tries']
+    tokens = rounds * (solve + 2 * verify)
     configured = getattr(args, 'proof_tokens', None)
     if configured is not None:
         tokens = min(tokens, configured)
-    seconds = 3 * effort['tries'] * getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)
+    seconds = 3 * rounds * getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)
     configured_seconds = getattr(args, 'proof_seconds', None)
     if configured_seconds is not None:
         seconds = min(seconds, configured_seconds)
-    return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds,
+    return dict(rounds=rounds, tokens=tokens, seconds=seconds,
                 solve_tokens=solve, verify_tokens=verify,
                 repair_tokens=min(solve, getattr(args, 'proof_repair_tokens', None) or solve))
 
 
 def workflow_budget(name, args=None):
     """Cumulative inference allowance for a DS4 worker at its selected effort."""
-    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['medium']))
+    effort = EFFORTS.get(name, LEGACY_EFFORTS.get(name, EFFORTS['high']))
     tokens, seconds = effort['research_tokens'], effort['minutes'] * 60
     configured = getattr(args, 'research_tokens', None)
     if configured is not None:
@@ -100,15 +101,16 @@ def workflow_budget(name, args=None):
 
 def effort_presets(args):
     """Server-provided presets, keeping non-Proof budgets and times separate."""
-    presets = {}
-    for name, effort in EFFORTS.items():
-        proof = proof_limits(name, args)
-        work = workflow_budget(name, args)
-        presets[name] = {**effort, 'research_tokens': work['tokens'], 'minutes': work['seconds'] / 60, 'tokens': proof['tokens'],
-                         'solve_tokens': proof['solve_tokens'], 'verify_tokens': proof['verify_tokens'],
-                         'repair_tokens': proof['repair_tokens'], 'proof_seconds': proof['seconds'],
-                         'proof_call_seconds': getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)}
-    return presets
+    from .literature import UNLIMITED_SOURCE
+    proof = proof_limits('high', args)
+    work = workflow_budget('high', args)
+    requests = getattr(args, 'research_requests', None)
+    return {'high': {**EFFORTS['high'], 'research_tokens': work['tokens'], 'minutes': work['seconds'] / 60,
+                     'tokens': proof['tokens'], 'solve_tokens': proof['solve_tokens'], 'verify_tokens': proof['verify_tokens'],
+                     'requests': UNLIMITED_SOURCE if requests is None else requests,
+                     'chars': getattr(args, 'research_chars', None) or UNLIMITED_SOURCE,
+                     'repair_tokens': proof['repair_tokens'], 'proof_seconds': proof['seconds'],
+                     'proof_call_seconds': getattr(args, 'proof_call_seconds', PROOF_CALL_SECONDS)}}
 
 
 # The hosted API profiles that serve DS4.1 Flash with the robust transport (mathagent.deepinfra.DeepInfra and its
@@ -164,9 +166,8 @@ def apply_defaults(args, arguments):
         args.predict = min(args.predict, args.ctx - 1025)
     if '--request-timeout' not in explicit:
         args.request_timeout = args.proof_call_seconds
-    # GUI launch caps accommodate every effort; terminal jobs derive their
-    # cumulative allowance from their actual number of solver passes.
-    rounds = 5 if getattr(args, 'gui', False) else args.proof_rounds
+    # Both entry points derive their cumulative ceiling from the actual pass count.
+    rounds = args.proof_rounds
     if '--proof-tokens' not in explicit:
         args.proof_tokens = rounds * (args.proof_solve_tokens + 2 * args.proof_verify_tokens)
     if '--proof-seconds' not in explicit:

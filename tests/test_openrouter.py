@@ -3,6 +3,7 @@
 
 """The OpenRouter profile: the DeepInfra hosted transport with OpenRouter's address, key, model name, wording and
 routing rules, against a loopback server that streams the way OpenRouter does (measured 2026-11-27)."""
+import base64
 import json
 import os
 import threading
@@ -11,9 +12,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from mathagent import cli
+from mathagent import cli, images
 from mathagent.agent import AgentError
 from mathagent.api_profiles import create_profile_client, profile_class
+from mathagent.call_policy import count_input
 from mathagent.deepinfra import (MODEL, DeepInfraGenerationError, DeepInfraRateLimit, generation_stream,
                                  provider_busy)
 from mathagent.gui import store
@@ -278,16 +280,12 @@ class OpenRouterTransportTests(unittest.TestCase):
         # The public catalog is read without the key.
         client.models()
         self.assertIsNone(next(auth for method, path, auth in self.fake.requests if path == '/api/v1/models'))
-        # Native images stay DeepInfra-only until verified on OpenRouter.
-        client.image_refs = [{'id': 'x'}]
-        with self.assertRaises(AgentError):
-            client._payload(PAYLOAD)
 
 
 class OpenRouterWorkflowTests(GuiCase):
     fake_class = FakeOpenRouter
     model = MODEL
-    extra_args = ('--backend', 'openai', '--api-profile', 'openrouter', '--offline', '--allow-remote-model',
+    extra_args = ('--backend', 'openai', '--api-profile', 'openrouter', '--allow-remote-model',
                   '--gui-model-concurrency', '1', '--ctx', '65536')
 
     def setUp(self):
@@ -297,10 +295,49 @@ class OpenRouterWorkflowTests(GuiCase):
         self.addCleanup(env.stop)
         super().setUp()
 
+    def test_uploaded_image_reaches_openrouter_and_remains_on_its_turn(self):
+        self.assertTrue(self.ok('GET', '/api/status')['image_support'])
+        self.assertTrue(images.supported('deepinfra', MODEL))
+        self.assertFalse(images.supported('default', MODEL))
+        self.assertFalse(images.supported('openrouter', 'deepseek-ai/DeepSeek-V4-Flash-0731'))
+        # A one-pixel green PNG, submitted through the same upload endpoint as a paste or drop.
+        png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgOMEAAAGUAMlBGJ3rAAAAAElFTkSuQmCC'
+        status, upload, _ = self.request('POST', '/api/files/upload?name=green.png', raw=base64.b64decode(png))
+        self.assertEqual(status, 200, upload)
+        ref = upload['image']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        direct = (json.dumps({'route': 'direct', 'effort': 'high', 'reason': 'Identify the color.', 'tasks': []}), '', 9)
+        self.fake.replies = [direct, ('Green.', '', 7), direct, ('Yes.', '', 7)]
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Identify the color.', 'files': [upload['path']]})
+        self.assertEqual(self.wait_task()['state'], 'done')
+        (self.root / upload['path']).unlink()  # Later calls must use the frozen bytes.
+        self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Was it green?'})
+        self.assertEqual(self.wait_task()['state'], 'done')
+        self.assertEqual(len(self.fake.completions), 4)
+        for request in self.fake.completions:  # Every routing and answer call carried the original PNG once.
+            urls = [part['image_url']['url'] for msg in request['messages'] if isinstance(msg['content'], list)
+                    for part in msg['content'] if part['type'] == 'image_url']
+            self.assertEqual(urls, ['data:image/png;base64,' + png])
+        self.assertEqual(self.fake.completions[-1]['messages'][-1]['content'], 'Was it green?')
+        saved = store.load_chat(self.root, chat)
+        self.assertEqual([m['images'] for m in saved['history'] if m['role'] == 'user'], [[ref], []])
+        self.assertNotIn(png, json.dumps(saved))
+
+        client = OpenRouter(self.fake.host, timeout=30)
+        text_tokens, _ = count_input(client, PAYLOAD)
+        client.image_root, client.image_refs = self.root, [ref]
+        image_tokens, _ = count_input(client, PAYLOAD)
+        self.assertEqual(image_tokens - text_tokens, images.VISION_TOKEN_ESTIMATE + images.prompt_overhead([ref]))
+        client.profile = 'default'
+        with self.assertRaisesRegex(AgentError, 'Image attachments require'):
+            count_input(client, PAYLOAD)
+        with self.assertRaisesRegex(AgentError, 'Image attachments require'):
+            client._payload(PAYLOAD)
+
     def test_an_assistant_turn_runs_on_openrouter_with_ds4_budgets(self):
         status = self.ok('GET', '/api/status')
         self.assertEqual(status['defaults']['budget_profile'], 'ds4.1-flash-1017')  # DS4 presets, not local budgets
-        chat = self.ok('POST', '/api/chats', {'mode': 'free', 'online': False})['id']
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
         self.fake.replies = [(json.dumps({'route': 'direct', 'effort': 'low', 'tasks': [], 'reason': 'A greeting.'}), '', 9),
                              ('Hello! How can I help?', 'The user greets me.', 7)]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'hi !'})

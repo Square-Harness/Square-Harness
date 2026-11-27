@@ -13,10 +13,10 @@ import { applyTheme, deleteConversation, readTheme, refreshLists, refreshStatus,
 import { ProjectNav } from './Projects'
 import { CellScale, ErrorNote, Meter, Modal } from './common'
 import { PersonalizationSettings } from './Personalization'
-import { FileAccess, FolderBrowser } from './FolderBrowser'
+import { FolderBrowser } from './FolderBrowser'
 import { Inline, MathMacrosProvider } from './Markdown'
 import { Glyph } from './Glyph'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, StopIcon, SunIcon, TrashIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FolderIcon, InfoIcon, MenuIcon, MoonIcon, MoreIcon, PanelLeftIcon, PauseIcon, PencilIcon, PhoneIcon, PlusIcon, SearchIcon, SlidersIcon, StackIcon, StopIcon, SunIcon, TrashIcon } from './Icons'
 import { clearDrafts } from '../drafts'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 import { VARIANT_NAMES, VERDICTS } from '../review'
@@ -98,11 +98,6 @@ export function Sidebar({ route }: { route: Route }) {
             </button>
           </div>
           <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
-          {route.mode !== 'style' && (
-            <a className="btn btn-block side-style" href={href('style')}>
-              <span className="history-mark mode-style" aria-hidden="true"><Glyph mode="style" /></span> Learn my writing style
-            </a>
-          )}
         </header>
         <div className="side-list">
           <ErrorNote>{app.listError}</ErrorNote>
@@ -398,7 +393,7 @@ function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; 
   )
 }
 
-/** The folder the harness works in, shown above the text window; click to open another. */
+/** The workspace the agent works in (it has access to its files), shown above the text window; click to select another. */
 export function WorkspaceSwitch() {
   const { status } = useApp()
   const [browsing, setBrowsing] = useState(false)
@@ -406,10 +401,9 @@ export function WorkspaceSwitch() {
   const folder = status.workspace.split('/').filter(Boolean).pop() || status.workspace
   return (
     <div className="workspace-switch">
-      <button type="button" className="workspace-open" title={status.workspace + ' (open another folder)'} onClick={() => setBrowsing(true)}>
+      <button type="button" className="workspace-open" title={status.workspace + ': the active workspace, whose files the agent can access (click to select another)'} onClick={() => setBrowsing(true)}>
         <FolderIcon size={15} /><span>{folder}</span>
       </button>
-      {!status.online && <span className="pill" title="No external requests; local and cached sources only">Offline</span>}
       {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
     </div>
   )
@@ -491,7 +485,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
   const limits = concurrencyLimits(app.snapshot, status)
   const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
-  const [access, setAccess] = useState(false)
   const [personalization, setPersonalization] = useState(false)
   const [account, setAccount] = useState<Account | null>(null)
   const accountEmail = useRef<string | null>(null)
@@ -527,8 +520,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
   }, [hasAllowance])
   if (!status) return null
   const allowance = status.tester_allowance
-  const readable = (['tex', 'pdf', 'py', 'text'] as const).filter((key) => status.read[key])
-  const readValue = readable.length === 4 ? 'all types' : readable.length ? readable.join(', ') : 'none'
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
   const ollama = status.backend === 'ollama'
@@ -565,10 +556,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
           <span className="side-menu-label">Parallel work</span>
           {(active > 0 || queued > 0) && <span className="side-menu-value">{active}/{limits.chats}{queued > 0 && ` +${queued}`}</span>}
         </button>
-        <button type="button" className="side-menu-item" title={`Choose which kinds of files the model may read by itself in this folder. Now: ${readValue}.`} onClick={() => setAccess(true)}>
-          <FileIcon size={16} />
-          <span className="side-menu-label">File access</span>
-        </button>
         <button type="button" className="side-menu-item" title="Standing instructions and LaTeX macros for every conversation" onClick={() => setPersonalization(true)}>
           <SlidersIcon size={16} />
           <span className="side-menu-label">Personalization</span>
@@ -581,7 +568,6 @@ function WorkspacePanel({ about }: { about: boolean }) {
       {account ? <AccountMenu account={account} allowance={allowance} />
         : allowance && <PilotAllowance allowance={allowance} />}
       {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
-      {access && <FileAccess onClose={() => setAccess(false)} />}
       {personalization && <PersonalizationSettings onClose={() => setPersonalization(false)} />}
       {pairing && (
         <Modal title="Connect a phone" icon={<PhoneIcon />} onClose={() => setPairing(false)}>

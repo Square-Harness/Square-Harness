@@ -85,7 +85,8 @@ class ExploreTasks:
         if self.journal is not None:
             _atomic_write(self.journal, _bytes(json.dumps(self.records, ensure_ascii=False)))
 
-    def schemas(self, original):
+    @staticmethod
+    def schemas(original, *, saved_checks=False):
         offered = copy.deepcopy(original)
         available = False
         for spec in offered:
@@ -99,7 +100,7 @@ class ExploreTasks:
                     'type': 'boolean', 'description': 'For a background check, default true: join before writing the '
                     'final answer. Set false only for optional exploration that can be dropped without compromising '
                     'the requested scope or your verdict. An explicitly requested verification is required.'}
-        if available or self.records:
+        if available or saved_checks:
             offered.append(schema('await_background_check', 'Wait for one submitted check when further work depends '
                                   'on it. Completed checks arrive automatically; do not poll.',
                                   {'check_id': {'type': 'string'}}, ['check_id']))

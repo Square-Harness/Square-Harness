@@ -6,7 +6,7 @@ import { api, type Template } from '../api'
 import { WorkspaceSwitch } from '../components/Shell'
 import { IMAGE_SUFFIXES } from '../components/ImageAttachments'
 import { Collapse, ErrorNote, FilePicker, NumberField, OptionalNumberField } from '../components/common'
-import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
+import { describeLimits, effortLimits } from '../effort'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp } from '../store'
@@ -27,32 +27,19 @@ export function WriteupNew() {
   const [remember, setRemember] = useState('')
   const [output, setOutput] = useState('')
   const [tokens, setTokens] = useState<number | null>(null)
-  const [minutes, setMinutes] = useState(15)
+  const [minutes, setMinutes] = useState(30)
   const [inputTokens, setInputTokens] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
-  const [level, setLevel] = useState<EffortLevel>('medium')
 
-  const applyLevel = (next: EffortLevel) => {
+  useEffect(() => {
     if (!d) return
-    const limits = effortLimits('writeup', d, next)
+    const limits = effortLimits('writeup', d)
     setTokens(limits.tokens)
     setMinutes(Math.max(1, Math.round(limits.seconds / 60)))
     setInputTokens(limits.input_tokens!)
-  }
-  useEffect(() => {
-    if (!d) return
-    applyLevel(level)
-    // Only when the launch defaults arrive.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d])
-  const preset = d ? effortLimits('writeup', d, level) : null
-  const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
-  const chooseLevel = (next: EffortLevel) => {
-    setLevel(next)
-    applyLevel(next)
-  }
   useEffect(() => { api.templates().then((result) => setTemplates(result.templates), () => undefined) }, [])
   const uploading = useDropTarget('Notes go to the sources; .sty and .cls files go to the template', (paths) => {
     const style = paths.filter((path) => /\.(sty|cls)$/i.test(path))
@@ -171,7 +158,7 @@ export function WriteupNew() {
               <span className="field-input"><input type="text" value={output} onChange={(event) => setOutput(event.target.value)} placeholder="notes-writeup.tex" /></span>
               <span className="field-hint">Created in this folder; an existing file is never replaced.</span>
             </label>
-            {d && <EffortSlider kind="writeup" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
+            <p className="field-hint">{describeLimits('writeup', { seconds: minutes * 60, tokens })}.</p>
             <Collapse summary="Advanced limits">
               <div className="field-grid">
                 <OptionalNumberField label="Total output token limit" value={tokens} onChange={setTokens} hint="Optional. Leave blank for no cumulative limit." />

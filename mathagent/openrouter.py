@@ -85,7 +85,7 @@ class OpenRouter(DeepInfra):
     public_routes = ('/api/v1/models',)
     tokenize_path = None
     key_file_env, key_env, loopback_env = 'OPENROUTER_API_KEY_FILE', 'OPENROUTER_API_KEY', 'OPENROUTER_ALLOW_LOOPBACK'
-    model_ids = {MODEL: WIRE_MODEL}  # the legacy V4 model is not offered here; native images stay off until verified
+    model_ids = {MODEL: WIRE_MODEL}  # the legacy V4 model is not offered here
     tolerate_repeated_finish = True
 
     def __init__(self, host=None, timeout=600):

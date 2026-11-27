@@ -16,7 +16,7 @@ from .review import EXPLORE_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner
 from .review_challenge import Challenge
 from .review_evidence import ReviewEvidence, bibliographic_query
 from .review_position import _words
-from .source_tasks import excludes_external_sources
+from .source_tasks import scoped_literature
 from .tools import Workspace
 from .worker_errors import WorkerInputError
 
@@ -115,6 +115,9 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
         numerics = base.workspace.numerics
         if numerics is None and self.sandbox is not None:
             numerics = self.sandbox.automatic_session(base.workspace.root, cancel=getattr(self, 'cancel', None), ctx=base.ctx)
+        if self.PIPELINE == EXPLORE_PIPELINE and getattr(numerics, 'invocation', None) == 'automatic':
+            numerics = numerics.for_proof(state.get('sandbox_run_limit')) or numerics
+            state['sandbox_run_limit'] = numerics.run_limit
         if numerics is not None:
             previous = numerics.on_record
             def record(run):
@@ -125,7 +128,13 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
                     previous(run)
             numerics.on_record = record
             numerics.runs = len(state['experiments'])
-        workspace = self.workspace_class(base.workspace, state['sources'], numerics, self._mark)
+        selected = copy.copy(base.workspace)
+        selected.literature = scoped_literature(self.literature, state['goal'], state.get('target'),
+                                                state.get('project_context'), sources=state['sources'])
+        workspace = self.workspace_class(selected, state['sources'], numerics, self._mark)
+        if getattr(selected.literature, 'assigned_sources', None) is not None:
+            # Frozen manuscript files remain readable. Web page IDs can refer to other cached material.
+            workspace.web = None
         client = MeteredClient(self, 'review', 'reviewer')
         reviewer = Agent(client, workspace, base.model, base.ctx, base.predict, state['thinking'], 'explore',
                          state['tool_rounds'], seed=base.seed, temperature=state['temperature'], top_p=state['top_p'])
@@ -134,13 +143,10 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
         reviewer.project_context = state.get('project_context', '')
         reviewer.document_output_cap = getattr(base, 'document_output_cap', None)
         if workspace.literature and workspace.literature.online:
-            if excludes_external_sources(state['goal']):
-                workspace.literature.online = False
-            else:
-                reference_agent = copy.copy(reviewer)
-                reference_agent.client = MeteredClient(self, 'reference', 'reference')
-                workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True,
-                                                   share_job_budget=self.PIPELINE == EXPLORE_PIPELINE)
+            reference_agent = copy.copy(reviewer)
+            reference_agent.client = MeteredClient(self, 'reference', 'reference')
+            workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True,
+                                               share_job_budget=self.PIPELINE == EXPLORE_PIPELINE)
 
         query = state['goal']
         if state.get('target'):
@@ -275,6 +281,7 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
         state = super()._extra_state()
         state['concurrency'] = self.concurrency
         state['tool_rounds'] = None
+        state['notebook_source'] = getattr(self.agent, 'notebook_source', '')
         state['challenge'] = {'status': 'new'}
         return state
 
@@ -290,7 +297,9 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
         query += '\nPrimary manuscript: ' + primary['path']
         if support:
             query += '\nSupporting material (consult where relevant): ' + ', '.join(s['path'] for s in support)
+        reviewer.notebook_source = state.get('notebook_source', (state.get('reference_context') or {}).get('notebook_source', ''))
         reviewer.workspace.evidence = evidence
+        reviewer.stop_on_stalled_tools = False
         challenge = Challenge(self)
         if checkpoint and checkpoint.get('external_evidence'):
             # Older v2 checkpoints injected their single challenge separately. Its saved note now lives
@@ -309,6 +318,7 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
             if self.sandbox is not None and reviewer.workspace.numerics is not None:
                 numerics = self.sandbox.automatic_session(reviewer.workspace.root, cancel=cancel, ctx=reviewer.ctx)
                 if numerics is not None:
+                    numerics = numerics.for_proof(state.get('sandbox_run_limit')) or numerics
                     def saved(experiment):
                         with self._mutex:
                             record['experiments'].append(experiment['id'])

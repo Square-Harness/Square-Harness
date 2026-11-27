@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
 
+from . import images
 from .agent import AgentError, Ollama, _NoModelRedirects
 from .jsonutil import loads_strict
 
@@ -287,8 +288,8 @@ class OpenAICompatible:
         self._token_count_cache[key] = (count, getattr(self, 'observed_context_tokens', None))
 
     def _payload(self, payload):
-        if getattr(self, 'image_refs', None) and getattr(self, 'profile', None) != 'deepinfra':
-            raise AgentError('Native image input is supported only by the DeepInfra DS4.1 Flash 1017 profile')
+        if getattr(self, 'image_refs', None) and not images.supported(getattr(self, 'profile', None), payload.get('model')):
+            raise AgentError(images.UNSUPPORTED)
         options = payload.get('options', {})
         data = {'model': payload['model'], 'messages': _messages(payload['messages']),
                 'stream': True, 'stream_options': {'include_usage': True},

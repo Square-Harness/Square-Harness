@@ -41,9 +41,8 @@ step 1.
   and in `<gui-root>/.mathagent/gui-token` (the workspace when `--gui-root` is not
   given). Give the address to the user, but never commit it, paste it into an
   issue, or copy it anywhere else.
-- **Never pass `--online` together with a remote `--host`** unless the user agrees
-  to send their prompts and files to that machine. With an SSH tunnel, `--online`
-  is not needed for the model.
+- Use `--allow-remote-model` with a remote `--host` only when the user agrees
+  to send their prompts and files to that machine. An SSH tunnel uses a loopback host.
 - **Don't guess around a failed check.** When a check fails, use the fallback
   given here, or the matching entry in [Troubleshooting](#troubleshooting).
   Report anything you could not fix.
@@ -222,8 +221,7 @@ HTTP loopback prefix ending in `/api/feedback`; these links work only in the
 paired local browser.
 
 The isolated API launcher accepts `--workspace` for a separate acceptance
-workspace and `--online` to enable literature tools. Without `--online` it keeps
-its previous locked-offline behavior. If the private
+workspace. Scholarly search is online. If the private
 `.local/feedback/slack-webhook` file exists, the launcher uses it for feedback
 unless `SH_FEEDBACK_WEBHOOK_FILE` was explicitly configured. For direct file
 delivery it similarly loads `.local/feedback/slack-bot-token` and the channel ID
@@ -323,11 +321,11 @@ Save the OpenRouter key at the hidden prompt, then start the interface:
 
 ```bash
 python3 scripts/setup-openrouter.py
-python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter --online
+python3 scripts/start-deepinfra.py --profile ds4 --provider openrouter
 ```
 
 The key stays in the private, mode-0600 file `.local/openrouter/credential`.
-The launcher opens a paired browser window. The `--online` flag enables web research.
+The launcher opens a paired browser window with online scholarly search.
 For hosted services, use `--backend openai --api-profile openrouter --allow-remote-model`
 and set `OPENROUTER_API_KEY_FILE` to the backend account's private key file outside its workspace.
 Keep each tester's existing quota path, budget and rates when changing providers.
@@ -359,9 +357,10 @@ The provider's spending limit is distinct from workflow token limits; ongoing
 requests may settle after admission. Changing parallel work does not mint a
 new credential or increase its existing spending allowance.
 
-Native image input needs this pinned **DS4.1 Flash 1017** DeepInfra profile;
-there is no extra dependency or vision service to install. Keep the private
-`.mathagent/images` cache when moving or backing up a workspace, alongside its
+Both the DeepInfra and OpenRouter profiles accept native images with the pinned
+**DS4.1 Flash 1017** model. Image input uses the configured provider and needs
+no additional service or dependency. Keep the private `.mathagent/images`
+cache when moving or backing up a workspace, alongside its
 saved job state. The GUI uses authenticated same-origin thumbnail requests.
 PNG, JPEG and static WebP are accepted, with eight images per conversation/job,
 8 MiB per image and 24 MiB combined, at most 8,192 pixels per side and 32
@@ -418,7 +417,7 @@ file, then use:
 
 ```bash
 python -m mathagent --gui --backend openai --api-profile deepinfra \
-  --allow-remote-model --offline --workspace WORKSPACE
+  --allow-remote-model --workspace WORKSPACE
 ```
 
 Here `--api-profile deepinfra` selects the DS4 transport and budget profile.
@@ -431,7 +430,8 @@ model settings from B4. Selecting a different profile never rewrites saved
 jobs or grants them new allowances on resume.
 
 DS4 uses 384,000 output tokens as the ceiling for substantive calls across its
-modes. Low, Medium and High allow 1, 3 and 5 solver passes in Proof. The total output allowance
+modes. All new jobs use High effort. Proof defaults to five solver passes,
+and operators can set `--proof-rounds` explicitly. The total output allowance
 includes one possible review-format retry per pass. See the budget table in
 [guide.md](guide.md). The common per-call time guard defaults to three hours;
 use `--proof-call-seconds SECONDS` for an explicit value in either the DS4
@@ -439,7 +439,9 @@ launcher or a manual launch.
 The workflow time allowance is derived from the permitted calls instead of the
 old short effort-specific deadline. Explicit token and time flags remain hard
 limits; they may stop a job before its maximum pass count. The scoped API key's
-spending allowance is separate and remains unchanged by selecting an effort.
+spending allowance is independent of workflow settings. Proof workers can search scholarly sources online directly and during delegated reference checks. Automatic Proof calculations use the same
+optional numerical sandbox as Explore. Both roles can still work by hand when
+the sandbox is unavailable.
 
 The profile pins `deepseek-ai/DeepSeek-V4.1-Flash-1017` at
 `https://api.deepinfra.com/v1/openai`. It uses ordinary streamed Chat
@@ -677,8 +679,7 @@ this computer                                        GPU node
 square-harness --gui ── 127.0.0.1:18020 ══ssh══▶ 127.0.0.1:18020  model server (vLLM or Ollama)
 ```
 
-Because the tunnel ends on `127.0.0.1`, the harness keeps its default offline
-mode for the model.
+The tunnel exposes a loopback model endpoint. Scholarly searches use the configured public sources.
 
 ### B1. Inspect the GPU machine
 
@@ -911,7 +912,7 @@ Install the parts the user chose in step 1:
 
 - **Python sandbox** (`@python_lab`, `@sanity_check`): requires Docker (Docker
   Engine on Linux, Docker Desktop on macOS). From the repository, run
-  `.venv/bin/python -m mathagent.numerics build`, then
+  `.venv/bin/python -m mathagent.numerics build` (builds the required version 3 image and leaves an installed version 2 available for older checkouts), then
   `.venv/bin/python -m mathagent.numerics doctor`; the doctor must report the
   image and a successful test run. Without Docker, the harness works and these
   two skills explain what is missing. Snap-packaged Docker makes `doctor` report
@@ -932,9 +933,7 @@ Tell the user:
 1. the `Open:` address (in `$REPO/.local/gui.log`), and that it contains a
    secret token. The token stays the same across restarts; deleting
    `<gui-root>/.mathagent/gui-token` revokes it;
-2. that the web app searches scholarly sources online by default (short public
-   queries, never their files), and that launching with `--offline` turns this
-   off;
+2. that workers search scholarly sources online with public queries and respect source restrictions in the user's request;
 3. how to stop it gracefully:
    - find the PID with `pgrep -af "$REPO/.venv/bin/square-harness --gui"` and
      check that the command line is the one you started;
@@ -960,7 +959,7 @@ Tell the user:
 
 | Symptom | Fix |
 | --- | --- |
-| `Offline mode requires a localhost/loopback model --host` | The model must be reached through `127.0.0.1` (a tunnel). Use `--online` only with the user's consent to send data to that host. |
+| `A remote model host requires --allow-remote-model` | Use a loopback tunnel or pass `--allow-remote-model` with the user's consent to send data to that host. |
 | `The complete request needs N input tokens … leaves 0 output tokens` | Raise `--ctx` (16384 at least with Ollama, whose token count is a conservative byte estimate). |
 | `Use ctx >= 2048, 128 <= predict < ctx - 1024 …` | Lower `--predict`, or raise `--ctx`. |
 | `--gui-root must be a folder that contains the --workspace folder` / no such directory | `mkdir -p` the workspace; make `--gui-root` a parent of it. |

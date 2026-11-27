@@ -121,7 +121,7 @@ certain, or if what settles it is not in the lines shown; "drop" if the original
 {"check": two sentences, "verdict": "correction" | "look" | "drop"}."""
 WORDS_REMARK = re.compile(r'(?i)\b(?:mis-?spell|spelling|grammar|ungrammatical|unidiomatic|article|lower-?case|upper-?case|'
                           r'capitali[sz]|punctuat|full stop|comma|hyphen|typo in the word|stray (?:word|fragment))')
-CHECK_REACH, EVIDENCE_REACH, MACROS_CHARS = 110, 25, 24_000  # lines shown around a remark and its evidence
+CHECK_REACH, EVIDENCE_REACH = 110, 25  # lines shown around a remark and its evidence
 TRIAGE = CHECK1 + ('\nA slip that changes nothing in the mathematics is still a slip, not a "drop": a variable left inside a '
                    'norm, an open interval that should be half-closed, a missing index or superscript, a set written two '
                    'ways. Write the comparison or the computation itself in "check", in at most 80 words, before the verdict.')
@@ -179,7 +179,7 @@ def spelling_swap(old, new):
 
 
 def line_edits(n, old, new, masked):
-    """The edits that turn line n into its correction, or None for a rewrite (more than MAX_EDITS edits).
+    """The edits that turn line n into its correction, or None for a rewrite (many independent edits relative to the length of the line).
 
     Neighbouring edits are merged first: judged word by word, "aims at proving" → "aims to prove" is two wrong edits.
     An edit is left out when it touches masked math, a command argument or a comment, when its new text has a line
@@ -191,7 +191,7 @@ def line_edits(n, old, new, masked):
         at += len(t)
     changes = [(i1, i2, j1, j2) for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
                if tag != 'equal' and (''.join(a[i1:i2]).strip() or ''.join(b[j1:j2]).strip())]
-    if len(changes) > MAX_EDITS:
+    if len(changes) > max(MAX_EDITS, len(old.split()) // 12):
         return None
     spans = []
     for i1, i2, j1, j2 in changes:
@@ -396,7 +396,7 @@ class TypoLanes:
             sid = self._lane_source()[0]
             lines = self._lines(sid)
             self.emit('notice', f'Proofreading the English of lines {a}-{b}')
-            result = self._ask('read', FIX + '\n\n' + numbered(lines, a, b), cap=LANGUAGE_CAP, schema=FIX_SCHEMA,
+            result = self._ask('read', FIX + '\n\n' + numbered(lines, a, b), cap=self._analysis_cap(LANGUAGE_CAP), schema=FIX_SCHEMA,
                                key=key, temperature=temperature, reference=False)
             value = result['value'] if isinstance(result['value'], dict) else {}
             answered = bool(result['complete']) and isinstance(value.get('lines'), list)
@@ -460,7 +460,7 @@ class TypoLanes:
                 context = '\n'.join(f'{m}| {lines[m - 1]}' for m in range(max(1, n - 2), min(len(lines), n + 2) + 1))
                 rows.append(f'PROPOSAL {i} (line {n})\n{context}\noriginal: "{e["quote"]}"\nproposed: "{e["suggestion"]}"')
             self.emit('notice', f'Second look at {len(rows)} language corrections')
-            result = self._ask('typo-check', VERDICT + '\n\nPROPOSALS:\n\n' + '\n\n'.join(rows), cap=VERDICT_CAP,
+            result = self._ask('typo-check', VERDICT + '\n\nPROPOSALS:\n\n' + '\n\n'.join(rows), cap=self._analysis_cap(VERDICT_CAP),
                                schema=VERDICT_SCHEMA, key=f'V{batch[0]}', temperature=0, reference=False)
             value = result['value'] if isinstance(result['value'], dict) else {}
             verdicts = {v.get('id'): v.get('verdict') for v in value.get('items') or [] if isinstance(v, dict)}
@@ -544,7 +544,7 @@ class TypoLanes:
                 if not same['evidence_line'] and evidence:
                     same['evidence_line'], same['evidence_quote'] = evidence, str(item.get('evidence_quote') or '')
                 continue
-            lanes['math'].append({'start_line': n, 'end_line': n, 'quote': _clip(quote, 300), 'comment': _clip(item.get('problem'), 600),
+            lanes['math'].append({'start_line': n, 'end_line': n, 'quote': quote, 'comment': str(item.get('problem') or '').strip(),
                                   'suggestion': _clip(correction, 600), 'evidence_line': evidence,
                                   'evidence_quote': str(item.get('evidence_quote') or '') if evidence else '',
                                   'source': source, 'votes': 1})
@@ -560,7 +560,7 @@ class TypoLanes:
         spans.sort()
         if len(spans) == 2 and spans[1][0] <= spans[0][1] + 1:
             spans = [[spans[0][0], max(spans[0][1], spans[1][1])]]
-        macros = '\n\n'.join(p['content'] for p in self.state.get('packages') or [] if p.get('content'))[:MACROS_CHARS]
+        macros = '\n\n'.join(p['content'] for p in self.state.get('packages') or [] if p.get('content'))[:self.agent.workspace.result_chars]
         text = ('MACROS AND PACKAGES OF THE MANUSCRIPT:\n' + macros + '\n\n') if macros else ''
         return text + '\n\n'.join(f'LINES {a}-{b} OF THE MANUSCRIPT:\n' + self._numbered(sid, a, b, mark=False) for a, b in spans)
 
@@ -574,7 +574,7 @@ class TypoLanes:
         every doubt, and most of them fall here in a few seconds. What survives is shown as a place to check."""
         def run():
             r = self.state['typo_lanes']['math'][i]
-            result = self._ask('typo-check', self._excerpt(r) + '\n\n' + TRIAGE + '\n\n' + self._row(r), cap=TRIAGE_CAP,
+            result = self._ask('typo-check', self._excerpt(r) + '\n\n' + TRIAGE + '\n\n' + self._row(r), cap=self._analysis_cap(TRIAGE_CAP),
                                schema=CHECK1_SCHEMA, key=f'T{i}', temperature=0)
             value = result['value'] if isinstance(result['value'], dict) else {}
             with self._mutex:
@@ -596,9 +596,9 @@ class TypoLanes:
 
     # -- the report
 
-    def _presentation_section(self, items, sid, unread, read_any, capped=True):
+    def _presentation_section(self, items, sid, unread, read_any):
         if not self._lanes_on() or not items:
-            return super()._presentation_section(items, sid, unread, read_any, capped=capped)
+            return super()._presentation_section(items, sid, unread, read_any)
         blocks = {
             'math': ('Corrections in formulas and notation',  # jobs saved when each remark had a reasoning check
                      '*Each correction was checked against the paper; check it again before changing a formula.*'),

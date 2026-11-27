@@ -3,7 +3,9 @@
 
 import { useState, type FormEvent } from 'react'
 import { api, type Personalization } from '../api'
+import { href } from '../router'
 import { ErrorNote, Loading, Modal, useLoad } from './common'
+import { Glyph } from './Glyph'
 import { SlidersIcon } from './Icons'
 
 export function PersonalizationSettings({ onClose }: { onClose: () => void }) {
@@ -32,6 +34,15 @@ export function PersonalizationSettings({ onClose }: { onClose: () => void }) {
       {!value && !error && <Loading />}
       {value && (
         <form onSubmit={save}>
+          <div className="field personal-style">
+            <a className="btn" href={href('style')} onClick={(event) => {
+              if (saving || (draft && !window.confirm('Leave without saving your preferences?'))) { event.preventDefault(); return }
+              onClose()
+            }}>
+              <span className="history-mark mode-style" aria-hidden="true"><Glyph mode="style" /></span> Learn my writing style
+            </a>
+            <span className="field-hint">Your own articles teach write-ups how you write.</span>
+          </div>
           <label className="field">
             <span className="field-label">Standing instructions</span>
             <span className="field-hint">How you like answers: language, level of detail, conventions, what to avoid.</span>

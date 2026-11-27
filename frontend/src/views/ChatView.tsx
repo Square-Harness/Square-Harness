@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement, type ReactNode } from 'react'
 import { api, ApiError, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { assistantBudgetDisplay } from '../assistantBudget'
 import { Collapse, CopyButton, ErrorNote, Loading, ModelWaitNote, Toggle, WorkProgressNote, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, FolderIcon, PauseIcon, PlayIcon, SendIcon, StopIcon } from '../components/Icons'
-import { EFFORTS, effortLimits, isLevel, type EffortKind, type EffortLevel } from '../components/Effort'
+import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../effort'
 import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { ProjectSelector } from '../components/Projects'
@@ -26,13 +26,15 @@ import { MODES } from '../modes'
 import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
+import { FilePanel } from './FileView'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { go, href } from '../router'
+import { go, href, openFile, parse, useRoute, viewHref } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
 import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
+import { JobDownloads } from '../components/JobDownloads'
 import { AttachMenu } from '../components/FileExplorer'
 
 type ChatMode = 'critic' | 'explore' | 'free'
@@ -84,18 +86,17 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: Cover }> = {
 const kindOf = (mode: RouteMode | 'critic' | 'free'): Kind => (mode === 'critic' || mode === 'explore' || mode === 'free' || mode === 'investigate' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
   mode === 'prove' ? 'proof' : mode === 'writeup' || mode === 'summarize' ? 'writeup' : mode === 'literature' ? 'literature' : ['referee', 'detailed_review', 'typo_check', 'quick_review', 'explain'].includes(mode) ? 'research' : null
-// A review and a typo check have one depth: their level names a budget and is never chosen or shown.
-const levelOf = (mode: RouteMode, effort?: string): EffortLevel => FIXED_EFFORT[mode] ?? (isLevel(effort) ? effort : 'medium')
 // Quick reviews and explanations are pages of the Review notebook; summaries are write-ups.
 // Python Lab and sanity checks answer in the conversation: they have no notebook page.
 type Paged = Exclude<RouteMode, 'investigate' | 'check' | 'python_lab' | 'sanity_check'>
 const paged = (mode: RouteMode | 'critic' | 'free'): mode is Paged =>
   mode !== 'critic' && mode !== 'free' && mode !== 'investigate' && mode !== 'check' && mode !== 'python_lab' && mode !== 'sanity_check'
 const pageOf = (mode: Paged) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' || mode === 'typo_check' ? 'referee' : mode === 'summarize' ? 'writeup' : mode)
-const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
+const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'high'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
+  const viewing = useRoute().file
   const tick = useTick(id)
   const personalizationTick = useTick('personalization')
   // Reloaded when a turn ends too: its last save may have arrived before the turn was marked done.
@@ -123,12 +124,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const [draft, setDraft] = useState(() => kept?.draft || loadDraft(id))
   useEffect(() => { saveDraft(id, draft) }, [id, draft])
   const [selectedCall, setSelectedCall] = useState<ModeCall | null>(() => mode === 'free' ? typedCall(draft, true) : null)
-  // null: no effort named, so the harness picks its default for the mode.
-  const [selectedEffort, setSelectedEffort] = useState<EffortLevel | null>(null)
-  const selectCall = (next: ModeCall | null) => {
-    if (next?.mode !== selectedCall?.mode) setSelectedEffort(null)
-    setSelectedCall(next)
-  }
   const [attachments, setAttachments] = useState<string[]>(kept?.attachments || [])
   const [deletedNotice, setDeletedNotice] = useState(!!kept)
   const defaultProject = app.projects?.some((project) => project.id === app.projectFilter) ? app.projectFilter : null
@@ -160,15 +155,13 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       if ((draft.trim() || attachments.length) && !window.confirm('Start a new conversation in this project? Your unsent message and attachments will be cleared.')) {
         event.preventDefault(); return
       }
-      setDraft(''); setAttachments([]); setSelectedCall(null); setSelectedEffort(null); setSendError(''); createdChat.current = null
+      setDraft(''); setAttachments([]); setSelectedCall(null); setSendError(''); createdChat.current = null
     }
     window.addEventListener('square-new-project-chat', prepare)
     return () => window.removeEventListener('square-new-project-chat', prepare)
   }, [draft, attachments, sending])
   const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
-  // Online search is always on, unless the interface was launched --offline.
-  const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLFormElement>(null)
   const pinned = useRef(true)
@@ -206,10 +199,6 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const uploading = useDropTarget('Attached to your next message', (paths) => setAttachments((items) => [...new Set([...items, ...paths])]),
     currentProject)
   useEffect(() => { if (data) setThink(data.settings.think) }, [data?.id])
-  // Conversations saved with search off (earlier versions) get it back.
-  useEffect(() => {
-    if (id && data && !locked && !data.settings.online) api.chatSettings(id, { online: true }).catch(() => undefined)
-  }, [id, data?.settings.online, locked])
 
   // Follow new output while the reader is at the bottom; never yank them back up.
   const liveSize = live ? live.steps.reduce((n, step) => n + (step.type === 'call' ? step.text.length + step.thinking.length : 1), 0) : 0
@@ -238,7 +227,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     }
     // A message that is only a mode name ("@summarize") is that call, picked from the menu or not.
     const call = validCall(raw, selectedCall) ? selectedCall : imageOnlyCall || (raw.trim().match(/^@[a-z_]+$/) ? typedCall(raw, true) : null)
-    const modeCall = free && text === undefined ? callPayload(raw, call, call === selectedCall ? selectedEffort ?? undefined : undefined) : undefined
+    const modeCall = free && text === undefined ? callPayload(raw, call) : undefined
     const content = modeCall ? raw : raw.trim()
     // A new message while the Assistant is paused sets that turn aside (the server says so in the conversation).
     const queue = canQueue
@@ -248,7 +237,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setBusyError(false)
     try {
       let chatId = id || createdChat.current
-      if (!chatId) { chatId = (await api.createChat(mode, think, locked ? undefined : true, newProject)).id; createdChat.current = chatId }
+      if (!chatId) { chatId = (await api.createChat(mode, think, newProject)).id; createdChat.current = chatId }
       if (free) await api.route(chatId, content, attachments, modeCall, queue)
       else await api.send(chatId, content, attachments)
       if (text === undefined) rememberMessage(content)
@@ -257,7 +246,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
       setSelectedCall(null)
       setAttachments([])
       pinned.current = true
-      if (!id) go(mode, chatId)
+      if (!id) go(mode, chatId, undefined, undefined, parse(window.location.hash).file)  // an open file stays open
     } catch (reason) {
       setSendError((reason as Error).message)
       setBusyError(reason instanceof ApiError && reason.status === 409)
@@ -315,7 +304,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const sentHere = useMemo(() => sentMessages(data?.transcript || []), [data?.transcript])
   const recall = useRecall(sentHere.length ? sentHere : recentMessages(), draft, (text) => {
     setDraft(text)
-    selectCall(free ? typedCall(text, true) : null)
+    setSelectedCall(free ? typedCall(text, true) : null)
   })
   // Esc in the message box pauses the running turn, as the Pause button does.
   const boxKeys = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -386,18 +375,16 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])}
             startFolder={app.projects?.find((item) => item.id === currentProject)?.folder} projectId={currentProject} />
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
-            <span key={path} className="chip" title={path}>
-              <FileIcon size={14} /><span>{displayPath(path)}</span>
+            <AttachedChip key={path} path={path} size={14}>
               <button type="button" className="chip-remove" aria-label={`Remove ${displayPath(path)}`}
                 onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
-            </span>
+            </AttachedChip>
           ))}
         </div>
         <PinnedImages paths={attachments} onRemove={(path) => setAttachments((items) => items.filter((item) => item !== path))} />
         {hasImages && app.status?.image_support === false && <p className="error-note">This model cannot read images. Remove the images or use a vision-capable model.</p>}
         <div className="composer-box">
-          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={selectCall}
-            effort={selectedEffort} onEffort={setSelectedEffort} hasEffort={!!selectedCall && !FIXED_EFFORT[selectedCall.mode] && (selectedCall.mode === 'investigate' || !!effortKind(selectedCall.mode))}
+          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={setSelectedCall}
             onSend={() => { send() }} onKey={boxKeys} disabled={pausedInvestigation || (blocked && !canQueue) || sending || resuming || projectSaving} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
@@ -426,7 +413,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </button>
           ) : (
             <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
-              <SendIcon size={16} /> {uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}
+              <SendIcon size={16} /> <span className="composer-send-label">{uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}</span>
             </button>
           )}
         </div>
@@ -457,7 +444,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
         <ErrorNote>{sendError || (!errorInChat && taskError)}</ErrorNote>
       </form>
     </div>
-    {data && <WorkPanel key={data.id} chat={data} />}
+    {/* An open file takes the notebook's place; the notebook comes back when it closes. */}
+    {viewing ? <FilePanel key={viewing} path={viewing} /> : data && <WorkPanel key={data.id} chat={data} />}
     </div>
     </MathMacrosProvider>
   )
@@ -594,7 +582,7 @@ function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptIt
         <Markdown quiet>{literalUnderscores(item.content)}</Markdown>
         {attached.length > 0 && (
           <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
-            <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>
+            <AttachedChip key={path} path={path} />
           )}</div>
         )}
         {available.length > 0 && (
@@ -731,7 +719,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   // cancelled before running, can be started (again) as the model chose them.
   const start = (activeMode: RouteMode) => act(() => {
     const effort = effortKind(activeMode)
-    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, levelOf(activeMode, item.effort), !!FIXED_EFFORT[activeMode]) : undefined
+    const limits = effort && app.status ? effortLimits(effort, app.status.defaults, !!FIXED_EFFORT[activeMode]) : undefined
     return api.startRoute(chatId, index, { mode: activeMode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
   })
 
@@ -778,14 +766,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && <>
-            {item.outputs?.pdf && <a className="btn btn-small btn-primary" href={api.researchPdfDownloadUrl(item.job_id)} download>Download PDF</a>}
-            {item.outputs?.source && <a className={'btn btn-small' + (item.outputs.pdf ? '' : ' btn-primary')} href={api.researchSourceUrl(item.job_id)} download={item.outputs.source}>Sources (.zip)</a>}
-            {item.outputs?.download && <a className={'btn btn-small' + (item.outputs.pdf || item.outputs.source ? '' : ' btn-primary')} href={api.researchTexUrl(item.job_id)} download={item.outputs.download} title="Only the main LaTeX file. Images and template files must be beside it to compile; use Sources (.zip) for the complete bundle.">Main .tex only</a>}
-            {item.outputs?.download && item.outputs.body && <a className="btn btn-small" href={api.researchBodyUrl(item.job_id)} download={item.outputs.body} title="The text alone, without preamble, title or bibliography: paste it into your paper or \input it. Definitions it needs are listed at its top.">Body .tex</a>}
-            {item.outputs?.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(item.job_id)} download>{item.status === 'stopped' ? 'Download partial review (.md)' : 'Download review (.md)'}</a>}
-            {item.outputs?.bib && <a className={'btn btn-small' + (item.outputs.review ? '' : ' btn-primary')} href={item.outputs.review ? api.reviewBibtexUrl(item.job_id) : api.researchBibDownloadUrl(item.job_id)} download>BibTeX (.bib)</a>}
-          </>}
+          {item.job_id && item.outputs && <JobDownloads job={item.job_id} outputs={item.outputs} partial={item.status === 'stopped'} />}
           {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
             ? href('free', chatId, null, null, { tab: 'outputs', selected: item.job_id })
             : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
@@ -797,7 +778,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
           <Collapse className="route-details" summary={(kind === 'answer' || kind === 'check') && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
             <div className="route-summary"><Inline mathProse limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
-              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>)}</div>
+              <div className="attachments">{item.files.map((path) => <AttachedChip key={path} path={path} />)}</div>
             )}
             {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
@@ -917,5 +898,20 @@ function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutp
         </div>
       </div>
     </div>
+  )
+}
+
+/** An attached file (path relative to the open folder): a double click opens it in the viewer, beside the conversation. */
+function AttachedChip({ path, size = 13, children }: { path: string; size?: number; children?: ReactNode }) {
+  const { status } = useApp()
+  const route = useRoute()
+  const fromRoot = (status?.workspace_path ? status.workspace_path + '/' : '') + path
+  return (
+    <span className={'chip chip-viewable' + (children ? '' : ' chip-static')} title={`${path} (double-click to view)`}
+      onDoubleClick={() => openFile(fromRoot)}>
+      <FileIcon size={size} /><span>{displayPath(path)}</span>
+      <a className="sr-only" href={viewHref(route, fromRoot)}>View {displayPath(path)}</a>
+      {children}
+    </span>
   )
 }

@@ -35,6 +35,7 @@ export function Square({ variant, size = 14, label }: { variant: Variant; size?:
 type Look = { variant: Variant; label: string }
 
 export function proofLook(status: string, running = false, version = 2): Look {
+  if (status === 'waiting_for_evidence') return { variant: running ? 'running' : 'paused', label: running ? 'Gathering requested evidence' : 'Evidence request saved' }
   if (running) return { variant: 'running', label: 'Running' }
   if (version === 1 && status === 'candidate_complete') return { variant: 'complete', label: 'Complete candidate, audited by the v0.4 engine' }
   switch (status) {
@@ -102,5 +103,5 @@ export function issueLook(kind: ReviewIssue['kind'] | string): Look {
 
 // Mirrors the engine: finished jobs return their saved result instead of running,
 // and legacy v0.4 jobs (version 1) are read-only.
-export const proofResumable = (status: string, version = 2) => version === 2 && ['ready', 'running', 'paused'].includes(status)
+export const proofResumable = (status: string, version = 2) => version === 2 && ['ready', 'running', 'waiting_for_evidence', 'paused'].includes(status)
 export const researchResumable = (status: string) => ['ready', 'running', 'paused', 'error'].includes(status)

@@ -29,6 +29,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request
 
+from . import images
 from .agent import AgentError, ModelNotDispatched
 from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
                        StalledStream)
@@ -667,12 +668,8 @@ class DeepInfra(OpenAICompatible):
             raise AgentError(f'The {self.display} test profile requires model ' + MODEL +
                              (' (or ' + LEGACY_MODEL + ' for saved work)' if LEGACY_MODEL in self.model_ids else ''))
         refs = getattr(self, 'image_refs', [])
-        if refs:
-            from . import images
-            if not images.supported(self.profile, payload.get('model')):
-                raise AgentError('Native images require the DeepInfra DS4.1 Flash 1017 profile; this profile or model cannot receive them')
-            if '_sh_bounded_title' in payload:
-                raise AgentError('A bounded conversation-title call cannot include images')
+        if refs and '_sh_bounded_title' in payload:
+            raise AgentError('A bounded conversation-title call cannot include images')
         data = super()._payload(payload)
         data['model'] = self.model_ids[payload['model']]
         if self.service_tier == 'priority':
@@ -787,9 +784,7 @@ class DeepInfra(OpenAICompatible):
         refs = getattr(self, 'image_refs', [])
         image_allowance, image_method = 0, ''
         if refs:
-            from .images import VISION_TOKEN_ESTIMATE, message_images, prompt_overhead
-            image_allowance = sum(len(attached) * VISION_TOKEN_ESTIMATE + prompt_overhead(attached)
-                                  for _, attached in message_images(refs, payload['messages']))
+            image_allowance = images.input_allowance(refs, payload['messages'])
             image_method = ' + conservative 4096-token/image vision allowance (not base64 text tokens)'
         if self._tokenize_supported is not False:
             request = {'model': data['model'], 'messages': data['messages'], 'return_token_strs': False}
@@ -863,6 +858,7 @@ class DeepInfra(OpenAICompatible):
                     # Never count base64 transport as input tokens. Unknown usage stays out of the measured totals.
                     data = self._payload(payload, include_images=False)
                     inputs = self._bytes(data['messages']) + 1024 + 128 * len(data['messages'])
+                    inputs += images.input_allowance(getattr(self, 'image_refs', []), payload['messages'])
                     quota.charge(min(CONTEXT_TOKENS, inputs), min(data['max_tokens'], sum(progress.values()) + 256),
                                  estimated=True)
             except AgentError:

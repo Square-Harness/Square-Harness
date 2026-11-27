@@ -32,8 +32,9 @@ import stat
 import sys
 import threading
 import unicodedata
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 import webbrowser
+import zlib
 
 from .. import __version__
 from ..agent import AgentError
@@ -42,6 +43,7 @@ from ..ledger import _directory
 from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
 from ..model_limits import HOSTED_DS4
 from .. import images
+from ..literature import UNLIMITED_SOURCE
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
 from .watch import Watcher
@@ -60,6 +62,7 @@ def build_id():
         return ''
     return match[1] if match else ''
 MAX_BODY = 1_000_000
+VIEW_SAVE_BODY = 32 * 1024 * 1024  # Hosted gateway request limit.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -113,12 +116,12 @@ def _int(body, key, low=None, high=None):
 
 
 def _added_seconds(body, key):
-    """An explicit extra working time on resume: 0 (none) up to one day."""
+    """An explicit extra working time on resume: a finite, nonnegative number of seconds."""
     value = body.get(key)
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 86400:
-        raise ValueError(f'{key} must be a number of seconds from 0 to 86400')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= MAX_ADD_TOKENS:
+        raise ValueError(f'{key} must be a finite, nonnegative number of seconds within the JSON-safe range')
     return value
 
 
@@ -140,17 +143,17 @@ def _flag(body, key):
 
 def _files(body, key='source_files'):
     value = body.get(key) or []
-    if not isinstance(value, list) or len(value) > 20 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in value):
-        raise ValueError('Pinned files must be a list of at most 20 workspace-relative paths')
+    if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
+        raise ValueError('Pinned files must be a list of workspace-relative paths')
     return value
 
 
-def _text(body, key, limit):
+def _text(body, key, limit=None):
     value = body.get(key)
     # Text made only of control characters and spaces is as empty as whitespace: refuse it before any model call.
     if not isinstance(value, str) or not ''.join(ch for ch in value if unicodedata.category(ch) != 'Cc').strip():
         raise ValueError(f'Provide {key}')
-    if len(value) > limit:
+    if limit is not None and len(value) > limit:
         raise ValueError(f'{key} is limited to {limit} characters')
     return value
 
@@ -266,8 +269,6 @@ def status(h, body):
     out = {'version': VERSION, 'build': build_id(), 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            'model_default': bool(getattr(args, 'model_default', False)),
-           # The default for new work in the interface: online unless launched --offline.
-           'online': hub.online(), 'online_locked': hub.online_locked,
            'image_support': hub.image_support(),
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
            'concurrency': hub.limits(),
@@ -398,8 +399,8 @@ def files(h, body):
     # explorer's search), relative to the interface root.
     hub = h.server.hub
     everywhere = (h.query.get('scope') or [''])[0] == 'root'
-    records = store.list_files(hub.base if everywhere else hub.root, limit=2001)
-    return {'files': records[:2000], 'truncated': len(records) > 2000}
+    records = store.list_files(hub.base if everywhere else hub.root)
+    return {'files': records, 'truncated': False}
 
 
 @route('GET', '/api/files/browse')
@@ -475,16 +476,14 @@ def proofs(h, body):
 
 @route('POST', '/api/proofs')
 def proof_start(h, body):
-    unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'literature'}
+    unknown = set(body) - {'goal', 'source_files', 'rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens', 'ctx', 'queue', 'online', 'literature'}
     if unknown:
         raise ValueError('Unknown proof options: ' + ', '.join(sorted(unknown)))
-    if _flag(body, 'literature'):
-        raise ValueError('Proof jobs use the pinned text only, with no tools: pin the sources the proof needs')
     task = h.server.hub.start_proof(
-        _text(body, 'goal', 60000), source_files=_files(body),
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 512),
-        seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, 1_000_000),
-        verify_tokens=_int(body, 'verify_tokens', 128, 1_000_000), ctx=_int(body, 'ctx', 2048),
+        _text(body, 'goal'), source_files=_files(body),
+        rounds=_int(body, 'rounds', 1, MAX_ADD_ROUNDS), tokens=_int(body, 'tokens', 512),
+        seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, MAX_ADD_TOKENS),
+        verify_tokens=_int(body, 'verify_tokens', 128, MAX_ADD_TOKENS), ctx=_int(body, 'ctx', 2048),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
@@ -558,14 +557,14 @@ def research_start(h, body):
     if variant is not None and variant not in ('quick', 'review', 'journal', 'typos', 'explain'):
         raise ValueError('variant must be quick, review, typos or explain (journal, the former detailed review, is the review)')
     target = body.get('target') or ''
-    if not isinstance(target, str) or len(target) > 200:
-        raise ValueError('target is a short text, at most 200 characters')
+    if not isinstance(target, str):
+        raise ValueError('The review target must be text')
     task = h.server.hub.start_research(
-        body.get('kind'), _text(body, 'goal', 20000), source_files=_files(body), variant=variant, target=target,
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        body.get('kind'), _text(body, 'goal'), source_files=_files(body), variant=variant, target=target,
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
-        requests=_int(body, 'requests', 0, 1000), chars=_int(body, 'chars', 1000, 1_000_000),
-        online=_flag(body, 'online'), queue=bool(_flag(body, 'queue')))
+        requests=_int(body, 'requests', 0, UNLIMITED_SOURCE), chars=_int(body, 'chars', 1000, UNLIMITED_SOURCE),
+        queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
@@ -626,9 +625,9 @@ def chats(h, body):
 @route('POST', '/api/chats')
 def chat_create(h, body):
     hub = h.server.hub
-    think, online = _flag(body, 'think'), _flag(body, 'online')
+    think = _flag(body, 'think')
     chat = store.create_chat(hub.root, body.get('mode'), (not hub.args.no_think) if think is None else think,
-                             hub.args.model, hub.online(online), project_id=body.get('project_id'))
+                             hub.args.model, project_id=body.get('project_id'))
     hub.bus.publish('chat_saved', chat=chat['id'])
     return _chat_view(chat, hub.root)
 
@@ -705,27 +704,23 @@ def chat_project(h, body, id):
 @route('POST', '/api/chats/' + UUID + '/settings')
 def chat_settings(h, body, id):
     hub = h.server.hub
-    think, online = _flag(body, 'think'), _flag(body, 'online')
-    if think is None and online is None:
-        raise ValueError('Give think or online as true or false')
-    if online:
-        hub.online(True)  # refuses when launched with --offline
-    view = _chat_view(store.update_chat_settings(hub.root, id, think=think, online=online), hub.root)
-    if online is False:
-        # Running work of this conversation stops web access at its next request, not only later turns.
-        view['online_stopped_jobs'] = hub.stop_online(id)
-    return view
+    think = _flag(body, 'think')
+    if think is None:
+        if _flag(body, 'online') is True:  # Old clients explicitly enabling search need no state change.
+            return _chat_view(store.load_chat(hub.root, id), hub.root)
+        raise ValueError('Give think as true or false')
+    return _chat_view(store.update_chat_settings(hub.root, id, think=think), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/messages')
 def chat_message(h, body, id):
-    return {'task': h.server.hub.chat(id, _text(body, 'content', 60000), files=_files(body, 'files'),
+    return {'task': h.server.hub.chat(id, _text(body, 'content'), files=_files(body, 'files'),
                                      queue=bool(_flag(body, 'queue'))).summary()}
 
 
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
-    content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'), _files(body, 'files'))
+    content, mode = validated_mode_call(_text(body, 'content'), body.get('mode_call'), _files(body, 'files'))
     task = h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode,
                               required_effort=(body.get('mode_call') or {}).get('effort'), queue=bool(_flag(body, 'queue')))
     # A follow-up queued behind the running turn has state 'queued'; cancel it with /api/queue/<task>/cancel.
@@ -756,12 +751,12 @@ def route_start(h, body, id, index):
     if not isinstance(raw, dict):
         raise ValueError('limits must be an object')
     limits = {key: value for key, value in (
-        ('rounds', _int(raw, 'rounds', 1, 100)), ('tokens', _int(raw, 'tokens', 512)),
-        ('solve_tokens', _int(raw, 'solve_tokens', 128, 1_000_000)),
-        ('verify_tokens', _int(raw, 'verify_tokens', 128, 1_000_000)),
+        ('rounds', _int(raw, 'rounds', 1, MAX_ADD_ROUNDS)), ('tokens', _int(raw, 'tokens', 512)),
+        ('solve_tokens', _int(raw, 'solve_tokens', 128, MAX_ADD_TOKENS)),
+        ('verify_tokens', _int(raw, 'verify_tokens', 128, MAX_ADD_TOKENS)),
         ('input_tokens', _int(raw, 'input_tokens', 2048)), ('seconds', _seconds(raw, 'seconds')),
-        ('requests', _int(raw, 'requests', 0, 1000)), ('chars', _int(raw, 'chars', 1000, 1_000_000))) if value is not None}
-    task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request', 60000),
+        ('requests', _int(raw, 'requests', 0, UNLIMITED_SOURCE)), ('chars', _int(raw, 'chars', 1000, UNLIMITED_SOURCE))) if value is not None}
+    task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request'),
                                     _files(body, 'files'), limits)
     return {'task': task.summary()}
 
@@ -835,7 +830,7 @@ def preferences_save(h, body):
     return value
 
 
-@route('POST', '/api/files/upload', raw=True)
+@route('POST', '/api/files/upload', raw=True, body_limit=store.UPLOAD_BYTES)
 def upload(h, body):
     name = (h.query.get('name') or [''])[0]
     root = h.server.hub.root
@@ -859,6 +854,51 @@ def upload(h, body):
             raise
     h.server.hub.bus.publish('files', path=saved)
     return result
+
+
+@route('GET', '/api/files/view')
+def files_view(h, body):
+    """A file for the viewer (path relative to the interface root): its kind, and the text of a text file."""
+    return store.view_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+
+
+@route('GET', '/api/files/raw')
+def files_raw(h, body):
+    """A PDF or an image for the browser to display, framed only by this interface; with download=1, any file
+    the file explorer lists, as a download."""
+    download = (h.query.get('download') or [''])[0] == '1'
+    data, content_type, name = store.raw_file(h.server.hub.base, (h.query.get('path') or [''])[0], download)
+    safe = re.sub(r'[^A-Za-z0-9._ -]', '_', name)[:120] or 'file'
+    disposition = f"{'attachment' if download else 'inline'}; filename=\"{safe}\"; filename*=UTF-8''{quote(name)}"
+    h.send_bytes(200, data, content_type, [('Content-Disposition', disposition), ('Cache-Control', 'no-store')],
+                 csp=download, frame=not download)
+    return Streamed
+
+
+@route('POST', '/api/files/save', body_limit=VIEW_SAVE_BODY)
+def files_save(h, body):
+    """Save the viewer's edit of a text file; refused if the file changed since the viewer read it."""
+    path = body.get('path')
+    result = store.save_text(h.server.hub.base, path, body.get('content'), body.get('sha256'))
+    h.server.hub.bus.publish('files', path=path)
+    return result
+
+
+@route('PUT', '/api/files/save', raw=True, body_limit=VIEW_SAVE_BODY)
+def files_save_bytes(h, body):
+    """The editor sends UTF-8 directly. Large decoded legacy files can arrive as gzip."""
+    if h.headers.get_content_type() == 'application/gzip':
+        # A supported single-byte source character uses at most three UTF-8 bytes.
+        limit = 3 * store.VIEW_TEXT_BYTES
+        unpack = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            body = unpack.decompress(body, limit + 1)
+        except zlib.error as exc:
+            raise ValueError('Invalid compressed text') from exc
+        if len(body) > limit or not unpack.eof or unpack.unused_data:
+            raise ValueError('Invalid or oversized compressed text')
+    return files_save(h, {'content': body.decode('utf-8'), 'path': (h.query.get('path') or [''])[0],
+                          'sha256': (h.query.get('sha256') or [''])[0]})
 
 
 @route('POST', '/api/files/copy')
@@ -915,12 +955,12 @@ def writeup_start(h, body):
     if not isinstance(notes, str) or not isinstance(body.get('output') or '', str):
         raise ValueError('notes and output must be text')
     task = h.server.hub.start_writeup(
-        _text(body, 'goal', 20000), source_files=_files(body, 'files' if body.get('files') is not None else 'source_files'),
+        _text(body, 'goal'), source_files=_files(body, 'files' if body.get('files') is not None else 'source_files'),
         template_files=_files(body, 'template_files'),
         template=template if isinstance(template, str) and template else None,
         save_template=save_as if isinstance(save_as, str) and save_as.strip() else None,
         notes=notes, output=body.get('output') or '',
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
@@ -1014,11 +1054,11 @@ def style_start(h, body):
     name, goal = body.get('name'), body.get('goal') or ''
     if not isinstance(name, str) or not name.strip():
         raise ValueError('Name the style')
-    if not isinstance(goal, str) or len(goal) > 20000:
-        raise ValueError('goal must be text of at most 20000 characters')
+    if not isinstance(goal, str):
+        raise ValueError('goal must be text')
     task = h.server.hub.start_style(
         goal, name=name.strip(), source_files=_files(body), template_files=_files(body, 'template_files'),
-        rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
+        rounds=_int(body, 'rounds', 1, UNLIMITED_SOURCE), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
@@ -1259,12 +1299,12 @@ class Handler(BaseHTTPRequestHandler):
                              'Remove it and try again.') from None
         return value
 
-    def _raw_body(self):
+    def _raw_body(self, limit):
         length = self.headers.get('Content-Length', '')
-        if not length.isdigit() or int(length) > store.UPLOAD_BYTES:
+        if not length.isdigit() or int(length) > limit:
             # Read a moderately oversized body before refusing it, so the client receives the
             # message instead of a broken connection; a much larger one is not read at all.
-            if length.isdigit() and int(length) <= 4 * store.UPLOAD_BYTES:
+            if length.isdigit() and int(length) <= 4 * limit:
                 remaining = int(length)
                 while remaining > 0:
                     chunk = self.rfile.read(min(65536, remaining))
@@ -1272,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     remaining -= len(chunk)
                 self.body_read = True
-            raise ValueError('Files are limited to 20 MB')
+            raise ValueError(f'Files are limited to {limit // (1024 * 1024)} MiB per request')
         data = self.rfile.read(int(length))
         self.body_read = True
         return data
@@ -1291,12 +1331,17 @@ class Handler(BaseHTTPRequestHandler):
             if not self._same_origin():
                 return self.error(403, 'Cross-origin request refused')
             try:
-                body = self._raw_body() if getattr(function, 'raw_body', False) else self._body(function.body_limit)
+                body = self._raw_body(function.body_limit) if function.raw_body else self._body(function.body_limit)
             except TypeError as exc:
                 return self.error(415, str(exc))
             except (ValueError, UnicodeError, RecursionError) as exc:
                 return self.error(400, 'Invalid JSON body' if isinstance(exc, (json.JSONDecodeError, RecursionError)) else str(exc))
         try:
+            if isinstance(body, dict) and path.startswith(('/api/chats', '/api/proofs', '/api/research')):
+                keys = ('online', 'literature') if path == '/api/proofs' else ('online',)
+                if any(_flag(body, key) is False for key in keys):
+                    raise ValueError('The offline setting was retired. To restrict this task to your material, '
+                                     'remove the setting and include “Do not search the web” in the request.')
             result = function(self, body, **match.groupdict())
         except Busy as exc:
             return self.error(409, str(exc))
@@ -1530,7 +1575,7 @@ def serve(args):
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
              f'│ {args.model} · {args.backend} at {args.host}',
              f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
-             f'│ Research: {"offline, locked by --offline (local/cache only)" if hub.online_locked else "online by default, switchable per job"}'
+             '│ Research: external sources available'
              ' · proof: solve → verify → repair',
              f'│ Open: {local}{query}']
     for url in server.urls:
