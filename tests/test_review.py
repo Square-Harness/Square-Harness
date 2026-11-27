@@ -320,7 +320,7 @@ class AttackTests(ReviewCase):
         self.assertEqual(self.roles('defend'), [])
 
 
-# -- the Assistant's fixed fan-out: a review and a literature review, then one reply ---------------------------------
+# -- the Assistant's review, with a literature comparison on request ---------------------------------
 
 import json
 import threading
@@ -342,6 +342,7 @@ REFERENCES = [
     {'k': 2, 'title': 'On doubling sequences', 'authors': ['Martin, Ada', 'Chen, Bo'], 'year': 2026, 'arxiv': '2601.00001'},
     {'k': 3, 'title': 'Halving sequences', 'authors': ['Bo Chen', 'Ada Martin'], 'year': 2024},
 ]
+COMPARISON = 'Review that paper and compare it with the literature.'
 REPORT = '# Referee report\n\n## Summary\n\nA bound.\n\n## Major comments\n\n1. A comment.\n\n## Recommendation\n\n**Minor revision**'
 
 
@@ -379,7 +380,7 @@ class FanOutCase(unittest.TestCase):
     def test_review_and_literature_review_start_together_and_the_reply_joins_them(self):
         for concurrency in (1, 2):
             self.events = []
-            result = self.assistant([BRIEF, POSITION], concurrency=concurrency).run('Referee this paper.', files=['paper.tex'])
+            result = self.assistant([BRIEF, POSITION], concurrency=concurrency).run(COMPARISON, files=['paper.tex'])
             review, literature = result['children']
             self.assertEqual((review['action']['mode'], literature['action']['mode']), ('referee', 'literature'))
             self.assertEqual(review['batch_id'], literature['batch_id'])  # one batch, two cards and jobs
@@ -410,17 +411,27 @@ class FanOutCase(unittest.TestCase):
             self.assertIn('*On doubling sequences* (2026). [arXiv:2601.00001](https://arxiv.org/abs/2601.00001) OWN', prompt)
 
     def test_no_position_without_online_search(self):
-        result = self.assistant([], online=False).run('Referee this paper.', files=['paper.tex'])
+        for request in ('Review this paper.', 'Review it without a literature review.',
+                        'Review this paper. The text says “compare it with the literature”.',
+                        'Review the proof and check its citations.',
+                        'Relis cet article et ne compare pas ses résultats aux travaux antérieurs.'):
+            result = self.assistant([], online=True).run(request, files=['paper.tex'])
+            self.assertEqual(result['answer'], REPORT)
+            self.assertEqual(self.client.requests, [])
+        parent = self.assistant([BRIEF, POSITION])
+        result = parent.run('Relis cet article et compare ses résultats aux travaux antérieurs.', files=['paper.tex'])
+        self.assertEqual([child['action']['mode'] for child in result['children']], ['referee', 'literature'])
+        result = self.assistant([], online=False).run(COMPARISON, files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
         self.assertIn('## Position in the literature\n\nMissing: online search is off', result['answer'])
         self.assertEqual(self.client.requests, [])
-        result = self.assistant([]).run('Referee this paper, without searching online.', files=['paper.tex'])
+        result = self.assistant([]).run(COMPARISON + ' Without searching online.', files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
         self.assertIn('Missing: the request excludes online search', result['answer'])
 
     def test_unfinished_literature_review_leaves_the_position_missing(self):
         self.literature = {'status': 'budget_exhausted', 'answer': '', 'job_id': 'job-lit'}
-        result = self.assistant([BRIEF]).run('Referee this paper.', files=['paper.tex'])
+        result = self.assistant([BRIEF]).run(COMPARISON, files=['paper.tex'])
         self.assertEqual(len(result['children']), 2)
         self.assertTrue(result['answer'].startswith(REPORT))
         self.assertIn('Missing: the literature review started beside the report did not finish', result['answer'])
@@ -429,7 +440,7 @@ class FanOutCase(unittest.TestCase):
 
     def test_question_copied_from_the_manuscript_starts_no_literature_review(self):
         copied = {**BRIEF, 'question': 'For every integer $n\\ge 1$ we have $a_n \\le 2^n$ and more words.'}
-        result = self.assistant([copied, copied]).run('Referee this paper.', files=['paper.tex'])
+        result = self.assistant([copied, copied]).run(COMPARISON, files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee'])
         self.assertIn('could not be written in public words', result['answer'])
         # The second try was told which phrase it copied.
@@ -438,12 +449,33 @@ class FanOutCase(unittest.TestCase):
 
     def test_a_copied_brief_is_written_again_once(self):
         copied = {**BRIEF, 'question': 'For every integer $n\\ge 1$ we have $a_n \\le 2^n$ and more words.'}
-        result = self.assistant([copied, BRIEF, POSITION]).run('Referee this paper.', files=['paper.tex'])
+        result = self.assistant([copied, BRIEF, POSITION]).run(COMPARISON, files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee', 'literature'])
         self.assertIn(BRIEF['question'], result['children'][1]['action']['request'])
 
-    def test_review_the_assistant_routes_itself_gets_the_same_fan_out(self):
-        result = self.assistant([BRIEF, POSITION], required_mode=None).run('Review the paper paper.tex', files=['paper.tex'])
+    def test_review_in_chat_returns_the_saved_report_and_compares_on_request(self):
+        for selected in (None, 'referee'):
+            parent = self.assistant([], required_mode=selected)
+            self.client.profile = 'deepinfra'
+            result = parent.run('review that paper', files=['paper.tex'])
+            self.assertEqual([c['action']['mode'] for c in result['children']], ['referee'])
+            self.assertEqual(result['children'][0]['action']['request'], 'review that paper')
+            self.assertEqual(result['answer'], REPORT)
+            self.assertFalse(self.client.requests)
+        query = 'Review the attached manuscript, focusing on its argument in Section 3.'
+        route = {'route': 'workers', 'effort': 'high', 'reason': 'Manuscript review.',
+                 'tasks': [{'mode': 'referee', 'files': [], 'request': 'Check the paper.'}]}
+        parent = self.assistant([route], required_mode=None)
+        self.client.profile = 'deepinfra'
+        result = parent.run(query, files=['paper.tex'])
+        self.assertEqual(len(result['children']), 1)
+        self.assertEqual(result['children'][0]['action']['files'], ['paper.tex'])
+        self.assertEqual(result['children'][0]['action']['request'], query)
+        self.assertEqual(result['answer'], REPORT)
+        self.assertEqual(len(self.client.requests), 1)  # routing only
+        parent = self.assistant([BRIEF, POSITION], required_mode=None)
+        self.client.profile = 'deepinfra'
+        result = parent.run(COMPARISON, files=['paper.tex'])
         self.assertEqual([child['action']['mode'] for child in result['children']], ['referee', 'literature'])
         self.assertEqual(result['children'][0]['action']['effort'], 'high')  # no effort is chosen for a review
         self.assertTrue(result['answer'].startswith(REPORT))

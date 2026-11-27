@@ -19,7 +19,7 @@ from .review_position import (BRIEF_OUTPUT, BRIEF_POLICY, BRIEF_SCHEMA, POSITION
                               position_prompt, render_position)
 from .router import JOB_MODES, EFFORTS, LEGACY_EFFORTS, effort_for
 from .source_tasks import (access_check_source, automatic_source_action, excludes_external_sources, _instruction_text,
-                           _source_lines)
+                           requests_literature_position, simple_manuscript_review, _source_lines)
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
 from .model_limits import HOSTED_DS4
@@ -38,7 +38,7 @@ _SEARCH_ALLOWED = re.compile(
     r'cherche(?:z)? (?:en ligne|sur internet))\b')
 
 
-# A review is started with a literature review beside it (the fixed fan-out); the reply joins the two.
+# The optional comparison uses a separate literature review with verified records.
 REVIEW_MODES = ('referee', 'detailed_review')
 POSITION_NOTE = ('CONTROLLER REVIEW AND LITERATURE: a literature review was started beside the referee report to place its '
                  'results. Give the report as it is, then a part "Position in the literature" written only from that '
@@ -407,8 +407,7 @@ class ModeOrchestrator(Orchestrator):
                         for p in self.state['pending_calls']))
 
     def _plan_pending(self):
-        """The fixed fan-out of a review: a literature review at its lowest breadth joins the batch of a review
-        that is about to start, whoever chose the review (the user's @referee, the router, the Assistant). Its
+        """An explicitly requested literature comparison joins the review that is about to start. Its
         question is written from the manuscript's title, abstract and introduction, in public words. Without
         online search, or when the request excludes it, the review starts alone and the reply says why no
         position follows. Decided once per turn, before the review starts: an interruption decides again."""
@@ -417,7 +416,8 @@ class ModeOrchestrator(Orchestrator):
                      and isinstance(p['call']['function']['arguments'], dict)]
         pending = next((p for p in delegates if p['status'] == 'pending'
                         and p['call']['function']['arguments'].get('mode') in REVIEW_MODES), None)
-        if (pending is None or state.get('review_fanout') is not None or (state.get('review_reference') or {}).get('followup')
+        if (pending is None or state.get('review_fanout') is not None or not requests_literature_position(state['query'])
+                or (state.get('review_reference') or {}).get('followup')
                 or any(p['call']['function']['arguments'].get('mode') == 'literature' for p in delegates)
                 or any(c['action']['mode'] == 'literature' for c in state['children'])):
             return  # no new review, a reply to an earlier report, or a literature review asked for in its own right
@@ -480,13 +480,11 @@ class ModeOrchestrator(Orchestrator):
                                                 'words from the manuscript')
 
     def _review_reply(self):
-        """A review that is the whole work of the turn: its report as written (a later dispute cites its comment
-        numbers), then the position of its results in the literature. None when the parent must write the answer
-        (other workers, a review that saved nothing)."""
+        """Return the reviewer's saved report directly, plus a literature comparison when requested."""
         state = self.state
         fan = state.get('review_fanout')
         review = next((c for c in reversed(state['children']) if c['action']['mode'] in REVIEW_MODES), None)
-        if fan is None or review is None or review['status'] != 'complete':
+        if review is None or review['status'] != 'complete':
             return None
         companion = next((c for c in state['children'] if c.get('companion')), None)
         decision = state.get('proof_routing') or {}
@@ -498,6 +496,8 @@ class ModeOrchestrator(Orchestrator):
                 or not isinstance(report, str) or not report.strip()
                 or (companion is not None and companion['status'] != 'complete')):
             return None
+        if fan is None:
+            return self._worker_reply(review, report)
         if 'section' not in fan:
             fan['section'] = self._position(report, review, companion, fan)
             self._save()  # written once: a resumed turn shows the same text
@@ -848,7 +848,8 @@ class ModeOrchestrator(Orchestrator):
                     'function': {'name': 'read_file', 'arguments': {'path': source, 'start_line': 1, 'end_line': 40}}}]})
                 return
             action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
-            if action and getattr(self.agent.client, 'profile', 'default') in HOSTED_DS4:
+            if (action and getattr(self.agent.client, 'profile', 'default') in HOSTED_DS4
+                    and not (action['mode'] == 'referee' and len(files) == 1 and simple_manuscript_review(query))):
                 # A source/reference match may describe only one clause. Ask the normal
                 # whole-turn router whether it covers every requested deliverable.
                 self.state['suggested_specialist'] = action

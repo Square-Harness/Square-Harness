@@ -36,8 +36,11 @@ export const VARIANT_STEPS: Record<ReviewVariant, string[]> = {
   typos: ['plan', 'audit', 'done'],
   explain: ['plan', 'extract', 'explain', 'fill', 'check', 'fix', 'done'],
 }
+export const SINGLE_REVIEW_PIPELINE = 'review-explore-v1'
+
 /** Saved pipelines keep their own phase sequence. */
 export const PIPELINE_STEPS: Record<string, string[]> = {
+  [SINGLE_REVIEW_PIPELINE]: ['plan', 'review', 'done'],
   'review-v4': ['plan', 'referees', 'write', 'done'],
   'review-v1': ['plan', 'read', 'scope', 'literature', 'write', 'done'],
   'journal-v1': VARIANT_STEPS.journal,
@@ -45,7 +48,7 @@ export const PIPELINE_STEPS: Record<string, string[]> = {
 
 export const VARIANT_STEP_NAMES: Record<string, string> = {
   plan: 'Map', extract: 'Find', verify: 'Check', confirm: 'Re-check', read: 'Read', scope: 'Overview', check: 'Proofs',
-  referees: 'Referees and judge', audit: 'Read and check',
+  review: 'Review', referees: 'Referees and judge', audit: 'Read and check',
   literature: 'Literature', presentation: 'Presentation', write: 'Write', explain: 'Explain', fill: 'Fill', fix: 'Fix', done: 'Done',
 }
 

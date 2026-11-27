@@ -22,7 +22,7 @@ from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 12
+POLICY_VERSION = 13
 OUTPUT_TOKENS = 1024
 # Before deciding, the routing step may look at the workspace's files to find the document a request means:
 # at most INSPECT_ROUNDS rounds of INSPECT_REQUESTS searches or reads, each answer cut at INSPECT_CHARS.
@@ -77,11 +77,11 @@ independently of the review. Use check for a targeted verified reference, litera
 python_lab for a specifically requested execution or numerical simulation, explore
 for a mathematical explanation without a source or of a whole document, explain for one
 named result, page, section or appendix of an attached file, and prove for a nontrivial proof.
-For a manuscript file: referee writes a referee report on the whole paper (every proof checked, a
-recommendation; it does not list typos); typo_check lists only its typos, misprints, language and
-presentation problems, each correction checked, and checks no proof: use it whenever the user asks for
-typos, proofreading, spelling or grammar of a file, never explore; quick_review checks one given proof.
-A review and the typos of the same file are two tasks, referee and typo_check, that start together.
+For a manuscript file, referee reviews its statements, proofs, gaps and typos together. Use one referee
+task for a mathematical review even when the user mentions typos. Use typo_check for proofreading
+alone or a separately requested list of typos. Use quick_review to check one specified proof.
+If the user asks to compare the reviewed paper with the literature, include that request in the referee
+task. The controller arranges the comparison. A separate survey on another topic is its own task.
 Use writeup when the user asks for a document: a LaTeX note, a write-up, a .tex
 or PDF file of results. It writes the file from the results of the conversation,
 so it waits (after_results) for the tasks whose results it states or cites.
@@ -395,6 +395,13 @@ def _validated_tasks(decision, query, files=(), reading=(), known=()):
             incomplete = True
             continue
         refs = list(dict.fromkeys(refs or named_attachments(task['request'], files)))
+        if task['mode'] == 'referee' and not refs:
+            # A paraphrased assignment can drop a filename the user supplied. Reuse its identified paper.
+            papers = [s['files'] for s in reading if s['mode'] == 'referee']
+            if len(papers) == 1:
+                refs = list(papers[0])
+            elif len(files) == 1:
+                refs = list(files)
         if task['mode'] == 'summarize' and not summary_document:
             if refs and not any(set(refs) <= set(source['files']) for source in reading):
                 task = {**task, 'mode': 'explore'}
@@ -460,6 +467,9 @@ def _validated_tasks(decision, query, files=(), reading=(), known=()):
         # Recover through the scoped ordinary tools. A malformed batch is never
         # authority to run Python, and the normal child/action ceilings still apply.
         return {'route': 'other', 'assignment_recovery': True}
+    if (len(assignments) == 1 and assignments[0]['mode'] == 'referee' and len(query) <= 8000
+            and not (later or questions or incomplete or chat_recap)):
+        assignments[0]['request'] = query
     outcome = {'tasks': assignments, 'question': ' '.join(questions)}
     if chat_recap:
         outcome['chat_recap'] = True

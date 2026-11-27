@@ -376,7 +376,26 @@ class Workspace:
         suffix = (f'\n[Continue list_files with offset={next_offset}]' if next_offset < len(names) else '')
         return ('\n'.join(selected) or '(no readable files at this offset)') + suffix
 
+    def _document_lines(self, p, deadline=None, needle=None):
+        if p.suffix.lower() != '.pdf':
+            text = self.text(p, deadline=deadline)
+            return (text.splitlines() if not needle or needle in text.casefold() else []), (), ''
+        previous = self.literature.deadline
+        if deadline is not None:
+            self.literature.deadline = min(deadline, previous) if previous is not None else deadline
+        try:
+            summary = self.literature.import_local(str(p.relative_to(self.root)))
+            metadata, lines = self.literature._document(summary['document_id'])
+            pages = metadata.get('extracted_pages')
+            return lines, metadata.get('pdf_page_starts', ()), f'{pages} extracted PDF pages; ' if pages else ''
+        finally:
+            self.literature.deadline = previous
+
     def read_file(self, path, start_line=1, end_line=None, start_column=1):
+        text, _ = self._file_excerpt(path, start_line, end_line, start_column)
+        return text
+
+    def _file_excerpt(self, path, start_line, end_line, start_column):
         # Without end_line, the excerpt runs as far as the result budget allows (result_chars, a share of the
         # model's context); a cut excerpt says where to continue.
         if end_line is None:
@@ -387,16 +406,7 @@ class Workspace:
             raise ValueError('Line bounds must be positive integers with start <= end')
         p = self.path(path, pdf=True)
         self._readable(p)
-        pagination, page_starts = '', ()
-        if p.suffix.lower() == '.pdf':
-            # Local extraction, cached with the literature evidence; nothing is uploaded.
-            summary = self.literature.import_local(str(p.relative_to(self.root)))
-            metadata, lines = self.literature._document(summary['document_id'])
-            page_starts = metadata.get('pdf_page_starts', ())
-            if metadata.get('extracted_pages'):
-                pagination = f"{metadata['extracted_pages']} extracted PDF pages; "
-        else:
-            lines = self.text(p).splitlines()
+        lines, page_starts, pagination = self._document_lines(p)
         end = min(end_line, len(lines))
         result = f'{path}: {pagination}{len(lines)} total lines; requested excerpt {start_line}-{end}\n'
         remaining = self.result_chars - len(result) - 250
@@ -408,12 +418,12 @@ class Workspace:
             prefix = pdf_page_label(page_starts, index + 1, first=index + 1 == start_line) + prefix
             if len(prefix) + len(text) + 1 > remaining:
                 if selected:
-                    return result + '\n'.join(selected) + f'\n[Continue read_file at start_line={index + 1}, start_column={column}]'
+                    return result + '\n'.join(selected) + f'\n[Continue read_file at start_line={index + 1}, start_column={column}]', index
                 take = max(1, remaining - len(prefix) - 1)
-                return result + prefix + text[:take] + f'\n[Partial line; continue read_file at start_line={index + 1}, start_column={column + take}]'
+                return result + prefix + text[:take] + f'\n[Partial line; continue read_file at start_line={index + 1}, start_column={column + take}]', index
             selected.append(prefix + text)
             remaining -= len(prefix) + len(text) + 1
-        return result + '\n'.join(selected)
+        return result + '\n'.join(selected), end
 
     def search_text(self, pattern, offset=0):
         if not isinstance(pattern, str) or not pattern:
@@ -434,22 +444,8 @@ class Workspace:
                 raise KeyboardInterrupt()
             if time.monotonic() >= deadline:
                 return ('\n'.join(hits) or '(no matches in files scanned so far)') + f'\n[Search time limit; continue search_text with offset={index}]'
-            page_starts = ()
             try:
-                if p.suffix.lower() == '.pdf':
-                    previous = self.literature.deadline
-                    self.literature.deadline = min(deadline, previous) if previous is not None else deadline
-                    try:
-                        summary = self.literature.import_local(str(p.relative_to(self.root)))
-                        metadata, lines = self.literature._document(summary['document_id'])
-                        page_starts = metadata.get('pdf_page_starts', ())
-                    finally:
-                        self.literature.deadline = previous
-                else:
-                    text = self.text(p, deadline=deadline)
-                    if needle not in text.casefold():
-                        continue
-                    lines = text.splitlines()
+                lines, page_starts, _ = self._document_lines(p, deadline=deadline, needle=needle)
             except (OSError, ValueError, UnicodeError):  # LiteratureError is a ValueError
                 continue
             for i, line in enumerate(lines, 1):

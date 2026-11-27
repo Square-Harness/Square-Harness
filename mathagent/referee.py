@@ -520,7 +520,7 @@ class MeteredClient:
     """The model client of one referee or judge tool loop: every round is charged to the review job (reserved before
     it is sent, corrected by the provider's counts), saved in `calls` with its role, and stopped by the clock."""
 
-    def __init__(self, runner, role, who, stop_at, first_cap=None):
+    def __init__(self, runner, role, who, stop_at=None, first_cap=None):
         self.runner, self.role, self.who, self.stop_at = runner, role, who, stop_at
         self.first_cap = first_cap  # output cap of the first FIRST_ROUNDS rounds (referees)
         self.client = runner.agent.client
@@ -538,7 +538,9 @@ class MeteredClient:
 
     def stream(self, payload):
         runner = self.runner
-        if runner._abort.is_set() or runner._elapsed() >= self.stop_at:
+        if self.stop_at is None:
+            runner._check_time()
+        elif runner._abort.is_set() or runner._elapsed() >= self.stop_at:
             raise RefereeStop(runner._stop_note())
         if self.first_cap and self.rounds < FIRST_ROUNDS:
             payload['options']['num_predict'] = min(payload['options']['num_predict'], self.first_cap)
@@ -546,11 +548,15 @@ class MeteredClient:
         count, method = count_input(self.client, payload)
         with runner._mutex:
             if runner._tokens_left() < cap or runner._input_left() < count:
-                raise RefereeStop('The review\'s token allowance cannot cover another round.')
+                reason = "The review's token allowance cannot cover another round."
+                if self.stop_at is None:
+                    raise ResearchBudget(reason)
+                raise RefereeStop(reason)
             runner._admit_call(self.role, cap, count)
             # The request artifact holds the messages new since the previous round: the transcript without copying
             # the manuscript into every file.
-            messages, previous = payload['messages'], self.sent
+            messages = payload['messages']
+            previous = self.sent if self.stop_at is not None else 0
             self.sent = len(messages)
             request = runner._artifact(f'{self.role}-{self.who}-request',
                                        json.dumps({**{k: v for k, v in payload.items() if k != 'messages'},
@@ -576,6 +582,8 @@ class MeteredClient:
                     if event.get('done'):
                         done = True
                         stats = {k: event[k] for k in ('eval_count', 'prompt_eval_count', 'done_reason') if k in event}
+                    elif self.stop_at is None:
+                        runner._check_time()
                     elif runner._abort.is_set() or runner._elapsed() >= self.stop_at + 90:
                         raise RefereeStop(runner._stop_note() if runner._fatal else 'Stopped by the review clock during a round.')
                     yield event
@@ -593,7 +601,7 @@ class MeteredClient:
         except BaseException as exc:
             with runner._mutex:
                 runner._interrupt_call(call, exc)
-            if provider_refused(exc):  # no restart, no retry: the whole review stops
+            if self.stop_at is not None and provider_refused(exc):  # a v4 refusal stops its other referees
                 runner._refused(exc)
                 raise RefereeStop(runner._stop_note()) from exc
             raise

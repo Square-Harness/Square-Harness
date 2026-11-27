@@ -611,7 +611,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Referee report: referees with tools (Python, cited papers), an independent judge on every reported problem, a recommendation | `@referee`, New review | `/referee` |
+| Review | Mathematical review of a manuscript by one Explore agent with access to the source, Python and references | `@referee`, New review | `/referee` |
 | Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
@@ -1034,125 +1034,20 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review** (`@referee`): a referee report on the whole paper, verdict first.
-  It has one depth and no effort to choose. With DS4 (the whole paper fits the
-  model's context), a **lead referee** and up to **five co-referees** work at the
-  same time, each reading the whole paper and deciding itself what to check. The
-  lead does what only a referee of the whole paper can do: it tries to break each
-  main statement (degenerate parameters, low dimension, boundary cases, a known
-  result it would contradict, with Python where a computation decides), checks
-  the numerics and examples against the hypotheses of the results they
-  illustrate, the claims of the abstract, introduction and remarks against what
-  the paper proves and what the cited works say, and the constants and
-  conventions across sections, and the paper's own citations: every place where
-  it invokes one of its results ("by Lemma 2.4", a `\ref` or `\eqref` to a
-  result) is listed by code, and each use is checked on two points, whether the
-  cited result states exactly what is used there and whether its hypotheses
-  hold there (a label that points nowhere, at another kind of result, or a
-  circular use is flagged; "Lemma 3.3" written out counts only when no citation
-  of another work governs its sentence, and a doubtful one is shown as such);
-  the uses inside the proofs the focused readers read go to those readers, who
-  check them first, the uses in a co-referee's group to that co-referee, and the
-  rest (introduction, remarks, numerics, every flagged or doubtful use) to the
-  lead; a problem reported at a use counts as its check. Each
-  co-referee checks the proofs of one group
-  (the main results' proofs, then the others by position in the paper) and
-  reports anything else it notices. Beside them, from the start, **focused
-  readers** read the proofs of the main results and of what they use (up to
-  twelve proofs, a long one in parts) line by line, one reasoning call each,
-  without seeing what the referees report. A reading cut at its output limit
-  keeps the problems it had written, or writes its answer from its notes in one
-  short call; its proof is then not counted as checked, and a reading that gave
-  nothing is named under "What could not be checked". A co-referee that finishes early is
-  asked once for a second look at the step of its group the main results depend
-  on most, and a referee that stops without finishing is asked once to go on. They
-  have tools: they read and search the manuscript, **run Python** in the sandbox
-  to recompute a constant or test a counterexample, and find and read cited
-  papers to check a theorem's hypotheses (with online search on; a search query
-  that copies eight words of your manuscript is refused, so its text is never
-  sent to a search engine). Each problem is reported as soon as it is found, with
-  its lines and an exact quote that the code checks, and every result of a
-  referee's group must get a status (no error found, issue, not checked) before
-  it can finish. A referee's first two rounds are short, so it starts with its
-  tools instead of thinking for minutes; a referee can take back a report of
-  its own that turns out not to be a problem. Every reported problem then goes
-  to an **independent judge**,
-  which sees the paper and the report but not the referee's reasoning, checks it
-  (with Python or the cited paper when the claim rests on them, and always with
-  tools for an error reported on a main result or on what a main result uses)
-  and decides: confirmed, refuted or undecided, with its effect (the statement
-  is false, the proof fails, a gap an expert can fill, an imprecision, a
-  misprint). When another referee checked the same result and found no error,
-  the judge sees both sides. The judge is there to keep false alarms out, never
-  to make a real finding smaller: a gap whose repair needs a fact the paper
-  neither proves nor cites (a density, regularity up to the boundary or the
-  initial time, a limit, a uniform bound, a new lemma) is a failed proof, and a
-  reported error the judge rates lower stays an error unless the judge writes
-  the complete repair and it needs nothing new (then it is filed as a gap, with
-  the judge's argument shown). Meanwhile the code compiles the TeX source (a
-  figure that is not attached becomes a box) and checks the bibliography. The
-  referees are asked to finish after about 11 minutes; the report is written
-  from what was found and judged by 20 minutes at the latest. If the model
-  provider refuses the calls (an expired credential or no credit), the review
-  stops at once and the report is written from what was recorded.
+- **Review** (`@referee`) reads a whole manuscript. Attach the paper in an
+  Assistant conversation and say “review that paper”, or choose Review from the
+  form. You can specify a focus such as “check the proof of Theorem 1.4”.
+  One reviewer uses the same mathematical agent as Explore. It reads the
+  manuscript, can run computations when the sandbox is available, and can
+  consult references under the selected online settings. Its written response
+  is the saved report. You can reopen it and discuss a particular finding.
+  If the reviewer stops before it finishes, the job records the interruption.
+  An empty answer after tool use gets one opportunity to recover.
 
-  The report has, in order: the verdict (a recommendation that follows the
-  judged findings by rule: a confirmed error, or an error on the main results
-  that nobody settled, means a major revision; then one line per such error and
-  a short paragraph written after the judge from the judged findings only; the
-  code checks that it names every confirmed error and never calls a main result
-  free of error against its status, and writes the paragraph itself otherwise),
-  the main results with their status, computed by the code through the
-  dependencies between the results (an error in its own proof, a result it uses
-  with a confirmed error, an unsettled error, not fully checked, or no error
-  found only when its proof and everything it uses were checked), how they were checked and the
-  counterexamples tried, the errors (location, quote, the problem in at most four
-  sentences, the fix, the results affected, how it was verified), gaps and
-  imprecisions, questions to the authors (problems the judge could not decide,
-  a rejection that two referees or an unrepeated computation dispute, and
-  problems not judged, with the reason), formula misprints and wrong references
-  by section, compilation and bibliography, what was verified by computation (a
-  checklist, with the experiment ids, which `python -m mathagent.numerics show`
-  opens) and what could not be checked, text replacements, and last, one line
-  each, the problems a referee raised and the judge rejected, so that a wrong
-  rejection can be caught. Whenever a referee and the judge disagree the report
-  says so. An unfinished review (a referee stopped, problems not judged) and an
-  error on the main results that nobody settled, and a main result not fully
-  checked, make the recommendation provisional; the verdict then says what was not checked. It is rewritten as
-  the review goes on. Language typos are left to the typo check, which you can start at the
-  same time on the same file.
-
-  The referees and judges run at once (up to the model-request limit in Settings,
-  200 by default with DS4), also when the review is started in a
-  conversation. If the allowance runs short, the referees and readers stop first,
-  so that every reported problem is still judged. A review of a 3,000-line paper took about 14 minutes in a test.
-
-  When the whole paper does not fit the model's context (a small local model),
-  the review checks the proofs one by one instead, as described under "How it
-  works" below.
-
-  The referees can check works the manuscript cites. A separate literature search places its results in context.
-  In a conversation, the Assistant starts **two jobs at once** when you ask for a
-  review: the review, and a literature review at its lowest breadth, each with its
-  own card and page. The question of that literature review is written by the
-  Assistant from the title, abstract and introduction of your manuscript, in
-  public mathematical words; no manuscript text is pasted into it, and the
-  manuscript is not handed to the search. When both have returned, the answer is
-  the review's report as it is, followed by **Position in the literature**: for
-  each main result, the closest earlier result the literature review found, what
-  differs, and whether that changes the recommendation. This part is written
-  only from the literature review's checked text and verified records; the
-  references are printed by the code, a work with exactly your manuscript's
-  title and one of its authors is labelled as the manuscript itself (your own
-  preprint), and a work whose authors are all among yours (all but one for three
-  or more authors) as a work of the manuscript's authors; neither counts as
-  prior work. If the literature review
-  failed or did not finish, the answer says that the position is missing; none
-  is written from memory. With online search off, or when your request excludes
-  it ("without searching online"), the review starts alone and the answer says
-  why there is no position. The literature review shares the provider's
-  throughput with the review, so the two together take longer than the review
-  alone. A review started from the New review form or the terminal runs alone.
+  To ask for a separate survey, say “review that paper and compare its results
+  with the literature” in the conversation. With online search enabled, the
+  Assistant then adds a comparison based on the literature review's sources.
+  For an ordinary review, the agent can look up individual citations as needed.
 - **Typo check** (`@typo_check`): the typos and presentation problems of a
   manuscript, and nothing else. The paper is proofread in parts of about 220
   lines (each call with the whole paper in view) for typos, misprinted formulas,
@@ -1162,54 +1057,6 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   proof is checked and there is no recommendation. About 16 calls and 2.5
   minutes with DS4 for a 3,000-line paper.
 
-  How the Review works without the whole paper in context. The code maps the paper: its statements and proofs (theorem
-  numbers come from your `.sty` and, when present, the `.aux` file), proofs that
-  run over a whole section ("Proof of Theorem 1", "In this section we prove
-  Theorem 1.2"), and which result uses which. A first call writes the overview,
-  names the main results (those proved only in an appendix stay main) and locates
-  the proofs the map missed. Then, first of all, the **statement** of each main
-  result (four at most) is attacked by a reasoning call that sees the whole
-  paper: degenerate parameters, low dimension, boundary cases, a known result the
-  statement would contradict, the simplest example the hypotheses allow. A
-  counterexample counts only when it is explicit and checked against every
-  hypothesis; it then becomes a finding that the statement is false, which gets a
-  second opinion like any other. A statement that fails only in an edge case is
-  reported under the main-results table. All the calls run in one pool, the main results
-  and what they use first: a check of each
-  proof (a long proof line by line in parts, with the whole paper in view), and
-  reads across the paper for inconsistent constants or conventions, claims never
-  established and cited results applied outside their hypotheses. Each check
-  reports every problem with its effect: the statement is false, the proof fails,
-  a gap an expert can fill, an imprecision, or a misprint. As soon as a proof's
-  checks are done, each of its findings gets a **second opinion**: a defence of the
-  paper, then an independent judge. A finding said to make a statement false or a
-  proof fail always goes to the judge, even when the defence gives way (the
-  defence answers at once; the judge reasons); other findings go to the judge when
-  the defence holds the paper right or makes the finding less serious. The
-  judge's verdict is final. Minor findings that got no second opinion are checked against the paper, twenty
-  per call: a finding the paper does not support leaves the report, and so does a
-  finding whose quoted words are not in the paper (the scope at the end of the
-  report counts both; the saved job keeps them).
-
-  The report is **rewritten after every call**: within minutes it shows the
-  overview, the first findings and the main-results table (with, for each main
-  result, what the search for a counterexample gave), then a first prose
-  report once the main results are checked and judged, and the final report at
-  the end. It has a summary, the status of each main result (checked with no
-  issue, affected by a comment and where it comes from, open, or not checked), an
-  assessment, numbered major and minor comments (assembled by the code from the
-  findings: the prose cannot add, drop or renumber one; the same problem found
-  twice is one comment), questions to the authors, a
-  recommendation and a confidential note to the editor. A major comment upheld
-  after a defence of the paper rules out "accept" and "minor revision"; the
-  recommendation is provisional while a main result rests on an unchecked proof or
-  an open point. With a small local context the paper is read in parts and each
-  check sees one proof with the statements and equations it cites (what that
-  reading notices about the writing is listed in the report); the sweeps
-  across the paper need a large context (DS4). On DS4 a review of a
-  3,000-line paper makes several dozen calls, each reading the whole paper; how
-  long it takes depends on how many run at once (the model-request limit in
-  Settings, up to 200, DeepInfra's account limit; 200 by default with DS4).
 - **Explain**: one result and its proof, or a page, a section or a short text,
   for a mathematician from another field: what it says, the idea, a walk through
   the proof or the passage (every line of a short one), the standard facts used,
@@ -1221,17 +1068,13 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   file or message of the conversation holds the proof ("explain the proof of
   Brouwer's fixed point theorem"), the explanation comes from Explore instead.
 
-Saved reviews stay readable whatever their age. A review saved before the
-referees and the judge existed resumes with its own pipeline. Resuming one saved at Low effort
-continues it as a typo check; one saved at Medium or High, or before the review
-and the detailed review became one, continues as the review (it no longer reads
-for typos, and keeps the remarks it had).
+You can read earlier reports and resume unfinished reviews with their saved
+pipeline and allowance. The earlier Detailed Review name still opens Review.
 
 To discuss a completed report, select `@referee` again and explain which comments
 you dispute. When the target is unambiguous, the follow-up reuses the reviewed
 manuscript and keeps the original report. It addresses the contested comments
-rather than silently replacing the earlier review; each answer is headed with the
-comment's number in the saved report. Ask explicitly for a full new
+and refers back to the original report. Ask explicitly for a full new
 review to reread the whole paper. New attachments take precedence; when the target
 is ambiguous, the interface asks which manuscript to use. Review also asks when several manuscripts are attached and your message names
 none of them. Explain asked for a section the document does not have lists the
@@ -1656,11 +1499,8 @@ conversation. Install the sandbox once (see the install guide).
   counterexample*, *numerically verified candidate*, *no counterexample detected*
   or *inconclusive*. Passing tests never count as a proof.
   For an explicit **@sanity_check**, a run without a classification is recorded as *unclassified*.
-- **The Review** binds the sanity-check skill with its own policy, *review*:
-  30 s, 2 GB and 1 CPU a run; 20 runs for the lead referee, 8 for each
-  co-referee and 3 for each judge of one review; two runs at a time; no
-  escalation. `--no-numerical-checks` turns it off too: the referees then compute
-  by hand and the report says that no computation was run.
+- **Review** can use the same automatic sandbox computations as Explore.
+  Saved v4 reviews use their original per-referee limits when resumed.
 
 A run stopped at its time or memory limit keeps what it printed and the files it
 saved before it stopped. Its record keeps the error, the limits, why it stopped

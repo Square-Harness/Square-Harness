@@ -269,7 +269,9 @@ class LedgerTests(RefereeCase):
         runner, _ = self.run_review(ScriptClient({}), ctx=150_000)
         self.assertEqual(runner.state['pipeline'], 'review-v2')
         self.assertEqual(runner.state['issues'], [])
-        self.assertIs(runner_class('review'), R.RefereeRunner)
+        from mathagent.explore_review import ExploreReviewRunner
+        self.assertIs(runner_class('review'), ExploreReviewRunner)
+        self.assertIs(runner_for_state({'pipeline': ExploreReviewRunner.PIPELINE}), ExploreReviewRunner)
         self.assertIs(runner_for_state({'pipeline': 'review-v2'}), PaperReviewRunner)
         self.assertIs(runner_for_state({'pipeline': 'review-v4'}), R.RefereeRunner)
         self.assertEqual(variant_for_state({'pipeline': 'review-v4'}), 'review')

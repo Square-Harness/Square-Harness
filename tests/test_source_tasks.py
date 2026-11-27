@@ -30,14 +30,14 @@ class TypoRequests(unittest.TestCase):
         self.assertEqual(mode('Explain Theorem 3.1 of this paper'), 'explain')
 
     def test_no_typo_check_without_a_clear_request(self):
-        # A review with the typos is two tasks for the router; a typo inside one proof is a question about that proof.
+        # A whole review can include typos; a typo inside one proof is a question about that proof.
         for query in ('Review this paper and check the typos', 'Is there a typo in the proof of Lemma 2.3?',
                       "Don't check the typos, just summarize this paper"):
             self.assertNotEqual(mode(query), 'typo_check', query)
         self.assertIsNone(mode('What is a typo?', []))
 
     def test_the_router_is_told_about_the_manuscript_skills(self):
-        self.assertIn('typo_check lists only its typos', proof_routing.POLICY)
+        self.assertIn('Use typo_check for proofreading', proof_routing.POLICY)
         self.assertIn('typo_check', proof_routing.SCHEMA['properties']['tasks']['items']['properties']['mode']['enum'])
 
 

@@ -70,10 +70,11 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   hypotheses, competing examples and sources. Preserve the topic and scope the user requested.
   Treat any proposed theorem or status as a question to investigate. Every literature review runs at high effort.
 - referee: a referee report on a whole manuscript file the user names or attaches: an overview of the paper,
-  a check of every proof, and a recommendation. It has one depth: effort does not change it. It does not list typos.
+  its statements and proofs, gaps, and typos. Keep the user's focus in their own words. Include a requested
+  comparison with the literature in that review task; the controller arranges it.
 - typo_check: only the typos, misprints and presentation problems of a manuscript file the user names or
   attaches, each correction checked; no proof is checked. Choose it when the user asks only for typos,
-  proofreading or the presentation; when they ask for a review and the typos, give both tasks.
+  proofreading or the presentation, or explicitly request a separate list of typos alongside a review.
 - quick_review: check whether a given proof of a given statement is correct, with a saved verdict and
   located issues, e.g. "is this proof right?", "check the proof of Lemma 3.2 in paper.tex". The request
   must contain the statement and its proof word for word, or name the file and the result.

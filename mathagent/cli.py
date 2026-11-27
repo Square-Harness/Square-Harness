@@ -29,7 +29,7 @@ from .literature import LiteratureTools
 from .litreview import ReviewRunner
 from .refcheck import CheckRunner, nested_checker, precise_reference_request
 from .research import ResearchRunner
-from .review import runner_class as review_runner, variant_for_state
+from .review import runner_class as review_runner, runner_for_state, variant_for_state
 from .writeup import WriteupRunner
 from . import __version__
 
@@ -641,7 +641,7 @@ def main():
                     if check_job:
                         runner = CheckRunner(agent, ui.emit)
                     elif variant:
-                        runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
+                        runner = runner_for_state(saved)(agent, ui.emit, concurrency=review_concurrency())
                         runner.sandbox = sandbox
                     elif saved.get('pipeline') in (ReviewRunner.PIPELINE, ReviewRunner.LEGACY_PIPELINE):
                         # An old reading list stays readable; the runner refuses to resume it.

@@ -36,7 +36,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Pin the manuscript. The referees examine the main results and the proofs they depend on. An independent judge checks reported issues. The report links findings to the manuscript and records which results still need checking. For language and presentation, choose Typo.',
+    lede: 'Attach the manuscript for a mathematical review. You can ask the reviewer to focus on a particular theorem or proof.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (a TeX source gives the best results; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',
@@ -151,7 +151,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     setError('')
     setQueuedNote('')
     const request = goal.trim() || (variant === 'typos' && review ? 'Check the typos and the presentation of this manuscript.'
-      : manuscript ? 'Referee this manuscript for a mathematics journal.'
+      : manuscript ? 'Please review the proofs in this paper for errors, gaps and typos.'
       : `${variant === 'quick' ? 'Check the proof of' : 'Explain'} ${target.trim()}.`)
     try {
       const result = await api.startResearch({
@@ -197,8 +197,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
               <p className="network-note">The typo check uses the pinned manuscript. Web search is off.</p>
             ) : paperReview ? (
               <p className={'network-note' + (searching ? ' network-online' : '')}>
-                {searching ? 'Cited-paper lookup is on. Public search services receive bibliographic queries, and the referees can open papers to check the results the manuscript cites.'
-                  : 'Cited-paper lookup is off. The referees can use the manuscript and papers already cached in the workspace.'}
+                {searching ? 'Cited-paper lookup is on. Public search services receive bibliographic queries, and the reviewer can open papers to check the results the manuscript cites.'
+                  : 'Cited-paper lookup is off. The reviewer can use the manuscript and papers already cached in the workspace.'}
               </p>
             ) : (
               <p className={'network-note' + (searching ? ' network-online' : '')}>
@@ -247,7 +247,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             {manuscript && <p className="field-hint">{variant === 'typos' ? 'A typo check' : 'A review'} has a fixed checking depth.</p>}
             {!offline && (
               <Toggle label={paperReview ? "Look up cited papers online" : "Search online"} checked={searching} onChange={setOnline} disabled={status?.online_locked}
-                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : paperReview ? 'Allow the referees to search for and open cited papers.' : 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.'} />
+                hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : paperReview ? 'Allow the reviewer to search for and open cited papers.' : 'zbMATH, arXiv, Semantic Scholar and Crossref, and open full texts of key papers when available.'} />
             )}
             <Collapse summary="Advanced limits">
               <div className="field-grid">

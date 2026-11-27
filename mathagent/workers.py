@@ -359,8 +359,11 @@ def run_worker(host, parent, budget, action, child, save):
                 child['job_id'] = native
                 host.update_card(child, job_id=native)
                 save()
-    agent = host.engine(mode)
-    if mode in ('explore', 'writeup'):
+    whole_review = REVIEW_MODES.get(mode) == 'review'
+    agent = host.engine('explore' if whole_review else mode)
+    if whole_review:
+        agent.project_context = host.project_context(context.get('project_snapshot'))
+    if mode in ('explore', 'writeup') or whole_review:
         # A write-up keeps the user's Personalization (standing instructions, macros) in its saved state.
         agent.personal_context = getattr(parent.agent, 'personal_context', '')
     images.bind(agent, image_refs)
@@ -415,7 +418,7 @@ def run_worker(host, parent, budget, action, child, save):
         if mode == 'explore' and (child.get('brief') or {}).get('text'):
             agent.optional_leads = child['brief']['text']
     host.show_experiments(agent.workspace)
-    if mode in ('explore',) + USER_MODES and agent.workspace.numerics is not None:
+    if (whole_review or mode in ('explore',) + USER_MODES) and agent.workspace.numerics is not None:
         session = agent.workspace.numerics
         show_record = session.on_record
         def record_experiment(record):
@@ -518,7 +521,7 @@ def run_worker(host, parent, budget, action, child, save):
             save()
 
     def emit(kind, value):
-        if runner is not None:
+        if runner is not None and (not whole_review or kind not in ('thinking', 'text')):
             ident = runner.state['id'] if runner.state else None
             if ident and child.get('job_id') != ident:
                 with state_lock:

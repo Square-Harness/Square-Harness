@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Whole-paper Review now gives the pinned manuscript and the user's request to
+  one Explore agent. Its written report is saved and returned directly in the
+  conversation. Asking “review that paper” runs Review; asking also to compare
+  it with prior work adds a literature review. Earlier reviews retain their
+  saved workflows. This replaces the timed v4 referee and judge workflow for
+  new reports after the plain agent found more planted defects in the
+  six-manuscript comparison.
+
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns
   with images. Older turns can confirm their destination when it is unknown.

@@ -51,7 +51,8 @@ _ADDITIONAL_WORK = re.compile(
     r'(?:prove|check|verify|audit|review|referee|write|create|draft|find|search|survey|translate|'
     r'explain|walk me through|prouve(?:r|z)?|demontre(?:r|z)?|verifie(?:r|z)?|controle(?:r|z)?|'
     r'relis|relisez|ecris|ecrivez|redige(?:r|z)?|cree(?:r|z)?|trouve(?:r|z)?|cherche(?:r|z)?|'
-    r'traduis|traduisez|explique(?:r|z)?|donne(?:r|z)?\s+(?:moi\s+)?(?:des |les )?references)\b')
+    r'traduis|traduisez|explique(?:r|z)?|donne(?:r|z)?\s+(?:moi\s+)?(?:des |les )?references|'
+    r'(?:do|give|provide|produce) (?:me )?(?:a |an )?literature (?:review|survey) (?:on|about))\b')
 
 
 def _fold(text):
@@ -105,6 +106,38 @@ def _instruction_text(query):
     return _fold(instruction_prose(query))
 
 
+_PRIOR_WORK = (r"(?:literature|(?:prior|earlier|existing) (?:work|art|results?)|related work|state of the art|"
+               r"litterature|(?:travaux|resultats) (?:anterieurs|existants|publies)|etat de l.art)")
+_COMPARISON = re.compile(
+    r"\b(?:compare|comparing|place|placing|position|positioning|situate|situating|relate|fits?|"
+    r"compar(?:e[rz]?|ons)|situ(?:e[rz]?|ons)|positionn(?:e[rz]?|ons))\b.{0,100}?\b" + _PRIOR_WORK + r"\b|"
+    r"\b(?:with|include|add|give|provide|write|do|and|et|avec|ajoute[rz]?|inclu(?:re|ez|s))\s+"
+    r"(?:(?:a|an|the|une?|la|brief|short|also)\s+)*(?:literature (?:review|survey|comparison)|"
+    r"survey of (?:the )?literature|revue de (?:la )?litterature)\b|"
+    r"\b(?:assess|evaluate|check|verify|discuss|evalu(?:e|er|ez)|discut(?:e|er|ez))\s+"
+    r"(?:(?:its|their|the|claimed|sa|leur|la)\s+)*(?:novelty|originality|nouveaute|originalite)\b")
+
+
+def simple_manuscript_review(query):
+    """A whole-paper instruction with an unambiguous scope, including the common comparison request."""
+    return bool(re.fullmatch(
+        r"\s*(?:please\s+)?(?:review|referee)\s+(?:(?:my|our|the|this|that|attached|uploaded)\s+)*"
+        r"(?:paper|article|manuscript|preprint|document)(?:\s+and (?:also )?compare (?:it|its results) "
+        r"(?:with|to|against) (?:the )?" + _PRIOR_WORK + r")?\s*[.!?]?\s*", _fold(query)))
+
+
+def requests_literature_position(query):
+    """A request in the user's own instructions for the paper's position in the literature."""
+    for clause in re.split(r'[.!?;,\n]|\b(?:but|mais)\b', _instruction_text(query)):
+        match = _COMPARISON.search(clause)
+        if match and re.match(r'\s+(?:on|about|sur)\b', clause[match.end():]):
+            continue  # A separately named survey has its own topic.
+        if match and not _NEGATION.search(clause[:match.end()]) and not re.search(
+                r"\b(?:no|skip|exclude|omit|ignore|aucune?)\b.{0,45}$", clause[:match.start()]):
+            return True
+    return False
+
+
 def requests_workspace_search(query):
     """An explicit request to use the wider workspace alongside selected sources."""
     location = r'(?:(?:the|my|this|our|project|working|all|entire|whole|le|mon|ce|tout)\s+)*(?:workspace|folder|directory|espace de travail|dossier|repertoire)\b'
@@ -125,7 +158,11 @@ def excludes_external_sources(query):
         r"\b(?:(?:no|without|avoid|sans)\s+(?:(?:any|using|consulting|accessing|the|aucune?)\s+)*"
         r"(?:external (?:sources?|references?|search(?:es)?)|(?:internet|web)(?: searches?)?|"
         r"sources? externes?|recherche en ligne)|"
-        r"(?:do not|don.t|never) (?:search|browse|use|consult) (?:the )?(?:web|internet|external sources))\b",
+        r"(?:do not|don.t|never) (?:search|browse|use|consult) (?:the )?(?:web|internet|external sources)|"
+        r"(?:without (?:searching|checking|browsing|looking)|(?:do not|don.t|never) (?:search|check|browse|look)) "
+        r"(?:online|on(?: the)? (?:internet|web))|(?:no|without) (?:online|web) (?:search|lookup)|"
+        r"(?:sans|ne pas) (?:chercher|verifier|regarder) (?:en ligne|sur internet)|"
+        r"(?:stay|work|remain|reste[rz]?|travaille[rz]?) (?:offline|hors ligne))\b",
         _instruction_text(query)))
 
 

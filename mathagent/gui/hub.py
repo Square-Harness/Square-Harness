@@ -1545,6 +1545,8 @@ class Hub:
 
         def work(task):
             agent, _ = self._engine(task, mode=kind, online=online)
+            if variant == 'review':
+                agent.personal_context = personalization.context(personalization.load(self.base))
             images.bind(agent, image_refs)
             self._ensure_model(agent)
             if kind == 'literature':  # a literature review written from verified records

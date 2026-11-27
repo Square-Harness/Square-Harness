@@ -95,9 +95,9 @@ Recorded sandbox code and figures are supplied automatically to write-up workers
 do not read hidden storage paths or put generated figures in the files argument.
 
 quick_review checks one given proof (verdict, located issues), never a whole document; explain explains a result and
-its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (overview, every
-proof checked, recommendation; it has one depth, whatever effort you give; the controller starts a literature
-review beside it and adds the position of the results after the report, so do not delegate one for that); typo_check lists the typos and
+its proof, or a named page, section or short text line by line; referee reviews a whole manuscript (statements,
+proofs, gaps and typos). Give it the user's focus. If the user requests a comparison with the literature,
+the controller starts a separate survey and adds its findings after the report. typo_check lists the typos and
 presentation problems of a manuscript, with checked corrections, and checks no proof. For a numbered result of an attached file, delegate at
 once with the file and its name (e.g. "Lemma 3.2"); the worker finds it, so do not search first.
 For an attached article's main results, overview or author-claimed novelty, use explore

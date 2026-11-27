@@ -14,7 +14,7 @@ export const MODE_CALLS: { mode: RouteMode; label: string; summary: string }[] =
   { mode: 'check', label: 'Literature Check', summary: 'Find or verify a reference for a known result.' },
   { mode: 'literature', label: 'Literature', summary: 'Survey a mathematical question through its main results, methods and sources.' },
   { mode: 'quick_review', label: 'Proof Check', summary: 'Check whether a given proof is correct: verdict and located issues.' },
-  { mode: 'referee', label: 'Review', summary: 'Referee a manuscript: every proof checked, second opinions, a recommendation.' },
+  { mode: 'referee', label: 'Review', summary: 'Review the statements and proofs of an attached manuscript.' },
   { mode: 'typo_check', label: 'Typo', summary: 'List the typos and presentation problems of a manuscript, each correction checked.' },
   { mode: 'explain', label: 'Explain', summary: 'Explain a result and its proof precisely, step by step.' },
   { mode: 'writeup', label: 'Write-Up', summary: 'Write up results from this conversation, or an attached draft, as a .tex file in your style. Alone, it summarizes.' },

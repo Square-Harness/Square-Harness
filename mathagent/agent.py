@@ -118,7 +118,8 @@ class Agent:
             from .tools import result_budget
             self.workspace.result_chars = result_budget(value)
 
-    def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None, recover_empty_tool_answer=False):
+    def run(self, query, emit=lambda kind, value: None, fresh=False, *, instruction=None, recover_empty_tool_answer=False,
+            tool_checkpoint=None, after_tools=None, recover_empty_answer=False):
         # Only commit history when a full turn completes; interruptions cannot
         # leave a dangling assistant tool call in the next API request.
         messages = copy.deepcopy([] if fresh else self.history)
@@ -131,13 +132,18 @@ class Agent:
         message = {'role': 'user', 'content': query}
         if hasattr(self, 'turn_image_refs'):
             message['images'] = copy.deepcopy(self.turn_image_refs)
-        messages.append(message)
+        if tool_checkpoint:
+            messages = copy.deepcopy(tool_checkpoint['messages'])
+        else:
+            messages.append(message)
         instruction = MODES[self.mode] if instruction is None else instruction
         system = {'role': 'system', 'content': SYSTEM + ('\nMODE: ' + instruction if instruction else '')}
         context = [{'role': 'user', 'content': value} for value in
                    (getattr(self, 'personal_context', ''), getattr(self, 'project_context', '')) if value]
         schemas = self.workspace.schemas()
-        round_no, answer_now, forced_final = -1, False, False
+        round_no = tool_checkpoint['round'] if tool_checkpoint else -1
+        answer_now = False
+        forced_final = round_no >= self.max_rounds - 1 and bool(tool_checkpoint)
         continued = 0
         while True:
             round_no += 1
@@ -232,9 +238,11 @@ class Agent:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')
                     messages.append({'role': 'user', 'content': RESULTS_ONLY})
                     forced_final = True
+                if after_tools is not None:
+                    after_tools({'messages': messages, 'round': round_no})
                 continue
             exhausted = self.last_stats.get('done_reason') == 'length'
-            empty_after_tool = recover_empty_tool_answer and round_no > 0 and not exhausted
+            retry_empty = (recover_empty_answer or (recover_empty_tool_answer and round_no > 0)) and not exhausted
             note = getattr(self, 'continue_after_length', '')
             if (note and exhausted and not assistant['content'].strip() and not answer_now
                     and round_no + 1 < self.max_rounds and continued < getattr(self, 'continue_limit', 3)):
@@ -245,14 +253,14 @@ class Agent:
                 messages.append({'role': 'user', 'content': note + '\n\nTHE END OF YOUR REASONING SO FAR (not kept '
                                  'otherwise):\n' + thinking[-getattr(self, 'continue_tail', input_limit(self, 'recovery_note', 4000)):]})
                 continue
-            if not assistant['content'].strip() and not answer_now and (exhausted or empty_after_tool):
+            if not assistant['content'].strip() and not answer_now and (exhausted or retry_empty):
                 # The reasoning (or an unfinished tool call) used the whole allowance, or a worker wrote
                 # nothing after its tool results: one more call, without reasoning or tools, asks for
                 # the answer instead of returning nothing.
                 answer_now = True
                 recovery_notes = thinking[-input_limit(self, 'recovery_note', 4000):]
-                if empty_after_tool:
-                    emit('notice', 'The worker returned an empty answer after a tool call. Requesting its conclusion.')
+                if retry_empty:
+                    emit('notice', 'The model returned an empty answer. Requesting its conclusion.')
                     prompt = 'Give your final mathematical answer using the work above. Identify any unresolved points.'
                 else:
                     emit('notice', 'Output limit reached while reasoning; asking for the answer now.')
@@ -261,7 +269,7 @@ class Agent:
                 continue
             if not assistant['content'].strip():
                 # A worker's stop reason reaches the parent, which repeats it to the user: no controller terms.
-                if answer_now and recover_empty_tool_answer:
+                if answer_now and (recover_empty_tool_answer or recover_empty_answer):
                     self.last_stop_reason = 'No written conclusion was produced.'
                 else:
                     self.last_stop_reason = ('Output limit reached while reasoning; no written conclusion was produced.'

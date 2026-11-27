@@ -15,7 +15,7 @@ import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, roleInfo, useJobClass, useLiveStream } from './shared'
-import { FIXED_VARIANTS, PIPELINE_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
+import { FIXED_VARIANTS, SINGLE_REVIEW_PIPELINE, PIPELINE_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review: code searches and follows citations; the model screens the records,
@@ -124,7 +124,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       <ol className="phases phases-wide" aria-label="Workflow">
         {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
-          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
+          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.pipeline === SINGLE_REVIEW_PIPELINE && step === 'plan' ? 'Prepare' : data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
         })}
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} taskId={ownTask?.id} />
@@ -161,6 +161,9 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
 }
 
 export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
+  // The saved partial report identifies interrupted work even when the agent streamed some prose.
+  const report = data.pipeline === SINGLE_REVIEW_PIPELINE && !data.running
+    ? data.report || data.draft : data.draft || data.report
   return (
     <div className={data.pipeline === REVIEW_PIPELINE ? 'report literature-review' : 'report'}>
       {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}
@@ -176,9 +179,9 @@ export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail
           <Square variant={VERDICTS[data.verdict].variant} size={20} /> {VERDICTS[data.verdict].label}
         </p>
       )}
-      {(data.draft || data.report) ? (
+      {report ? (
         <>
-          <p className="caveat">{data.pipeline === 'review-v1' ? 'This earlier review assessed the presentation and gave an overview of the manuscript. Its workflow did not check the proofs.' : data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline === REVIEW_PIPELINE
+          <p className="caveat">{data.pipeline === SINGLE_REVIEW_PIPELINE ? 'Manuscript review by the Explore agent.' : data.pipeline === 'review-v1' ? 'This earlier review assessed the presentation and gave an overview of the manuscript. Its workflow did not check the proofs.' : data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline === REVIEW_PIPELINE
             ? 'Every reference comes from a returned bibliographic record. Statements of results come from abstracts and, where marked, from full texts; this is a model-written survey to check against the papers.'
             : data.pipeline
             ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
@@ -190,10 +193,10 @@ export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail
             </div>
           )}
           {data.coverage && <p className="caveat">{coverageText(data.coverage)}</p>}
-          <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft || data.report}</Markdown>
+          <Markdown className="report-text" onCite={onCite} flagged={flagged}>{report}</Markdown>
         </>
       ) : (
-        <p className="empty-note">No draft yet. {data.running
+        <p className="empty-note">No draft yet. {data.pipeline === SINGLE_REVIEW_PIPELINE ? (data.running ? 'The reviewer is examining the manuscript.' : '') : data.running
           ? (data.pipeline === REVIEW_PIPELINE ? 'The review is written once the key papers are read and the sections planned.' : data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.')
           : 'The plan and working notes are under Plan and notes.'}</p>
       )}
@@ -233,7 +236,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
   return (
     <div className="ledger">
       {cite && <Passage refText={cite} data={data} sources={sources} onClose={() => onCite(null)} />}
-      <section className="aside-section">
+      {(data.pipeline !== SINGLE_REVIEW_PIPELINE || issues.length > 0) && <section className="aside-section">
         <h3 className="aside-title">Citation checks</h3>
         {issues.length ? (
           <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
@@ -241,7 +244,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
           <p className="muted small">{data.pipeline === REVIEW_PIPELINE ? 'Every reference comes from a returned bibliographic record. Statements of results come from abstracts and, where marked, from full texts; this is a model-written survey to check against the papers.'
             : data.pipeline === LIST_PIPELINE ? 'Entries are checked against returned bibliographic records. This does not verify their mathematical claims or full text.' : data.draft ? 'No invalid source locators were detected. This checks locations, not mathematical correctness.' : 'Checks run when the draft is written.'}</p>
         )}
-      </section>
+      </section>}
       {data.sources.length > 0 && (
         <section className="aside-section">
         <h3 className="aside-title">Source reading</h3>
