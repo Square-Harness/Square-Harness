@@ -31,13 +31,18 @@ export function isLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && (LEVELS as string[]).includes(value)
 }
 
+/** Whether the server runs a hosted DS4 profile (deepinfra, openrouter): it then sends its DS4 budget profile. */
+export function isDS4(defaults: Defaults): boolean {
+  return !!defaults.budget_profile && defaults.budget_profile !== 'default'
+}
+
 /** A proof needs room for one full solve and its review: fit the per-call ceilings in the budget. */
 function proofCeilings(defaults: Defaults, tokens: number | null, preset?: { solve_tokens: number; verify_tokens: number }) {
   const solve = Math.min(defaults.proof_solve_tokens, preset?.solve_tokens ?? defaults.proof_solve_tokens)
   const verify = Math.min(defaults.proof_verify_tokens, preset?.verify_tokens ?? defaults.proof_verify_tokens)
   // DS4 keeps its full role ceilings even when an explicit total cannot fund
   // them. Admission reports that constraint; selecting effort never hides it.
-  if (defaults.api_profile === 'deepinfra') return { tokens, solve_tokens: solve, verify_tokens: verify }
+  if (isDS4(defaults)) return { tokens, solve_tokens: solve, verify_tokens: verify }
   if (tokens === null || tokens >= solve + verify) return { tokens, solve_tokens: solve, verify_tokens: verify }
   // Launch floors for repairs stay valid: the solve ceiling never goes below them.
   const floor = Math.max(128, defaults.proof_repair_tokens ?? 0, defaults.proof_min_solve_tokens ?? 0)
@@ -51,7 +56,7 @@ export function effortLimits(kind: EffortKind, defaults: Defaults, requestedLeve
   const preset = defaults.effort_presets?.[level]
   const effort = preset || EFFORTS.find((item) => item.id === level) || EFFORTS[1]
   // Whole-manuscript reviews and typo checks read the full paper each time (gui/effort.py).
-  const ds4 = defaults.api_profile === 'deepinfra'
+  const ds4 = isDS4(defaults)
   const seconds = effort.minutes * 60 * (wholeManuscript && !ds4 ? 2 : 1)
   const cap = (configured: number | null, value: number) => configured === null ? value : Math.min(configured, value)
   if (kind === 'proof') {

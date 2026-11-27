@@ -7,7 +7,7 @@ The interface's forms use the same legacy table (frontend/src/effort.ts).
 DS4 presets come from model_limits and are sent to the interface by the server.
 """
 from ..litreview import breadth
-from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget
+from ..model_limits import EFFORTS as DS4_EFFORTS, LEGACY_EFFORTS as DS4_LEGACY_EFFORTS, proof_limits, workflow_budget, HOSTED_DS4
 from ..router import effort_for
 
 # Token estimates remain for older integrations. New jobs have no cumulative
@@ -33,7 +33,7 @@ REVIEW_INPUT = 4
 def level(mode, name, args=None, *, review_companion=False):
     """Legacy workload estimates; a review (which checks every proof) allows twice the working time on a local model and
     four times the input on DS4 (every call reads the whole paper); literature uses its own search and writing budget."""
-    table = DS4_EFFORTS if getattr(args, 'api_profile', None) == 'deepinfra' else EFFORTS
+    table = DS4_EFFORTS if getattr(args, 'api_profile', None) in HOSTED_DS4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if table is DS4_EFFORTS else LEGACY_EFFORTS
     name = 'low' if review_companion and mode == 'literature' else effort_for(mode, name)
     value = dict(table.get(name, legacy.get(name, table['medium'])))
@@ -78,7 +78,7 @@ def _proof_ceilings(args, tokens, effort=None):
 
 def limits(mode, level, args, *, review_companion=False):
     """Budget keyword arguments for Hub.start_route; answers in the conversation have none."""
-    ds4 = getattr(args, 'api_profile', None) == 'deepinfra'
+    ds4 = getattr(args, 'api_profile', None) in HOSTED_DS4
     table = DS4_EFFORTS if ds4 else EFFORTS
     legacy = DS4_LEGACY_EFFORTS if ds4 else LEGACY_EFFORTS
     level = 'low' if review_companion and mode == 'literature' else effort_for(mode, level)

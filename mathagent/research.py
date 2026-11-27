@@ -27,7 +27,7 @@ from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
 from .call_policy import allocate_call, CallContextError, interrupted_charge, streamed_characters
-from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget, HOSTED_DS4
 from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
 
@@ -334,7 +334,7 @@ class ResearchRunner:
                         online=bool(self.literature and self.literature.online))
         settings['api_profile'] = getattr(self.agent.client, 'profile', 'default')
         settings['model_limits_sha256'] = hashlib.sha256(Path(__file__).with_name('model_limits.py').read_bytes()).hexdigest()
-        if settings['api_profile'] == 'deepinfra':
+        if settings['api_profile'] in HOSTED_DS4:
             settings['reasoning_effort'] = self.agent.client.reasoning_effort
         root = self.agent.workspace.root / '.mathagent'
         _directory(root, create=True)
@@ -422,7 +422,7 @@ class ResearchRunner:
         profile = getattr(self.agent.client, 'profile', 'default')
         if settings.get('api_profile', 'default') != profile:
             raise ValueError('Resume with the original --api-profile; saved work is unchanged')
-        if profile == 'deepinfra':
+        if profile in HOSTED_DS4:
             effort = settings.get('reasoning_effort')
             if effort not in {'none', 'low', 'high', 'max'}:
                 raise ValueError('Saved DeepInfra reasoning effort is invalid; saved work is unchanged')

@@ -21,7 +21,7 @@ from .deepinfra import DeepInfraGenerationError, TesterAllowanceInsufficient
 from .ledger import ProofStore, _ID, _atomic_write, _bytes, _directory, _now, _read, _regular
 from .litreview import ReviewRunner, review_outcome
 from .mode_calls import USER_MODES, routed_python_task
-from .model_limits import input_limit as model_input_limit, output_limit, is_ds4
+from .model_limits import input_limit as model_input_limit, output_limit, is_ds4, HOSTED_DS4
 from .numerics import SandboxUnavailable
 from .orchestrator import CUT_MARK, FINAL_PREDICT, PROOF_OUTCOMES
 from .proof import ProofRunner
@@ -59,7 +59,7 @@ def worker_limits(mode, level_name, args):
     for key in values:
         if limits.get(key) is not None:
             values[key] = min(values[key], limits[key])
-    if mode == 'check' and getattr(args, 'api_profile', None) != 'deepinfra':
+    if mode == 'check' and getattr(args, 'api_profile', None) not in HOSTED_DS4:
         for key in ('tokens', 'input_tokens', 'seconds', 'requests'):
             cap = REFCHECK_EFFORTS.get(level_name, REFCHECK_EFFORTS['medium']).get(key)
             if cap is not None:
@@ -283,7 +283,7 @@ def run_worker(host, parent, budget, action, child, save):
                 cap = getattr(host.args, 'proof_tokens' if candidate['action']['mode'] == 'prove' else 'research_tokens', None)
                 if cap is not None:
                     allocation = cap if allocation is None else min(allocation, cap)
-                if getattr(host.args, 'api_profile', None) == 'deepinfra':
+                if getattr(host.args, 'api_profile', None) in HOSTED_DS4:
                     preset = effort.limits(candidate['action']['mode'], candidate['action']['effort'], host.args,
                                            review_companion=candidate.get('companion') == 'review')
                     preset_cap = preset.get('tokens', level['tokens'])
@@ -479,7 +479,7 @@ def run_worker(host, parent, budget, action, child, save):
     configured_input = getattr(host.args, 'research_input_tokens', None)
     if configured_input is not None:
         input_limit = configured_input if input_limit is None else min(input_limit, configured_input)
-    if getattr(host.args, 'api_profile', None) == 'deepinfra':
+    if getattr(host.args, 'api_profile', None) in HOSTED_DS4:
         input_limit = level['input'] if input_limit is None else min(input_limit, level['input'])
     if limits:
         input_limit = min(input_limit, limits['input_tokens']) if input_limit is not None else limits['input_tokens']
@@ -546,7 +546,7 @@ def run_worker(host, parent, budget, action, child, save):
             if child.get('job_id'):
                 result = runner.resume(child['job_id'])
             else:
-                if getattr(host.args, 'api_profile', None) == 'deepinfra':
+                if getattr(host.args, 'api_profile', None) in HOSTED_DS4:
                     preset = effort.limits('prove', action['effort'], host.args)
                     solve, verify = preset['solve_tokens'], preset['verify_tokens']
                     if allocation is not None and allocation < preset['tokens']:
@@ -560,7 +560,7 @@ def run_worker(host, parent, budget, action, child, save):
                 if allocation is not None and allocation < 256:
                     raise AssistantBudget('No budget remains for a proof worker and its review.')
                 if allocation is not None and solve + verify > allocation:
-                    if getattr(host.args, 'api_profile', None) == 'deepinfra':
+                    if getattr(host.args, 'api_profile', None) in HOSTED_DS4:
                         raise AssistantBudget(
                             f'Proof needs {solve + verify} tokens for a full solve and review; '
                             f'only {allocation} remain. No smaller call was dispatched.')

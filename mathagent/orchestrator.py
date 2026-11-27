@@ -29,7 +29,7 @@ from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_b
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .tools import schema
 from .refcheck import standalone_reference_request
-from .model_limits import output_limit, input_limit, is_ds4
+from .model_limits import output_limit, input_limit, is_ds4, HOSTED_DS4
 
 
 # Each section keeps the earlier single POLICY's sentences unchanged. A section is sent only in a
@@ -327,7 +327,7 @@ class Orchestrator:
             raise ValueError('max_actions must be null or a nonnegative integer')
         if max_children is not None and (type(max_children) is not int or max_children < 0):
             raise ValueError('max_children must be null or a nonnegative integer')
-        concurrency_limit = 5 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        concurrency_limit = 5 if getattr(agent.client, 'profile', 'default') in HOSTED_DS4 else 4
         if type(concurrency) is not int or not 1 <= concurrency <= concurrency_limit:
             raise ValueError(f'concurrency must be an integer between 1 and {concurrency_limit}')
         self.agent, self.delegate = agent, delegate

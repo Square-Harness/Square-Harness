@@ -30,7 +30,7 @@ from .call_policy import allocate_call, CallContextError
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, LiteratureError, _fold, _crossref_title
-from .model_limits import is_ds4, workflow_budget
+from .model_limits import is_ds4, workflow_budget, HOSTED_DS4
 from .deepinfra import (DeepInfraGenerationError, DeepInfraRateLimit, DeepInfraSilentStart, generation_window,
                         refusal_notices, rejected_before_inference)
 from .assistant_budget import AssistantBudget
@@ -1199,7 +1199,7 @@ class ReviewRunner(ResearchRunner):
         # Immediate replacements share a deadline. A deferred unit in a later
         # wave is separately admitted work under the saved phase and job limits.
         deadline = None
-        if getattr(self.agent.client, 'profile', None) == 'deepinfra':
+        if getattr(self.agent.client, 'profile', None) in HOSTED_DS4:
             deadline = time.monotonic() + min(self.agent.client.timeout, self._seconds_for_phase(self.state['phase']))
         for attempt in (0, 1):
             self._cancel()
@@ -1250,7 +1250,7 @@ class ReviewRunner(ResearchRunner):
                     if role == 'scope':
                         raise
                     raise _UnitGenerationFailure(str(exc)) from None
-                if (attempt or getattr(self.agent.client, 'profile', None) == 'deepinfra'
+                if (attempt or getattr(self.agent.client, 'profile', None) in HOSTED_DS4
                         or isinstance(exc, (ResearchBudget, TokenBudgetError, KeyboardInterrupt, AssistantBudget))):
                     raise
                 self._warn(f'The model server failed on a {role} call ({str(exc)[:120]}); it was asked again.')
@@ -1451,7 +1451,7 @@ class ReviewRunner(ResearchRunner):
             except (ResearchBudget, TokenBudgetError, WorkerInputError, KeyboardInterrupt, AssistantBudget):
                 raise
             except Exception as exc:  # isolate a malformed unit or an exhausted transport retry
-                if isinstance(exc, AgentError) and getattr(self.agent.client, 'profile', None) == 'deepinfra':
+                if isinstance(exc, AgentError) and getattr(self.agent.client, 'profile', None) in HOSTED_DS4:
                     provider_failed.set()
                     raise
                 reason = f'{type(exc).__name__}: {str(exc)[:120]}'

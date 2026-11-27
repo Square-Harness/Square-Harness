@@ -123,7 +123,8 @@ def _held_secrets(root=None, extra=()):
     """Exact values of the credentials this server holds, whatever their syntax.
 
     Prefix-less keys (DeepInfra) and the interface token match no pattern, and the recommended
-    launcher passes the provider key in a file, so the environment scan alone never sees it."""
+    launcher passes the provider key in a file, so the environment scan alone never sees it. Every hosted
+    provider's key is read, whichever profile runs."""
     values = {value for value in extra if isinstance(value, str)}
     for name, secret in os.environ.items():
         if _SECRET_KEYS.search(re.sub(r'[^a-z]', '', name.lower())):
@@ -131,7 +132,8 @@ def _held_secrets(root=None, extra=()):
     from ..deepinfra import read_api_key
     from . import feedback_slack
     token = Path(root or os.devnull) / '.mathagent' / 'gui-token'
-    readers = (read_api_key, _webhook, lambda: (feedback_slack.settings() or ('',))[0],
+    from ..openrouter import OpenRouter
+    readers = (read_api_key, lambda: read_api_key(OpenRouter.key_file_env, OpenRouter.key_env, OpenRouter.display), _webhook, lambda: (feedback_slack.settings() or ('',))[0],
                lambda: _read(token, 4096).decode('ascii', 'replace') if root and token.exists() else '')
     for read in readers:
         try:

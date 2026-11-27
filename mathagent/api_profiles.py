@@ -15,18 +15,26 @@ from http.client import HTTPException
 from .agent import AgentError
 from .backends import OpenAICompatible
 from .deepinfra import DeepInfra
+from .openrouter import OpenRouter
+
+
+API_PROFILES = ('default', 'mlx', 'deepinfra', 'openrouter')
+HOSTED_PROFILES = {'deepinfra': DeepInfra, 'openrouter': OpenRouter}  # model_limits.HOSTED_DS4
 
 
 def resolve_api_profile(profile=None):
     selected = os.environ.get('SQUARE_OPENAI_PROFILE', 'default') if profile is None else profile
-    if selected not in {'default', 'mlx', 'deepinfra'}:
-        raise AgentError('API profile must be default, mlx or deepinfra')
+    if selected not in API_PROFILES:
+        raise AgentError('API profile must be ' + ', '.join(API_PROFILES[:-1]) + ' or ' + API_PROFILES[-1])
     return selected
 
 
+def profile_class(profile):
+    return {'default': OpenAICompatible, 'mlx': MLX, **HOSTED_PROFILES}[resolve_api_profile(profile)]
+
+
 def create_profile_client(profile, host, timeout=600):
-    classes = {'default': OpenAICompatible, 'mlx': MLX, 'deepinfra': DeepInfra}
-    return classes[resolve_api_profile(profile)](host, timeout=timeout)
+    return profile_class(profile)(host, timeout=timeout)
 
 
 class MLX(OpenAICompatible):

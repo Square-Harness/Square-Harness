@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Opt-in DeepInfra transport for a pinned DeepSeek checkpoint.
+"""Opt-in hosted transport for a pinned DeepSeek checkpoint: DeepInfra, and the base of other hosted profiles.
 
 Credentials stay outside model payloads and are sent only to the configured,
 approved origin. Token preflight is deliberately labelled an estimate: the
 documented tokenizer does not expose every chat-template and tool option.
+
+`DeepInfra` carries the robust hosted transport (retry windows, busy waits, silent-start detection, replays, the
+tester ledger). Its provider-specific values are class attributes; another hosted provider of the same model is a
+subclass that overrides them (mathagent.openrouter.OpenRouter). Which one runs is the --api-profile.
 """
 import copy
 import ipaddress
@@ -28,7 +32,7 @@ from urllib.request import Request
 from .agent import AgentError, ModelNotDispatched
 from .backends import (MeasuredStreamCancellation, OpenAICompatible, ProviderStreamError, SilentStreamStart,
                        StalledStream, ToolCallError)
-from .model_limits import MODEL_OUTPUT_TOKENS
+from .model_limits import HOSTED_DS4, MODEL_OUTPUT_TOKENS
 
 
 BASE_URL = 'https://api.deepinfra.com/v1/openai'
@@ -54,7 +58,7 @@ START_SECONDS = 30  # an accepted stream silent this long (plus prefill time) is
 BUSY_PATIENCE = 300  # measured from the start of the call, so waits on other calls' cooldown count too
 BUSY_STEP = 30  # longest pause between two sends (about 24-36 s with jitter) unless the provider asks for longer
 MAX_REFUSALS = 60
-NOTICE_EVERY = 45  # seconds between two "DeepInfra is busy" notices of one call (the first is always shown)
+NOTICE_EVERY = 45  # seconds between two "<provider> is busy" notices of one call (the first is always shown)
 _cooldown = {'until': 0.0}
 _cooldown_lock = threading.Lock()
 
@@ -139,7 +143,7 @@ def generation_deadline(timeout):
 @contextmanager
 def generation_window(client, *, replacement=False, deadline=None):
     """Share one replacement across HTTP rejections, terminal SSE errors and nested callers."""
-    if getattr(client, 'profile', None) != 'deepinfra' or _generation_window.get() is not None:
+    if getattr(client, 'profile', None) not in HOSTED_DS4 or _generation_window.get() is not None:
         yield
         return
     end = generation_deadline(client.timeout)
@@ -180,7 +184,7 @@ def generation_attempts(client, emit, *, before_retry=None, replay=True):
     replay=False: the caller already showed the partial output (a conversation), so only a request that
     produced nothing is sent again.
     """
-    if getattr(client, 'profile', None) != 'deepinfra' or _generation_window.get() is not None:
+    if getattr(client, 'profile', None) not in HOSTED_DS4 or _generation_window.get() is not None:
         yield (nullcontext(),)
         return
     failed = []
@@ -243,20 +247,22 @@ def generation_stream(client, payload, emit):
 
 
 class DeepInfraSilentStart(DeepInfraGenerationError):
-    """DeepInfra accepted the request and sent no output before the caller's start limit. The caller
+    """The provider accepted the request and sent no output before the caller's start limit. The caller
     closed the stream itself, so nothing was generated for it: it can be replaced like a terminal error."""
 
-    def __init__(self, stream_progress=None, retry_spent=False):
-        super().__init__('DeepInfra accepted the request but did not start to answer.',
+    def __init__(self, stream_progress=None, retry_spent=False, display='DeepInfra'):
+        super().__init__(f'{display} accepted the request but did not start to answer.',
                          category='service_unavailable', stream_progress=stream_progress,
                          confirmed_terminal=True, retry_spent=retry_spent)
 
 
 class DeepInfraRateLimit(DeepInfraGenerationError):
-    """A definitive HTTP 429 response, before the transport opened a success stream."""
+    """A definitive refusal (HTTP 429, or a provider's in-flight budget limit), before the transport opened a
+    success stream. code=None leaves the HTTP status out of the message: a transient 402 must not read as a credit
+    refusal (referee.provider_refused stops a review on 'HTTP 402')."""
 
-    def __init__(self, hint, *, completion_rejected, transient=False):
-        super().__init__('DeepInfra HTTP 429: ' + hint, category='rate_limit')
+    def __init__(self, hint, *, completion_rejected, transient=False, display='DeepInfra', code=429):
+        super().__init__((f'{display} HTTP {code}: ' if code else f'{display}: ') + hint, category='rate_limit')
         self.completion_rejected = completion_rejected
         self.retryable = transient
 
@@ -264,8 +270,8 @@ class DeepInfraRateLimit(DeepInfraGenerationError):
 class DeepInfraUnavailable(DeepInfraRateLimit):
     """A definitive HTTP 5xx response before any stream: the provider refused the request without generating."""
 
-    def __init__(self, code, *, completion_rejected):
-        DeepInfraGenerationError.__init__(self, f'DeepInfra HTTP {code}: the provider is temporarily unavailable.',
+    def __init__(self, code, *, completion_rejected, display='DeepInfra'):
+        DeepInfraGenerationError.__init__(self, f'{display} HTTP {code}: the provider is temporarily unavailable.',
                                           category='service_unavailable')
         self.completion_rejected = completion_rejected
 
@@ -327,31 +333,30 @@ def _credit_limit(signals):
                                                          'insufficient quota', 'quota exhausted'))
 
 
-def _generation_failure(value):
+def _generation_failure(value, display='DeepInfra'):
     """Map known provider signals to public diagnostics. Raw fields may reflect private inputs."""
     signals = _provider_signals(value)
     if _credit_limit(signals) or '402' in signals:
-        return 'quota', 'DeepInfra reported a credit or spending limit during generation.'
+        return 'quota', f'{display} reported a credit or spending limit during generation.'
     if signals & {'401', '403', 'authentication error', 'permission denied', 'unauthorized', 'forbidden'}:
-        return 'auth', 'DeepInfra reported an authorization error during generation.'
+        return 'auth', f'{display} reported an authorization error during generation.'
     if _mentions(signals, _BUSY):  # before 'invalid request': DeepInfra types engine_overloaded invalid_request_error
-        return 'service_unavailable', 'DeepInfra reported that the model is busy.'
+        return 'service_unavailable', f'{display} reported that the model is busy.'
     if signals & {'429', 'rate limit error', 'rate limit exceeded', 'rate limited', 'too many requests'}:
-        return 'rate_limit', 'DeepInfra reported a rate limit during generation.'
+        return 'rate_limit', f'{display} reported a rate limit during generation.'
     if signals & {'400', '404', '422', 'invalid request', 'invalid request error', 'context length exceeded'}:
-        return 'invalid_request', 'DeepInfra reported an invalid model request during generation.'
+        return 'invalid_request', f'{display} reported an invalid model request during generation.'
     if signals & {'502', '503', '504', 'model busy', 'model overloaded', 'server overloaded', 'service unavailable', 'gateway timeout'}:
-        return 'service_unavailable', 'DeepInfra reported a temporary service failure during generation.'
+        return 'service_unavailable', f'{display} reported a temporary service failure during generation.'
     if signals & {'500', 'internal server error', 'server error', 'internal error', 'inference error', 'generation error'}:
-        return 'server_error', 'DeepInfra reported an internal model error during generation.'
-    return 'unknown', 'DeepInfra reported an unspecified error during generation.'
+        return 'server_error', f'{display} reported an internal model error during generation.'
+    return 'unknown', f'{display} reported an unspecified error during generation.'
 
 
-def _rate_limit(exc, deadline):
-    # Only match recognized signals. Never retain or quote a provider body,
-    # which may reflect submitted material or request headers.
-    # The HTTP status alone confirms rejection. Spend at most one second reading
-    # the optional diagnostic, even when the normal generation timeout is hours.
+def _read_error_body(exc, deadline):
+    """The decoded body of an HTTP refusal (JSON, or text), or None. Only matched against recognized signals:
+    never retained or quoted, since it may reflect submitted material or request headers. The HTTP status alone
+    confirms rejection; at most one second is spent reading this optional diagnostic."""
     read_end = min(deadline, time.monotonic() + 1)
     body = bytearray()
     complete = False
@@ -380,7 +385,11 @@ def _rate_limit(exc, deadline):
             value = json.loads(body)
         except (ValueError, UnicodeError, RecursionError):
             value = body.decode('ascii', errors='replace')
-    signals = _provider_signals(value)
+    return value
+
+
+def _rate_limit(exc, deadline):
+    signals = _provider_signals(_read_error_body(exc, deadline))
     if _credit_limit(signals):
         return 'Check the provider credit balance and spending limit.', False
     if signals & {'rate limited', 'rate limit exceeded', 'rate limit error', 'too many requests',
@@ -422,69 +431,116 @@ def _retry_delay(header, attempt=0):
     return seconds if seconds <= LONGEST_RETRY_AFTER else None
 
 
-def read_api_key():
+def read_api_key(key_file_env='DEEPINFRA_API_KEY_FILE', key_env='DEEPINFRA_API_KEY', display='DeepInfra'):
     """Read a private file without following its final symlink, or an env key."""
-    path = os.environ.get('DEEPINFRA_API_KEY_FILE')
+    path = os.environ.get(key_file_env)
     if path:
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(descriptor, 'rb') as source:
                 info = os.fstat(source.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                    raise AgentError('DeepInfra key file must be an owned, private regular file (mode 600)')
+                    raise AgentError(f'{display} key file must be an owned, private regular file (mode 600)')
                 raw = source.read(16_385)
             if len(raw) > 16_384:
-                raise AgentError('DeepInfra key file is too large')
+                raise AgentError(f'{display} key file is too large')
             key = raw.decode('ascii').strip()
         except (OSError, UnicodeError):
-            raise AgentError('Cannot read the private DeepInfra key file') from None
+            raise AgentError(f'Cannot read the private {display} key file') from None
     else:
-        key = os.environ.get('DEEPINFRA_API_KEY', '').strip()
+        key = os.environ.get(key_env, '').strip()
     if not key or len(key) > 16_384 or any(ord(char) <= 32 or ord(char) >= 127 for char in key):
-        raise AgentError('Set DEEPINFRA_API_KEY_FILE to a private API-key file, or DEEPINFRA_API_KEY')
+        raise AgentError(f'Set {key_file_env} to a private API-key file, or {key_env}')
     return key
 
 
+HINTS = {400: 'Check the model request and supported parameters.',
+         401: 'Check the API credential and its expiry.',
+         402: 'Check available credit and the credential spending limit.',
+         403: 'Check the credential scopes and allowed models.',
+         404: 'The requested model or endpoint is unavailable.',
+         405: 'This endpoint does not support the requested operation.',
+         422: 'Check the model request and supported parameters.'}
+
+
 class DeepInfra(OpenAICompatible):
-    """Authenticated stateless Chat Completions; no redirects or proxy env."""
+    """Authenticated stateless Chat Completions; no redirects or proxy env.
+
+    The class attributes below are DeepInfra's; a subclass for another hosted provider of the same model overrides
+    them (and, where the provider words things differently, _refusal, _stream_error and _read_service_tier)."""
     profile = 'deepinfra'
+    display = 'DeepInfra'  # every user-visible provider name
+    origin_host = 'api.deepinfra.com'
+    api_path = '/v1/openai'
+    host_paths = ('', '/v1/openai')  # path forms accepted on --host
+    routes = ('/v1/openai/models', '/v1/openai/chat/completions', '/v1/tokenize')  # credential-scoped allowlist
+    public_routes = ('/v1/openai/models',)  # sent without credentials (scoped JWTs are rejected there)
+    tokenize_path = '/v1/tokenize'  # None: the token count is always the byte estimate
+    key_file_env, key_env, loopback_env = 'DEEPINFRA_API_KEY_FILE', 'DEEPINFRA_API_KEY', 'DEEPINFRA_ALLOW_LOOPBACK'
+    model_ids = {MODEL: MODEL, LEGACY_MODEL: LEGACY_MODEL}  # model name in Square Harness -> model name on the wire
+    tolerate_repeated_finish = False  # a provider that repeats an empty finish frame to carry usage (backends._stream)
     require_terminal_usage = True
     # DS4 streams about 150 tokens/s once started; three minutes with only keep-alives is a stalled
     # stream. It is ended; a worker call is then replayed (see REPLAYS), a conversation is not.
     stall_seconds = 180
 
-    def __init__(self, host=BASE_URL, timeout=600):
+    @classmethod
+    def default_base_url(cls):
+        return 'https://' + cls.origin_host + cls.api_path
+
+    def __init__(self, host=None, timeout=600):
+        host = host or self.default_base_url()
         parsed = urlsplit(host.rstrip('/'))
         try:
             port = parsed.port
         except ValueError:
-            raise AgentError('Invalid DeepInfra endpoint port') from None
-        production = parsed.scheme == 'https' and parsed.hostname == 'api.deepinfra.com' and port in {None, 443}
+            raise AgentError(f'Invalid {self.display} endpoint port') from None
+        production = parsed.scheme == 'https' and parsed.hostname == self.origin_host and port in {None, 443}
         loopback = False
-        if os.environ.get('DEEPINFRA_ALLOW_LOOPBACK') == '1' and parsed.scheme in {'http', 'https'}:
+        if os.environ.get(self.loopback_env) == '1' and parsed.scheme in {'http', 'https'}:
             try:
                 loopback = ipaddress.ip_address(parsed.hostname or '').is_loopback
             except ValueError:
                 pass
         if (not (production or loopback) or parsed.username or parsed.password or parsed.query or parsed.fragment
-                or parsed.path.rstrip('/') not in {'', '/v1/openai'}):
-            raise AgentError('DeepInfra requires https://api.deepinfra.com/v1/openai')
+                or parsed.path.rstrip('/') not in set(self.host_paths)):
+            raise AgentError(f'{self.display} requires {self.default_base_url()}')
         origin = parsed.scheme + '://' + parsed.netloc
         super().__init__(origin, timeout)
         if self.thinking_budget_policy:
-            raise AgentError('The DeepInfra profile does not support vLLM thinking-budget fractions')
-        self.host = self.base_url = origin + '/v1/openai'
-        self.tokenize_url = origin + '/v1/tokenize'
+            raise AgentError(f'The {self.display} profile does not support vLLM thinking-budget fractions')
+        self.host = self.base_url = origin + self.api_path
+        self.tokenize_url = origin + self.tokenize_path if self.tokenize_path else None
+        if self.tokenize_url is None:
+            self._tokenize_supported = False
         self._origin = (parsed.scheme, parsed.hostname, port or (443 if parsed.scheme == 'https' else 80))
         self.reasoning_effort = os.environ.get('SH_DEEPINFRA_REASONING_EFFORT', 'high')
         if self.reasoning_effort not in {'none', 'low', 'high', 'max'}:
             raise AgentError('DeepSeek reasoning effort must be none, low, high or max')
-        self.service_tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
-        if self.service_tier not in {'standard', 'priority'}:
-            raise AgentError('DeepInfra service tier must be standard or priority')
-        self._api_key = read_api_key()
+        self.service_tier = self._read_service_tier()
+        self._api_key = read_api_key(self.key_file_env, self.key_env, self.display)
         self.observed_context_tokens = CONTEXT_TOKENS
-        self.input_token_count_method = 'DeepInfra preflight estimate'
+        self.input_token_count_method = f'{self.display} preflight estimate'
+
+    def _read_service_tier(self):
+        tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
+        if tier not in {'standard', 'priority'}:
+            raise AgentError('DeepInfra service tier must be standard or priority')
+        return tier
+
+    def _refusal(self, exc, deadline):
+        """How an HTTP refusal is handled: ('unavailable' | 'rate_limit' | 'fatal', hint, transient)."""
+        if exc.code in {500, 502, 503, 504}:
+            # Refused before any generation: the provider or its gateway is overloaded.
+            return 'unavailable', None, True
+        if exc.code != 429:
+            return 'fatal', HINTS.get(exc.code, 'The provider request failed; check its service status.'), False
+        hint, transient = _rate_limit(exc, deadline)
+        return 'rate_limit', hint, transient
+
+    def _stream_error(self, detail):
+        """(category, message) of an error event inside an accepted stream."""
+        return _generation_failure(detail, self.display)
 
     def _redact(self, value):
         return str(value).replace(self._api_key, '[redacted]')
@@ -492,30 +548,22 @@ class DeepInfra(OpenAICompatible):
     def _request_url(self, url, data=None, *, optional=False):
         parsed = urlsplit(url)
         origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
-        paths = {'/v1/openai/models', '/v1/openai/chat/completions', '/v1/tokenize'}
-        if (origin != self._origin or parsed.path not in paths or parsed.username or parsed.password
+        if (origin != self._origin or parsed.path not in set(self.routes) or parsed.username or parsed.password
                 or parsed.query or parsed.fragment):
-            raise AgentError('Refused to send DeepInfra credentials outside approved API endpoints')
+            raise AgentError(f'Refused to send {self.display} credentials outside approved API endpoints')
         headers = {'Content-Type': 'application/json',
                    'Accept': 'text/event-stream' if parsed.path.endswith('/chat/completions') else 'application/json'}
         # Catalog reads are public. Inference-only scoped JWTs are rejected by
         # this endpoint if supplied, although they work for generation.
-        if parsed.path != '/v1/openai/models':
+        if parsed.path not in set(self.public_routes):
             headers['Authorization'] = 'Bearer ' + self._api_key
         request = Request(url, data=None if data is None else json.dumps(data, ensure_ascii=False).encode(),
                           headers=headers)
-        hints = {400: 'Check the model request and supported parameters.',
-                 401: 'Check the API credential and its expiry.',
-                 402: 'Check available credit and the credential spending limit.',
-                 403: 'Check the credential scopes and allowed models.',
-                 404: 'The requested model or endpoint is unavailable.',
-                 405: 'This endpoint does not support the requested operation.',
-                 422: 'Check the model request and supported parameters.'}
         completion = parsed.path.endswith('/chat/completions')
         deadline = generation_deadline(self.timeout)
         timeout = deadline - time.monotonic()
         if timeout <= 0:
-            raise ModelNotDispatched('The DeepInfra request time allowance elapsed before dispatch.')
+            raise ModelNotDispatched(f'The {self.display} request time allowance elapsed before dispatch.')
         cancel = getattr(self, 'cancel', None)
         attempt, plain_errors, started, announced = 0, 0, time.monotonic(), {'at': None, 'refused': False}
         window = _generation_window.get() if completion else None
@@ -549,13 +597,13 @@ class DeepInfra(OpenAICompatible):
                     # the deadline, so routing falls back instead of pausing the turn).
                     if attempt:
                         raise DeepInfraRateLimit('The model is temporarily at capacity.', completion_rejected=completion,
-                                                 transient=True)
+                                                 transient=True, display=self.display)
                     wait = 0
                 if 0 < wait <= LONGEST_RETRY_AFTER:
                     if time.monotonic() + wait >= deadline:
                         raise ModelNotDispatched('The provider asked to wait beyond this request\'s time allowance.')
                     if wait >= 1:
-                        announce(f'DeepInfra is busy (another request was just refused); sending in {round(wait)} s '
+                        announce(f'{self.display} is busy (another request was just refused); sending in {round(wait)} s '
                                  f'(waited {round(time.monotonic() - started)} s, up to {max(1, round(patience / 60))} min).')
                     if cancel is not None and cancel.wait(wait):
                         raise _RejectedRetryCancelled(completion)
@@ -568,18 +616,16 @@ class DeepInfra(OpenAICompatible):
                 with exc:
                     if optional and exc.code in {404, 405}:
                         return None
-                    if exc.code in {500, 502, 503, 504}:
-                        # Refused before any generation: the provider or its gateway is overloaded.
-                        rejection = DeepInfraUnavailable(exc.code, completion_rejected=completion)
+                    kind, hint, transient = self._refusal(exc, deadline)
+                    if kind == 'fatal':
+                        raise AgentError(f'{self.display} HTTP {exc.code}: {hint}') from None
+                    if kind == 'unavailable':
+                        rejection = DeepInfraUnavailable(exc.code, completion_rejected=completion, display=self.display)
                         transient = True
-                        delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
-                    elif exc.code != 429:
-                        hint = hints.get(exc.code, 'The provider request failed; check its service status.')
-                        raise AgentError(f'DeepInfra HTTP {exc.code}: {hint}') from None
                     else:
-                        hint, transient = _rate_limit(exc, deadline)
-                        delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
-                        rejection = DeepInfraRateLimit(hint, completion_rejected=completion, transient=transient)
+                        rejection = DeepInfraRateLimit(hint, completion_rejected=completion, transient=transient,
+                                                       display=self.display, code=429 if exc.code == 429 else None)
+                    delay = _retry_delay(exc.headers.get('Retry-After') if exc.headers else None, attempt)
                 now = time.monotonic()
                 if completion:
                     delay = _refusal_delay(delay, exc.headers.get('Retry-After') if exc.headers else None, attempt)
@@ -594,7 +640,7 @@ class DeepInfra(OpenAICompatible):
                     give_up = bool(attempt)  # a request outside a generation window (catalog, tokenizer) retries once
                 if give_up or not transient or delay is None or now + delay >= deadline:
                     raise rejection from None
-                announce(f'DeepInfra is busy ({hint.rstrip(".").lower() if exc.code == 429 else "temporarily unavailable"}); '
+                announce(f'{self.display} is busy ({hint.rstrip(".").lower() if kind == "rate_limit" else "temporarily unavailable"}); '
                          f'trying again in {max(1, round(delay))} s (waited {round(now - started)} s, '
                          f'up to {max(1, round(patience / 60))} min).', refusal=True)
                 attempt += 1
@@ -612,12 +658,12 @@ class DeepInfra(OpenAICompatible):
                 if timeout <= 0:
                     raise rejection from None
             except (URLError, TimeoutError, OSError, HTTPException) as exc:
-                raise AgentError('Cannot reach DeepInfra: ' + self._redact(exc)) from None
+                raise AgentError(f'Cannot reach {self.display}: ' + self._redact(exc)) from None
 
     def _payload(self, payload, *, include_images=True):
-        if payload.get('model') not in SUPPORTED_MODELS:
-            raise AgentError('The DeepInfra test profile requires model ' + MODEL +
-                             ' (or ' + LEGACY_MODEL + ' for saved work)')
+        if payload.get('model') not in self.model_ids:
+            raise AgentError(f'The {self.display} test profile requires model ' + MODEL +
+                             (' (or ' + LEGACY_MODEL + ' for saved work)' if LEGACY_MODEL in self.model_ids else ''))
         refs = getattr(self, 'image_refs', [])
         if refs:
             from . import images
@@ -626,13 +672,14 @@ class DeepInfra(OpenAICompatible):
             if '_sh_bounded_title' in payload:
                 raise AgentError('A bounded conversation-title call cannot include images')
         data = super()._payload(payload)
+        data['model'] = self.model_ids[payload['model']]
         if self.service_tier == 'priority':
             data['service_tier'] = 'priority'
         data.pop('chat_template_kwargs', None)
         data.pop('thinking_token_budget', None)
         cap = data.pop('max_completion_tokens', None)
         if type(cap) is not int or not 0 < cap <= MAX_OUTPUT_TOKENS:
-            raise AgentError(f'DeepInfra needs an explicit output cap between 1 and {MAX_OUTPUT_TOKENS}')
+            raise AgentError(f'{self.display} needs an explicit output cap between 1 and {MAX_OUTPUT_TOKENS}')
         data['max_tokens'] = cap
         effort = ('none' if not payload.get('think', True) else
                   payload.get('reasoning_effort') or self.reasoning_effort)
@@ -746,7 +793,7 @@ class DeepInfra(OpenAICompatible):
             request = {'model': data['model'], 'messages': data['messages'], 'return_token_strs': False}
             cached = self._cached_token_count(request)
             if cached is not None:
-                self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate' + image_method
+                self.input_token_count_method = f'{self.display} message token count plus framing/tool/schema estimate' + image_method
                 return cached + framing + extra_allowance + image_allowance
             response = self._request_url(self.tokenize_url, request, optional=True)
             if response is not None:
@@ -757,14 +804,14 @@ class DeepInfra(OpenAICompatible):
                     if type(count) is not int or count < 0 or type(context) is not int or context <= 0:
                         raise ValueError('Invalid tokenizer count or context')
                 except (ValueError, KeyError, TypeError, OSError, HTTPException):
-                    raise AgentError('Malformed tokenizer response from DeepInfra') from None
+                    raise AgentError(f'Malformed tokenizer response from {self.display}') from None
                 self._tokenize_supported = True
                 self.observed_context_tokens = min(context, CONTEXT_TOKENS)
                 self._remember_token_count(request, count)
-                self.input_token_count_method = 'DeepInfra message token count plus framing/tool/schema estimate' + image_method
+                self.input_token_count_method = f'{self.display} message token count plus framing/tool/schema estimate' + image_method
                 return count + framing + extra_allowance + image_allowance
             self._tokenize_supported = False
-        self.input_token_count_method = 'DeepInfra UTF-8 byte and framing estimate (tokenizer unavailable)' + image_method
+        self.input_token_count_method = f'{self.display} UTF-8 byte and framing estimate (tokenizer unavailable)' + image_method
         return self._bytes(data['messages']) + framing + extra_allowance + image_allowance
 
     def _stream_deadline(self):
@@ -775,17 +822,17 @@ class DeepInfra(OpenAICompatible):
             return exc
         if isinstance(exc, SilentStreamStart):
             window = _generation_window.get()
-            return DeepInfraSilentStart(progress, retry_spent=bool(window and window.retry_spent))
+            return DeepInfraSilentStart(progress, retry_spent=bool(window and window.retry_spent), display=self.display)
         if isinstance(exc, ProviderStreamError):
-            category, message = _generation_failure(exc.detail)
+            category, message = self._stream_error(exc.detail)
         elif isinstance(exc, StalledStream):
             message = str(exc)
         elif category == 'interrupted':
-            message = 'The DeepInfra connection ended before the completion stream finished.'
+            message = f'The {self.display} connection ended before the completion stream finished.'
         elif str(exc) == 'Model stream ended without finish reason and token usage':
             message = str(exc)
         else:
-            message = 'DeepInfra returned an invalid completion stream.'
+            message = f'{self.display} returned an invalid completion stream.'
         window = _generation_window.get()
         return DeepInfraGenerationError(message, category=category, stream_progress=progress, stats=final_usage,
                                         confirmed_terminal=isinstance(exc, ProviderStreamError), output_started=output_started,

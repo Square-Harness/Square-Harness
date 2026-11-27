@@ -30,7 +30,8 @@ from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllo
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
 from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
-from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget
+from ..openrouter import OpenRouter
+from ..model_limits import MODEL_OUTPUT_TOKENS, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4
 from ..ledger import LedgerError, ProofStore
 from ..literature import LiteratureTools
 from ..proof import TERMINAL as PROOF_TERMINAL, ProofRunner, budget_stop, unsettled_interrupts
@@ -263,7 +264,7 @@ class Interruptible:
         if self.pool is None or getattr(self._admitted, 'active', False):
             yield
             return
-        if getattr(self, 'profile', None) == 'deepinfra' and deadline is not None:
+        if getattr(self, 'profile', None) in HOSTED_DS4 and deadline is not None:
             deadline = min(deadline, generation_deadline(self.timeout))
         with self.pool.slot(self.owner, self.cancel, deadline=deadline):
             previous_timeout = self.timeout
@@ -336,7 +337,7 @@ class Interruptible:
                         raise MeasuredStreamCancellation(terminal_usage)
                     raise KeyboardInterrupt
                 if state['expired']:
-                    if terminal_usage and getattr(self, 'profile', None) == 'deepinfra':
+                    if terminal_usage and getattr(self, 'profile', None) in HOSTED_DS4:
                         raise DeepInfraGenerationError('The model stream reached its time limit.', category='deadline', stats=terminal_usage)
                     raise AgentError('Model stream exceeded its elapsed-time guard')
                 yield event
@@ -383,6 +384,10 @@ class InterruptibleMLX(Interruptible, MLX):
 
 
 class InterruptibleDeepInfra(Interruptible, DeepInfra):
+    pass
+
+
+class InterruptibleOpenRouter(Interruptible, OpenRouter):
     pass
 
 
@@ -1276,10 +1281,10 @@ class Hub:
         if args.backend == 'openai':
             profile = resolve_api_profile(getattr(args, 'api_profile', None))
             client_class = {'default': InterruptibleOpenAI, 'mlx': InterruptibleMLX,
-                            'deepinfra': InterruptibleDeepInfra}[profile]
+                            'deepinfra': InterruptibleDeepInfra, 'openrouter': InterruptibleOpenRouter}[profile]
         client = client_class(args.host, task.cancel, timeout=args.request_timeout,
                               pool=self.inference, owner=task.id)
-        if isinstance(client, InterruptibleDeepInfra) and task.kind != 'title':
+        if isinstance(client, DeepInfra) and task.kind != 'title':
             def update_wait(waiting):
                 with self.bus._cond:
                     task.waiting_model_calls += 1 if waiting else -1
@@ -1402,11 +1407,11 @@ class Hub:
         solve = args.proof_solve_tokens if solve_tokens is None else solve_tokens
         verify = args.proof_verify_tokens if verify_tokens is None else verify_tokens
         repair = args.proof_repair_tokens
-        if getattr(args, 'api_profile', None) == 'deepinfra':
+        if getattr(args, 'api_profile', None) in HOSTED_DS4:
             repair = min(solve, repair or solve)
         # Proof allocates its own output from the actual prompt and context.
         # A DS4 context override is independent of the ordinary-chat ceiling.
-        _check_ctx(ctx, None if getattr(args, 'api_profile', None) == 'deepinfra' else args.predict)
+        _check_ctx(ctx, None if getattr(args, 'api_profile', None) in HOSTED_DS4 else args.predict)
         _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx, explicit_ctx=ctx)
         image_refs, _ = self._capture_images(source_files, {}, explicit=source_files)
         job_id = str(uuid.uuid4())  # known at once, so a queued proof can be followed by its id
@@ -1510,7 +1515,7 @@ class Hub:
     def review_concurrency(self):
         """Independent review calls run together only on a server that batches requests (vLLM); the
         shared inference pool still admits them within the interface's model-request limit."""
-        limit = MAX_CAPACITY if getattr(self.args, 'api_profile', None) == 'deepinfra' else 4
+        limit = MAX_CAPACITY if getattr(self.args, 'api_profile', None) in HOSTED_DS4 else 4
         return min(limit, self.inference.capacity) if self.args.backend == 'openai' else 1
 
     def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None,
@@ -2410,10 +2415,10 @@ def _check_ctx(ctx, predict):
 
 def _check_proof(args, *, tokens, solve, verify, ctx, explicit_ctx=None):
     """The terminal's checks for a new proof, made before the job exists."""
-    if getattr(args, 'api_profile', None) == 'deepinfra' and max(solve, verify) > MODEL_OUTPUT_TOKENS:
+    if getattr(args, 'api_profile', None) in HOSTED_DS4 and max(solve, verify) > MODEL_OUTPUT_TOKENS:
         raise ValueError(f'DeepInfra DS4 solve and review ceilings cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     cap = getattr(args, 'specialist_output_tokens', None)
-    if explicit_ctx is not None and getattr(args, 'api_profile', None) == 'deepinfra':
+    if explicit_ctx is not None and getattr(args, 'api_profile', None) in HOSTED_DS4:
         # DS4 calls need their whole output allowance beside the statement; a smaller context only fails later.
         needed = max(min(solve, cap or solve), min(verify, cap or verify)) + 2048
         if explicit_ctx < needed:
@@ -2424,7 +2429,7 @@ def _check_proof(args, *, tokens, solve, verify, ctx, explicit_ctx=None):
     if tokens is not None and tokens < required:
         raise ValueError(f'The token budget must cover one full solve and its review: at least {required} tokens')
     repair = args.proof_repair_tokens
-    if getattr(args, 'api_profile', None) == 'deepinfra':
+    if getattr(args, 'api_profile', None) in HOSTED_DS4:
         repair = min(solve, repair or solve)
     if repair is not None and repair > solve:
         raise ValueError(f'The launch repair allowance (--proof-repair-tokens {repair}) exceeds the solve ceiling of {solve}')

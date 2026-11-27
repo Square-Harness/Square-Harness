@@ -78,8 +78,8 @@ export function ModelWaitNote({ taskId }: { taskId?: string }) {
   const waiting = taskById(snapshot, taskId)?.task.waiting_model_calls || 0
   if (!waiting) return null
   return <p className="muted small" role="status">{waiting === 1
-    ? 'DeepInfra accepted the request. Waiting for its first output.'
-    : `DeepInfra accepted ${waiting} requests that are still waiting for their first output.`}</p>
+    ? 'The model provider accepted the request. Waiting for its first output.'
+    : `The model provider accepted ${waiting} requests that are still waiting for their first output.`}</p>
 }
 
 export function WorkProgressNote({ progress, status, running = false, pipeline, taskId }: { progress?: WorkProgress | null; status: string; running?: boolean; pipeline?: string | null; taskId?: string }) {

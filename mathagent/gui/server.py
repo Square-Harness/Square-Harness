@@ -40,6 +40,7 @@ from ..agent import AgentError
 from ..mode_calls import validated_mode_call
 from ..ledger import _directory
 from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
+from ..model_limits import HOSTED_DS4
 from .. import images
 from . import effort, personalization, projects, store
 from .hub import Busy, Hub
@@ -271,8 +272,8 @@ def status(h, body):
            'concurrency': hub.limits(),
            'defaults': {'ctx': args.ctx, 'predict': args.predict, 'think': not args.no_think,
                         'api_profile': api_profile,
-                        'budget_profile': PROFILE if api_profile == 'deepinfra' else 'default',
-                        'effort_presets': effort_presets(args) if api_profile == 'deepinfra' else None,
+                        'budget_profile': PROFILE if api_profile in HOSTED_DS4 else 'default',
+                        'effort_presets': effort_presets(args) if api_profile in HOSTED_DS4 else None,
                         'literature_presets': {'high': effort.limits('literature', 'high', args)},
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,

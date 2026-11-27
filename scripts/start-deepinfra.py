@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Start the isolated GUI with DS4/DeepInfra or the existing local Qwen server."""
+"""Start the isolated GUI with DS4 (on DeepInfra or OpenRouter) or the existing local Qwen server."""
 import argparse
 import math
 import os
@@ -14,15 +14,20 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / '.local' / 'deepinfra'
+RUNTIME = ROOT / '.local' / 'deepinfra'  # workspace, logs and pid of the DS4 GUI, whichever provider serves it
+# DS4 providers: the --api-profile, the key file the launcher passes, and the key's setup script.
+PROVIDERS = {'deepinfra': ('DEEPINFRA_API_KEY_FILE', ROOT / '.local' / 'deepinfra' / 'credential', 'scripts/setup-deepinfra.py'),
+             'openrouter': ('OPENROUTER_API_KEY_FILE', ROOT / '.local' / 'openrouter' / 'credential', 'scripts/setup-openrouter.py')}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', choices=('ds4', 'qwen'), default='ds4',
                         help='Model and budget setup (default: ds4)')
+    parser.add_argument('--provider', choices=tuple(PROVIDERS), default='deepinfra',
+                        help='Who serves DS4 (default: deepinfra); openrouter routes it among zero-retention providers')
     parser.add_argument('--service-tier', choices=('standard', 'priority'),
-                        help='DS4 API scheduling and pricing tier (default: standard)')
+                        help='DeepInfra API scheduling and pricing tier (default: standard)')
     parser.add_argument('--port', type=int, help='GUI port (default: 8780 for DS4, 8781 for Qwen)')
     parser.add_argument('--host', help='Qwen model server URL (default: http://127.0.0.1:18020)')
     parser.add_argument('--model', help='Qwen served model ID (default: qwen3.8-27b)')
@@ -38,11 +43,13 @@ def main():
     ds4 = options.profile == 'ds4'
     if not ds4 and options.service_tier is not None:
         parser.error('--service-tier requires the DS4 profile')
+    if options.service_tier is not None and options.provider != 'deepinfra':
+        parser.error('--service-tier is a DeepInfra setting; OpenRouter always uses its standard tier')
     options.port = options.port if options.port is not None else (8780 if ds4 else 8781)
     if not 1024 <= options.port <= 65535:
         parser.error('choose a port between 1024 and 65535')
     if ds4 and (options.host is not None or options.model is not None):
-        parser.error('--host and --model select the existing Qwen server; DS4 uses the pinned DeepInfra model')
+        parser.error('--host and --model select the existing Qwen server; DS4 uses the pinned DS4.1 Flash model')
     if options.proof_call_seconds is not None and (not ds4 or not math.isfinite(options.proof_call_seconds)
                                                   or options.proof_call_seconds <= 0):
         parser.error('--proof-call-seconds requires the DS4 profile and a finite positive value')
@@ -50,9 +57,9 @@ def main():
         parser.error('--ctx must be at least 2048')
     os.umask(0o077)
     runtime = RUNTIME if ds4 else ROOT / '.local' / 'qwen-test'
-    credential = RUNTIME / 'credential'
+    key_env, credential, setup = PROVIDERS[options.provider]
     if ds4 and not credential.is_file():
-        parser.error('run python3 scripts/setup-deepinfra.py first; never paste the key into a command')
+        parser.error(f'run python3 {setup} first; never paste the key into a command')
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -64,11 +71,11 @@ def main():
     workspace.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(ROOT)
-    for name in ('DEEPINFRA_API_KEY', 'DEEPINFRA_API_KEY_FILE', 'DEEPINFRA_ALLOW_LOOPBACK',
-                 'SH_DEEPINFRA_SERVICE_TIER'):
+    for name in ('DEEPINFRA_API_KEY', 'DEEPINFRA_API_KEY_FILE', 'DEEPINFRA_ALLOW_LOOPBACK', 'SH_DEEPINFRA_SERVICE_TIER',
+                 'OPENROUTER_API_KEY', 'OPENROUTER_API_KEY_FILE', 'OPENROUTER_ALLOW_LOOPBACK'):
         environment.pop(name, None)
     if ds4:
-        environment['DEEPINFRA_API_KEY_FILE'] = str(credential)
+        environment[key_env] = str(credential)
         environment['SH_DEEPINFRA_SERVICE_TIER'] = options.service_tier or 'standard'
         for name in ('SQUARE_OPENAI_THINKING_FRACTION', 'SQUARE_OPENAI_STRUCTURED_THINKING_FRACTION'):
             environment.pop(name, None)
@@ -87,7 +94,7 @@ def main():
     command = [sys.executable, '-m', 'mathagent', '--gui', '--no-browser',
                '--gui-host', '127.0.0.1', '--gui-port', str(options.port),
                '--workspace', str(workspace), '--backend', 'openai',
-               '--api-profile', 'deepinfra' if ds4 else 'default', '--online' if options.online else '--offline',
+               '--api-profile', options.provider if ds4 else 'default', '--online' if options.online else '--offline',
                '--gui-concurrency', '5' if ds4 else '1',
                '--gui-model-concurrency', '5' if ds4 else '1',
                '--assistant-concurrency', '5' if ds4 else '1']
@@ -130,8 +137,11 @@ def main():
         webbrowser.open(url)
     print(f'Square Harness is running at http://127.0.0.1:{options.port}/ (PID {process.pid}).')
     print('Model: ' + model + '; web research is ' + ('on.' if options.online else 'off.'))
-    if ds4:
+    if ds4 and options.provider == 'deepinfra':
         print('DeepInfra service tier: ' + environment['SH_DEEPINFRA_SERVICE_TIER'])
+    elif ds4:
+        print('Served through OpenRouter (zero data retention, fp8; providers: '
+              + (os.environ.get('SH_OPENROUTER_PROVIDERS') or 'deepinfra,cohere,parasail,coreweave,crusoe') + ').')
     print('Private workspace: ' + str(workspace))
     print('The authenticated Open address is in the private GUI log: ' + str(log))
     return 0

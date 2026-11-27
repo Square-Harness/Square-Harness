@@ -111,9 +111,24 @@ def effort_presets(args):
     return presets
 
 
+# The hosted API profiles that serve DS4.1 Flash with the robust transport (mathagent.deepinfra.DeepInfra and its
+# subclasses): every DS4 limit, preset and hosted behaviour keys on this set, never on one provider's name.
+HOSTED_DS4 = frozenset({'deepinfra', 'openrouter'})
+
+
+def hosted_profile(profile):
+    """Whether an --api-profile name is a hosted DS4 profile."""
+    return profile in HOSTED_DS4
+
+
+def ds4_args(args):
+    """Whether the launch arguments select a hosted DS4 profile."""
+    return getattr(args, 'api_profile', None) in HOSTED_DS4
+
+
 def is_ds4(subject):
     client = getattr(subject, 'client', subject)
-    return getattr(client, 'profile', 'default') == 'deepinfra'
+    return getattr(client, 'profile', 'default') in HOSTED_DS4
 
 
 def substantive_output(subject, fallback):
@@ -134,7 +149,7 @@ def sampling(subject, fallback):
 
 def apply_defaults(args, arguments):
     """Apply only to flags the user omitted; manual allowances are authoritative."""
-    if getattr(args, 'api_profile', None) != 'deepinfra':
+    if not ds4_args(args):
         return
     explicit = {value.split('=', 1)[0] for value in arguments if value.startswith('--')}
     for name, value in DEFAULTS.items():

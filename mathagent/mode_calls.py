@@ -22,6 +22,7 @@ from .source_tasks import (access_check_source, automatic_source_action, exclude
                            _source_lines)
 from .refcheck import standalone_reference_request
 from .writeup import ATTACHED_REQUEST, SUMMARY_REQUEST
+from .model_limits import HOSTED_DS4
 
 # Seconds the routing call waits for a busy provider before the message is answered directly.
 ROUTING_PATIENCE = 20
@@ -820,7 +821,7 @@ class ModeOrchestrator(Orchestrator):
                     'function': {'name': 'read_file', 'arguments': {'path': source, 'start_line': 1, 'end_line': 40}}}]})
                 return
             action = automatic_source_action(query, files) or automatic_reference_action(query, files, history)
-            if action and getattr(self.agent.client, 'profile', 'default') == 'deepinfra':
+            if action and getattr(self.agent.client, 'profile', 'default') in HOSTED_DS4:
                 # A source/reference match may describe only one clause. Ask the normal
                 # whole-turn router whether it covers every requested deliverable.
                 self.state['suggested_specialist'] = action
@@ -875,7 +876,7 @@ class ModeOrchestrator(Orchestrator):
             allow_tools = True
         super()._complete_pending(allow_tools=allow_tools)
         state = self.state
-        if (getattr(self.agent.client, 'profile', 'default') != 'deepinfra'
+        if (getattr(self.agent.client, 'profile', 'default') not in HOSTED_DS4
                 or self.required_mode is not None or state.get('required_mode')
                 or state.get('automatic_source_mode') or state.get('children')):
             return

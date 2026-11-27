@@ -36,7 +36,7 @@ from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
 from .tools import decode_text
 from .reporting import usage_footer
-from .model_limits import input_limit, is_ds4, output_limit, substantive_output
+from .model_limits import input_limit, is_ds4, output_limit, substantive_output, HOSTED_DS4
 from .deepinfra import DeepInfraGenerationError, retry_generation_call
 from .source_tasks import _instruction_text
 from .typocheck import TypoLanes
@@ -378,7 +378,7 @@ class ReviewBase(ResearchRunner):
 
     def __init__(self, agent, emit=lambda kind, value: None, concurrency=1):
         super().__init__(agent, emit)
-        concurrency_limit = 16 if getattr(agent.client, 'profile', 'default') == 'deepinfra' else 4
+        concurrency_limit = 16 if getattr(agent.client, 'profile', 'default') in HOSTED_DS4 else 4
         self.concurrency = max(1, min(concurrency_limit, int(concurrency)))
         self._mutex = threading.RLock()
         self._lines_cache = {}
@@ -627,7 +627,7 @@ class ReviewBase(ResearchRunner):
                 result = self._ask(role, prompt, cap=cap, schema=schema, key=key, think=True)
             except AgentError as exc:
                 if (isinstance(exc, (ResearchBudget, TokenBudgetError, DeepInfraGenerationError))
-                        or getattr(self.agent.client, 'profile', None) == 'deepinfra'):
+                        or getattr(self.agent.client, 'profile', None) in HOSTED_DS4):
                     raise
                 # Some servers fail on thinking plus structured output for a given input (vLLM answered 500).
                 self._warn(f'The model server failed on a {role} call with thinking ({str(exc)[:120]}); it was asked again without thinking.')

@@ -454,7 +454,13 @@ class OpenAICompatible:
                         delta = choice.get('delta') or {}
                         if not isinstance(delta, dict):
                             raise AgentError('Malformed streamed completion delta')
-                        if finish is not None and delta:
+                        # A provider that repeats an empty finish frame to carry the usage (OpenRouter) is accepted
+                        # only when the class says so; any output after the finish is still refused.
+                        repeat = (getattr(self, 'tolerate_repeated_finish', False) and finish is not None
+                                  and not any(delta.get(key) for key in
+                                              ('content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call'))
+                                  and choice.get('finish_reason') in (None, finish))
+                        if finish is not None and delta and not repeat:
                             final_usage = None
                             raise AgentError('Model output received after finish reason')
                         message = {}
@@ -498,7 +504,8 @@ class OpenAICompatible:
                                 if reported:
                                     final_usage = reported
                                 raise ProviderStreamError(choice.get('error') or {})
-                            if finish is not None or reason not in {'stop', 'length', 'tool_calls'}:
+                            if (reason not in {'stop', 'length', 'tool_calls'}
+                                    or finish is not None and not (repeat and reason == finish)):
                                 raise AgentError(f'Unsupported or repeated model finish reason: {reason}')
                             finish = reason
                     if finish is not None and reported:

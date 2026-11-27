@@ -15,9 +15,9 @@ from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
-from .api_profiles import create_profile_client, resolve_api_profile
+from .api_profiles import API_PROFILES, create_profile_client, profile_class, resolve_api_profile
 from .format_request import markdown_conversion_request
-from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults
+from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
 from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import PythonSandbox, SandboxUnavailable
 from .numerics.session import MIN_AUTOMATIC_CONTEXT
@@ -163,8 +163,9 @@ def parser():
     p.add_argument('--version', action='version', version='Square Harness ' + __version__)
     p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
                    help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
-    p.add_argument('--api-profile', choices=('default', 'mlx', 'deepinfra'), default=None,
-                   help='OpenAI API dialect: default (vLLM), mlx or deepinfra; overrides SQUARE_OPENAI_PROFILE')
+    p.add_argument('--api-profile', choices=API_PROFILES, default=None,
+                   help='OpenAI API dialect: default (vLLM), mlx, or a hosted DS4 provider (deepinfra, openrouter); '
+                        'overrides SQUARE_OPENAI_PROFILE')
     p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
@@ -185,15 +186,15 @@ def parser():
     p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort and model profile)')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, help='Optional cumulative generated-token ceiling, including thinking and verification '
-                   '(default: no cumulative ceiling; DeepInfra DS4 profile: proof-rounds x (solve + 2 x verify) tokens)')
+                   '(default: no cumulative ceiling; hosted DS4 profiles: proof-rounds x (solve + 2 x verify) tokens)')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof '
-                   '(default: 1800; DeepInfra DS4 profile: 3 x proof-rounds x --proof-call-seconds)')
+                   '(default: 1800; hosted DS4 profiles: 3 x proof-rounds x --proof-call-seconds)')
     p.add_argument('--proof-call-seconds', type=float, default=10800,
                    help='DS4 per-call working-time allowance; new Proof totals allow three calls per solver pass (default: 10800)')
     p.add_argument('--proof-solve-tokens', type=int, default=32768,
-                   help=f'Output ceiling for each full solve or revision, including thinking (default: 32768; DeepInfra DS4 profile: {MODEL_OUTPUT_TOKENS})')
+                   help=f'Output ceiling for each full solve or revision, including thinking (default: 32768; hosted DS4 profiles: {MODEL_OUTPUT_TOKENS})')
     p.add_argument('--proof-verify-tokens', type=int, default=16384,
-                   help=f'Output ceiling for each whole-proof review, including thinking (default: 16384; DeepInfra DS4 profile: {MODEL_OUTPUT_TOKENS})')
+                   help=f'Output ceiling for each whole-proof review, including thinking (default: 16384; hosted DS4 profiles: {MODEL_OUTPUT_TOKENS})')
     p.add_argument('--proof-repair-tokens', type=int, default=None,
                    help='Output ceiling for each repair/later attempt, including thinking (default: solve tokens)')
     p.add_argument('--proof-min-solve-tokens', type=int, default=None,
@@ -283,8 +284,8 @@ def main():
         p.error(str(exc))
     if args.api_profile != 'default' and args.backend != 'openai':
         p.error('A non-default --api-profile requires --backend openai')
-    remote_profile = args.backend == 'openai' and args.api_profile == 'deepinfra'
-    args.host = args.host or ('https://api.deepinfra.com/v1/openai' if remote_profile else
+    remote_profile = args.backend == 'openai' and hosted_profile(args.api_profile)
+    args.host = args.host or (profile_class(args.api_profile).default_base_url() if remote_profile else
                               'http://localhost:11434' if args.backend == 'ollama' else 'http://localhost:8000')
     # The interface names a model nobody configured only once it answers (see the sidebar footer).
     args.model_default = args.model is None and not remote_profile
@@ -318,7 +319,7 @@ def main():
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
         p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
     if remote_profile and max(args.predict, args.proof_solve_tokens, args.proof_verify_tokens) > MODEL_OUTPUT_TOKENS:
-        p.error(f'DeepInfra DS4 chat, solve and verify limits cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
+        p.error(f'DS4 chat, solve and verify limits cannot exceed {MODEL_OUTPUT_TOKENS} output tokens')
     if args.proof_repair_tokens is not None and not 128 <= args.proof_repair_tokens <= args.proof_solve_tokens:
         p.error('--proof-repair-tokens must be between 128 and --proof-solve-tokens')
     if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= (args.proof_repair_tokens or args.proof_solve_tokens):

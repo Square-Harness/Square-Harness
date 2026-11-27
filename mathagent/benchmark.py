@@ -19,10 +19,10 @@ import threading
 
 from .agent import Agent, AgentError
 from .backends import create_client, TokenBudgetError, openai_thinking_budget_policy
-from .api_profiles import create_profile_client
+from .api_profiles import create_profile_client, profile_class
 from .deepinfra import (BASE_URL as DEEPINFRA_URL, MODEL as DEEPINFRA_MODEL,
                         CONTEXT_TOKENS as DEEPINFRA_CONTEXT, MAX_OUTPUT_TOKENS as DEEPINFRA_OUTPUT)
-from .model_limits import DEFAULTS as DS4_DEFAULTS
+from .model_limits import DEFAULTS as DS4_DEFAULTS, HOSTED_DS4
 from .proof import ProofRunner, ProofContext, check_context
 from .proof_policy import COMMON_INSTRUCTION, initial_request
 from .tools import Workspace
@@ -88,8 +88,8 @@ def parser():
     p.add_argument('--output', type=Path)
     p.add_argument('--init-smoke', type=Path, help='Create an external dataset with two synthetic toy statements')
     p.add_argument('--backend', choices=('openai', 'ollama', 'llamacpp'), default='openai')
-    p.add_argument('--api-profile', choices=('default', 'deepinfra'), default='default')
-    p.add_argument('--allow-remote-model', action='store_true', help='Explicitly allow hosted DeepInfra inference')
+    p.add_argument('--api-profile', choices=('default', *sorted(HOSTED_DS4)), default='default')
+    p.add_argument('--allow-remote-model', action='store_true', help='Explicitly allow hosted inference (deepinfra, openrouter)')
     p.add_argument('--host', default='http://127.0.0.1:8000')
     p.add_argument('--model', default='square-qwen')
     p.add_argument('--model-revision', default='unrecorded', help='Immutable weights revision for provenance')
@@ -135,16 +135,19 @@ def backend_settings(args):
     profile = getattr(args, 'api_profile', 'default')
     settings = {'api_profile': profile, 'backend': args.backend,
                 'host': args.host.rstrip('/'), 'model': args.model}
-    if profile == 'deepinfra':
+    if profile in HOSTED_DS4:
         effort = os.environ.get('SH_DEEPINFRA_REASONING_EFFORT', 'high')
-        tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard')
+        tier = os.environ.get('SH_DEEPINFRA_SERVICE_TIER', 'standard') if profile == 'deepinfra' else 'standard'
         if effort not in {'none', 'low', 'high', 'max'}:
             raise ValueError('DeepSeek reasoning effort must be none, low, high or max')
         if tier not in {'standard', 'priority'}:
             raise ValueError('DeepInfra service tier must be standard or priority')
         settings.update(reasoning_effort=effort, service_tier=tier)
         if openai_thinking_budget_policy():
-            raise ValueError('DeepInfra does not support vLLM thinking-budget fractions')
+            raise ValueError('Hosted DS4 profiles do not support vLLM thinking-budget fractions')
+        if profile == 'openrouter':
+            from .openrouter import routing
+            settings['provider_routing'] = routing()
     return settings
 
 
@@ -154,14 +157,14 @@ def preflight(args):
     host = urlparse(args.host)
     if host.scheme not in {'http', 'https'} or not host.hostname or host.username is not None or host.query or host.fragment:
         raise ValueError('Host must be an http(s) URL without credentials, query or fragment')
-    if getattr(args, 'api_profile', 'default') == 'deepinfra':
+    if getattr(args, 'api_profile', 'default') in HOSTED_DS4:
         if args.backend != 'openai' or not args.allow_remote_model:
-            raise ValueError('DeepInfra requires --backend openai and explicit --allow-remote-model')
+            raise ValueError('Hosted DS4 profiles require --backend openai and explicit --allow-remote-model')
         if args.model != DEEPINFRA_MODEL:
             raise ValueError('Use the pinned DeepSeek V4.1 Flash 1017 model for this profile')
         if args.ctx > DEEPINFRA_CONTEXT or max(args.predict, args.verify_tokens,
                 args.repair_tokens or args.predict) > DEEPINFRA_OUTPUT:
-            raise ValueError('DeepInfra supports at most 1048576 context and 384000 output tokens per call')
+            raise ValueError('Hosted DS4 supports at most 1048576 context and 384000 output tokens per call')
     data = load_manifest(args.manifest)
     output = args.output.resolve()
     if output.exists():
@@ -221,7 +224,7 @@ def preflight(args):
             'common_instruction': COMMON_INSTRUCTION, 'code_sha256': code, 'checkout': checkout,
             'provenance_warning': ((
                 'Hosted model ID is recorded, but immutable weights/serving revisions are provider-managed and not independently verified.'
-                if serving['api_profile'] == 'deepinfra' else
+                if serving['api_profile'] in HOSTED_DS4 else
                 'Checkpoint/server provenance is incomplete; suitable for software smoke tests only.')
                 if 'unrecorded' in {args.model_revision, args.server_image, args.dtype} else None),
             'output': str(output), 'jobs': len(data['problems']) * args.replicates * len(args.arms),
@@ -601,10 +604,10 @@ def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
     try:
-        if args.api_profile == 'deepinfra':
+        if args.api_profile in HOSTED_DS4:
             arguments = sys.argv[1:] if argv is None else argv
             explicit = {value.split('=', 1)[0] for value in arguments if value.startswith('--')}
-            defaults = {'host': DEEPINFRA_URL, 'model': DEEPINFRA_MODEL,
+            defaults = {'host': profile_class(args.api_profile).default_base_url(), 'model': DEEPINFRA_MODEL,
                         'ctx': DS4_DEFAULTS['ctx'], 'predict': DS4_DEFAULTS['proof_solve_tokens'],
                         'verify_tokens': DS4_DEFAULTS['proof_verify_tokens'],
                         'temperature': DS4_DEFAULTS['temperature'],

@@ -26,7 +26,7 @@ from .call_policy import (CONTEXT_MARGIN, CallContextError, allocate_call, count
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
 from .ledger import LedgerError, ProofStore
-from .model_limits import is_ds4
+from .model_limits import is_ds4, HOSTED_DS4
 from .proof_policy import (
     CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
     VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, initial_request, review_request,
@@ -300,9 +300,13 @@ class ProofRunner:
         profile = getattr(self.agent.client, 'profile', 'default')
         if profile != 'default':
             value['api_profile'] = profile
-            module = 'deepinfra.py' if profile == 'deepinfra' else 'api_profiles.py'
-            value['profile_transport_sha256'] = hashlib.sha256(Path(__file__).with_name(module).read_bytes()).hexdigest()
-        if profile == 'deepinfra':
+            # The hosted transport (deepinfra.py), plus the provider's own module for another hosted profile.
+            modules = {'deepinfra': ('deepinfra.py',), 'openrouter': ('deepinfra.py', 'openrouter.py')}.get(profile, ('api_profiles.py',))
+            value['profile_transport_sha256'] = hashlib.sha256(b''.join(Path(__file__).with_name(m).read_bytes()
+                                                                         for m in modules)).hexdigest()
+            if getattr(self.agent.client, 'routing', None) is not None:
+                value['provider_routing'] = copy.deepcopy(self.agent.client.routing)
+        if profile in HOSTED_DS4:
             value['reasoning_effort'] = self.agent.client.reasoning_effort
             value['model_limits_sha256'] = hashlib.sha256(Path(__file__).with_name('model_limits.py').read_bytes()).hexdigest()
         return value
@@ -479,7 +483,7 @@ class ProofRunner:
         images.restore(self.agent, self.state)
         if hasattr(self.agent.client, 'thinking_budget_policy'):
             self.agent.client.thinking_budget_policy = copy.deepcopy(saved['thinking_budget_policy'])
-        if saved.get('api_profile') == 'deepinfra':
+        if saved.get('api_profile') in HOSTED_DS4:
             self.agent.client.reasoning_effort = saved['reasoning_effort']
         # Source hashes record provenance, not a compatibility contract. Only a
         # deliberate execution-policy change invalidates an unfinished proof.
