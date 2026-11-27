@@ -14,6 +14,7 @@ import { useRoute, type Route } from './router'
 import { dismissFolderNotice, useApp } from './store'
 import { CloseIcon } from './components/Icons'
 import { AboutView } from './views/AboutView'
+import { FileView } from './views/FileView'
 import { ChatView } from './views/ChatView'
 import { ProofNew } from './views/ProofNew'
 import { ProofView } from './views/ProofView'
@@ -25,6 +26,7 @@ import { StyleNew, StyleView } from './views/Style'
 
 function View({ route }: { route: Route }) {
   if (route.mode === 'about') return <AboutView />
+  if (route.mode === 'file') return <FileView key={route.path || ''} path={route.path || null} />
   const info = MODES[route.mode]
   if (info.kind === 'proof') return route.id ? <ProofView key={route.id} id={route.id} tab={route.tab} /> : <ProofNew />
   if (info.kind === 'chat' || info.kind === 'free') {

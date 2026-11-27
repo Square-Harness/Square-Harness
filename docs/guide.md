@@ -459,7 +459,17 @@ one with a message.
   manager: double-click a folder (or press Enter) to open it, go back with **Up**,
   Backspace or the folder path; click a file to select it, Ctrl-click (⌘ on a
   Mac) to add or remove one, Shift-click to select a range; sort by name, size or
-  date; the search box searches every folder. Text files are best saved as UTF-8; older files in Latin-1 or
+  date; the search box searches every folder. Double-click a file to attach it to
+  your next message. To read a file, point at it and click **View file**, or
+  double-click a file attached above the text box or in a message: it opens in a
+  new tab, a PDF in the browser's PDF viewer, Markdown rendered with its
+  mathematics, an image as is, other text files (TeX, BibTeX, code, data) as
+  text. Archives and other files are marked as not supported, and text files over
+  4 MB are not shown. Markdown and text files can be edited there: click in the
+  text (on a Markdown page, click the rendered text or **Edit**), type, then
+  **Save** or Ctrl+S (⌘S on a Mac). The file keeps its encoding. If the file
+  changed on disk after you opened it (the model edited it, for example), it is
+  not overwritten: reload it, or copy your text first. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
   with a byte-order mark (as some Windows editors save them) are accepted and
@@ -563,7 +573,9 @@ limit, the agent shows the failure and its partial text remains readable.
   mathematical notation. Open **Time and usage** for the resource figures.
 
 On a wide screen the notebook opens beside the conversation. Drag its divider
-or focus the divider and use the arrow keys to resize it. On a smaller screen
+or focus the divider and use the arrow keys to resize it (End widens it fully).
+It can cover up to 65% of the window; the conversation narrows to make room and
+switches to compact margins and controls. On a smaller screen
 the panel overlays the page. On a phone it fills the screen. Close it with
 Escape or its close button. The URL identifies the tab and selected item, so
 you can reload or share a link within the same authorized workspace.

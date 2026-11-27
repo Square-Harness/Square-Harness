@@ -11,12 +11,15 @@ const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 export const WORK_TABS = ['agents', 'outputs', 'record', 'plan'] as const
 export type WorkTab = typeof WORK_TABS[number]
 export type WorkSelection = { tab: WorkTab; selected: string | null }
-export type Route = { mode: Mode | 'about'; id: string | null; tab: string | null; from: string | null; panel?: WorkSelection }
+export type Route = { mode: Mode | 'about' | 'file'; id: string | null; tab: string | null; from: string | null; panel?: WorkSelection
+  /** The file the viewer shows (#/file?path=…), relative to the interface root. */
+  path?: string | null }
 
 export function parse(hash: string): Route {
   const [path, search = ''] = hash.replace(/^#\/?/, '').split('?')
   const [first, second, third] = path.split('/')
   if (first === 'about') return { mode: 'about', id: null, tab: null, from: null }
+  if (first === 'file') return { mode: 'file', id: null, tab: null, from: null, path: new URLSearchParams(search).get('path') }
   const requestedMode = (MODE_ORDER as string[]).includes(first) ? (first as Mode) : 'free'
   const id = second && UUID.test(second) ? second : null
   // Other notebooks open from conversations, cards and links; the Style page is opened directly.
@@ -79,5 +82,15 @@ export function go(mode: Mode, id?: string | null, tab?: string | null, from?: s
 
 /** Older chats and About share the conversation sidebar. */
 export function notebook(mode: Route['mode']): Mode {
-  return mode === 'critic' || mode === 'explore' || mode === 'about' ? 'free' : mode
+  return mode === 'critic' || mode === 'explore' || mode === 'about' || mode === 'file' ? 'free' : mode
+}
+
+/** The viewer page of a file, by its path relative to the interface root. */
+export function fileHref(path: string) {
+  return '#/file?' + new URLSearchParams({ path }).toString()
+}
+
+/** Open a file in the viewer, in a new tab: the conversation stays where it was. */
+export function openFile(path: string) {
+  window.open(window.location.pathname + window.location.search + fileHref(path), '_blank', 'noopener')
 }

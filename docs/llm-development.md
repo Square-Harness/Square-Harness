@@ -545,6 +545,11 @@ Version 1.1.0. The source of truth for the machine-readable version is
   - the token travels in an HttpOnly, SameSite=Strict cookie;
   - unexpected `Host` headers and cross-site requests are refused;
   - the CSP is strict, and uploads never overwrite a file;
+  - the file viewer (`#/file?path=`) replaces a text or Markdown file only on the
+    user's Save, and only if its SHA-256 still matches what the viewer loaded
+    (`store.save_text`, 409 otherwise), atomically and in the file's encoding;
+    `GET /api/files/raw` sends only PDFs and PNG/JPEG/WebP images, with a fixed
+    content type;
   - folders are confined to `--gui-root`.
 - In the terminal, the model `--host` must be loopback unless `--online`. Online
   research is opt-in in the terminal and on by default in the web app, except

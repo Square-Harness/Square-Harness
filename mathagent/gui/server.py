@@ -861,6 +861,31 @@ def upload(h, body):
     return result
 
 
+@route('GET', '/api/files/view')
+def files_view(h, body):
+    """A file for the viewer (path relative to the interface root): its kind, and the text of a text file."""
+    return store.view_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+
+
+@route('GET', '/api/files/raw')
+def files_raw(h, body):
+    """A PDF or an image for the browser to display, framed only by this interface."""
+    data, content_type, name = store.raw_file(h.server.hub.base, (h.query.get('path') or [''])[0])
+    safe = re.sub(r'[^A-Za-z0-9._ -]', '_', name)[:120] or 'file'
+    h.send_bytes(200, data, content_type, [('Content-Disposition', f'inline; filename="{safe}"'),
+                                           ('Cache-Control', 'no-store')], csp=False, frame=True)
+    return Streamed
+
+
+@route('POST', '/api/files/save')
+def files_save(h, body):
+    """Save the viewer's edit of a text file; refused if the file changed since the viewer read it."""
+    path = body.get('path')
+    result = store.save_text(h.server.hub.base, path, body.get('content'), body.get('sha256'))
+    h.server.hub.bus.publish('files', path=path)
+    return result
+
+
 @route('POST', '/api/files/copy')
 def files_copy(h, body):
     """Copy files of other folders into the open folder (or a project's folder) to attach them."""

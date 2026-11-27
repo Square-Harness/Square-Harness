@@ -673,3 +673,33 @@ select {
   .ws-file-search { flex: 1 1 100%; }
   .attach-menu-list { min-width: min(270px, calc(100vw - 32px)); }
 }
+
+/* "View file" on a file row of the explorer: shown on hover or keyboard focus. */
+.ws-file-view { flex: none; gap: 5px; min-height: 26px; padding: 0 8px; visibility: hidden; }
+.ws-file-row:hover .ws-file-view, .ws-file-row:focus-within .ws-file-view, .ws-file-row-selected .ws-file-view { visibility: visible; }
+.chip-viewable { cursor: default; }
+.chip-viewable:hover { border-color: var(--ink); }
+
+/* The file viewer (#/file?path=…): a PDF, an image, rendered Markdown, or text to edit. */
+.file-view { display: flex; flex-direction: column; gap: 12px; min-height: 100%; padding: 20px 28px 24px; box-sizing: border-box; }
+/* The right padding keeps the Save button clear of the floating Feedback button. */
+.file-view-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-right: 96px; }
+.file-view-head > svg { flex: none; color: var(--ink); }
+.file-view-title { flex: 1; min-width: 0; }
+.file-view-title h1 { margin: 0; font: 600 19px/1.3 var(--font-text); overflow-wrap: anywhere; }
+.file-view-title p { margin: 2px 0 0; }
+.file-view-state { min-width: 96px; text-align: right; }
+.file-view-frame { flex: 1; width: 100%; min-height: calc(100vh - 140px); border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.file-view-image { flex: 1; display: grid; place-items: start center; }
+.file-view-image img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.file-view-editor { flex: 1; width: 100%; min-height: calc(100vh - 160px); box-sizing: border-box; padding: 14px 16px; resize: vertical;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--sheet); color: var(--text); font: 13.5px/1.6 var(--font-mono); tab-size: 4; }
+.file-view-editor:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.file-view-markdown { max-width: var(--measure); padding: 12px 16px; border: 1px solid transparent; border-radius: 8px; cursor: text; }
+.file-view-markdown:hover { border-color: var(--line); background: var(--sheet); }
+.file-view-markdown:focus-visible { outline: 2px solid var(--focus); }
+.file-view-note { margin: 24px 0; }
+@media (max-width: 560px) {
+  .file-view { padding: 14px 16px; }
+  .ws-file-view { display: none; }
+}

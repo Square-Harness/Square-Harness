@@ -650,6 +650,9 @@ export type Artifact = {
 
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
+/** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
+export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
+  size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
 export type FolderFiles = { path: string; crumbs: { name: string; path: string }[]; folders: WorkspaceFolder[]; files: WorkspaceFile[]; truncated: boolean }
 export type ProjectFile = { path: string; name: string; size: number; updated_at: string }
@@ -756,6 +759,10 @@ export const api = {
     post<{ files: { source: string; path?: string; copied?: boolean; error?: string }[] }>('/api/files/copy', { paths, project_id }),
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
+  /** One file for the viewer, by its path relative to the interface root. */
+  viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
+  /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
+  saveFile: (path: string, content: string, sha256: string) => post<{ sha256: string; size: number }>('/api/files/save', { path, content, sha256 }),
   previewImages: (files: string[]) => post<{ images: ImageRef[] }>('/api/images/preview', { files }),
   imageUrl: (sha256: string) => `/api/images/${encodeURIComponent(sha256)}`,
 
@@ -857,3 +864,6 @@ export const api = {
     post<FeedbackResult>('/api/feedback', { ...value, chat_id: value.include_trace ? value.chat_id : null }),
   feedbackArchiveUrl: (id: string) => `/api/feedback/${encodeURIComponent(id)}/archive`,
 }
+
+/** The address of a PDF or an image for the browser to display (path relative to the interface root). */
+export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)

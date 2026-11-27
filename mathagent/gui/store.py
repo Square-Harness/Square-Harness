@@ -1749,6 +1749,110 @@ def save_upload(workspace, name, data):
     return target.name
 
 
+# -- the file viewer and editor -------------------------------------------------------------------------
+
+VIEW_TEXT_BYTES = 4 * 1024 * 1024    # text shown (and edited) in the viewer
+VIEW_RAW_BYTES = 64 * 1024 * 1024    # a PDF or an image sent to the browser
+MARKDOWN = {'.md', '.markdown'}
+
+
+def root_file(base, relative):
+    """A regular file at or below the interface root: no hidden part, no symlink, nothing outside the root."""
+    base = Path(base).resolve(strict=True)
+    if not isinstance(relative, str) or not relative.strip('/') or len(relative) > 1000:
+        raise ValueError('Give the file path relative to the interface root')
+    parts = Path(relative.strip('/')).parts
+    if Path(relative).is_absolute() or any(part in ('', '.', '..') or part.startswith('.') for part in parts):
+        raise ValueError('Files are relative to the interface root; hidden files and folders are excluded')
+    folder = base.joinpath(*parts[:-1]).resolve(strict=True)
+    if not folder.is_relative_to(base) or any(part.startswith('.') for part in folder.relative_to(base).parts):
+        raise ValueError('That file is outside the interface root')
+    path = folder / parts[-1]
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise NotFound('No such file') from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Only regular files can be opened')
+    return path
+
+
+def view_kind(path):
+    """How the viewer shows a file: pdf, markdown, text (TeX, code, data...), image, or unsupported."""
+    suffix = source_suffix(path)
+    if Path(path).suffix.lower() == '.pdf':
+        return 'pdf'
+    if images.is_image(path):
+        return 'image'
+    if Path(path).suffix.lower() in MARKDOWN:
+        return 'markdown'
+    if suffix in TEXT and not is_source_archive(path):
+        return 'text'
+    return 'unsupported'
+
+
+def view_file(base, relative):
+    """What the viewer needs: the file's kind and size, and for text its content, encoding and digest (the
+    digest guards a save against a change made meanwhile, by the user elsewhere or by the model)."""
+    path = root_file(base, relative)
+    kind, size = view_kind(path), path.stat().st_size
+    result = {'path': relative.strip('/'), 'name': path.name, 'kind': kind, 'size': size,
+              'updated_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
+    if kind not in ('text', 'markdown'):
+        return result
+    if size > VIEW_TEXT_BYTES:
+        return {**result, 'kind': 'too_large'}
+    data = path.read_bytes()
+    try:
+        text, encoding = decode_text(data, path.name)
+    except ValueError as exc:  # a file named .txt that holds binary data
+        return {**result, 'kind': 'unsupported', 'note': str(exc)}
+    return {**result, 'text': text, 'encoding': encoding or 'utf-8', 'sha256': hashlib.sha256(data).hexdigest(),
+            'editable': True}
+
+
+def raw_file(base, relative):
+    """The bytes and content type of a PDF or an image, for the browser to display."""
+    path = root_file(base, relative)
+    kind = view_kind(path)
+    if kind not in ('pdf', 'image'):
+        raise ValueError('Only PDFs and images are sent as files; other files are shown as text')
+    if path.stat().st_size > VIEW_RAW_BYTES:
+        raise ValueError('That file is too large to display here')
+    types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+    return path.read_bytes(), 'application/pdf' if kind == 'pdf' else types.get(path.suffix.lower(), 'application/octet-stream'), path.name
+
+
+def save_text(base, relative, content, sha256):
+    """Save the viewer's edit of a text file, in the encoding it was read in, if nobody changed it since
+    (`sha256` is the digest the viewer read). The replacement is atomic and keeps the file's permissions."""
+    path = root_file(base, relative)
+    if view_kind(path) not in ('text', 'markdown'):
+        raise ValueError('Only text files can be edited here')
+    if not isinstance(content, str) or len(content.encode('utf-8', 'surrogatepass')) > VIEW_TEXT_BYTES:
+        raise ValueError('The text must be at most 4 MB')
+    current = path.read_bytes()
+    if not isinstance(sha256, str) or hashlib.sha256(current).hexdigest() != sha256:
+        raise FileExistsError('The file changed since it was opened; reload it before saving')
+    _, encoding = decode_text(current, path.name)
+    try:
+        data = content.encode(encoding or 'utf-8')
+    except UnicodeEncodeError:
+        raise ValueError(f'The text has characters that {encoding} cannot store; '
+                         'remove them or save the file as UTF-8 elsewhere') from None
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix='.edit-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
+
+
 def copy_into(base, workspace, destination, relative):
     """A file of another folder below the interface root, copied into `destination` (the open folder, or a
     project's folder in it) so that it can be attached: the model reads only the open folder, and that limit

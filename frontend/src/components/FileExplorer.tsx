@@ -5,7 +5,8 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type M
 import { api, type FolderFiles, type WorkspaceFile, type WorkspaceFolder } from '../api'
 import { ago, bytes, count, displayPath } from '../format'
 import { useApp, useTick } from '../store'
-import { BackIcon, ChevronIcon, FileIcon, FolderIcon } from './Icons'
+import { openFile, useRoute } from '../router'
+import { BackIcon, ChevronIcon, ExternalIcon, FileIcon, FolderIcon } from './Icons'
 import { ErrorNote, Loading, Modal } from './common'
 import { isImagePath } from './ImageAttachments'
 
@@ -73,8 +74,8 @@ function compare(sort: Sort) {
  *
  * Folders open on a double click (or Enter); the breadcrumb and Up go back. A click selects a file; with
  * `multiple`, Ctrl/⌘-click adds or removes one file and Shift-click selects the range from the last file
- * clicked. Typing in the search box searches every folder. Opening a file is not decided yet: pass `onOpen`
- * and a double click (or Enter) on a file calls it, for instance to download or preview that file.
+ * clicked. Typing in the search box searches every folder. Hovering a file shows "View file", which opens it in
+ * the viewer in a new tab. A double click (or Enter) on a file calls `onOpen`; both dialogs attach the file with it.
  */
 export function FileExplorer({ selected, onSelect, multiple = false, onOpen, unavailable, badge, startFolder, folderNote }: {
   selected: string[]
@@ -182,7 +183,7 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
   const selectedHere = selected.length
   const statusText = selectedHere === 1 ? displayPath(selected[0])
     : selectedHere > 1 ? `${count(selectedHere)} files selected`
-    : multiple ? `Double-click a folder to open it. ${MOD}-click or Shift-click to select several files.`
+    : multiple ? `Double-click a folder to open it${onOpen ? ', a file to attach it' : ''}. ${MOD}-click or Shift-click to select several files.`
     : 'Double-click a folder to open it.'
 
   return (
@@ -256,6 +257,9 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
                   onClick={(event) => { event.stopPropagation(); go(part.folder) }}>{part.folder ? displayPath(part.folder) : root}</button>}
               </span>
               {label && <span className="pill">{label}</span>}
+              <button type="button" className="btn btn-quiet btn-small ws-file-view" title="Open the file in the viewer, in a new tab"
+                onClick={(event) => { event.stopPropagation(); openFile(file.path) }} onDoubleClick={(event) => event.stopPropagation()}>
+                View file <ExternalIcon size={13} /></button>
               {part.extension && <span className={'ws-file-ext ws-file-ext-' + file.kind}>.{part.extension}</span>}
               <span className="ws-file-size">{bytes(file.size)}</span>
               <span className="ws-file-date">{ago(file.updated_at)}</span>
@@ -269,13 +273,56 @@ export function FileExplorer({ selected, onSelect, multiple = false, onOpen, una
   )
 }
 
-/** "See my files": what the open workspace holds, from the folder browser. */
+/**
+ * Attach files given by their paths relative to the interface root: a file of the open folder as it is, a file of
+ * another folder copied into the open folder first (into the project's folder in a project's conversation),
+ * as an upload would be: the model reads only the open folder. Returns the attachments' paths, relative to the
+ * open folder, and the files that could not be copied.
+ */
+async function attachable(paths: string[], prefix: string, projectId?: string | null) {
+  const inOpenFolder = (path: string) => path.startsWith(prefix) ? path.slice(prefix.length) : null
+  const attached = paths.flatMap((path) => inOpenFolder(path) ?? [])
+  const failed: { source: string; error: string }[] = []
+  const outside = paths.filter((path) => inOpenFolder(path) === null)
+  if (outside.length) {
+    const result = await api.copyFiles(outside, projectId || undefined)
+    for (const item of result.files) {
+      if (item.path) attached.push(item.path)
+      else failed.push({ source: item.source, error: item.error || 'not copied' })
+    }
+  }
+  return { attached, failed }
+}
+
+const failures = (failed: { source: string; error: string }[]) =>
+  failed.map((item) => `${item.source.split('/').pop()}: ${item.error}`).join(' · ')
+
+/** "See my files": what the folders hold, from the folder browser. A double click attaches a file to the next
+ * message of the conversation open behind it. */
 export function FilesDialog({ onClose, onBack }: { onClose: () => void; onBack?: () => void }) {
+  const { status, chats } = useApp()
+  const route = useRoute()
   const [selected, setSelected] = useState<string[]>([])
+  const [error, setError] = useState('')
+  const prefix = status?.workspace_path ? status.workspace_path + '/' : ''
+  const projectId = chats?.find((chat) => chat.id === route.id)?.project_id ?? null
+  const attach = async (file: WorkspaceFile) => {
+    setError('')
+    try {
+      const { attached, failed } = await attachable([file.path], prefix, projectId)
+      if (attached.length) {
+        window.dispatchEvent(new CustomEvent('square-attach-paths', { detail: attached }))
+        onClose()
+      } else setError(failures(failed))
+    } catch (reason) {
+      setError((reason as Error).message)
+    }
+  }
   return (
     <Modal title="My files" icon={<FileIcon />} onClose={onClose} wide>
-      <p className="modal-lede">Your folders and their text, PDF and image files, starting in the open folder, whose files the model can be given.</p>
-      <FileExplorer selected={selected} onSelect={setSelected} multiple />
+      <p className="modal-lede">Your folders and their text, PDF and image files, starting in the open folder, whose files the model can be given. Double-click a file to attach it to your next message; hover it to view it.</p>
+      <FileExplorer selected={selected} onSelect={setSelected} multiple onOpen={(file) => void attach(file)} />
+      <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         {onBack && <button type="button" className="btn action-start" onClick={onBack}><BackIcon size={15} /> Back to folders</button>}
         <button type="button" className="btn btn-primary" onClick={onClose}>Done</button>
@@ -311,23 +358,14 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
     : inOpenFolder(file.path) === null && !COPYABLE.test(file.path) ? 'Only the kinds of files you can upload can be copied into the open folder'
     : undefined
   const outside = selected.filter((path) => inOpenFolder(path) === null)
-  const attach = async () => {
+  const attach = async (paths: string[]) => {
     setBusy(true); setError('')
     try {
-      const paths = selected.flatMap((path) => inOpenFolder(path) ?? [])
-      const failed: { source: string; error: string }[] = []
-      if (outside.length) {
-        const result = await api.copyFiles(outside, projectId || undefined)
-        for (const item of result.files) {
-          if (item.path) paths.push(item.path)
-          else failed.push({ source: item.source, error: item.error || 'not copied' })
-        }
-      }
-      if (paths.length) onAttach(paths)
+      const { attached: done, failed } = await attachable(paths, prefix, projectId)
+      if (done.length) onAttach(done)
       if (!failed.length) { onClose(); return }
       setSelected(failed.map((item) => item.source))
-      setError(failed.map((item) => `${item.source.split('/').pop()}: ${item.error}`).join(' · ')
-        + (paths.length ? ' The other files were attached.' : ''))
+      setError(failures(failed) + (done.length ? ' The other files were attached.' : ''))
     } catch (reason) {
       setError((reason as Error).message)
     } finally {
@@ -338,6 +376,7 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
     <Modal title="Attach files from the workspace" icon={<FileIcon />} onClose={busy ? undefined : onClose} wide>
       <p className="modal-lede">Select the files to attach to your next message.</p>
       <FileExplorer selected={selected} onSelect={setSelected} multiple unavailable={unavailable}
+        onOpen={(file) => { if (!busy) void attach([file.path]) }}
         startFolder={startFolder ? prefix + startFolder.replace(/\/+$/, '') : undefined}
         badge={(file) => fromRoot.includes(file.path) ? 'Attached' : undefined}
         folderNote={(folder) => inOpenFolder(folder + '/') === null
@@ -348,7 +387,7 @@ export function AttachFromWorkspace({ attached, onAttach, onClose, startFolder, 
         {outside.length > 0 && <span className="muted small action-start">
           {outside.length === 1 ? '1 file' : `${count(outside.length)} files`} from another folder will be copied into {destination}.</span>}
         <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-        <button type="button" className="btn btn-primary" disabled={!selected.length || busy} onClick={() => void attach()}>
+        <button type="button" className="btn btn-primary" disabled={!selected.length || busy} onClick={() => void attach(selected)}>
           {busy ? 'Copying…' : selected.length > 1 ? `Attach ${count(selected.length)} files` : 'Attach'}
         </button>
       </div>

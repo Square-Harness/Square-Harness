@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement, type ReactNode } from 'react'
 import { api, ApiError, type Chat, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
@@ -27,7 +27,7 @@ import { FIXED_EFFORT } from '../review'
 import { WorkspaceSwitch } from '../components/Shell'
 import { WorkPanel } from '../components/WorkPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { go, href } from '../router'
+import { fileHref, go, href, openFile } from '../router'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
@@ -386,11 +386,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             attached={attachments} onAttach={(paths) => setAttachments((items) => [...new Set([...items, ...paths])])}
             startFolder={app.projects?.find((item) => item.id === currentProject)?.folder} projectId={currentProject} />
           {attachments.filter((path) => !isImagePath(path)).map((path) => (
-            <span key={path} className="chip" title={path}>
-              <FileIcon size={14} /><span>{displayPath(path)}</span>
+            <AttachedChip key={path} path={path} size={14}>
               <button type="button" className="chip-remove" aria-label={`Remove ${displayPath(path)}`}
                 onClick={() => setAttachments((items) => items.filter((item) => item !== path))}><CloseIcon size={13} /></button>
-            </span>
+            </AttachedChip>
           ))}
         </div>
         <PinnedImages paths={attachments} onRemove={(path) => setAttachments((items) => items.filter((item) => item !== path))} />
@@ -426,7 +425,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             </button>
           ) : (
             <button type="submit" className="btn btn-primary composer-send" disabled={(blocked && !canQueue) || sending || resuming || projectSaving || !!uploading || (!draft.trim() && !hasImages) || (hasImages && !app.status?.image_support)} aria-label={canQueue ? 'Queue' : 'Send'}>
-              <SendIcon size={16} /> {uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}
+              <SendIcon size={16} /> <span className="composer-send-label">{uploading ? 'Uploading…' : canQueue ? 'Queue' : 'Send'}</span>
             </button>
           )}
         </div>
@@ -594,7 +593,7 @@ function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptIt
         <Markdown quiet>{literalUnderscores(item.content)}</Markdown>
         {attached.length > 0 && (
           <div className="attachments" role="group" aria-label="Attached to this message">{attached.map(path =>
-            <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>
+            <AttachedChip key={path} path={path} />
           )}</div>
         )}
         {available.length > 0 && (
@@ -797,7 +796,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
           <Collapse className="route-details" summary={(kind === 'answer' || kind === 'check') && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
             <div className="route-summary"><Inline mathProse limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
-              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static" title={path}><FileIcon size={13} /><span>{displayPath(path)}</span></span>)}</div>
+              <div className="attachments">{item.files.map((path) => <AttachedChip key={path} path={path} />)}</div>
             )}
             {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
@@ -917,5 +916,19 @@ function LiveTurnView({ live, mode, investigating, agentsWorking, waitingForOutp
         </div>
       </div>
     </div>
+  )
+}
+
+/** An attached file (path relative to the open folder): a double click opens it in the viewer, in a new tab. */
+function AttachedChip({ path, size = 13, children }: { path: string; size?: number; children?: ReactNode }) {
+  const { status } = useApp()
+  const fromRoot = (status?.workspace_path ? status.workspace_path + '/' : '') + path
+  return (
+    <span className={'chip chip-viewable' + (children ? '' : ' chip-static')} title={`${path} (double-click to view)`}
+      onDoubleClick={() => openFile(fromRoot)}>
+      <FileIcon size={size} /><span>{displayPath(path)}</span>
+      <a className="sr-only" href={fileHref(fromRoot)} target="_blank" rel="noopener">View {displayPath(path)}</a>
+      {children}
+    </span>
   )
 }

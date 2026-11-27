@@ -17,9 +17,11 @@ import './WorkPanel.css'
 const WIDE = '(min-width: 1200px)'
 const DEFAULT_WIDTH = 380
 const MIN_WIDTH = 304
-const MAX_WIDTH = 600
+// The notebook may cover up to 65% of the window; the conversation column narrows to make room.
+const MAX_SHARE = 0.65
+const maxWidth = () => Math.max(MIN_WIDTH, Math.round(window.innerWidth * MAX_SHARE))
 const LABELS = { agents: 'Agents', outputs: 'Results', record: 'Findings', plan: 'Plan' }
-const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(value)))
+const clampWidth = (value: number) => Math.max(MIN_WIDTH, Math.min(maxWidth(), Math.round(value)))
 
 export function WorkPanel({ chat }: { chat: Chat }) {
   const route = useRoute()
@@ -34,6 +36,12 @@ export function WorkPanel({ chat }: { chat: Chat }) {
   const initialized = useRef(false)
   const autoTurn = useRef('')
   const drag = useRef<{ x: number; width: number } | null>(null)
+  // A narrower window lowers the ceiling: the width follows it, and the stored preference is kept.
+  useEffect(() => {
+    const fit = () => setWidth((current) => clampWidth(Math.max(current, workPreferences().width ?? DEFAULT_WIDTH)))
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [])
   const activeLanes = (chat.agents || []).filter((agent) => agent.status === 'running' || agent.status === 'waiting')
   const currentTurn = activeLanes.length >= 2 ? activeLanes[0].turn_id : ''
   const running = activeLanes.filter(lane => lane.status === 'running').length
@@ -135,7 +143,7 @@ export function WorkPanel({ chat }: { chat: Chat }) {
     <aside className="work-panel" ref={pane} role={wide ? 'complementary' : 'dialog'} aria-modal={!wide || undefined}
       aria-labelledby="work-panel-title" style={{ '--work-panel-width': width + 'px' } as CSSProperties}>
       {wide && <div role="separator" aria-label="Research panel width" aria-orientation="vertical" tabIndex={0}
-        aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width} className="work-panel-grip"
+        aria-valuemin={MIN_WIDTH} aria-valuemax={maxWidth()} aria-valuenow={width} className="work-panel-grip"
         onPointerDown={(e) => { if (e.button !== 0) return; drag.current = { x: e.clientX, width }; e.currentTarget.setPointerCapture(e.pointerId) }}
         onPointerMove={(e) => { if (drag.current) setWidth(clampWidth(drag.current.width + drag.current.x - e.clientX)) }}
         onPointerUp={(e) => { if (drag.current) { const value = clampWidth(drag.current.width + drag.current.x - e.clientX); setWidth(value); rememberWorkPanel({ width: value }) } drag.current = null }}
@@ -143,7 +151,7 @@ export function WorkPanel({ chat }: { chat: Chat }) {
         onKeyDown={(e) => {
           if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
           e.preventDefault()
-          const value = e.key === 'Home' ? MIN_WIDTH : e.key === 'End' ? MAX_WIDTH : clampWidth(width + (e.key === 'ArrowLeft' ? 1 : -1) * (e.shiftKey ? 64 : 16))
+          const value = e.key === 'Home' ? MIN_WIDTH : e.key === 'End' ? maxWidth() : clampWidth(width + (e.key === 'ArrowLeft' ? 1 : -1) * (e.shiftKey ? 64 : 16))
           setWidth(value); rememberWorkPanel({ width: value })
         }} />}
       <header className="work-panel-head">

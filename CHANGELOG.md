@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- View and edit workspace files. In the file browser, a double click on a file
+  attaches it to the next message (copied into the open folder first when it
+  comes from another folder), and **View file**, shown when the pointer is over
+  a file, opens it in a new tab; a double click on an attached file does the
+  same. The viewer shows a PDF in the browser's viewer, Markdown rendered with
+  its mathematics, images, other text files as text, and says when a file is not
+  supported or too large (over 4 MB of text). Markdown and text files are edited
+  in place: click, type, then **Save** or Ctrl+S. The file keeps its encoding and
+  permissions; a file that changed on disk since it was opened is not
+  overwritten. `GET /api/files/view`, `GET /api/files/raw` (PDFs and images) and
+  `POST /api/files/save` (with the SHA-256 the viewer read; 409 on a change).
+- The notebook can be widened to 65% of the window (was 600 px). The
+  conversation narrows to make room; below 620 px it uses compact margins and
+  composer controls, and below 420 px the Send button shows only its arrow.
+
 - Assistant checkpoints record the provider and endpoint. Resuming on another
   provider leaves the turn available on its original endpoint, including turns
   with images. Older turns can confirm their destination when it is unknown.
