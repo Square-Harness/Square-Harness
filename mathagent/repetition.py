@@ -5,6 +5,7 @@
 
 import re
 from collections import Counter
+from hashlib import blake2b
 
 
 # Each sample searches for four or more consecutive, identical copies. The
@@ -19,6 +20,7 @@ _WORD = re.compile(r"[^\W\d_]{3,}")
 _TEX_COMMAND = re.compile(r"\\[a-zA-Z@]+")
 _PROSE_MARK = re.compile(r"[:;!?。！？]|\.(?!\d)")
 _NUMERIC_CELL = re.compile(r'(?:^|[,;])\s*"?[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"?\s*(?:[,;]|$)')
+_PASSAGE_END = re.compile(r'[.!?。！？][ \t]|\n')
 
 
 def _is_tabular(text: str) -> bool:
@@ -81,6 +83,103 @@ def _has_recycled_sentences(tail: str) -> bool:
     return bool(openings) and max(openings.values()) >= 0.85 * len(recent) and not _is_tabular(window)
 
 
+class _Landmark:
+    """Fingerprint all passages between consecutive returns to the same text."""
+
+    def __init__(self, offset: int, prose: int):
+        self.block = blake2b(digest_size=16)
+        self.previous = b''
+        self.copies = 0
+        self.offset = offset
+        self.prose = prose
+
+    def revisit(self, offset: int, prose: int) -> bool:
+        length = offset - self.offset
+        digest = self.block.digest()
+        # Short cycles already have an exact text check. A stray prose heading
+        # in a repeated data table does not make that table a prose cycle.
+        if length > _ANCHORS[-1] // 3 and (prose - self.prose) * 2 >= length:
+            self.copies = self.copies + 1 if digest == self.previous else 1
+        else:
+            self.copies = 0
+        self.previous = digest
+        self.offset, self.prose = offset, prose
+        self.block = blake2b(digest_size=16)
+        return self.copies >= 4
+
+
+class _LongProseCycles:
+    """Recognize repeated ordered blocks without buffering a block of any particular length."""
+
+    def __init__(self):
+        self.landmarks: dict[bytes, _Landmark] = {}
+        self.passage = blake2b(digest_size=16)
+        self.previous_passage = b''
+        self.sample = ''
+        self.carry = ''
+        self.tabular_line = False
+        self.eligible = self.offset = self.prose = self.length = 0
+
+    def feed(self, text: str) -> bool:
+        text = self.carry + text
+        # A sentence delimiter may straddle two incoming samples.
+        self.carry = text[-1:] if text.endswith(('.', '!', '?', '。', '！', '？')) else ''
+        if self.carry:
+            text = text[:-1]
+        start = 0
+        for boundary in _PASSAGE_END.finditer(text):
+            self._append(text[start:boundary.end()])
+            if self._finish(boundary.group() == '\n'):
+                return True
+            start = boundary.end()
+        self._append(text[start:])
+        return False
+
+    def _append(self, piece: str):
+        self.passage.update(piece.encode('utf-8', 'surrogatepass'))
+        self.offset += len(piece)
+        self.length += len(piece)
+        # This sample only classifies the passage. Its digest covers every byte.
+        self.sample += piece[:1024 - len(self.sample)]
+
+    def _finish(self, newline: bool) -> bool:
+        digest = self.passage.digest()
+        self.passage = blake2b(digest_size=16)
+        for point in self.landmarks.values():
+            point.block.update(digest)
+        sample, length = self.sample, self.length
+        self.sample, self.length = '', 0
+        tabular = self.tabular_line or _is_tabular(sample)
+        self.tabular_line = tabular and not newline
+        if not sample.strip():
+            return False
+        key = digest + self.previous_passage
+        self.previous_passage = digest
+        if tabular or not _is_prose_cycle(sample):
+            return False
+        self.prose += length
+        self.eligible += 1
+        point = self.landmarks.get(key)
+        if point is not None and point.revisit(self.offset, self.prose):
+            return True
+        # Retain content-selected landmarks, which recur at the same position
+        # within each pass irrespective of transport chunking. Doubling epochs
+        # admits new landmarks after a unique prefix and accommodates long
+        # periods without keeping ever more text or signatures.
+        if (self.eligible & (self.eligible - 1)) == 0:
+            self.landmarks.clear()
+            if point is not None:
+                self.landmarks[key] = point
+        if key not in self.landmarks:
+            if len(self.landmarks) == 4:
+                worst = max(self.landmarks)
+                if key > worst:
+                    return False
+                del self.landmarks[worst]
+            self.landmarks[key] = _Landmark(self.offset, self.prose)
+        return False
+
+
 class RepetitionDetector:
     """Feed consecutive deltas from one channel. A positive signal latches."""
 
@@ -90,6 +189,7 @@ class RepetitionDetector:
         self._pending: list[str] = []
         self._pending_size = 0
         self._tail = ""
+        self._long = _LongProseCycles()
 
     def feed(self, text: str) -> bool:
         """Return true once this channel shows sustained repetitive prose."""
@@ -102,10 +202,11 @@ class RepetitionDetector:
             self.characters_seen += take
             if self._pending_size < _STRIDE:
                 break
-            self._tail = self._tail[-(_HISTORY - _STRIDE):] + "".join(self._pending)
+            sample = "".join(self._pending)
+            self._tail = self._tail[-(_HISTORY - _STRIDE):] + sample
             self._pending.clear()
             self._pending_size = 0
-            if _has_exact_cycle(self._tail):
+            if _has_exact_cycle(self._tail) or self._long.feed(sample):
                 self.kind = "exact"
             elif (
                 self.characters_seen >= _PROSE_WINDOW
