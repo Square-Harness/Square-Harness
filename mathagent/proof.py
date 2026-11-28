@@ -22,7 +22,7 @@ from .jsonutil import loads_single
 from .agent import AgentError
 from .backends import MeasuredStreamCancellation, RepetitionLoop, TokenBudgetError
 from .call_policy import (CONTEXT_MARGIN, MIN_PROOF_REVIEW_TOKENS, CallContextError, allocate_call, count_input, interrupted_charge,
-                          streamed_characters)
+                          prefer_different_upstream, streamed_characters)
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
 from .reporting import output_summary
 from .ledger import MAX_FILE_BYTES, LedgerError, ProofStore
@@ -1300,6 +1300,8 @@ class ProofRunner:
         pending = self.state['pending']
         call.update(status='repetition', repetition_channel=exc.channel, repetition_kind=exc.kind,
                     stream_progress=exc.stream_progress)
+        if exc.provider:
+            call['repeated_provider'] = exc.provider
         cap = call['reserved_tokens']
         if exc.stats:
             charge = exc.stats['eval_count']
@@ -1311,10 +1313,11 @@ class ProofRunner:
         call['charged_tokens'] = charge
         self.state['tokens_charged'] += charge - cap
         pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
-        if role + '_repetition_retry' in pending:
+        retry_key = role + '_repetition_retry'
+        already_retried = retry_key in pending
+        pending[retry_key] = call['key']
+        if already_retried:
             self._stop('paused', f'The {role} repeated a passage again. Proof paused with the preceding work saved.')
-        else:
-            pending[role + '_repetition_retry'] = call['key']
 
     @retry_generation_call
     def _dispatch_call(self, role, messages, cap, format_schema=None):
@@ -1436,6 +1439,8 @@ class ProofRunner:
                 client.timeout = old_timeout
         if self._elapsed() >= self.state['settings']['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted before generation')
+        if prior := pending.get(role + '_repetition_retry'):
+            prefer_different_upstream(payload, (self._find_call(prior) or {}).get('repeated_provider'))
         try:
             request = self.store.write_artifact(role + '-request', json.dumps(payload, ensure_ascii=False))
         except LedgerError as exc:

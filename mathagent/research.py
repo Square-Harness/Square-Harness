@@ -28,7 +28,8 @@ from .ledger import MAX_FILE_BYTES, _atomic_write, _bytes, _directory, _publish_
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
-from .call_policy import allocate_call, CallContextError, interrupted_charge, retry_repeated_prompt, streamed_characters
+from .call_policy import (allocate_call, CallContextError, interrupted_charge, prefer_different_upstream,
+                          retry_repeated_prompt, streamed_characters)
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget, HOSTED_DS4, ProviderChanged
 from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
@@ -1006,7 +1007,7 @@ class ResearchRunner:
     @retry_repeated_prompt
     @retry_generation_call
     def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
-              top_p=None):
+              top_p=None, repeated_provider=None):
         self._check_time()
         settings = self.state['settings']
         cap = self._call_cap(role, cap)
@@ -1023,6 +1024,7 @@ class ResearchRunner:
         fixed, optional = (('', []) if role == 'image_read' else self._material(role))
         payload = {'model': self.agent.model, 'stream': True, 'think': think,
                    'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+        prefer_different_upstream(payload, repeated_provider)
         if top_p is not None:
             payload['options']['top_p'] = top_p
         if self.agent.seed is not None:

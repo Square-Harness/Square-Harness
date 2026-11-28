@@ -26,7 +26,7 @@ from xml.etree.ElementTree import ParseError
 
 from .agent import AgentError
 from .backends import RepetitionLoop, TokenBudgetError
-from .call_policy import allocate_call, CallContextError, REPETITION_RECOVERY
+from .call_policy import allocate_call, CallContextError, prefer_different_upstream, REPETITION_RECOVERY
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, UNLIMITED_SOURCE, LiteratureError, _fold, _crossref_title
@@ -1194,6 +1194,7 @@ class ReviewRunner(ResearchRunner):
     def _ask(self, role, prompt, *, cap, schema=None, units=()):
         """Retry critical work once, defer failed independent units, and preserve every call's accounting."""
         answer_only = False
+        repeated_provider = None
         last_provider_error = None
         # Immediate replacements share a deadline. A deferred unit in a later
         # wave is separately admitted work under the saved phase and job limits.
@@ -1212,7 +1213,8 @@ class ReviewRunner(ResearchRunner):
                 replacement = any(self._failure_count(role, key) for key in units or (role,))
                 with self._timeout(), generation_window(self.agent.client, replacement=replacement, deadline=deadline), \
                         refusal_notices(getattr(self, 'emit', None)):
-                    result = self._started(role, prompt, cap=cap, schema=schema, units=units, answer_only=answer_only)
+                    result = self._started(role, prompt, cap=cap, schema=schema, units=units, answer_only=answer_only,
+                                           repeated_provider=repeated_provider)
                     if attempt == 0 and result.get('stopped') == 'reasoning_limit':
                         # The first call delivered no answer. The same prompt and source passage
                         # still need a verdict, under the original cumulative and elapsed limits.
@@ -1225,6 +1227,7 @@ class ReviewRunner(ResearchRunner):
                     if attempt:
                         raise
                     prompt += '\n\n' + REPETITION_RECOVERY
+                    repeated_provider = exc.provider
                     self._warn(f'{exc} Retrying the {role} step from its saved evidence.')
                     continue
                 if isinstance(exc, DeepInfraGenerationError) or rejected_before_inference(exc):
@@ -1273,7 +1276,8 @@ class ReviewRunner(ResearchRunner):
                 self._cancel()
                 self._warn(f'A {role} call was accepted by the provider but did not start; it was submitted again.')
 
-    def _ask_once(self, role, prompt, *, cap, schema, units=(), answer_only=False, resubmission=0):
+    def _ask_once(self, role, prompt, *, cap, schema, units=(), answer_only=False, resubmission=0,
+                  repeated_provider=None):
         with self._mutex:
             self._cancel()
             if self._provider_pause:
@@ -1291,6 +1295,7 @@ class ReviewRunner(ResearchRunner):
             payload = {'model': self.agent.model, 'stream': True,
                        'think': bool(deliberate and not answer_only and getattr(self.agent, 'think', True) and cap >= 1800),
                        'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+            prefer_different_upstream(payload, repeated_provider)
             if hosted:
                 # Under the tester ledger too: a closed silent stream is charged an estimate of its input
                 # (hosted_quota).

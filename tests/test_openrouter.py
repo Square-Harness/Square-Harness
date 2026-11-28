@@ -9,11 +9,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
+from mathagent.agent import Agent
 from mathagent.deepinfra import MODEL
 from mathagent.gui import store
 from mathagent.model_limits import MODEL_OUTPUT_TOKENS
-from mathagent.openrouter import WIRE_MODEL
+from mathagent.openrouter import OpenRouter, WIRE_MODEL
+from mathagent.tools import Workspace
 from test_gui import GuiCase
+from test_research import FakeClient, response, tool
 
 
 class FakeOpenRouter:
@@ -100,6 +103,23 @@ class OpenRouterWorkflowTests(GuiCase):
         env.start()
         self.addCleanup(env.stop)
         super().setUp()
+
+    def test_explore_returns_tool_reasoning_only_inside_the_current_task(self):
+        call = dict(tool('list_files'), id='call_lookup')
+        first = response(calls=[call])
+        first[0]['message']['thinking'] = 'Check the available evidence.'
+        client = FakeClient([first, response('Done.'), response('Fresh answer.')])
+        client.profile = 'openrouter'
+        agent = Agent(client, Workspace(self.root), model=MODEL, ctx=65536, mode='explore')
+        self.assertEqual(agent.run('List the available files.'), 'Done.')
+        transport = OpenRouter()
+        messages = transport._payload(client.requests[1])['messages']
+        assistant, result = messages[-2:]
+        self.assertEqual(assistant['reasoning_content'], first[0]['message']['thinking'])
+        self.assertEqual(assistant['tool_calls'][0]['id'], result['tool_call_id'])
+        self.assertEqual(agent.run('Start a new task.'), 'Fresh answer.')
+        later = transport._payload(client.requests[2])['messages']
+        self.assertFalse(any('reasoning_content' in message for message in later))
 
     def test_an_assistant_turn_runs_on_openrouter_with_ds4_budgets(self):
         status = self.ok('GET', '/api/status')

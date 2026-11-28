@@ -951,6 +951,18 @@ readable without an upgrade.
 
 ### Explore
 
+When hosted DeepSeek uses a tool, Explore returns the reasoning that led to
+that call alongside the tool result on its next tool-enabled request in the
+same task. A later user request starts from the saved conversation. Its model
+input omits the previous task’s reasoning.
+
+When the hosted service detects sustained repetition, a worker with an
+existing recovery attempt repeats the affected step with its saved evidence.
+On OpenRouter that attempt prefers a different configured provider when the
+service identified the original one. The original provider remains eligible
+if the others cannot serve the request. A single-provider configuration
+continues to use its selected provider.
+
 With `@explore`, attached text, BibTeX and extracted PDF text stay with that worker.
 When the complete set fits the model request and the remaining job allowance, Explore
 receives every file together. Larger sets are read in successive portions. The run

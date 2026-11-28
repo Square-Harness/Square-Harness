@@ -30,7 +30,7 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _read
 from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion, _job_directory, _read_state
-from .call_policy import allocate_call, CallContextError, retry_repeated_prompt
+from .call_policy import allocate_call, CallContextError, prefer_different_upstream, retry_repeated_prompt
 from .proof import count_input
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
@@ -658,7 +658,8 @@ class ReviewBase(ResearchRunner):
 
     @retry_repeated_prompt
     @retry_generation_call
-    def _ask(self, role, prompt, *, cap, schema=None, key='', think=False, minimum_output=None, reference=True):
+    def _ask(self, role, prompt, *, cap, schema=None, key='', think=False, minimum_output=None, reference=True,
+             repeated_provider=None):
         """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact.
 
         reference=False leaves out the delegation context: a call that does not read the manuscript (the
@@ -673,6 +674,7 @@ class ReviewBase(ResearchRunner):
                 raise ResearchBudget('Generated-token budget exhausted')
             payload = {'model': self.agent.model, 'stream': True, 'think': think,
                        'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+            prefer_different_upstream(payload, repeated_provider)
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + zlib.crc32(key.encode())) % (2 ** 31)
             if schema:

@@ -50,9 +50,10 @@ class RepetitionLoop(AgentError):
 
     category = 'repetition'
 
-    def __init__(self, channel, stream_progress=None, stats=None, *, kind='exact'):
+    def __init__(self, channel, stream_progress=None, stats=None, *, kind='exact', provider=None):
         self.channel = channel
         self.kind = kind
+        self.provider = provider
         self.stream_progress = dict(stream_progress or {})
         self.stats = dict(stats or {})
         label = 'reasoning' if channel == 'thinking' else 'answer'
@@ -387,7 +388,7 @@ class OpenAICompatible:
     def _stream(self, data, output_char_limit=None, start_seconds=None, *, before_send=None, on_usage=None):
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
-        observe, receipt = None, None
+        observe, receipt, observed_provider = None, None, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
         detectors = {}
         if self.detect_repetition:
@@ -450,6 +451,7 @@ class OpenAICompatible:
                     if observe is not None:
                         receipt = observe(chunk)
                         if receipt is not None:
+                            observed_provider = receipt.get('provider')
                             observe = None
                     # A tool ID or an unfinished function fragment is model output
                     # even if no complete tool call has reached the caller. Inspect
@@ -554,7 +556,11 @@ class OpenAICompatible:
                         # fragments private until the whole call finishes, even if a text channel loops.
                         for channel, value in message.items():
                             if channel in detectors and detectors[channel].feed(value):
-                                raise RepetitionLoop(channel, progress, final_usage, kind=detectors[channel].kind)
+                                if observe is not None:
+                                    observed_provider = (observe(None) or {}).get('provider')
+                                    observe = None
+                                raise RepetitionLoop(channel, progress, final_usage, kind=detectors[channel].kind,
+                                                     provider=observed_provider)
                         if message:
                             event = {'message': message, 'done': False}
                             if receipt is not None:

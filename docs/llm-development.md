@@ -8,6 +8,14 @@ setting up a machine, [llm-install.md](llm-install.md).
 
 ## Worker limits
 
+Confirmed repetition carries the actual OpenRouter upstream on the generation
+exception. Only an existing recovery dispatch may attach that provider to its
+internal request. The serializer moves its endpoint variants behind the other
+entries in the configured order, retaining the original allowlist, fallback,
+required parameters, privacy, quantization and price filters. Proof stores
+the provider with the failed call so restarting from the checkpoint recovers
+the same routing decision. Ordinary requests use the original configuration.
+
 The CLI, Agent and benchmark use `model_limits.DEFAULT_TEMPERATURE` (1.0).
 Build model requests with the agent's configured temperature and pass it to nested
 workers, routers, retries and synthesis. Proof records the solver and verifier
@@ -21,6 +29,15 @@ remaining material. Use production settings to assess live worker behaviour.
 Supply a smaller allowance explicitly in tests that exercise exhaustion.
 
 ## Worker source coverage
+
+The ordinary agent tool loop keeps accepted hosted DeepSeek tool-call reasoning
+in memory for the duration of one `Agent.run`. The next tool-enabled request
+returns it as the assistant message’s `reasoning_content` with the original
+tool call and result. This history participates in normal context allocation.
+Interrupted generations contribute no tool reasoning to subsequent dispatches.
+New user turns and reopened sessions use the existing conversation projection.
+DeepSeek’s native API requires previous reasoning on turns replayed as native
+tool history; the active-task guarantee applies only within one worker invocation.
 
 The worker selected by the user and the files supplied to that worker are independent.
 For Explore the journal records the identities of the extracted texts, their positions
