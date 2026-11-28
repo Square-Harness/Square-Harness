@@ -22,8 +22,8 @@ temporary hosted-model test, `--backend openai --api-profile deepinfra`
 uses DeepSeek V4.1 Flash 1017 through DeepInfra, and `--api-profile openrouter`
 uses the same model through OpenRouter, which routes each call among a fixed list
 of providers that keep no data (Cohere first, then DeepInfra, Crusoe, Parasail,
-CoreWeave, ordered by how rarely they produced repetition loops in a matched test;
-change it with `SH_OPENROUTER_PROVIDERS`), so a busy provider is replaced
+CoreWeave, based on a comparison using citation lookups; change the order with
+`SH_OPENROUTER_PROVIDERS`), so a busy provider is replaced
 by the next one. The provider is only a setting: `scripts/start-deepinfra.py
 --provider openrouter` (or `deepinfra`, the default), each with its own key
 (`scripts/setup-deepinfra.py`, `scripts/setup-openrouter.py`). The harness and
@@ -1070,7 +1070,7 @@ requests to arXiv.
 
 ### When the model provider is busy
 
-A hosted DeepSeek response can repeat a passage while the connection stays active. Square Harness stops a generation when its answer or reasoning shows sustained repetition, including a template repeated with one changing word and a structured answer that has turned into a long run of whitespace. Proof retains the candidate and completed checks. It makes a fresh attempt at the affected step. A second repetition leaves the job available to resume. For a precise citation check, the first call proposes bibliographic details. The reference worker then checks the publication and the cited result against source evidence.
+A hosted DeepSeek response can repeat a passage while the connection stays active. Square Harness stops a generation when its answer or reasoning shows sustained repetition, including a series of repeated labels or checks that cycles through the same text. It also stops a stream that produces a long uninterrupted run of whitespace. Proof retains the candidate and completed checks. It makes a fresh attempt at the affected step. A second repetition leaves the job available to resume. For a precise citation check, the first call proposes bibliographic details. The reference worker then checks the publication and the cited result against source evidence.
 
 A repeated sequence can span several pages. Square Harness compares the actual intervening passages, including their mathematical values. This lets a verifier continue working through different cases that use the same wording. A model that paraphrases an earlier argument can still escape detection.
 

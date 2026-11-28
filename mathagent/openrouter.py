@@ -31,11 +31,12 @@ from .deepinfra import (DeepInfra, HINTS, MODEL, _BUSY, _credit_limit, _generati
 
 WIRE_MODEL = 'deepseek/deepseek-v4.1-flash-1017'
 # Chosen 2026-11-27 among OpenRouter's endpoints for this model: fp8, zero data retention, at least 384k output,
-# structured outputs. Order set 2026-11-28 by repetition loops on 160 pinned, unseeded calls of a loop-prone
+# structured outputs. Order set 2026-11-28 after 160 pinned, unseeded attempts on a loop-prone
 # structured citation request (8 public questions, temperatures 0.2 and 1.0; loops / calls, output tok/s):
 # Cohere 0/32 (~175, $0.12/$0.40 per M), DeepInfra 0/29 (~90, $0.10/$0.29), Crusoe 9/32 (~225, $0.19/$0.78),
 # Parasail 10/32 (~320, $0.30/$1.20), CoreWeave 16/32 (~340, $0.30/$1.20). At temperature 1.0 alone: 0/30 for the
-# first two against 8/48 for the others. The first available one serves; the next takes over when it is busy.
+# first two against 8/48 for the others. Whitespace runaways are separate (two DeepInfra at temperature 1.0,
+# two Cohere at 0.2). Three DeepInfra attempts were refused before generation.
 DEFAULT_PROVIDERS = ('cohere', 'deepinfra', 'crusoe', 'parasail', 'coreweave')
 MAX_PRICE = {'prompt': '0.30', 'completion': '1.20'}  # USD per million tokens; leaves out "fast" tiers ($0.60/$2.40)
 _SLUG = re.compile(r'^[a-z0-9][a-z0-9._-]*(/[a-z0-9._-]+)*$')

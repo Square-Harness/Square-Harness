@@ -26,9 +26,9 @@ _NUMERIC_CELL = re.compile(r'(?:^|[,;])\s*"?[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][
 _PASSAGE_END = re.compile(r'[.!?。！？][ \t]|\n')
 # A degenerate template can vary one slot per copy ("(not read) (no page) (no line) ..."), or repeat a label
 # without sentence punctuation ("[unverified memory] ..."); neither forms an exact prose cycle. Measured on
-# DeepSeek V4.1 Flash 1017 (November 2026): such tails compress to 0.5-4% of their size and only 0.2-5% of their
-# words are distinct. Healthy reasoning compresses to 20-35%. A shared frame that brings new numbers or formulas
-# in each copy is progress: it keeps 15% or more distinct words, so it stays clear of both bounds.
+# DeepSeek V4.1 Flash 1017 (November 2026): such tails compress to 0.5-4% of their size and only 0.2-5% of
+# their words are distinct. These are cheap filters. Indexed cases may be equally compressible, so require
+# the text between phrase occurrences to recur as well.
 _TEMPLATE_WINDOW = 16384
 _TEMPLATE_RATIO = 0.06
 _TEMPLATE_DISTINCT = 0.08
@@ -112,7 +112,23 @@ def _is_compressed_template(tail: str) -> bool:
     phrase, count = phrases.most_common(1)[0]
     # Repeated language, not a matrix, a table of numbers or a formula.
     language = _WORD.findall(_TEX_COMMAND.sub("", " ".join(phrase)).casefold())
-    return count >= _TEMPLATE_PHRASE and len(set(language)) >= 2
+    if count < _TEMPLATE_PHRASE or len(set(language)) < 2:
+        return False
+    # Match whole words. Keep the original text between matches, including
+    # numbers, punctuation, signs and line breaks that distinguish results.
+    pattern = r"(?<!\S)" + r"\s+".join(map(re.escape, phrase)) + r"(?!\S)"
+    starts = [match.start() for match in re.finditer(pattern, window)]
+    if len(starts) < 4:
+        return False
+    blocks = [window[left:right] for left, right in zip(starts, starts[1:])]
+    middle = len(blocks) // 2
+    earlier = set(blocks[:middle])
+    if any(block not in earlier for block in blocks[middle:]):
+        return False
+    # The final occurrence can end mid-block. It must also follow an earlier
+    # occurrence up to the last character received.
+    suffix = window[starts[-1]:]
+    return any(window.startswith(suffix, start) for start in starts[:middle])
 
 
 class _Landmark:
@@ -226,15 +242,21 @@ class RepetitionDetector:
 
     def feed(self, text: str) -> bool:
         """Return true once this channel shows sustained repetitive prose or a runaway of whitespace."""
-        if self.kind is None and text:
-            kept = text.rstrip()
-            self._blank_run = self._blank_run + len(text) if not kept else len(text) - len(kept)
-            if self._blank_run >= _WHITESPACE_RUN:
-                self.kind = "whitespace"
         offset = 0
         while self.kind is None and offset < len(text):
-            take = min(_STRIDE - self._pending_size, len(text) - offset)
-            self._pending.append(text[offset:offset + take])
+            take = min(_STRIDE - self._pending_size, len(text) - offset, _WHITESPACE_RUN)
+            piece = text[offset:offset + take]
+            # A piece is at most one run long. Only its leading whitespace
+            # can complete a run carried from the previous piece.
+            if self._blank_run + take >= _WHITESPACE_RUN:
+                leading = take - len(piece.lstrip())
+                if self._blank_run + leading >= _WHITESPACE_RUN:
+                    self.characters_seen += _WHITESPACE_RUN - self._blank_run
+                    self.kind = "whitespace"
+                    break
+            trailing = take - len(piece.rstrip())
+            self._blank_run = self._blank_run + take if trailing == take else trailing
+            self._pending.append(piece)
             offset += take
             self._pending_size += take
             self.characters_seen += take
