@@ -9,11 +9,13 @@ from hashlib import blake2b
 
 
 # Each sample searches for four or more consecutive, identical copies. The
-# longest anchor covers prose cycles of up to 8,192 characters. These windows
+# longest anchor covers prose cycles of up to 16,384 characters. These windows
 # bound the detector's working set. Fresh model output can continue indefinitely.
 _STRIDE = 1024
-_ANCHORS = (2048, 6144, 24576)
+_ANCHORS = (2048, 6144, 24576, 49152)
 _HISTORY = _ANCHORS[-1] * 4 // 3
+# Keep the passage detector active in the overlap with the longest exact window.
+_LANDMARK_MIN_PERIOD = 8192
 _PROSE_WINDOW = 12288
 _SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
 _WORD = re.compile(r"[^\W\d_]{3,}")
@@ -98,7 +100,7 @@ class _Landmark:
         digest = self.block.digest()
         # Short cycles already have an exact text check. A stray prose heading
         # in a repeated data table does not make that table a prose cycle.
-        if length > _ANCHORS[-1] // 3 and (prose - self.prose) * 2 >= length:
+        if length > _LANDMARK_MIN_PERIOD and (prose - self.prose) * 2 >= length:
             self.copies = self.copies + 1 if digest == self.previous else 1
         else:
             self.copies = 0

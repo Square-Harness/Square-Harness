@@ -35,6 +35,14 @@ class RepetitionTests(unittest.TestCase):
         variants = [common + f"\nFor this case the hypothesis is x ≥ {j}.\n" for j in range(20)]
         self.assertFalse(RepetitionDetector().feed("".join(variants)))
 
+    def test_reader_cycle_after_a_long_nonrepeating_prefix(self):
+        prefix = "".join(argument(-n - 1) + "\n" for n in range(250))
+        block = "".join(argument(n) + "\n" for n in range(85))
+        detector = RepetitionDetector()
+        self.assertFalse(detector.feed(prefix + block * 3))
+        self.assertTrue(detector.feed(block * 4))
+        self.assertEqual(detector.kind, 'exact')
+
     def test_repeated_prose_headers_in_a_table(self):
         labels = "The following entries list the estimates for each component.\n"
         rows = "".join(f"| Component {n} | This value is exact. It is unchanged. |\n"
