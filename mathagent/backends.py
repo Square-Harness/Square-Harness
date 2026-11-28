@@ -377,12 +377,17 @@ class OpenAICompatible:
     def _first_model_output(self):
         """Transport hook for an observer monitoring a silent, accepted stream."""
 
+    def _generation_observer(self, data):
+        """A per-response metadata observer, when the service identifies its upstream."""
+        return None
+
     def _stream_deadline(self):
         return time.monotonic() + self.timeout
 
     def _stream(self, data, output_char_limit=None, start_seconds=None, *, before_send=None, on_usage=None):
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
+        observe, receipt = None, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
         detectors = {}
         if self.detect_repetition:
@@ -396,6 +401,7 @@ class OpenAICompatible:
         try:
             with self.request('/chat/completions', data, **request_options) as response:
                 accepted = True
+                observe = self._generation_observer(data)
                 output = {'started': False, 'last': None}
                 lines = response if start_seconds is None else _started(response, start_seconds, output)
                 if self.stall_seconds:
@@ -426,6 +432,11 @@ class OpenAICompatible:
                             raise AgentError('Model finished with tool_calls but supplied no calls')
                         event = {'message': {'tool_calls': complete_calls} if complete_calls else {},
                                  'done': True, **stats}
+                        if observe is not None:
+                            receipt = observe(None)
+                            observe = None
+                        if receipt is not None:
+                            event['generation'] = receipt
                         if on_usage is not None:
                             warning = on_usage(usage, progress)
                             on_usage = None
@@ -436,6 +447,10 @@ class OpenAICompatible:
                     chunk = json.loads(raw)
                     if not isinstance(chunk, dict):
                         raise AgentError('Malformed SSE model event')
+                    if observe is not None:
+                        receipt = observe(chunk)
+                        if receipt is not None:
+                            observe = None
                     # A tool ID or an unfinished function fragment is model output
                     # even if no complete tool call has reached the caller. Inspect
                     # co-located deltas before an error in that same frame.
@@ -541,7 +556,11 @@ class OpenAICompatible:
                             if channel in detectors and detectors[channel].feed(value):
                                 raise RepetitionLoop(channel, progress, final_usage, kind=detectors[channel].kind)
                         if message:
-                            yield {'message': message, 'done': False}
+                            event = {'message': message, 'done': False}
+                            if receipt is not None:
+                                event['generation'] = receipt
+                                receipt = None
+                            yield event
                     if not choices and finish is not None and reported:
                         final_usage = reported
             error = AgentError('Model stream ended before [DONE]; partial output is incomplete')
@@ -565,6 +584,8 @@ class OpenAICompatible:
             if accepted and on_usage is not None:
                 # Includes early close, local guards, model errors and cancellation before a usage trailer.
                 on_usage(final_usage, progress)
+            if observe is not None:
+                observe(None)
         raise self._stream_failure(error, 'interrupted', progress, final_usage, output_started)
 
 
