@@ -25,8 +25,8 @@ import time
 from xml.etree.ElementTree import ParseError
 
 from .agent import AgentError
-from .backends import TokenBudgetError
-from .call_policy import allocate_call, CallContextError
+from .backends import RepetitionLoop, TokenBudgetError
+from .call_policy import allocate_call, CallContextError, REPETITION_RECOVERY
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, UNLIMITED_SOURCE, LiteratureError, _fold, _crossref_title
@@ -1221,6 +1221,12 @@ class ReviewRunner(ResearchRunner):
                         continue
                     return result
             except (AgentError, KeyboardInterrupt) as exc:
+                if isinstance(exc, RepetitionLoop):
+                    if attempt:
+                        raise
+                    prompt += '\n\n' + REPETITION_RECOVERY
+                    self._warn(f'{exc} Retrying the {role} step from its saved evidence.')
+                    continue
                 if isinstance(exc, DeepInfraGenerationError) or rejected_before_inference(exc):
                     if (not isinstance(exc, DeepInfraGenerationError) or isinstance(exc, DeepInfraRateLimit)
                             or exc.category in ('quota', 'auth', 'rate_limit') or self._provider_pause):

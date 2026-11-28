@@ -66,7 +66,7 @@ export function reduceActivity(snapshot: TaskSnapshot, task: string, activity: A
 }
 
 export type ChatEvent = {
-  seq: number; task: string; chat: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice' | 'experiment' | 'progress'
+  seq: number; task: string; chat: string; kind: 'start' | 'delta' | 'end' | 'discard' | 'tool' | 'result' | 'notice' | 'experiment' | 'progress'
   thinking?: string; text?: string; item?: TranscriptItem
 }
 
@@ -77,12 +77,15 @@ export function reduceChat(snapshot: TaskSnapshot, event: ChatEvent): TaskSnapsh
     const steps: LiveStep[] = event.kind === 'start' || event.kind === 'progress' ? entry.live.steps.filter((step) => !('progress' in step && step.progress)) : [...entry.live.steps]
     if (event.kind === 'start') steps.push({ type: 'call', thinking: '', text: '' })
     else if (event.kind === 'progress' && event.text) steps.push({ type: 'notice', text: event.text, progress: true })
-    else if (event.kind === 'delta') {
+    else if (event.kind === 'delta' || event.kind === 'discard') {
       // Output belongs to the current model call, even when a notice (a provider wait) was shown after it started.
       let index = steps.length - 1
       while (index >= 0 && steps[index].type !== 'call') index -= 1
       const call = steps[index]
-      if (call?.type === 'call') steps[index] = { ...call, thinking: call.thinking + (event.thinking || ''), text: call.text + (event.text || '') }
+      if (call?.type === 'call') {
+        if (event.kind === 'discard') steps.splice(index, 1)
+        else steps[index] = { ...call, thinking: call.thinking + (event.thinking || ''), text: call.text + (event.text || '') }
+      }
     } else if (event.kind === 'tool' || event.kind === 'result' || event.kind === 'notice') steps.push({ type: event.kind, text: event.text || '' })
     else if (event.kind === 'experiment' && event.item?.role === 'experiment') steps.push({ type: 'experiment', item: event.item })
     return { ...entry, live: { ...entry.live, steps } }

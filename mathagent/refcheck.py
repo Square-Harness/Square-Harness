@@ -162,15 +162,6 @@ CANDIDATE = {
         'why': {'type': 'string'},
     },
 }
-RECALL_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['statement', 'keywords', 'candidates'],
-    'properties': {
-        'statement': {'type': 'string'},
-        'keywords': {'type': 'array', 'items': {'type': 'string'}},
-        'search_queries': {'type': 'array', 'items': {'type': 'string'}},
-        'candidates': {'type': 'array', 'items': CANDIDATE},
-    },
-}
 VERDICT_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['level', 'locator', 'document_id', 'lines', 'record', 'statement_found', 'note'],
@@ -648,22 +639,17 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             keep = {(_fold(' '.join(c['authors'])), _fold(c['title'])) for c in seeded}
             self.state['candidates'] = seeded + [c for c in self.state['candidates']
                                                  if (_fold(' '.join(c['authors'])), _fold(c['title'])) not in keep]
-        instruction = ('Before searching, recall from memory. Restate precisely the result the question asks about '
-                       '(hypotheses, domain, boundary conditions, spaces). Then list up to three references where it is '
-                       'stated, best first: the places an expert in the field would cite for exactly this result (a '
-                       'graduate textbook or monograph that proves it, or the founding paper), each with its '
-                       'authors\' surnames, title, year and ONE place you remember, written alone (e.g. "Theorem 9.26" '
-                       'or "Section 8.3"; comments go in why). If you do not know where it is stated, return no '
-                       'candidates rather than placeholders: an open-paper search follows. '
-                       'Your numbers are guesses that will be checked; prefer an honest section over an invented '
-                       'theorem number. Give 3 to 6 short search keywords.')
+        instruction = ('Recall candidate sources for the exact mathematical question. Briefly state the result '
+                       'sought, preserving its hypotheses, and give public topic keywords. List the works you '
+                       'remember, most relevant first, with a chapter, section or theorem number only when you '
+                       'remember it. These are unverified search leads. Leave uncertain details empty. If you '
+                       'recall no matching work, return an empty candidates list.')
         standard = self.state['check'].get('lookup') == 'standard'
         if standard:
             instruction = self._standard_recall_instruction()
         if self.state['candidates']:
             instruction += '\nThe asking agent already suggested: ' + '; '.join(
                 describe(c) + f', {c["locator"]}' for c in self.state['candidates']) + '. Keep these first.'
-        standard = self.state['check'].get('lookup') == 'standard'
         if standard:
             instruction += ('\nThis is a standard-reference lookup: suggest up to three relevant sources, with alternatives if recall is uncertain. '
                             'For a book, give in locator the chapter or section you think treats the result, even if '
@@ -675,34 +661,38 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                             'Recent papers on a topic, including a topic named after someone, are not an author lookup. '
                             'Never infer or guess an author who is not explicitly named in the question.')
         self.emit('notice', 'Recalling where this result is usually stated')
-        # Recall is where the model's knowledge matters most: let it think first, and
-        # fall back to a direct answer if thinking used up the output.
-        value = None
-        for think, cap in (((False, 1800), (False, 1200)) if standard else ((True, 3000), (False, 1200))):
-            # Some guided decoders get stuck emitting whitespace inside a JSON
-            # field. Retrying the same grammar reproduces the failure: use plain
-            # generation for the bounded recovery, then parse and clean guesses.
-            recovery = ('\nReturn only one compact JSON object with this structure: '
-                        '{"statement":"result sought","keywords":["short topic"],'
-                        '"candidates":[{"authors":["surname"],"title":"work",'
-                        '"year":"1976","locator":"guessed place or empty","source_type":"book|article|unknown",'
-                        '"why":"reason"}]}. Use an empty string for an unknown year. '
-                        'All year values must be quoted strings. No Markdown fences.\n')
-            if standard:
-                recovery += ('Also include search_queries: two short alternative complete public topic queries. '
-                             'The second uses a common terminology variant or removes a nonessential modifier; '
-                             'keep the essential setting and do not include guessed authors. '
-                             'Include author as the explicitly named author of a latest-publication request, '
-                             'or an empty string for all other requests.\n')
-            result = self._call('recall', instruction + (recovery if standard or not think else ''), cap=cap,
-                                format_schema=RECALL_SCHEMA if think and not standard else None, think=think)
+        candidate_fields = ('"authors":["surname"],"title":"work","year":"","locator":"",'
+                            '"source_type":"book|article|unknown"')
+        if standard:
+            candidate_fields += ',"why":"reason"'
+        instruction += ('\nReturn one compact JSON object, without Markdown fences: '
+                        '{"statement":"result sought","keywords":["public topic"],'
+                        '"candidates":[{' + candidate_fields + '}]}. Use quoted strings for years.\n')
+        if standard:
+            instruction += ('Also include search_queries: two short alternative complete public topic queries. '
+                            'The second uses a common terminology variant or removes a nonessential modifier; '
+                            'keep the essential setting and do not include guessed authors. '
+                            'Include author as the explicitly named author of a latest-publication request, '
+                            'or an empty string for all other requests.\n')
+        retry = (instruction if standard else
+                 'Give only bibliographic leads you remember for the question. Reply with '
+                 '{"candidates":[{"authors":["surname"],"title":"work","locator":"remembered place or empty"}]}. '
+                 'If you cannot identify a work, reply with {"candidates":[]}.')
+        # A direct recall supplies leads. Source reading and the subsequent verdict establish evidence.
+        for attempt, (prompt, cap) in enumerate(((instruction, 1800 if standard else 3000), (retry, 1200))):
+            result = self._call('recall', prompt, cap=cap, think=False)
             try:
                 value = loads(result['text'])
+                candidates = value.get('candidates') if isinstance(value, dict) else None
+                recalled = [c for item in (candidates if isinstance(candidates, list) else [])
+                            if (c := _clean_candidate(item, 'recall'))]
+                if not standard and (not isinstance(candidates, list) or (candidates and not recalled)):
+                    raise ValueError('Expected a list of identifiable candidate works')
                 break
             except ValueError:
-                self.state['warnings'].append('The recall answer was not usable JSON' +
-                    ('; retried without thinking or constrained decoding.' if think else '.'))
-                value = {}
+                self.state['warnings'].append('The recall answer did not supply usable bibliographic data.' if attempt
+                                             else 'The recall answer was malformed; retrying the bibliographic lookup.')
+                value, recalled = {}, []
         if not isinstance(value, dict):
             value = {}
         self.state['statement'] = str(value.get('statement') or '')
@@ -734,10 +724,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             return (_fold(' '.join(c['authors'])), _fold(c['title']),
                     None if standard else _fold(c['locator']))
         seen = {candidate_key(c) for c in self.state['candidates']}
-        candidates = [] if self.state.get('standard_author') else value.get('candidates')
-        for item in candidates if isinstance(candidates, list) else []:
-            c = _clean_candidate(item, 'recall')
-            if c and candidate_key(c) not in seen:
+        for c in ([] if self.state.get('standard_author') else recalled):
+            if candidate_key(c) not in seen:
                 self.state['candidates'].append(c)
                 seen.add(candidate_key(c))
 

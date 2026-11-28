@@ -318,6 +318,8 @@ Both profiles run the Assistant and its workers at temperature 1 by default.
 
 ### OpenRouter
 
+The hosted DeepSeek profiles check incoming streams for sustained repetitive prose locally. This uses the existing client process and requires no additional service or credential.
+
 Save the OpenRouter key at the hidden prompt, then start the interface:
 
 ```bash

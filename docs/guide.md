@@ -1057,6 +1057,8 @@ requests to arXiv.
 
 ### When the model provider is busy
 
+A hosted DeepSeek response can repeat a passage while the connection stays active. Square Harness stops a generation when its answer or reasoning shows sustained repetition. Proof retains the candidate and completed checks. It makes a fresh attempt at the affected step. A second repetition leaves the job available to resume. For a precise citation check, the first call proposes bibliographic details. The reference worker then checks the publication and the cited result against source evidence.
+
 With the hosted model (DS4 on DeepInfra), every mode and every key handles provider
 failures the same way. DeepInfra sometimes refuses calls for minutes at a time because
 the model is busy for all its customers ("Model busy, retry later"; on 26 November 2026

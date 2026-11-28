@@ -21,14 +21,14 @@ import uuid
 
 from .reporting import usage_footer
 from .agent import AgentError
-from .backends import MeasuredStreamCancellation, TokenBudgetError
+from .backends import MeasuredStreamCancellation, RepetitionLoop, TokenBudgetError
 from .literature import UNLIMITED_SOURCE
 from .source_tasks import scoped_literature
 from .ledger import MAX_FILE_BYTES, _atomic_write, _bytes, _directory, _publish_job, _read, _regular, _now, _ID, MAX_STREAM_BYTES
 from .proof import count_input
 from .tools import schema, unicode_source, is_source_archive
 from .worker_errors import WorkerInputError
-from .call_policy import allocate_call, CallContextError, interrupted_charge, streamed_characters
+from .call_policy import allocate_call, CallContextError, interrupted_charge, retry_repeated_prompt, streamed_characters
 from .model_limits import input_limit, is_ds4, output_limit, substantive_output, workflow_budget, HOSTED_DS4, ProviderChanged
 from .deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, rejected_before_inference, retry_generation_call
 from . import images
@@ -582,6 +582,10 @@ class ResearchRunner:
                     self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
                     self.state['worker_error'] = {'code': 'tester_allowance_insufficient', 'message': str(exc),
                                                   'retryable': True, 'scope': 'account', 'details': {'phase': self.state['phase']}}
+                elif isinstance(exc, RepetitionLoop):
+                    self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
+                    self.state['worker_error'] = {'code': 'repeated_generation', 'message': str(exc),
+                                                  'retryable': True, 'scope': 'model', 'details': {'channel': exc.channel}}
                 elif isinstance(exc, DeepInfraRateLimit):
                     self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
                     self.state['worker_error'] = {'code': 'provider_rate_limit', 'message': str(exc), 'retryable': True,
@@ -999,6 +1003,7 @@ class ResearchRunner:
         return [{'role': 'system', 'content': system},
                 {'role': 'user', 'content': user + ('\n\n' + trailer if trailer else '')}]
 
+    @retry_repeated_prompt
     @retry_generation_call
     def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False, minimum_output=None,
               top_p=None):
@@ -1157,13 +1162,27 @@ class ResearchRunner:
                 os.close(fd)
             if old_timeout is not None:
                 client.timeout = old_timeout
-            self.emit('end', '')
+            self.emit('discard' if call['status'] == 'repetition' else 'end', '')
             self._save()
 
     def _interrupt_call(self, call, exc):
         if call['status'] != 'running':
             return
         call['status'] = 'interrupted'
+        repetition = exc if isinstance(exc, RepetitionLoop) else exc.__cause__
+        if isinstance(repetition, RepetitionLoop):
+            call.update(status='repetition', repetition_channel=repetition.channel, stream_progress=repetition.stream_progress)
+            if repetition.stats:
+                used, incoming = repetition.stats['eval_count'], repetition.stats['prompt_eval_count']
+                call.update(stats=dict(repetition.stats), charged_tokens=used, charged_input_tokens=incoming)
+                self.state['tokens_charged'] += used - call['reserved_tokens']
+                self.state['input_tokens_charged'] += incoming - call['reserved_input_tokens']
+            else:
+                characters = sum(repetition.stream_progress.values())
+                cost = interrupted_charge(call['reserved_tokens'], characters)
+                self.state['tokens_charged'] += cost - call['reserved_tokens']
+                call.update(charged_tokens=cost, charge_basis='estimate', streamed_characters=characters)
+            return
         if rejected_before_inference(exc):
             self.state['tokens_charged'] -= call['reserved_tokens']
             self.state['input_tokens_charged'] -= call['reserved_input_tokens']
@@ -1196,7 +1215,7 @@ class ResearchRunner:
         """A transport guard at our deadline is a budget stop; an earlier outage still propagates."""
         try:
             yield from stream
-        except (TokenBudgetError, DeepInfraGenerationError):
+        except (TokenBudgetError, DeepInfraGenerationError, RepetitionLoop):
             raise
         except AgentError:
             if self._elapsed() < self.state['settings']['max_seconds']:

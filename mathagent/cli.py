@@ -99,6 +99,9 @@ class UI:
                 self.say('\n[answer]')
                 self.text_started = True
             print(clean(value), end='', flush=True)
+        elif kind == 'discard':
+            self.stop()
+            self.say('\n[Unfinished model response discarded.]')
         elif kind == 'end':
             self.stop()
             self.say('')

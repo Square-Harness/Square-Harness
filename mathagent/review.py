@@ -30,7 +30,7 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _read
 from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion, _job_directory, _read_state
-from .call_policy import allocate_call, CallContextError
+from .call_policy import allocate_call, CallContextError, retry_repeated_prompt
 from .proof import count_input
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
@@ -656,6 +656,7 @@ class ReviewBase(ResearchRunner):
         """A last check before a call is charged (under the mutex): raise to refuse it. The Review keeps a share of
         the allowance for its judges this way."""
 
+    @retry_repeated_prompt
     @retry_generation_call
     def _ask(self, role, prompt, *, cap, schema=None, key='', think=False, minimum_output=None, reference=True):
         """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact.

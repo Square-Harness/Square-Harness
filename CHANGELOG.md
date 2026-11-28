@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Precise citation lookup now asks for candidate bibliographic details before the source-verification step. Hosted DeepSeek streams recognize sustained repetition in an answer or its reasoning. An interrupted Proof verifier can retry against the same saved candidate, and incomplete generated tool calls are discarded.
+
 - Cut the Python suite from 194 tests to 16 covering core workflows, access to
   private data, hosted accounting and sandbox isolation. Removed the other cases
   and their unused fixtures.

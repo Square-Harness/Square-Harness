@@ -1245,6 +1245,7 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
 @_locked_chat
 def commit_review(root, chat_id, result, calls, notices):
     chat = load_chat(root, chat_id)
+    calls = [call for call in calls if not call.get('discarded')]
     # Same history record as the terminal's /review.
     chat['history'].extend([{'role': 'user', 'content': 'Critique the preceding answer.'},
                             {'role': 'assistant', 'content': result}])

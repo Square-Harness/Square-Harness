@@ -13,6 +13,39 @@ from .proof_policy import VERIFIER_SCHEMA
 from .tools import result_budget
 
 
+def review_evidence(items):
+    """Render contained, complete passages once, preserving each citation and its original metadata."""
+    result = list(items)
+    pages = []
+    for index, item in enumerate(items):
+        if ('passage_in' in item or item.get('kind') != 'passage' or item.get('lines_complete') is not True
+                or item.get('start_column') != 1):
+            continue
+        start, end = item.get('start_line'), item.get('end_line')
+        source = tuple(item.get(key) for key in ('document_id', 'text_sha256', 'source_url'))
+        if (type(start) is not int or type(end) is not int or not 1 <= start <= end
+                or not all(isinstance(v, str) and v for v in source)
+                or item.get('citation') != f'{source[0]}:L{start}-L{end}' or not isinstance(item.get('passage'), str)):
+            continue
+        lines = item['passage'].split('\n')
+        if len(lines) == end - start + 1:
+            pages.append((index, source, start, lines))
+    # Larger ranges first, so every pointer refers directly to an excerpt printed in full.
+    retained = {}
+    for index, source, start, lines in sorted(pages, key=lambda page: -len(page[3])):
+        for outer_start, outer_lines, outer_index in retained.get(source, ()):
+            offset = start - outer_start
+            if offset >= 0 and outer_lines[offset:offset + len(lines)] == lines:
+                link = {'record_number': outer_index + 1, 'citation': items[outer_index]['citation']}
+                if len(json.dumps({'passage_in': link}, ensure_ascii=False)) < len(items[index]['passage']):
+                    result[index] = {key: value for key, value in items[index].items() if key != 'passage'}
+                    result[index]['passage_in'] = link
+                break
+        else:
+            retained.setdefault(source, []).append((start, lines, index))
+    return result
+
+
 def _function(name, description, parameters):
     return {'type': 'function', 'function': {'name': name, 'description': description, 'parameters': parameters}}
 

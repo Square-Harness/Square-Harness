@@ -481,6 +481,7 @@ class DeepInfra(OpenAICompatible):
     model_ids = {MODEL: MODEL, LEGACY_MODEL: LEGACY_MODEL}  # model name in Square Harness -> model name on the wire
     tolerate_repeated_finish = False  # a provider that repeats an empty finish frame to carry usage (backends._stream)
     require_terminal_usage = True
+    detect_repetition = True
     # DS4 streams about 150 tokens/s once started; three minutes with only keep-alives is a stalled
     # stream. It is ended; a worker call is then replayed (see REPLAYS), a conversation is not.
     stall_seconds = 180
