@@ -170,6 +170,9 @@ requires an administrative migration of that same ledger and matching service
 settings, preserving all charged amounts. Never replace a ledger
 or mint a new credential to simulate a cap increase.
 
+Set `sanity.max_runs` to `null` in the file passed to `--python-limits` to allow
+unlimited automatic Python runs. Each script uses the configured resource limits.
+
 To bound heavy simulations across accounts, create a trusted shared directory
 with mode 0750, owned by root and a dedicated numerical group. Pre-create
 `slot-0.lock` and `slot-1.lock` as root-owned mode-0660 files in that group; tenants
