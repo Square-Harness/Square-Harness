@@ -77,7 +77,7 @@ Version 1.1.0. The source of truth for the machine-readable version is
 
 ### Tests
 
-- The 16 Python tests cover the workflows below. Run them with `python -m unittest discover -s tests`.
+- The Python suite covers the workflows below. Run it with `python -m unittest discover -s tests`.
   - The Assistant, independent proof verification and resume, literature and paper review,
     and protection of mathematical text during proofreading. Write-Up checks exercise
     compiled downloads and rollback after a broken revision using `latexmk` when available.
@@ -1949,6 +1949,10 @@ calibration may occur outside this gate. Unset configuration preserves the
 single-user path. Keep all existing container restrictions intact.
 
 ### Hosted provider profiles (DeepInfra, OpenRouter)
+
+The long-cycle detector retains a bounded text tail and fingerprints recurring sequences of complete passages. It distinguishes changes to numbers, symbols, and internal text. A positive signal requires consecutive matching blocks. The fingerprint path can recognize periods longer than the literal text tail.
+
+For each accepted OpenRouter stream, the service journal records the reported generation ID and upstream provider. The first eligible stream event also carries the validated metadata under `generation`. When the stream ends before both fields arrive, the journal marks any missing field unknown. Look up the recorded ID in OpenRouter to correlate an interruption with the provider's own record. The fields are scoped to one HTTP response, including when calls run concurrently.
 
 The hosted clients feed reasoning and visible text to separate instances of `repetition.RepetitionDetector`. An established cycle raises `backends.RepetitionLoop` and closes that response before a completed tool batch can be returned. Admission and accounting belong to each generation attempt. Preserve provider usage when available, otherwise settle the interrupted generation using its recorded progress. Recovery starts from the saved request, evidence and completed tool results. A discarded generation is excluded from committed conversations and verifier verdicts. Precise reference recall requests compact bibliographic candidates as plain JSON text with reasoning disabled. Source verification uses its own evidence-gathering calls.
 
