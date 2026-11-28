@@ -44,6 +44,7 @@ from ..refcheck import CheckRunner, nested_checker, precise_reference_request
 from ..review import ReviewBase, runner_class as review_runner, runner_for_state, full_review_requested
 from ..style import StyleRunner, load_choice, style_path
 from ..source_tasks import excludes_external_sources, explore_sources, named_explore_sources, requests_workspace_search
+from ..explore_samples import MAX_EXPLORE_SAMPLES, combined_reading
 from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
 from ..orchestrator import DEFAULT_ACTIONS, MAIN_PREDICT, WRITEUP_NEEDS, WorkerInterrupted, assistant_transport, check_assistant_transport
@@ -1701,26 +1702,30 @@ class Hub:
             # The previous turn may have just been saved before this slot opened.
             fresh = store.load_chat(self.root, chat_id)
             store.save_chat_images(self.root, chat_id, image_refs)
+
+            def prepare(agent, emit):
+                agent.history = store.image_history(fresh)
+                agent.turn_image_refs = attached_images
+                agent.personal_context = personal_context
+                agent.project_context = projects.context(project_snapshot)
+                agent.notebook_source = projects.quoted_inspection(inspection)
+                agent.notebook_answer = projects.verbatim_inspection(content, inspection) if not files else None
+                images.bind(agent, image_refs)
+                for name in excluded:
+                    try:
+                        agent.workspace.excluded_files.add(agent.workspace.path(name, pdf=True))
+                    except ValueError:
+                        pass
+                agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
+                self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
+                if agent.workspace.literature.online:
+                    agent.workspace.checker = nested_checker(agent, emit)
+
             agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
                                     source_request=content)
-            agent.history = store.image_history(fresh)
-            agent.turn_image_refs = attached_images
-            agent.personal_context = personal_context
-            agent.project_context = projects.context(project_snapshot)
-            agent.notebook_source = projects.quoted_inspection(inspection)
-            agent.notebook_answer = projects.verbatim_inspection(content, inspection) if not files else None
-            images.bind(agent, image_refs)
-            for name in excluded:
-                try:
-                    agent.workspace.excluded_files.add(agent.workspace.path(name, pdf=True))
-                except ValueError:
-                    pass
-            agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
             capture = ChatCapture(self, task, chat_id, agent)
-            self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
-            if agent.workspace.literature.online:
-                agent.workspace.checker = nested_checker(agent, capture.emit)
-            coverage = None
+            prepare(agent, capture.emit)
+            coverage = readings = None
             previous = fresh.get('direct_reading') or {}
             signature = {'request': content, 'attached': list(attached_files), 'project': fresh.get('project_id'),
                          'history_length': len(agent.history), 'images': [ref['sha256'] for ref in image_refs]}
@@ -1739,8 +1744,21 @@ class Hub:
                     reading = previous.get('reading')
                     paths = [doc['path'] for doc in reading['documents']] if reading else text_files
                     agent.predict = min(substantive_output(agent, agent.predict), agent.document_output_cap or agent.ctx)
-                    answer, coverage = explore_sources(agent, paths, content, capture.emit, reading, remember,
-                                                       requested=content, history=history)
+                    samples = self._explore_samples(fresh)
+                    if samples > 1 and not reading:
+                        def reader(index, emit):
+                            other, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
+                                                    source_request=content)
+                            prepare(other, emit)
+                            other.predict = agent.predict
+                            if other.seed is not None:
+                                other.seed += index  # Identical seeds would give identical readings.
+                            return other
+                        answer, coverage, readings = combined_reading(agent, reader, paths, content, capture.emit,
+                                                                      samples, history=history)
+                    else:
+                        answer, coverage = explore_sources(agent, paths, content, capture.emit, reading, remember,
+                                                           requested=content, history=history)
                     # Save the actual exchange. Private paging prompts and temporary
                     # cumulative findings do not become the next user's conversation.
                     user = {'role': 'user', 'content': content, 'images': attached_images}
@@ -1754,12 +1772,20 @@ class Hub:
             store.commit_turn(self.root, chat_id, agent.history, capture.calls[-1:] if coverage is not None else capture.calls, capture.notices,
                               echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files, source_coverage=coverage,
                               user_content=content, display_answer=agent.notebook_answer if coverage is None else None,
-                              project_snapshot=project_snapshot, image_refs=attached_images)
+                              project_snapshot=project_snapshot, image_refs=attached_images, readings=readings)
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': answer}
         live = {'chat': chat_id, 'kind': 'message', 'user': content if echo_user else '', 'steps': [], 'mode': turn_mode}
         label = 'Conversation' if legacy else 'Exploration'
         return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
+
+    def _explore_samples(self, session):
+        """Independent readings for an Explore turn over attached documents: the conversation's own setting,
+        otherwise the interface default."""
+        value = session.get('settings', {}).get('samples')
+        if type(value) is int and 1 <= value <= MAX_EXPLORE_SAMPLES:
+            return value
+        return getattr(self.args, 'explore_samples', 1) or 1
 
     def check(self, chat_id, question, *, effort='high', on_update=None, queue=False, files=()):
         """A literature check answered in a Default conversation (its evidence stays in .mathagent/checks)."""

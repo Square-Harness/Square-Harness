@@ -975,6 +975,15 @@ in the source. The answer includes the quotation, its locator and reading covera
 Whole-document requests continue through the selected sources. The mathematical answer states which
 proofs or claims the worker actually checked.
 
+An Explore conversation can read attached documents several times independently and combine the
+readings. Start the interface with `--explore-samples N` (1–5, default 1), or set `samples` for one
+conversation through `POST /api/chats/<id>/settings`. Each reading receives the whole document and your
+request, and they run at the same time. One more reading then receives the document, your request and
+every finished reading. It checks each point against the source and writes the single answer you see.
+A failed reading leaves the others. If the combined reading fails or stops early, the answer is one
+complete reading, and a notice says so. The saved turn keeps each reading. A combined turn starts
+again from the beginning after an interruption. It costs about N + 1 readings.
+
 Ordinary mathematical chat with read access to your folder (`.tex`, `.bib`, PDF
 text, …). **Explore** gives promising approaches early, with the first useful
 step and the main obstacle for each. It labels heuristic steps and may run a

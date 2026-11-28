@@ -18,6 +18,7 @@ from .backends import OpenAICompatible, create_client
 from .call_policy import MIN_PROOF_REVIEW_TOKENS
 from .api_profiles import API_PROFILES, create_profile_client, profile_class, resolve_api_profile
 from .format_request import markdown_conversion_request
+from .explore_samples import MAX_EXPLORE_SAMPLES
 from .model_limits import DEFAULT_TEMPERATURE, MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
 from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import IMAGE, PythonSandbox, SandboxUnavailable
@@ -247,6 +248,9 @@ def parser():
                    help='Maximum active interface chats/jobs (1–8; each keeps its full token budget)')
     p.add_argument('--gui-model-concurrency', type=int, default=2,
                    help='Maximum simultaneous model requests across interface jobs and workers (1–200)')
+    p.add_argument('--explore-samples', type=int, default=1, metavar='N',
+                   help='Independent Explore readings of attached documents, combined by one more reading (1–5; '
+                        'default: %(default)s). A conversation setting overrides it.')
     p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
@@ -356,6 +360,8 @@ def main():
             p.error('A remote model host requires --allow-remote-model')
     if not 1 <= args.python_concurrency <= 8:
         p.error('Use python-concurrency from 1 to 8')
+    if not 1 <= args.explore_samples <= MAX_EXPLORE_SAMPLES:
+        p.error(f'Use explore-samples from 1 to {MAX_EXPLORE_SAMPLES}')
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')

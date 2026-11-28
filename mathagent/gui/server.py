@@ -39,6 +39,7 @@ import zlib
 from .. import __version__
 from ..agent import AgentError
 from ..mode_calls import validated_mode_call
+from ..explore_samples import MAX_EXPLORE_SAMPLES
 from ..ledger import _directory
 from ..proof import MAX_ADD_ROUNDS, MAX_ADD_TOKENS
 from ..model_limits import HOSTED_DS4
@@ -705,11 +706,12 @@ def chat_project(h, body, id):
 def chat_settings(h, body, id):
     hub = h.server.hub
     think = _flag(body, 'think')
-    if think is None:
+    samples = _int(body, 'samples', 1, MAX_EXPLORE_SAMPLES)
+    if think is None and samples is None:
         if _flag(body, 'online') is True:  # Old clients explicitly enabling search need no state change.
             return _chat_view(store.load_chat(hub.root, id), hub.root)
-        raise ValueError('Give think as true or false')
-    return _chat_view(store.update_chat_settings(hub.root, id, think=think), hub.root)
+        raise ValueError('Give think as true or false, or samples as a whole number')
+    return _chat_view(store.update_chat_settings(hub.root, id, think=think, samples=samples), hub.root)
 
 
 @route('POST', '/api/chats/' + UUID + '/messages')

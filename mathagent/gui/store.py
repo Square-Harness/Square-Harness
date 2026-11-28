@@ -1053,9 +1053,12 @@ def delete_chat(root, chat_id):
 
 
 @_locked_chat
-def update_chat_settings(root, chat_id, *, think):
+def update_chat_settings(root, chat_id, *, think=None, samples=None):
     chat = load_chat(root, chat_id)
-    chat['settings']['think'] = bool(think)
+    if think is not None:
+        chat['settings']['think'] = bool(think)
+    if samples is not None:
+        chat['settings']['samples'] = int(samples)
     _save_chat(root, chat)
     return chat
 
@@ -1186,7 +1189,8 @@ def save_direct_reading(root, chat_id, record):
 
 @_locked_chat
 def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=None, *, files=(), attached_files=(), user_content=None,
-                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None, display_answer=None):
+                project_snapshot=None, image_refs=(), job_id=None, source_coverage=None, display_answer=None,
+                readings=None):
     """Save a completed turn: exact model context plus an append-only transcript."""
     chat = load_chat(root, chat_id)
     start = max(i for i, m in enumerate(history) if m.get('role') == 'user')
@@ -1217,6 +1221,8 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
                 item['notebook_display'] = True
             if source_coverage is not None and message is history[-1]:
                 item['source_coverage'] = source_coverage
+            if readings is not None and message is history[-1]:
+                item['readings'] = readings  # the independent readings behind a combined answer
             if job_id and mode == 'check':
                 item['job_id'] = job_id
             if message.get('tool_calls'):

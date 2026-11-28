@@ -1084,6 +1084,15 @@ an exact quotation on the current page that contains that result. The code suppl
 the locator and labels the next unread position. Broad requests and comparisons
 continue through the selection. A completed answer can replay from the checkpoint.
 A different source during an interrupted reading requires starting a fresh one.
+With more than one Explore sample (`--explore-samples` or the conversation's `samples`
+setting), `explore_samples.combined_reading` runs that many fresh readings of the same
+sources in parallel. Each reading has its own agent, workspace and background checks. A
+seeded configuration offsets each reading's seed. A final reading by the turn's own
+agent receives the request, every finished reading as untrusted material and the source.
+Only that exchange enters the conversation history. The saved assistant item lists the
+readings under `readings`. Failed readings are skipped. A failed or incomplete
+combination delivers one complete reading with a notice. Combined turns do not checkpoint
+partial readings.
 A numbered question or list item is not
 indexed as a section heading. The review parser's `manuscript.TEXT_SECTION`
 distinguishes numbered questions in a list from question-form section titles.
