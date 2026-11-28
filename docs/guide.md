@@ -1056,6 +1056,12 @@ Every sentence of a section is checked against the available evidence. A first p
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
+When a later review needs the same arXiv paper, it can reuse the exact revision
+already read in this workspace. If the registry identifies a new revision, the
+worker reads and stores it separately, so the earlier review's citations still
+open the passages it used. While arXiv spaces its downloads, the worker can
+read articles from other sites and process papers already in the workspace.
+
 New Literature reviews use High effort in the Assistant, the standalone form,
 the terminal and the companion survey beside a Referee report. The companion
 searches using its public question. It receives no manuscript attachments.

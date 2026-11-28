@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Literature reviews reuse previously read arXiv revisions, match article
+  titles in larger batches, and overlap paced arXiv downloads with reading
+  from publishers, repositories and the workspace cache.
+
 - Literature review links in the conversation and Notebook open the worker's
   progress page until it saves a review. Saved reviews, including partial
   ones, open in the document viewer and appear in Results.

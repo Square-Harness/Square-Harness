@@ -12,6 +12,7 @@ partial delivery when sources or model calls are unavailable.
 from collections import Counter
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
 import hashlib
@@ -536,6 +537,49 @@ def _arxiv_identity(value):
     return re.sub(r'v\d+$', '', value) if ARXIV_ID.fullmatch(value) else ''
 
 
+def _keep_arxiv_revision(record, raw):
+    """The registry's version is evidence about this exact preprint, independently of its journal DOI."""
+    identifier = str(raw.get('identifier') or '').lower().removeprefix('arxiv:')
+    base = _arxiv_identity(identifier)
+    checked = raw.get('version_checked_at')
+    if (not base or base == identifier or base != _arxiv_identity(record.get('arxiv'))
+            or type(checked) not in (float, int) or not 0 < checked <= time.time()):
+        return
+    previous = record.get('arxiv_revision') or {}
+    if checked >= previous.get('checked_at', 0):
+        record['arxiv_revision'] = {'id': identifier, 'checked_at': checked}
+
+
+def _arxiv_read_id(record, *, online):
+    bare = _arxiv_identity(record['arxiv'])
+    revision = record.get('arxiv_revision') or {}
+    identifier = revision.get('id') or ''
+    if (bare and identifier != bare and _arxiv_identity(identifier) == bare
+            and (not online or 0 <= time.time() - revision.get('checked_at', 0) < 86400)):
+        return identifier
+    return bare
+
+
+def _open_review_paper(library, target):
+    try:
+        return library.open_paper(target)
+    except LiteratureError as exc:
+        bare = _arxiv_identity(target)
+        if exc.code != 'arxiv_revision_unavailable' or not bare or target == 'arxiv:' + bare:
+            raise
+    # The review requested the current work, so its unversioned endpoint is also eligible.
+    # Keep that body's own identifier and record which exact representation could not be used.
+    document = library.open_paper('arxiv:' + bare)
+    return dict(document, unavailable_revision=target)
+
+
+def _paper_reference(summary):
+    result = {'document_id': summary['document_id'], 'extractor': summary.get('extractor', '')}
+    if summary.get('unavailable_revision'):
+        result.update(unavailable_revision=summary['unavailable_revision'], canonical_identifier=summary['canonical_identifier'])
+    return result
+
+
 def _math_commands(value):
     # A structured model response may decode an unescaped TeX control sequence as JSON backspace or form feed.
     text = str(value or '').replace('\b', r'\b').replace('\f', r'\f')
@@ -943,6 +987,14 @@ class _UnitGenerationFailure(Exception):
         self.deferred = deferred
 
 
+@dataclass
+class _PaperRead:
+    """A work's retrieval evidence, committed by the review thread in reading order."""
+    record: dict
+    document: dict | None
+    log: list = field(default_factory=list)
+
+
 class ReviewRunner(ResearchRunner):
     KINDS = ('literature',)
     TERMINAL = ('complete', 'partial', 'budget_exhausted', 'budget_violation')
@@ -963,7 +1015,9 @@ class ReviewRunner(ResearchRunner):
         self._stop, self._timeout_depth, self._timeout_saved = threading.Event(), 0, None
         self._generation_failure_streak, self._provider_pause = 0, None
         self.shared_source_budget = shared_source_budget
-        self._side, self._lane, self._repository_down, self._unavailable = None, [], False, False
+        self._side, self._lane = None, []
+        self._repository_down = threading.Event()
+        self._repository_lock = threading.Lock()
 
     @property
     def emit(self):
@@ -1495,33 +1549,32 @@ class ReviewRunner(ResearchRunner):
 
     # -- sources -----------------------------------------------------------------------------
 
-    def _log(self, source, query, count=None, error=None, seconds=None):
-        log = self.state['sweep_log']
-        log.append({'source': source, 'query': query, 'results': count, 'error': error,
-                    **({} if seconds is None else {'seconds': round(seconds, 1)})})
-
-    def _fetch(self, source, query, call, kind=list, seconds=None):
-        """A source answer, or an empty one: failures are logged as coverage gaps; only the deadline stops the job.
-        `seconds` is the time of a request that the helper lane already made."""
+    def _fetch(self, source, query, call, kind=list, seconds=None, *, log=None, unavailable=None):
+        """Log one source answer or failure. A paper worker buffers its events until the ranked merge."""
         self._cancel()
         began = time.monotonic()
-        took = lambda: time.monotonic() - began if seconds is None else seconds
-        self._unavailable = False
+        if log is None:
+            log = self.state['sweep_log']
+        def record(count=None, error=None):
+            elapsed = time.monotonic() - began if seconds is None else seconds
+            log.append({'source': source, 'query': query, 'results': count, 'error': error, 'seconds': round(elapsed, 1)})
         try:
             result = call()
         except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
             message = str(exc)
-            # The source itself did not answer (time-out, 5xx, 429): not an empty answer, a refusal or a full allowance.
-            self._unavailable = isinstance(exc, LiteratureError) and exc.code == 'source_unavailable'
-            self._log(source, query, error=message[:200], seconds=took())
+            if unavailable is not None and isinstance(exc, LiteratureError) and exc.code == 'source_unavailable':
+                unavailable.set()
+            record(error=message[:200])
             if (isinstance(exc, LiteratureError) and exc.code == 'workflow_budget'
                     or self._elapsed() >= self.state['settings']['max_seconds']):
                 raise ResearchBudget(message) from exc
             return kind()
         if not isinstance(result, kind) or kind is list and any(not isinstance(x, (dict, str)) for x in result):
-            self._log(source, query, error='Malformed provider result', seconds=took())
+            record(error='Malformed provider result')
             return kind()
-        self._log(source, query, len(result) if kind is list else 1, seconds=took())
+        record(len(result) if kind is list else 1)
+        if kind is dict and result.get('cached'):
+            log[-1]['cached'] = True
         return result
 
     # arXiv spaces its requests (three seconds for its registry, more for a paper's text), and each
@@ -1542,9 +1595,17 @@ class ReviewRunner(ResearchRunner):
                 # One request, with the retries and the redirect or fallback its transport may need.
                 side.reset_budget(max_requests=min(4, max(0, lit.max_requests - lit.stats['requests'])), max_chars=lit.max_chars)
                 side.deadline = lit.deadline
+                side.assigned_sources = getattr(lit, 'assigned_sources', None)
+                side.outbound_guard = getattr(lit, 'outbound_guard', None)
+                side.cancelled = lambda: self._stop.is_set() or lit.cancelled()
             began = time.monotonic()
             try:
                 result, error = call(side), None
+            except KeyboardInterrupt as exc:
+                if self.shared_source_budget:
+                    raise  # Each dispatch was already charged directly to the parent.
+                # A paused redirect or retry may already have spent requests on this lane.
+                result, error = None, exc
             except (LiteratureError, ValueError, ParseError, KeyError, IndexError, TypeError, AttributeError) as exc:
                 result, error = None, exc
             used = 0 if self.shared_source_budget else side.stats['requests']
@@ -1678,6 +1739,8 @@ class ReviewRunner(ResearchRunner):
             match = existing['n']
             break
         if match is None:
+            if source == 'arxiv':
+                _keep_arxiv_revision(record, raw)
             record['n'] = len(self.state['pool']) + 1
             self.state['pool'].append(record)
             self._index()
@@ -1712,6 +1775,8 @@ class ReviewRunner(ResearchRunner):
             elif match.get(key) in (None, '', []) and value not in (None, '', []):
                 match[key] = value
         _publication_record(match)
+        if source == 'arxiv':
+            _keep_arxiv_revision(match, raw)
         for key in self._ids(match):  # identifiers the merge added (an arXiv ID, a DOI) find this record from now on
             self._keys.setdefault(key, match['n'])
         return match
@@ -2307,11 +2372,13 @@ class ReviewRunner(ResearchRunner):
         anchors = sorted(candidates, key=lambda n: (-counts.get(n, 0), self._year(n) or 9999))[:level['anchors']]
         # The bibliographies and their leads keep their place in the request allowance.
         reserve = 2 * len(trace) + min(8, level['leads'])
+        self._refresh_arxiv_revisions(trace)
         with ThreadPoolExecutor(1, thread_name_prefix='mathagent-literature-source') as lane:
             try:
                 # arXiv serves one paper per crawl delay. The helper downloads these texts into the
                 # cache while this thread follows the citations through the other registries.
-                texts = [(n, self._apart(lane, lambda tools, n=n: tools.open_paper('arxiv:' + self._by_n(n)['arxiv'])))
+                texts = [(n, self._apart(lane, lambda tools, n=n: _open_review_paper(tools,
+                    'arxiv:' + _arxiv_read_id(self._by_n(n), online=tools.online))))
                          for n in trace]
                 if self._discovery_room('expand', reserve):
                     self._cocited(level['cocited'])
@@ -2327,10 +2394,12 @@ class ReviewRunner(ResearchRunner):
                     s['expanded'].append(n)
                     self._save()
                 for n, text in texts:
-                    self._counted(text)  # a failed download is asked again, and logged, by _paper
-                    lines = self._paper(n)  # from the cache when the helper succeeded
-                    if lines:
-                        self._trace_bibliography(n, lines)
+                    summary = self._joined(text, 'arxiv', f'full text of work #{n}', kind=dict)
+                    if summary.get('document_id'):
+                        s['documents'][str(n)] = _paper_reference(summary)
+                        lines = self._paper(n)
+                        if lines:
+                            self._trace_bibliography(n, lines)
                     traced.append(n)
                     self._save()
             finally:
@@ -2390,14 +2459,15 @@ class ReviewRunner(ResearchRunner):
                 if found:
                     self._link(n, found['n'])
 
-    def _archive_version(self, n):
+    def _archive_version(self, n, paper):
         """Match a deposit by DOI, title and author before admitting its abstract or PDF URL."""
-        r = self._by_n(n)
-        if self._repository_down:
-            return  # The repository index did not answer once in this run: each further lookup would wait for its time-out.
-        hits = self._fetch('openaire', f'open repository versions of work #{n}',
-                           lambda: self.literature.repository_versions(r['doi']))
-        self._repository_down = self._unavailable
+        r = paper.record
+        with self._repository_lock:
+            if self._repository_down.is_set():
+                return
+            hits = self._fetch('openaire', f'open repository versions of work #{n}',
+                               lambda: self.literature.repository_versions(r['doi']),
+                               log=paper.log, unavailable=self._repository_down)
         authors = {_norm(_surname(a)) for a in r.get('authors', [])}
         for hit in hits:
             if (_full_title(hit.get('title')) != _full_title(r['title'])
@@ -2409,9 +2479,28 @@ class ReviewRunner(ResearchRunner):
             if hit.get('full_text_url') and not r.get('repository_file'):
                 r['repository_file'] = hit['full_text_url']
 
+    def _paper_read(self, n):
+        return _PaperRead(dict(self._by_n(n)), self.state['documents'].get(str(n)))
+
+    def _merge_paper(self, n, paper):
+        record = self._by_n(n)
+        for key in ('abstract', 'abstract_source', 'repository_file'):
+            if key in paper.record:
+                record[key] = paper.record[key]
+        if paper.document is not None:
+            self.state['documents'][str(n)] = paper.document
+        self.state['sweep_log'].extend(paper.log)
+
     def _paper(self, n, *, cache_only=False):
-        """Read a verified arXiv version or an identifiable primary article from its DOI or repository."""
-        r, lit, documents = self._by_n(n), self.literature, self.state['documents']
+        paper = self._paper_read(n)
+        try:
+            return self._retrieve_paper(n, paper, cache_only=cache_only)
+        finally:
+            self._merge_paper(n, paper)
+
+    def _retrieve_paper(self, n, paper, *, cache_only=False):
+        """Read a verified article into a private result, sharing the job's scoped library and HTTP budget."""
+        r, lit = paper.record, self.literature
         def lines_of(doc):
             if not doc.get('document_id'):
                 return None
@@ -2432,34 +2521,37 @@ class ReviewRunner(ResearchRunner):
                 return lines
             return None
 
-        def fetch(target, source):
-            if cache_only:
+        def fetch(target, source, cached=cache_only):
+            if cached:
                 try:
                     summary = lit.open_paper(target, cache_only=True)
                 except (LiteratureError, ValueError, KeyError, OSError):
                     return None
             else:
-                summary = self._fetch(source, f'full text of work #{n}', lambda: lit.open_paper(target), kind=dict)
+                summary = self._fetch(source, f'full text of work #{n}', lambda: _open_review_paper(lit, target), kind=dict, log=paper.log)
             lines = lines_of(summary)
             if lines:
-                documents[str(n)] = {'document_id': summary['document_id'], 'extractor': summary.get('extractor', '')}
+                paper.document = _paper_reference(summary)
             return lines
-        if str(n) in documents and (not cache_only or documents[str(n)].get('document_id')):
-            return lines_of(documents[str(n)])
+        if paper.document is not None and (not cache_only or paper.document.get('document_id')):
+            return lines_of(paper.document)
         if r.get('arxiv'):
-            lines = fetch('arxiv:' + r['arxiv'], 'arxiv')
+            identifier = _arxiv_read_id(r, online=lit.online and not cache_only)
+            lines = fetch('arxiv:' + identifier, 'arxiv')
+            if not lines and (cache_only or not lit.online) and identifier != r['arxiv']:
+                lines = fetch('arxiv:' + r['arxiv'], 'arxiv', cached=True)
         elif r.get('doi'):
             target = r.get('full_text_url') or 'doi:' + r['doi']
             lines = fetch(target, 'publisher')
             if not lines:
                 if not cache_only:
-                    self._archive_version(n)
+                    self._archive_version(n, paper)
                 if r.get('repository_file') and r['repository_file'] != target:
                     lines = fetch(r['repository_file'], 'repository')
         else:
             return None
         if not lines and not cache_only:
-            documents[str(n)] = {'error': True, 'reason': 'No identifiable primary article body'}
+            paper.document = {'error': True, 'reason': 'No identifiable primary article body'}
         return lines
 
     def _trace_bibliography(self, n, lines):
@@ -2796,34 +2888,94 @@ class ReviewRunner(ResearchRunner):
                     break  # the whole reading allocation is already reachable before later titles
             elif len(_words(r['title'])) >= 2:
                 missing.append(n)
-        numbers = lambda text: re.findall(r'\d+|\b[ivx]+\b', _fold(text))
-        for i in range(0, len(missing), 4):  # a few titles per request: arXiv returns at most 20 records
-            cap = getattr(lit, 'max_requests', 0)
-            if self._late('read') or (getattr(lit, 'online', False) and cap and lit.stats['requests'] >= cap):
+        online, cap = getattr(lit, 'online', False), getattr(lit, 'max_requests', 0)
+
+        def room():
+            return not self._late('read') and not (online and cap and lit.stats['requests'] >= cap)
+
+        def lookup(group, pooled=False):
+            titles = [self._by_n(n)['title'] for n in group]
+            found = self._fetch('arxiv', f'arXiv versions of {len(group)} works',
+                                lambda: lit.arxiv_by_titles(titles, require_complete=True) if pooled
+                                else lit.arxiv_by_titles(titles))
+            return None if self.state['sweep_log'][-1]['error'] else found
+
+        def matches(n, found):
+            r = self._by_n(n)
+            mine = _words(r['title'])
+            own = _fold(_surname(r['authors'][0])).split()[-1:] if r['authors'] else []
+            numbers = lambda text: re.findall(r'\d+|\b[ivx]+\b', _fold(text))
+            for raw in found:
+                identifier = _arxiv_identity(raw.get('identifier'))
+                theirs = _words(raw.get('title'))
+                authors = _list(raw.get('authors'))
+                first = _fold(_surname(authors[0])).split()[-1:] if authors else []
+                same = _full_title(raw.get('title')) == _full_title(r['title'])
+                close = mine and len(mine & theirs) / len(mine | theirs) >= .85 and numbers(raw.get('title')) == numbers(r['title'])
+                doi = str(raw.get('doi') or '').lower()
+                if (ARXIV_ID.fullmatch(identifier) and (same or close) and own and own == first
+                        and not (doi and r.get('doi') and doi != r['doi'])
+                        and self._keys.get('arxiv:' + identifier, n) == n):
+                    yield identifier, raw, same
+
+        def needs_narrow_query(n, found):
+            candidates = list(matches(n, found))
+            # Similar titles may have appeared through another work's OR clause. Keep the
+            # smaller query's original ranking for near matches and competing identities.
+            return len({ident for ident, _, _ in candidates}) > 1 or any(not same for _, _, same in candidates)
+
+        self._index()
+        # A retry after a wide query should never take a request away from an explicitly
+        # budgeted job. Offline readers can use either generation of saved title searches.
+        pool_titles = self.state.get('adaptive_sources') and (not online or cap == UNLIMITED_SOURCE)
+        batch_size = 12 if pool_titles else 4
+        for i in range(0, len(missing), batch_size):
+            batch = missing[i:i + batch_size]
+            if not room():
                 break
-            group = missing[i:i + 4]
-            found = self._fetch('arxiv', f'arXiv versions of {len(group)} works', lambda: lit.arxiv_by_titles([self._by_n(n)['title'] for n in group]))
-            self._index()
-            for n in group:
-                r = self._by_n(n)
-                mine = _words(r['title'])
-                for raw in found:
-                    identifier = _arxiv_identity(raw.get('identifier'))
-                    theirs = _words(raw.get('title'))
-                    authors = _list(raw.get('authors'))
-                    first = _fold(_surname(authors[0])).split()[-1:] if authors else []
-                    own = _fold(_surname(r['authors'][0])).split()[-1:] if r['authors'] else []
-                    same = _full_title(raw.get('title')) == _full_title(r['title'])
-                    close = mine and len(mine & theirs) / len(mine | theirs) >= .85 and numbers(raw.get('title')) == numbers(r['title'])
-                    doi = str(raw.get('doi') or '').lower()
-                    if (ARXIV_ID.fullmatch(identifier) and (same or close) and own and own == first
-                            and not (doi and r.get('doi') and doi != r['doi'])
-                            and self._keys.get('arxiv:' + identifier.lower(), n) == n):
-                        r['arxiv'] = identifier
-                        self._keys['arxiv:' + identifier.lower()] = n
-                        if same and len(_intact_abstract(raw.get('abstract'))) > len(_intact_abstract(r.get('abstract'))):
-                            r['abstract'] = ' '.join(str(raw['abstract']).split())
-                        break
+            pooled = lookup(batch, pooled=True) if len(batch) > 4 else None
+            for j in range(0, len(batch), 4):
+                group = batch[j:j + 4]
+                found = pooled
+                if found is None or any(needs_narrow_query(n, found) for n in group):
+                    if not room():
+                        return
+                    found = lookup(group) or []
+                for n in group:
+                    match = next(matches(n, found), None)
+                    if match is None:
+                        continue
+                    identifier, raw, same = match
+                    r = self._by_n(n)
+                    r['arxiv'] = identifier
+                    _keep_arxiv_revision(r, raw)
+                    self._keys['arxiv:' + identifier] = n
+                    if same and len(_intact_abstract(raw.get('abstract'))) > len(_intact_abstract(r.get('abstract'))):
+                        r['abstract'] = ' '.join(str(raw['abstract']).split())
+
+    def _refresh_arxiv_revisions(self, numbers):
+        """Resolve latest versions in one registry call per page, without replacing existing evidence."""
+        lit = self.literature
+        if (not numbers or not getattr(lit, 'online', False)
+                or getattr(lit, 'assigned_sources', None) is not None or lit.max_requests != UNLIMITED_SOURCE):
+            # An optional version lookup must not take a finite request away from a paper.
+            return
+        missing = {}
+        for n in numbers:
+            r = self._by_n(n)
+            if (r.get('arxiv') and not (self.state['documents'].get(str(n)) or {}).get('document_id')
+                    and _arxiv_read_id(r, online=True) == _arxiv_identity(r['arxiv'])):
+                missing[_arxiv_identity(r['arxiv'])] = r
+        ids = list(missing)
+        for start in range(0, len(ids), 100):
+            if self._late(self.state['phase']):
+                return
+            batch = ids[start:start + 100]
+            for raw in self._fetch('arxiv', f'current revisions of {len(batch)} preprints',
+                                   lambda: lit.arxiv_records(batch)):
+                r = missing.get(_arxiv_identity(raw.get('identifier')))
+                if r is not None:
+                    _keep_arxiv_revision(r, raw)
 
     def _reading_order(self, targets, limit):
         """Share a small passage budget between central works, distinct questions and recent
@@ -2891,6 +3043,7 @@ class ReviewRunner(ResearchRunner):
                         publisher_slots -= 1
                 elif preprint and len(spares) < max(1, limit // 4):
                     spares.append(n)
+            self._refresh_arxiv_revisions(planned + spares)
             for n in targets:
                 record = self._by_n(n)
                 s['read_plan'][str(n)] = ('full_text' if n in planned else 'abstract'
@@ -2913,37 +3066,106 @@ class ReviewRunner(ResearchRunner):
             s['phase'] = 'outline'
             return
         jobs = []
-        for n in pending[:self.concurrency]:
-            lines = self._paper(n)
-            if lines:
-                self._printed_abstract(n, lines)
-                primary = {}
-                excerpts, bibliography = paper_excerpts(lines, self._vocabulary(), budget=self.agent.workspace.result_chars, primary=primary,
-                                                         abstract=self._by_n(n).get('abstract') or '', query=self._review_question())
-                self._match_bibliography(n, bibliography)
-                if primary:
-                    s['cards'][str(n)] = dict(self._record_card(n), **primary,
-                                              document_id=s['documents'][str(n)]['document_id'])
-                    continue
-                if excerpts:
-                    jobs.append((n, lambda n=n, text=excerpts: self._card(n, text)))
-                    continue
-            card = self._record_card(n)
-            s['cards'][str(n)] = card
-            s['read_plan'][str(n)] = card['mode']
-            # No model call was spent on the missing text. Try a bounded alternate inside
-            # the same call budget, preserving the ranked paper as abstract-only evidence.
-            if s.get('read_spares'):
-                spare = s['read_spares'].pop(0)
-                s['read_order'].append(spare)
-                s['read_plan'][str(spare)] = 'full_text'
-                s['cards'].pop(str(spare), None)
+        # A finite or parent-owned allowance must serve higher-ranked papers first, even across hosts.
+        if (s.get('adaptive_sources') and self.literature and not self.shared_source_budget
+                and self.literature.max_requests == UNLIMITED_SOURCE):
+            self._read_batch(pending[:max(3, self.concurrency)], jobs)
+        else:
+            for n in pending[:self.concurrency]:
+                self._collect_card(n, self._paper(n), jobs)
         self._link_references()
 
         def failed(n, reason):
             s['cards'][str(n)] = self._record_card(n)
             s['card_failed'][str(n)] = reason
         self._wave(jobs, failed)
+
+    def _read_batch(self, batch, jobs):
+        """One paced arXiv reader overlaps two publisher, repository or local readers.
+        Only the coordinator applies results and builds evidence cards, in the original priority order.
+        """
+        library = self.literature
+        previous_cancel = library.cancelled
+        previous_checkpoint = library.on_budget_change
+        library.cancelled = lambda: self._stop.is_set() or previous_cancel()
+
+        if previous_checkpoint:
+            # External accounting may take its own parent lock. Serialize callbacks without holding
+            # the review's state lock; the native _save takes that lock when its turn arrives.
+            checkpoint_lock = threading.Lock()
+            def checkpoint():
+                with checkpoint_lock:
+                    previous_checkpoint()
+            library.on_budget_change = checkpoint
+        arxiv = ThreadPoolExecutor(1, thread_name_prefix='mathagent-arxiv-read')
+        others = ThreadPoolExecutor(2, thread_name_prefix='mathagent-source-read')
+        queued = []
+        committed = set()
+        try:
+            for n in batch:
+                paper = self._paper_read(n)
+                remote_arxiv = paper.record.get('arxiv') and not paper.document and library.online
+                if remote_arxiv:
+                    identifier = _arxiv_read_id(paper.record, online=True)
+                    try:
+                        began = time.monotonic()
+                        paper.document = library.cached_arxiv_revision(identifier)
+                        if paper.document:
+                            paper.log.append({'source': 'arxiv', 'query': f'full text of work #{n}', 'results': 1,
+                                              'error': None, 'seconds': round(time.monotonic() - began, 1), 'cached': True})
+                    except (LiteratureError, ValueError, OSError):
+                        pass  # The ordinary retrieval path reports a corrupt or inaccessible cache entry.
+                executor = arxiv if remote_arxiv and not paper.document else others
+                queued.append((n, paper, executor.submit(self._retrieve_paper, n, paper)))
+            for n, paper, future in queued:
+                lines = future.result()
+                self._cancel()
+                with self._mutex:
+                    self._merge_paper(n, paper)
+                    committed.add(n)
+                    self._collect_card(n, lines, jobs)
+                    self._save()
+        except KeyboardInterrupt:
+            self._stop.set()
+            raise
+        finally:
+            for _, _, future in queued:
+                future.cancel()
+            arxiv.shutdown(wait=True, cancel_futures=True)
+            others.shutdown(wait=True, cancel_futures=True)
+            library.cancelled = previous_cancel
+            library.on_budget_change = previous_checkpoint
+            # Preserve completed retrievals and their coverage when a sibling or the controller stops.
+            # Missing cards remain pending and can be rebuilt from these exact cached documents on Resume.
+            for n, paper, future in queued:
+                if n not in committed and not future.cancelled():
+                    self._merge_paper(n, paper)
+
+    def _collect_card(self, n, lines, jobs):
+        s = self.state
+        if lines:
+            self._printed_abstract(n, lines)
+            primary = {}
+            excerpts, bibliography = paper_excerpts(lines, self._vocabulary(), budget=self.agent.workspace.result_chars, primary=primary,
+                                                     abstract=self._by_n(n).get('abstract') or '', query=self._review_question())
+            self._match_bibliography(n, bibliography)
+            if primary:
+                s['cards'][str(n)] = dict(self._record_card(n), **primary,
+                                          document_id=s['documents'][str(n)]['document_id'])
+                return
+            if excerpts:
+                jobs.append((n, lambda n=n, text=excerpts: self._card(n, text)))
+                return
+        card = self._record_card(n)
+        s['cards'][str(n)] = card
+        s['read_plan'][str(n)] = card['mode']
+        # No model call was spent on the missing text. Try a bounded alternate inside
+        # the same call budget, preserving the ranked paper as abstract-only evidence.
+        if s.get('read_spares'):
+            spare = s['read_spares'].pop(0)
+            s['read_order'].append(spare)
+            s['read_plan'][str(spare)] = 'full_text'
+            s['cards'].pop(str(spare), None)
 
     def _printed_abstract(self, n, lines):
         """Registries return the first 900 characters of an abstract, and the result is often stated after

@@ -1797,6 +1797,24 @@ full-text evidence.
 Source passages retain their line ranges. A locator must occur with the
 corresponding evidence. A metadata-only entry cannot substantiate a theorem.
 
+In the reading stage, adaptive reviews with an unlimited source allowance
+can match up to twelve titles per arXiv query. An incomplete response or an
+ambiguous match sends the affected group through the four-title lookup.
+Keep the base arXiv identifier for deduplication and a dated registry revision
+for retrieval. The worker can refresh missing or stale revision information
+in groups of up to 100 identifiers. A revision-specific cached document retains
+its content and line locators across reviews.
+Older entries may contain an arXiv HTML page fetched under the base identifier.
+The reader can pin its existing text when arXiv's page watermark and toolbar
+both name the requested revision, the cached hashes match, and extracting the
+original bytes reproduces the saved text. The new entry records the original
+URL and document ID. If that evidence is missing, the reader uses its normal
+retrieval path.
+
+One reader handles uncached arXiv papers and two handle independent sources
+and local documents. The coordinator records the results in reading order.
+All network reads share the HTTP budget and each host's request pacing.
+
 For a numbered result with an identifiable source heading and complete text block,
 retain the original theorem, setup and available proof passage directly. Resort
 to model extraction for documents with ambiguous structure. Keep a locator only

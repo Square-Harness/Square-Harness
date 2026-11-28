@@ -517,6 +517,67 @@ def _zbmath_record(r):
             'msc': [m.get('code') for m in r.get('msc') or [] if isinstance(m, dict) and m.get('code')]}
 
 
+class _ArxivPageHeader(HTMLParser):
+    """Recognize the two site-owned revision markers preceding a LaTeXML article."""
+    _VOID = frozenset('area base br col embed hr img input link meta param source track wbr'.split())
+    _CLASSES = {'arxiv-html-site-chrome', 'ds-site-header', 'ds-site-header-tools', 'ltx_page_main', 'ltx_page_content'}
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.links, self.marks = [], []
+        self.finished = self.article = False
+
+    def handle_starttag(self, tag, attrs):
+        if len(self.stack) >= 128:
+            self.finished = True
+        if self.finished:
+            return
+        attrs = dict(attrs)
+        classes = (attrs.get('class') or '').split()
+        path = [key for _, key in self.stack]
+        main = ['html', 'body', 'div.ltx_page_main']
+        if tag == 'article':
+            self.finished = True
+            self.article = path == main + ['div.ltx_page_content'] and 'ltx_document' in classes
+            return
+        key = tag
+        if tag == 'div' and attrs.get('id') == 'infobox' and 'infobox' in classes:
+            key = 'div#infobox'
+        elif tag == 'div' and attrs.get('id') == 'watermark-tr' and path == main + ['div#infobox']:
+            key = 'div#watermark-tr'
+            self.marks.append('')
+        else:
+            key = next((tag + '.' + name for name in classes if name in self._CLASSES), tag)
+        if (tag == 'a' and attrs.get('title') == 'Back to abstract page'
+                and path == ['html', 'body', 'div.arxiv-html-site-chrome', 'header.ds-site-header', 'div.ds-site-header-tools']):
+            self.links.append(attrs.get('href'))
+        if tag not in self._VOID:
+            self.stack.append((tag, key))
+
+    def handle_endtag(self, tag):
+        if not self.finished:
+            for i in range(len(self.stack) - 1, -1, -1):
+                if self.stack[i][0] == tag:
+                    del self.stack[i:]
+                    break
+
+    def handle_data(self, data):
+        if not self.finished and self.stack and self.stack[-1][1] == 'div#watermark-tr':
+            self.marks[-1] += data
+
+    def verifies(self, original, identifier):
+        # Article text, bibliography entries and inline scripts are never revision evidence.
+        prefix = original[:256 * 1024].decode('utf-8', errors='replace')
+        for start in range(0, len(prefix), 8192):
+            self.feed(prefix[start:start + 8192])
+            if self.finished:
+                break
+        return (self.article and self.links == ['/abs/' + identifier] and len(self.marks) == 1
+                and re.fullmatch(r'\s*arXiv:' + re.escape(identifier) + r'\s+\[[\w.-]+\]\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s*',
+                                 self.marks[0]) is not None)
+
+
 class _HTMLText(HTMLParser):
     """Readable HTML; retain TeX math alttext where available, omit scripts."""
     def __init__(self, check=lambda: None):
@@ -598,7 +659,8 @@ class LiteratureTools:
         self.cancelled = lambda: False
         # An interactive check goes before background reviews at a shared rate gate (the pacing stays the same).
         self.urgent = False
-        self._robots = {}
+        self._robots, self._robots_gates = {}, {}
+        self._transport_lock = threading.Lock()
         self.reset_budget(max_requests=max_requests, max_chars=max_chars)
 
     def reset_budget(self, *, max_requests=UNLIMITED_SOURCE, max_chars=UNLIMITED_SOURCE):
@@ -782,7 +844,7 @@ class LiteratureTools:
             if os.path.exists(temp):
                 os.unlink(temp)
 
-    def _read(self, parts, limit=MAX_TEXT):
+    def _read_bytes(self, parts, limit):
         p = self._path(*parts)
         if not p.exists():
             return None
@@ -792,7 +854,11 @@ class LiteratureTools:
             data = f.read(limit + 1)
         if len(data) > limit:
             raise LiteratureError('Oversized cache file')
-        return data.decode('utf-8')
+        return data
+
+    def _read(self, parts, limit=MAX_TEXT):
+        data = self._read_bytes(parts, limit)
+        return data.decode('utf-8') if data is not None else None
 
     def _query(self, query, limit):
         if not isinstance(query, str) or not query.strip() or len(query) > 500:
@@ -819,7 +885,7 @@ class LiteratureTools:
             except (ValueError, KeyError, TypeError):
                 result = None
                 age = float('inf')
-            stale = age >= (86400 if provider in ('arxiv-recent', 's2-citations', 'brave') or not (result or {}).get('results') else 7 * 86400)
+            stale = age >= (86400 if provider in ('arxiv-recent', 'arxiv-ids', 's2-citations', 'brave') or not (result or {}).get('results') else 7 * 86400)
             if result is not None and (not stale or not self.online):
                 result['cached'] = True
                 if stale:
@@ -961,7 +1027,7 @@ class LiteratureTools:
         """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
         return self.search_papers(query, 'arxiv', limit, sort='newest')['results']
 
-    def _arxiv_feed(self, params, limit, *, abstract=None):
+    def _arxiv_feed(self, params, limit, *, abstract=None, require_complete=False):
         body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=4_000_000)
         atom = {'a': 'http://www.w3.org/2005/Atom', 'x': 'http://arxiv.org/schemas/atom'}
         feed = ET.fromstring(body)
@@ -974,7 +1040,7 @@ class LiteratureTools:
             if not ARXIV_ID.fullmatch(identifier):
                 continue
             doi = entry.findtext('x:doi', '', atom).strip().lower() or None
-            results.append({'identifier': 'arxiv:' + identifier,
+            results.append({'identifier': 'arxiv:' + identifier, 'version_checked_at': time.time(),
                 'title': _plain(entry.findtext('a:title', '', atom), None),
                 'authors': [_plain(e.text, None) for e in entry.findall('a:author/a:name', atom)],
                 'published': entry.findtext('a:published', '', atom),
@@ -986,6 +1052,9 @@ class LiteratureTools:
                 **({'doi': doi} if doi and re.fullmatch(r'10\.\d{4,9}/\S+', doi) else {}),
                 'url': 'https://arxiv.org/abs/' + identifier,
                 'open_access_url': 'https://arxiv.org/pdf/' + identifier})
+        if require_complete and (not total or not total.isdigit() or int(total) != len(results)
+                                 or len({re.sub(r'v\d+$', '', r['identifier']) for r in results}) != len(results)):
+            raise LiteratureError('The grouped arXiv search did not return every record; retry smaller title groups.')
         return results
 
     def arxiv_search(self, query, *, limit=25, newest=False, categories=()):
@@ -1009,8 +1078,13 @@ class LiteratureTools:
         if not ids:
             return []
         params = {'id_list': ','.join(ids), 'start': 0, 'max_results': len(ids)}
-        return self._cache_search('arxiv-ids', ','.join(sorted(ids)), len(ids),
-                                  lambda: self._arxiv_feed(params, len(ids)))['results']
+        result = self._cache_search('arxiv-ids', ','.join(sorted(ids)), len(ids),
+                                    lambda: self._arxiv_feed(params, len(ids)))
+        # Older cached feeds recorded the retrieval date only on the envelope.
+        checked = datetime.fromisoformat(result['retrieved_at']).timestamp()
+        for record in result['results']:
+            record.setdefault('version_checked_at', checked)
+        return result['results']
 
     def lookup_identifier(self, identifier):
         """The registry record of one DOI or arXiv identifier, or found=false when the registry has none."""
@@ -1273,7 +1347,7 @@ class LiteratureTools:
             return list(dict.fromkeys(found))
         return self._cache_search('opencitations', doi, 1, fetch)['results']
 
-    def arxiv_by_titles(self, titles):
+    def arxiv_by_titles(self, titles, *, require_complete=False):
         """arXiv versions of several papers in one request: a few distinctive title words each."""
         groups, batches = [], []
         for title in titles:
@@ -1291,8 +1365,17 @@ class LiteratureTools:
         results = {}
         for batch in batches:
             query = ' OR '.join(batch)
-            limit = max(20, min(100, len(batch) * 4))
-            hits = self._cache_search('arxiv-titles', query, limit, lambda: self._search('arxiv', query, limit))['results']
+            if require_complete:
+                # A broad OR can fill its page with matches to just one title. Accept a pooled
+                # negative only when all records in the union actually arrived.
+                limit = 100
+                params = {'search_query': query, 'start': 0, 'max_results': limit,
+                          'sortBy': 'relevance', 'sortOrder': 'descending'}
+                hits = self._cache_search('arxiv-titles-complete', query, limit,
+                                          lambda: self._arxiv_feed(params, limit, require_complete=True))['results']
+            else:
+                limit = max(20, min(100, len(batch) * 4))
+                hits = self._cache_search('arxiv-titles', query, limit, lambda: self._search('arxiv', query, limit))['results']
             results.update((r['identifier'], r) for r in hits)
         return list(results.values())
 
@@ -1507,6 +1590,101 @@ class LiteratureTools:
         canonical = urlunsplit(('https', host, split.path or '/', split.query, ''))
         return canonical, canonical, None
 
+    def _cached_document(self, canonical):
+        canonical_id = document_id = 'doc-' + _digest(canonical)[:24]
+        index = self._read(('document-index', canonical_id + '.json'), 1000)
+        if index is not None:
+            document_id = json.loads(index).get('document_id')
+            if not isinstance(document_id, str) or not DOC_ID.fullmatch(document_id):
+                raise LiteratureError('Invalid cached document index')
+        raw = self._read(('documents', document_id + '.json'), DOCUMENT_META_BYTES)
+        metadata = json.loads(raw) if raw is not None else None
+        if metadata is not None and (metadata.get('canonical_identifier') != canonical or metadata.get('document_id') != document_id):
+            raise LiteratureError('Cached document does not match the requested identifier')
+        return canonical_id, document_id, metadata
+
+    def _revision_url_matches(self, canonical, url, representation):
+        # /abs/, /html/ and /pdf/ identify the same work, but only the last two supply its body.
+        try:
+            return (self._canonical(url)[0] == canonical and
+                    (canonical.startswith('arxiv-source:') or
+                     representation in ('html', 'pdf') and self._url(url).path.startswith('/' + representation + '/')))
+        except (ValueError, TypeError):
+            return False
+
+    def _confirmed_revision(self, canonical, metadata):
+        # Early caches recorded the requested version even when the endpoint redirected elsewhere.
+        representation = str(metadata.get('original_file', '')).rsplit('.', 1)[-1]
+        if self._revision_url_matches(canonical, metadata.get('source_url'), representation):
+            return True
+        proof = metadata.get('revision_evidence') or {}
+        return (proof.get('method') == 'arxiv-html-watermark-and-toolbar' and proof.get('identifier') == canonical
+                and (DOC_ID.fullmatch(str(proof.get('original_document_id') or ''))
+                     or 'original_document_id' not in proof and metadata.get('requested_url') == 'https://arxiv.org/html/' + canonical[6:])
+                and metadata['document_id'] == 'doc-' + _digest(canonical + ':' + str(metadata.get('sha256'))
+                                                                + ':' + str(metadata.get('text_sha256')))[:24]
+                and self._verified_html_revision(canonical, metadata) is not None)
+
+    @staticmethod
+    def _bare_html_url(canonical, url):
+        bare = re.sub(r'v\d+$', '', canonical)
+        return (canonical.startswith('arxiv:') and bare != canonical
+                and url in {'https://' + host + '/html/' + bare[6:] for host in ARXIV_HOSTS})
+
+    def _verified_html_revision(self, canonical, metadata):
+        """Verify the public body and its saved line extraction before crediting the site's edition markers."""
+        doc = metadata['document_id']
+        if (metadata.get('original_file') != doc + '.html'
+                or metadata.get('extractor') != 'stdlib HTMLParser with math alttext'
+                or not self._bare_html_url(canonical, metadata.get('source_url'))):
+            return None
+        body = self._read_bytes(('documents', doc + '.html'), MAX_BYTES)
+        text = self._read(('documents', doc + '.txt'))
+        if (body is None or text is None or _digest(body) != metadata.get('sha256')
+                or _digest(text) != metadata.get('text_sha256') or not _ArxivPageHeader().verifies(body, canonical[6:])):
+            return None
+        return body, text
+
+    def _pin_legacy_arxiv_html(self, canonical, canonical_id):
+        """Copy a provably identical edition without changing the bare paper or any old document ID."""
+        bare = re.sub(r'v\d+$', '', canonical)
+        try:
+            _, old_id, old = self._cached_document(bare)
+            data = self._verified_html_revision(canonical, old) if old else None
+            if data is None:
+                return None
+            body, text = data
+            # Two independently valid hashes are insufficient if a cache was assembled from mismatched files.
+            if self._html(body, old['content_type'])[0] != text:
+                return None
+        except (KeyError, UnicodeError, OSError, ValueError) as exc:
+            if isinstance(exc, LiteratureError) and exc.code == 'workflow_budget':
+                raise
+            return None  # A damaged or old-format cache entry cannot establish a revision.
+        doc = 'doc-' + _digest(canonical + ':' + old['sha256'] + ':' + old['text_sha256'])[:24]
+        evidence = {'method': 'arxiv-html-watermark-and-toolbar', 'identifier': canonical, 'original_document_id': old_id}
+        pinned = dict(old, document_id=doc, canonical_identifier=canonical, original_file=doc + '.html',
+                      version=canonical[len(bare):], revision_evidence=evidence)
+        self._write(('documents', doc + '.html'), body)
+        self._write(('documents', doc + '.txt'), text)
+        self._write(('documents', doc + '.json'), json.dumps(pinned, ensure_ascii=False))
+        self._write(('document-index', canonical_id + '.json'), json.dumps({'document_id': doc}))
+        return pinned
+
+    def cached_arxiv_revision(self, identifier):
+        """Return the exact local paper reference for a confirmed, immutable arXiv version."""
+        if self.assigned_sources is not None or not ARXIV_ID.fullmatch(identifier) or not re.search(r'v\d+$', identifier):
+            return None
+        canonical = 'arxiv:' + identifier
+        canonical_id, _, metadata = self._cached_document(canonical)
+        if metadata is None:
+            metadata = self._pin_legacy_arxiv_html(canonical, canonical_id)
+        elif not self._confirmed_revision(canonical, metadata):
+            return None
+        if metadata:
+            return {'document_id': metadata['document_id'], 'extractor': metadata.get('extractor', '')}
+        return None
+
     def open_paper(self, identifier_or_url, *, cache_only=False, section_offset=0):
         if self.assigned_sources is not None:
             raise LiteratureError('This request limits evidence to the assigned sources. Read a pinned document by ID.')
@@ -1514,24 +1692,18 @@ class LiteratureTools:
             raise LiteratureError('Give a nonnegative section offset', code='invalid_arguments')
         canonical, url, arxiv_id = self._canonical(identifier_or_url)
         source_request = canonical.startswith('arxiv-source:')
-        canonical_id = document_id = 'doc-' + _digest(canonical)[:24]
-        index = self._read(('document-index', canonical_id + '.json'), 1000)
-        if index is not None:
-            document_id = json.loads(index).get('document_id')
-            if not isinstance(document_id, str) or not DOC_ID.fullmatch(document_id):
-                raise LiteratureError('Invalid cached document index')
-        metadata = None
-        raw = self._read(('documents', document_id + '.json'), DOCUMENT_META_BYTES)
-        if raw is not None:
-            metadata = json.loads(raw)
-            if cache_only and metadata.get('canonical_identifier') != canonical:
-                raise LiteratureError('Cached document does not match the requested identifier')
+        versioned = bool(arxiv_id and re.search(r'v\d+$', arxiv_id))
+        canonical_id, document_id, metadata = self._cached_document(canonical)
+        if versioned and not source_request and metadata is None:
+            pinned = self._pin_legacy_arxiv_html(canonical, canonical_id)
+            if pinned is not None:
+                return self._document_summary(dict(pinned, cached=True), section_offset)
+        if metadata is not None and (not versioned or self._confirmed_revision(canonical, metadata)):
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(metadata['retrieved_at'])).total_seconds()
             except (KeyError, ValueError, TypeError):
                 age = float('inf')
-            immutable = bool(arxiv_id and re.search(r'v\d+$', arxiv_id))
-            stale = not immutable and age >= 86400
+            stale = not versioned and age >= 86400
             if not stale or not self.online or cache_only:
                 metadata['cached'] = True
                 if stale:
@@ -1539,6 +1711,7 @@ class LiteratureTools:
                 return self._document_summary(metadata, section_offset)
         if cache_only or not self.online:
             raise LiteratureError('Offline mode: paper is not cached. Online retrieval must be enabled explicitly.')
+        source_details = {}
         try:
             if source_request:
                 body, content_type, source_url = self._fetch(url, allowed_hosts=ARXIV_HOSTS)
@@ -1549,6 +1722,11 @@ class LiteratureTools:
                     raise LiteratureError('arXiv source redirect changed the requested paper or version')
             else:
                 body, content_type, source_url = self._fetch(url)
+                if versioned and not self._revision_url_matches(canonical, source_url, 'html'):
+                    if ('html' not in content_type or not self._bare_html_url(canonical, source_url)
+                            or not _ArxivPageHeader().verifies(body, arxiv_id)):
+                        raise LiteratureError('arXiv HTML unavailable for the requested version')
+                    source_details['revision_evidence'] = {'method': 'arxiv-html-watermark-and-toolbar', 'identifier': canonical}
             if arxiv_id and not source_request and ('html' not in content_type or b'ltx_' not in body):
                 raise LiteratureError('arXiv HTML unavailable')
         except LiteratureError as exc:
@@ -1556,10 +1734,24 @@ class LiteratureTools:
                 if 'robots.txt' in str(exc):
                     raise LiteratureError('arXiv robots.txt disallows this automated source download. Download the source yourself and attach its .tar.gz, .tgz or .tex file; SH can read it safely without executing it.', code='source_access_denied') from None
                 raise
-            if not arxiv_id or not ('HTTP 404' in str(exc) or 'HTML unavailable' in str(exc)):
+            if not arxiv_id or not ('HTTP 404' in str(exc) or 'HTML unavailable' in str(exc)
+                                    or versioned and str(exc).startswith('Source returned HTTP 410;')):
                 raise
-            body, content_type, source_url = self._fetch('https://arxiv.org/pdf/' + arxiv_id)
-        title, source_details = '', {}
+            try:
+                body, content_type, source_url = self._fetch('https://arxiv.org/pdf/' + arxiv_id)
+            except LiteratureError as pdf_error:
+                if versioned and str(pdf_error).startswith(('Source returned HTTP 404;', 'Source returned HTTP 410;')):
+                    raise LiteratureError(str(pdf_error), code='arxiv_revision_unavailable') from pdf_error
+                raise
+            if versioned:
+                if not self._revision_url_matches(canonical, source_url, 'pdf'):
+                    bare = re.sub(r'v\d+$', '', canonical)
+                    code = 'arxiv_revision_unavailable' if self._revision_url_matches(bare, source_url, 'pdf') else 'source_error'
+                    raise LiteratureError('arXiv PDF redirect changed the requested paper, version or representation',
+                                          code=code)
+                if not body.lstrip().startswith(b'%PDF'):
+                    raise LiteratureError('arXiv did not return a PDF for the requested version')
+        title = ''
         if source_request:
             if 'html' in content_type or body.lstrip().lower().startswith((b'<!doctype html', b'<html')):
                 raise LiteratureError('arXiv returned a webpage instead of TeX source; attach a downloaded source bundle')
@@ -1573,13 +1765,8 @@ class LiteratureTools:
             text, extractor = self._pdf(body)
             suffix = '.pdf'
         elif 'html' in content_type or body.lstrip().lower().startswith((b'<!doctype html', b'<html')):
-            parser = _HTMLText(self._remaining_timeout)
-            decoded = decode_page(body, content_type)
-            for offset in range(0, len(decoded), 8192):
-                self._remaining_timeout()
-                parser.feed(decoded[offset:offset + 8192])
-            text, title, extractor, suffix = parser.text(), _plain(' '.join(parser.title), 300), 'stdlib HTMLParser with math alttext', '.html'
-            self._remaining_timeout()
+            text, title = self._html(body, content_type)
+            extractor, suffix = 'stdlib HTMLParser with math alttext', '.html'
         elif content_type.startswith('text/plain'):
             text, extractor, suffix = decode_page(body, content_type), 'decoded public text', '.txt'
         else:
@@ -1590,8 +1777,8 @@ class LiteratureTools:
             raise LiteratureError('Extracted document exceeds the 4 MB text limit')
         if canonical.startswith('https://doi.org/') and suffix == '.html':
             self._landing_check(unquote(canonical[len('https://doi.org/'):]), title, text, source_url)
-        if metadata is not None and (metadata.get('sha256') != _digest(body)
-                                     or metadata.get('text_sha256') != _digest(text)):
+        if ('revision_evidence' in source_details or metadata is not None
+                and (metadata.get('sha256') != _digest(body) or metadata.get('text_sha256') != _digest(text))):
             # Preserve saved locators when the source OR its extraction changes.
             document_id = 'doc-' + _digest(canonical + ':' + _digest(body) + ':' + _digest(text))[:24]
         lines = text.splitlines()
@@ -1610,6 +1797,15 @@ class LiteratureTools:
         if document_id != canonical_id:
             self._write(('document-index', canonical_id + '.json'), json.dumps({'document_id': document_id}))
         return self._document_summary(metadata, section_offset)
+
+    def _html(self, body, content_type):
+        parser = _HTMLText(self._remaining_timeout)
+        decoded = decode_page(body, content_type)
+        for offset in range(0, len(decoded), 8192):
+            self._remaining_timeout()
+            parser.feed(decoded[offset:offset + 8192])
+        self._remaining_timeout()
+        return parser.text(), _plain(' '.join(parser.title), 300)
 
     def _landing_check(self, doi, title, text, source_url):
         """A DOI's web page must show its work: a page that never names the registered title (a journal's home
@@ -2015,33 +2211,39 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 or parts.hostname == 'openlibrary.org' and parts.path.endswith('.json')):
             return
         origin = urlunsplit((parts.scheme, parts.netloc, '', '', ''))
-        if origin not in self._robots:
-            rules = RobotFileParser()
-            parts_cache = ('robots', _digest(origin) + '.json')
-            try:
-                cached = json.loads(self._read(parts_cache, 600_000) or '{}')
-                age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached['retrieved_at'])).total_seconds()
-            except (ValueError, KeyError, TypeError):
-                cached, age = {}, float('inf')
-            if age < 86400 and isinstance(cached.get('lines'), list):
-                rules.parse(cached['lines'])
-            else:
-                try:
-                    body, _, _ = self._fetch(origin + '/robots.txt', max_bytes=512_000, _robots=False)
-                except LiteratureError as exc:
-                    if 'HTTP 404' in str(exc) or 'HTTP 410' in str(exc):
-                        lines = ['User-agent: *', 'Allow: /']
-                    elif 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
-                        lines = ['User-agent: *', 'Disallow: /']
-                    else:
-                        raise
-                else:
-                    lines = body.decode('utf-8', errors='replace').splitlines()
-                rules.parse(lines)
-                self._write(parts_cache, json.dumps({'retrieved_at': _stamp(), 'lines': lines}))
-            self._robots[origin] = rules
+        with self._transport_lock:
+            gate = self._robots_gates.setdefault(origin, _Gate())
+        with gate.hold(self.urgent, self.cancelled):
+            if origin not in self._robots:
+                self._load_robots(origin)
         if not self._robots[origin].can_fetch('SquareHarness', url):
             raise LiteratureError('Source robots.txt disallows automated retrieval of this URL')
+
+    def _load_robots(self, origin):
+        rules = RobotFileParser()
+        parts_cache = ('robots', _digest(origin) + '.json')
+        try:
+            cached = json.loads(self._read(parts_cache, 600_000) or '{}')
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached['retrieved_at'])).total_seconds()
+        except (ValueError, KeyError, TypeError):
+            cached, age = {}, float('inf')
+        if age < 86400 and isinstance(cached.get('lines'), list):
+            rules.parse(cached['lines'])
+        else:
+            try:
+                body, _, _ = self._fetch(origin + '/robots.txt', max_bytes=512_000, _robots=False)
+            except LiteratureError as exc:
+                if 'HTTP 404' in str(exc) or 'HTTP 410' in str(exc):
+                    lines = ['User-agent: *', 'Allow: /']
+                elif 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
+                    lines = ['User-agent: *', 'Disallow: /']
+                else:
+                    raise
+            else:
+                lines = body.decode('utf-8', errors='replace').splitlines()
+            rules.parse(lines)
+            self._write(parts_cache, json.dumps({'retrieved_at': _stamp(), 'lines': lines}))
+        self._robots[origin] = rules
 
     def _fetch(self, url, *, headers=None, max_bytes=MAX_BYTES, _robots=True, allowed_hosts=None):
         if not self.online:
@@ -2051,13 +2253,14 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         if allowed_hosts is not None and original_host not in allowed_hosts:
             raise LiteratureError('Source download host is outside the permitted arXiv origins')
         provider = QUOTA_HOSTS.get(original_host)
-        if provider in self.down:
-            since = self._down_at.get(provider)
-            if since is None or time.monotonic() - since < DOWN_COOLDOWN:
-                raise LiteratureError(f'{provider} unavailable earlier in this session; use cached evidence or another provider', code='source_unavailable')
-            # A rate limit or an outage may have passed: one probe, and one more failure marks it down again.
-            self.down.discard(provider)
-            self._strikes[provider] = STRIKES - 1
+        with self._transport_lock:
+            if provider in self.down:
+                since = self._down_at.get(provider)
+                if since is None or time.monotonic() - since < DOWN_COOLDOWN:
+                    raise LiteratureError(f'{provider} unavailable earlier in this session; use cached evidence or another provider', code='source_unavailable')
+                # A rate limit or an outage may have passed: one probe, and one more failure marks it down again.
+                self.down.discard(provider)
+                self._strikes[provider] = STRIKES - 1
         auth_headers = {'authorization', 'x-api-key', 'x-subscription-token'}
         if any(k.casefold() in auth_headers for k in headers) and original_host not in ('api.semanticscholar.org', 'api.search.brave.com'):
             raise LiteratureError('API credentials may only be sent to their fixed provider host')
@@ -2090,9 +2293,11 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 self._remaining_timeout()
                 if not self.online:
                     raise LiteratureError('Offline mode: internet access is disabled')
-                if self.stats['requests'] >= self.max_requests:
-                    raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
-                self.stats['requests'] += 1
+                # Different origins have different rate gates but one shared job allowance.
+                with self._transport_lock:
+                    if self.stats['requests'] >= self.max_requests:
+                        raise LiteratureError('Literature HTTP request budget exhausted; use cached evidence', code='request_budget')
+                    self.stats['requests'] += 1
                 _LAST_REQUEST[rate_host] = time.monotonic()
             if self.on_budget_change:
                 self.on_budget_change()
@@ -2142,12 +2347,14 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 raise LiteratureError(f'Source returned HTTP {status}; check provider access or use another public source',
                                       code='source_unavailable' if status == 429 or status >= 500 else 'source_error')
             if provider:
-                self._strikes.pop(provider, None)
+                with self._transport_lock:
+                    self._strikes.pop(provider, None)
             return body, response_headers.get('content-type', '').lower(), url
 
     def _strike(self, provider, *, permanent=False):
         """Count a failed request; a provider is marked down after STRIKES failures in a row (each already retried)."""
-        self._strikes[provider] = self._strikes.get(provider, 0) + 1
-        if permanent or self._strikes[provider] >= STRIKES:
-            self.down.add(provider)
-            self._down_at[provider] = None if permanent else time.monotonic()
+        with self._transport_lock:
+            self._strikes[provider] = self._strikes.get(provider, 0) + 1
+            if permanent or self._strikes[provider] >= STRIKES:
+                self.down.add(provider)
+                self._down_at[provider] = None if permanent else time.monotonic()
