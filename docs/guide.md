@@ -1139,8 +1139,9 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   author's version, including the relevant theorem and hypotheses. If only a
   bibliographic record or another paper's citation is available, the referee
   identifies the evidence it obtained. It waits for checks you explicitly
-  request and for those needed for the mathematical verdict. It can finish
-  with a still-unverified ancillary attribution and identify it in the report.
+  request and for those needed for the mathematical verdict. An ancillary
+  attribution stays in the background unless it becomes necessary to the
+  review. The report names any such attribution still unfinished at delivery.
   You can reopen the report and discuss a particular finding.
   If the reviewer stops before it finishes, the job records the interruption.
   An empty answer after tool use gets one opportunity to recover.

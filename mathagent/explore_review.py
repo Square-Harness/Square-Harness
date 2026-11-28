@@ -254,8 +254,8 @@ Submit citation checks as their need becomes apparent. Give the original citatio
 While they run, verify independent proofs, record findings and prepare the rest of the report. When the paper
 gives its own proof, check it while its historical attribution is being verified. Make a check
 required for the report when the author requests its verification or your verdict depends on the source.
-An ancillary attribution can be reported as unverified. Await a pending citation only when the remaining
-work needs its result. Use background execution for independent computations as well.
+An ancillary attribution can be reported as unverified. If later reasoning makes it decisive, promote it
+to required and identify the inference that needs it. Use background execution for independent computations as well.
 Use the private index to track proofs, other passages and references. Reading lines establishes access; record
 your actual assessment with assess_review_items. Group related items when they have the same specific basis.
 Use record_review_finding for concrete located findings that should survive subsequent tool calls. Validate any

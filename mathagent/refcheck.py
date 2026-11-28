@@ -198,7 +198,9 @@ original publication or an author's version of that same work. Match the authors
 Use a DOI, publisher full text or author copy from the records. Read the relevant passage and its hypotheses
 with search_paper and read_paper. A catalogue entry or a publisher landing page can establish identity alone.
 If the original is unavailable or leaves a consequential question open, a targeted citation from another paper
-can supply indirect evidence. Use find_quotes only when that evidence would help decide the question. Report
+can supply indirect evidence. Use find_quotes only when that evidence would help decide the question. Request
+the primary lookup separately. If you request it together with find_quotes, inspect the primary result first
+and request find_quotes again if indirect evidence is still needed. Report
 what remains unverified when further searching would only establish the same bibliographic facts.
 When ready to give your verdict, return short notes without tool calls."""
 
@@ -269,7 +271,7 @@ _MEMORY_NOTE = re.compile(r'\s*[(\[][^()\[\]]*\b(?:by memory|from memory|de m[é
                           r'[^()\[\]]*[)\]]', re.I)
 
 
-def _clean_candidate(value, source):
+def _clean_candidate(value, source, *, original_first=False):
     if not isinstance(value, dict):
         return None
     placeholder = re.compile(r'^\s*(?:not (?:known|sure|recalled|remembered)|unknown|n/a|none|unsure|\?+|'
@@ -281,10 +283,19 @@ def _clean_candidate(value, source):
     title = str(value.get('title') or '').strip()
     if placeholder.search(title):
         title = ''
-    if not authors:
-        return None  # nothing to look up: a guess needs an author
     year = re.search(r'(?:1[5-9]|20)\d\d', str(value.get('year') or ''))
+    identifier = None
+    if original_first:
+        hint = value.get('identifier') or value.get('doi') or value.get('arxiv_id')
+        if isinstance(hint, str) and len(hint) <= 300:
+            if re.fullmatch(r'(?:doi:|https?://(?:dx\.)?doi\.org/)?10\.\d{4,9}/\S+', hint.strip(), re.I):
+                identifier = 'doi:' + _identity(hint.strip())
+            elif re.fullmatch(r'(?:arxiv:|https?://(?:www\.)?arxiv\.org/abs/)?(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', hint.strip(), re.I):
+                identifier = 'arxiv:' + re.sub(r'^(?:arxiv:|https?://(?:www\.)?arxiv\.org/abs/)', '', hint.strip(), flags=re.I)
+    if not authors and not identifier:
+        return None
     return {'authors': authors, 'title': title, 'year': year.group() if year else '',
+            **({'identifier_hint': identifier} if identifier else {}),
             'locator': _MEMORY_NOTE.sub('', str(value.get('locator') or '')).strip(' ,;')[:120],
             'why': str(value.get('why') or '')[:400],
             'source_type': value.get('source_type') if value.get('source_type') in ('book', 'article') else 'unknown',
@@ -407,7 +418,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         self._asker = asker
         self._lookup = lookup
         self._original_first = original_first
-        self._guesses = [g for g in (_clean_candidate(g, 'caller') for g in guesses or []) if g]
+        self._guesses = [g for value in guesses or [] if (g := _clean_candidate(value, 'caller', original_first=original_first))]
         self._level = dict(level)
         budgets = dict(max_rounds=level['candidates'] * level['verify_rounds'] + level['verify_rounds'],
                        max_tokens=profile['tokens'] if profile else None, max_input_tokens=None, max_seconds=level['seconds'],
@@ -662,9 +673,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         targets = self.state['candidates']
         if original_first and len(targets) == 1:
             for e in self.state['evidence']:
-                if e.get('candidate') == 'identifier' and e['tool'] == 'open_paper':
+                if e.get('candidate') == 'identifier' and (e['tool'] == 'open_paper' or
+                        e['tool'] == 'lookup_identifier' and len(self.state['identifier_checks']) == 1):
                     e['candidate'] = 0  # Include the supplied document in the identity and passage check.
-        if original_first and targets and all(c['title'] for c in targets):
+        if original_first and targets and all(c['title'] or c.get('identifier_hint') for c in targets):
             # The caller has already identified the works. Alternative papers do not resolve that attribution.
             self.state.update(current=0, statement=self.state['goal'], phase='verify')
             for i, c in enumerate(targets):
@@ -830,6 +842,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def _confirmed(self):
         return sum(1 for c in self.state['candidates'] if RANK[(c['verdict'] or {}).get('level', 'not_found')] >= RANK['cited'])
 
+    def _primary_batch(self, calls, start=0):
+        """Reassess any proposed secondary search after this batch's primary evidence arrives."""
+        if self.state['check'].get('original_first') and any(
+                self._key(c)[0] in {'search_papers', 'lookup_identifier', 'open_paper', 'read_paper', 'search_paper'}
+                for c in calls):
+            return calls[:start] + [c for c in calls[start:] if self._key(c)[0] != 'find_quotes']
+        return calls
+
     def _verify(self):
         s = self.state
         if s['check'].get('lookup') == 'standard':
@@ -838,8 +858,18 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         index = s['current']
         c = s['candidates'][index]
         if s['pending_tools']:
+            pending = s['pending_tools']
+            pending['calls'] = self._primary_batch(pending['calls'], pending['index'])
+            remaining = pending['calls'][pending['index']:]
+            if remaining and all(self._key(call)[0] == 'find_quotes' for call in remaining):
+                # Deduplication can supply a candidate with newly copied primary evidence without
+                # leaving a registry call in this batch. Reassess the indirect request against it.
+                if direct := self._next_original(c, index):
+                    s['pending_tools'] = {'calls': direct, 'index': 0, 'active': False}
             self._execute_pending()
             self._tag(index)
+        elif s['check'].get('original_first'):
+            self._tag(index)  # A resumed job can have an executed tool checkpointed just before tagging.
         settings = s['settings']
         if not c.get('seeded'):
             # Before asking the model, look up the work and how papers quote the guessed place.
@@ -850,11 +880,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if calls:
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
-        if s['check'].get('original_first'):
-            call = self._original_step(c, index)
-            if call:
-                s['pending_tools'] = {'calls': [call], 'index': 0, 'active': False}
-                return
+        if direct := self._next_original(c, index):
+            s['pending_tools'] = {'calls': direct, 'index': 0, 'active': False}
+            return
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']
                 and not self._out_of_time()):
             c['rounds'] += 1
@@ -901,21 +929,48 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def _requests(self):
         return self.literature.stats['requests'] if self.literature else 0
 
+    def _next_original(self, candidate, index):
+        if self.state['check'].get('original_first'):
+            while call := self._original_step(candidate, index):
+                if fresh := self._fresh([call], index):
+                    return fresh
+        return []
+
     def _original_step(self, candidate, index):
         """Open an identified original, then search its cited place before spending a verifier turn."""
         evidence = [e for e in self.state['evidence'] if e.get('candidate') == index]
+        hint = candidate.get('identifier_hint')
+        if hint and not (candidate['authors'] and candidate['title']):
+            for e in evidence:
+                if e['tool'] != 'lookup_identifier' or _identity(e['arguments'].get('identifier')) != _identity(hint):
+                    continue
+                try:
+                    lookup = json.loads(e['result'])
+                except (ValueError, TypeError):
+                    continue
+                hit = lookup.get('record') or {}
+                if not lookup.get('found') or not hit.get('authors') or not hit.get('title'):
+                    continue
+                if (candidate['year'] and hit.get('year') and candidate['year'] != str(hit['year']) or
+                        candidate['title'] and _fold(candidate['title']) != _fold(hit['title']) or
+                        not {_fold(n) for n in _surnames(candidate['authors'])} <=
+                        {_fold(n) for n in _surnames(hit['authors'])}):
+                    continue
+                candidate['authors'] = candidate['authors'] or _surnames(hit['authors'])
+                candidate['title'] = candidate['title'] or hit['title']
+                candidate['year'] = candidate['year'] or str(hit.get('year') or '')
+                break
         record = self._record(candidate, evidence)
         opened = [e for e in evidence if e['tool'] == 'open_paper']
-        if not opened and not candidate.get('original_identifier') and not candidate.get('original_open_dispatched'):
-            record = record or {}
-            identifier = (record.get('full_text_url') or record.get('open_access_url') or
-                          record.get('arxiv_id') or record.get('doi'))
-            if not identifier and str(record.get('identifier') or '').startswith(('arxiv:', 'doi:')):
-                identifier = record['identifier']
-            if identifier:
-                candidate['original_open_dispatched'] = True
-                return {'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': identifier}}}
-            if candidate['title'] and not candidate.get('original_crossref_dispatched'):
+        if not candidate.get('original_identifier') and not candidate.get('supplied_document'):
+            name, target = self._original_lead(candidate, evidence, record)
+            if target:
+                tried = candidate.setdefault('original_attempts', [])
+                if [name, target] not in tried:
+                    tried.append([name, target])
+                    key = 'identifier' if name == 'lookup_identifier' else 'identifier_or_url'
+                    return {'function': {'name': name, 'arguments': {key: target}}}
+            elif not opened and candidate['title'] and not candidate.get('original_crossref_dispatched'):
                 candidate['original_crossref_dispatched'] = True
                 query = ' '.join([*candidate['authors'], candidate['title'], candidate['year']]).strip()
                 return {'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'crossref'}}}
@@ -925,21 +980,93 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     doc = json.loads(e['result'])['document_id']
                 except (ValueError, KeyError, TypeError):
                     continue
-                if self._document_is_work(doc, candidate, record):
+                target = e['arguments'].get('identifier_or_url')
+                if (self._document_is_work(doc, candidate, record) or
+                        ['open_paper', target] in candidate.get('original_attempts', [])):
                     candidate['original_search_dispatched'] = True
                     return {'function': {'name': 'search_paper', 'arguments': {
                         'document_id': doc, 'query': _number(candidate['locator']) or candidate['locator']}}}
         return None
+
+    def _original_lead(self, candidate, evidence, record):
+        """Where to look next. An incomplete registry hit can guide retrieval but cannot establish attribution."""
+        if record:
+            pinned = candidate.get('identifier_hint', '')
+            if (pinned.startswith('arxiv:') and re.search(r'v\d+$', pinned) and
+                    any(_identity(pinned) == _identity(record.get(k)) for k in ('identifier', 'arxiv_id'))):
+                return 'open_paper', pinned
+            target = (record.get('full_text_url') or record.get('open_access_url') or
+                      record.get('arxiv_id') or record.get('doi'))
+            if not target and str(record.get('identifier') or '').startswith(('arxiv:', 'doi:')):
+                target = record['identifier']
+            if target:
+                return 'open_paper', target
+        names = {_fold(n) for n in _surnames(candidate['authors'])}
+        year = candidate['year']
+        incomplete, sparse, resolved, looked_up = set(), set(), {}, set()
+        for event in evidence:
+            if event['tool'] not in ('lookup_identifier', 'search_papers'):
+                continue
+            try:
+                result = json.loads(event['result'])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(result, dict):
+                continue
+            if event['tool'] == 'lookup_identifier':
+                hit = result.get('record') or {}
+                if not isinstance(hit, dict):
+                    continue
+                looked_up.add(_identity(event['arguments'].get('identifier')))
+                if result.get('found') is True and not (hit.get('title') or hit.get('authors')):
+                    ident = result.get('identifier') or hit.get('identifier')
+                    if ident and ident.startswith('doi:'):
+                        resolved[_identity(ident)] = hit.get('url') or ident
+                continue
+            args = event['arguments']
+            if not names or not year or args.get('provider') != 'zbmath' or args.get('query') != self._registry_query(candidate):
+                continue
+            for hit in result.get('results') or []:
+                if not isinstance(hit, dict) or str(hit.get('year')) != year:
+                    continue
+                authors = {_fold(n) for n in _surnames(hit.get('authors'))}
+                if not candidate['title'] and hit.get('title') and authors == names:
+                    sparse.add((_fold(hit['title']), hit.get('full_text_url') or hit.get('arxiv_id') or hit.get('doi')))
+                elif candidate['title'] and not hit.get('title') and not authors:
+                    incomplete.add(_identity(hit.get('doi')))
+        if len(sparse) == 1:
+            return 'open_paper', next(iter(sparse))[1]
+        hint = _identity(candidate.get('identifier_hint'))
+        if hint in resolved:
+            return 'open_paper', resolved[hint]
+        if len(incomplete) == 1:
+            ident = next(iter(incomplete))
+            if ident in resolved:
+                return 'open_paper', resolved[ident]
+            if ident and ident not in looked_up:
+                return 'lookup_identifier', 'doi:' + ident
+        if not incomplete and len(resolved) == 1:
+            return 'open_paper', next(iter(resolved.values()))
+        if len(sparse) > 1 or len(incomplete) > 1 or len(resolved) > 1:
+            candidate['original_ambiguous'] = True
+        return '', ''
+
+    @staticmethod
+    def _registry_query(candidate):
+        words = re.findall(r'[^\W\d_]+', candidate['title'])[:8]
+        return 'au:' + _surnames(candidate['authors'])[0] + (' ti:' + ' '.join(words) if words else '')
 
     def _seed(self, c):
         if c.get('supplied_document'):
             return [{'function': {'name': 'read_paper', 'arguments': {'document_id': c['supplied_document']}}}]
         if c.get('original_identifier'):
             return [{'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': c['original_identifier']}}}]
+        calls = []
+        if c.get('identifier_hint'):
+            calls.append({'function': {'name': 'lookup_identifier', 'arguments': {'identifier': c['identifier_hint']}}})
         names = _surnames(c['authors'])
         if not names:
-            return []
-        calls = []
+            return calls
         work = self._review_work(c)
         if work:
             # A work of the review shown in this conversation: its saved record, and its full text, which the
@@ -958,8 +1085,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if self.state['check'].get('lookup') != 'standard' and (work.get('arxiv') or work.get('doi')):
                 identifier = ('arxiv:' + work['arxiv']) if work.get('arxiv') else 'doi:' + work['doi']
                 calls.append({'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': identifier}}})
-        words = re.findall(r'[^\W\d_]+', c['title'])[:8]
-        query = f'au:{names[0]}' + (' ti:' + ' '.join(words) if words else '')
+        query = self._registry_query(c)
         calls.append({'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'zbmath', 'limit': 3}}})
         if self.state['check'].get('lookup') == 'standard' or self.state['check'].get('original_first'):
             return calls
@@ -1098,7 +1224,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                         walk(item)
         for e in evidence:
             try:
-                walk(json.loads(e['result']))
+                result = json.loads(e['result'])
+                if (self.state['check'].get('original_first') and e['tool'] == 'lookup_identifier'
+                        and isinstance(result, dict) and result.get('found') is False):
+                    continue  # An absent revision may still return a record for the base work.
+                walk(result)
             except ValueError:
                 pass
         return records
@@ -1191,9 +1321,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if host in {'zbmath.org', 'www.zbmath.org', 'api.crossref.org', 'openalex.org', 'api.openalex.org',
                         'www.semanticscholar.org', 'openlibrary.org'}:
                 return False
-            pinned = candidate.get('original_identifier') or ''
-            if pinned.startswith('arxiv:') and re.search(r'v\d+$', pinned) and source.startswith('arxiv:'):
-                return pinned.lower() == source.lower()
+            pinned = candidate.get('original_identifier') or candidate.get('identifier_hint') or ''
+            if pinned.startswith('arxiv:') and re.search(r'v\d+$', pinned):
+                if pinned.lower() != source.lower().replace('arxiv-source:', 'arxiv:', 1):
+                    return False
+                if candidate.get('original_identifier') or record and any(
+                        _identity(pinned) == _identity(record.get(k)) for k in ('identifier', 'arxiv_id')):
+                    return True
             if record and record.get('doi') and source.startswith('https://doi.org/'):
                 return _identity(source) == _identity(record['doi'])
             requested = metadata.get('requested_url')
@@ -1353,6 +1487,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 level = 'inconclusive'
             elif failed:
                 reasons.append('no record was found, but ' + ', '.join(sorted(failed)) + ' failed: not conclusive')
+                level = 'inconclusive'
+            elif any(step[0] == 'open_paper' for step in c.get('original_attempts', [])):
+                reasons.append('a possible original was pursued, but its identity and the cited passage could not be confirmed')
+                level = 'inconclusive'
+            elif c.get('original_ambiguous'):
+                reasons.append('the supplied citation fits multiple registry leads and the intended work could not be identified')
                 level = 'inconclusive'
             else:
                 reasons.append('no record of the work was found')

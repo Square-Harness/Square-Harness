@@ -117,6 +117,10 @@ class ExploreTasks:
                     'type': 'string', 'description': 'For a pending citation, name the unresolved inference or '
                     'requested verification that needs this result now. If omitted, the check keeps running '
                     'while you examine other passages. Completed results are returned immediately.'}
+                offered[-1]['function']['parameters']['properties']['required_for_report'] = {
+                    'type': 'boolean', 'description': 'Set true only when a previously ancillary citation has '
+                    'become necessary for your mathematical verdict or for verification the author requested. '
+                    'Explain the change in needed_for. Other ancillary citations continue in the background.'}
         return offered
 
     def _access(self, name, arguments):
@@ -136,7 +140,7 @@ class ExploreTasks:
                 raise ValueError('Tool arguments must be an object')
             args = dict(args)
             if name == 'await_background_check':
-                return self.await_result(args.get('check_id'), args.get('needed_for'))
+                return self.await_result(args.get('check_id'), args.get('needed_for'), args.get('required_for_report'))
             if name in ELIGIBLE:
                 citation = name == 'check_reference' and getattr(self.workspace, 'defer_citations', False)
                 background = args.pop('background', citation)
@@ -211,16 +215,25 @@ class ExploreTasks:
                 self.records[ident]['waits'].append({'reason': reason, 'start': started, 'end': time.time()})
                 self._save()
 
-    def await_result(self, ident, needed_for=None):
+    def await_result(self, ident, needed_for=None, required_for_report=None):
         if not isinstance(ident, str) or ident not in self.records:
             return 'Tool error: unknown background check ID'
         with self.lock:
             row = self.records[ident]
-            if ('citation_statement' in row and 'result' not in row
-                    and not (isinstance(needed_for, str) and needed_for.strip())):
-                return json.dumps({'check_id': ident, 'status': 'running',
-                                   'next': 'Continue an independent part of the review. This result arrives '
-                                   'automatically. To wait now, give the specific dependency in needed_for.'})
+            if 'citation_statement' in row and 'result' not in row:
+                if not (isinstance(needed_for, str) and needed_for.strip()):
+                    return json.dumps({'check_id': ident, 'status': 'running',
+                                       'next': 'Continue an independent part of the review. This result arrives '
+                                       'automatically. To wait now, give the specific dependency in needed_for.'})
+                if not row['required_for_report']:
+                    if required_for_report is not True:
+                        return json.dumps({'check_id': ident, 'status': 'running', 'next':
+                            'This citation is ancillary. Continue the review or finish with its attribution '
+                            'unverified. If the verdict now depends on it or the author requested it, '
+                            'set required_for_report to true and identify that dependency in needed_for.'})
+                    row['required_for_report'] = True
+                    row['promoted_for'] = needed_for
+                    self._save()
         self._wait(ident, 'dependency')
         return self._evidence(ident)
 
