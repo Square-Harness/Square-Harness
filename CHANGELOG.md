@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- An operator can set `sanity.max_runs` to `null` for unlimited automatic Python calculations. Per-script resources and concurrent sandbox slots remain independently configurable.
+
 - OpenRouter now tries Cohere first, followed by DeepInfra, Crusoe, Parasail and CoreWeave. On eight loop-prone citation questions at production sampling, Cohere and DeepInfra had zero repeated-text failures in 30 served calls and the other providers had eight in 48. Two of the DeepInfra calls separately ran away in whitespace. Hosted workers now detect sustained whitespace and repeated labels or templates whose intervening text keeps cycling. In the saved benchmark and smoke runs the new checks caught four previously missed text loops and four whitespace runaways.
 
 - Hosted DeepSeek streams can now detect a repeating sequence spanning many pages of reasoning. The check preserves distinct mathematical arguments that reuse a heading or proof structure. The hosted service records the generation ID and upstream provider reported by OpenRouter so operators can trace interrupted requests.

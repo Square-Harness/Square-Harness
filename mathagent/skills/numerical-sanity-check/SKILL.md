@@ -74,7 +74,7 @@ until higher precision shows otherwise.
 
 ## Budget
 
-An automatic check normally has three runs. If the user selects this skill, continue useful experiments within the job or the configured allowance. Each run normally has 5 s, 2 GB and one CPU in isolation. Use `/python-lab` for a computation that needs more resources.
+Use the run allowance and per-script resources shown by the active sandbox. Continue with further calculations when they can resolve a mathematical question. Each run normally has 5 s, 2 GB and one CPU in isolation. Use `/python-lab` for a computation that needs more resources.
 
 ## Reporting
 
