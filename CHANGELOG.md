@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Literature review links in the conversation and Notebook open the worker's
+  progress page until it saves a review. Saved reviews, including partial
+  ones, open in the document viewer and appear in Results.
+
 - An operator can set `sanity.max_runs` to `null` for unlimited automatic Python calculations. Per-script resources and concurrent sandbox slots remain independently configurable.
 
 - OpenRouter now tries Cohere first, followed by DeepInfra, Crusoe, Parasail and CoreWeave. On eight loop-prone citation questions at production sampling, Cohere and DeepInfra had zero repeated-text failures in 30 served calls and the other providers had eight in 48. Two of the DeepInfra calls separately ran away in whitespace. Hosted workers now detect sustained whitespace and repeated labels or templates whose intervening text keeps cycling. In the saved benchmark and smoke runs the new checks caught four previously missed text loops and four whitespace runaways.

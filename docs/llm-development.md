@@ -1016,6 +1016,9 @@ come from the saved decision until their corresponding children exist.
 The panel location uses the chat URL's `panel` and `selected` parameters.
 New output types should reuse the authenticated native preview or download
 endpoint and preserve keyboard navigation and both themes.
+For literature jobs, the research list exposes `has_review` and the saved
+download formats. Use these to route to the job page until a review exists.
+Older reading lists can have a readable draft without downloadable files.
 
 Worker cards and native jobs reuse saved child identifiers after interruption.
 Publish a new Proof, Check or research job directory by rename once its first

@@ -584,8 +584,10 @@ the same viewer, which has more room than the notebook; closing it brings the
 notebook back. Answers, proofs and experiments
 are read in the notebook.
 
-- **Agents** shows what each specialist is doing. From a Literature task,
-  **Open literature review** takes you into the review itself.
+- **Agents** shows what each specialist is doing. While a literature worker is
+  searching or reading, **View review progress** opens its job page. Once it
+  saves a review, **Read literature review** opens the text beside the conversation.
+  A saved partial review can be read there too.
 - **Results** collects investigation reports, saved answers, proof attempts, reviews, experiments and
   Write-Up downloads.
 - **Findings** shows results and sources available in this conversation or project.

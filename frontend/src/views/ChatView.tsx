@@ -29,7 +29,8 @@ import { WorkPanel } from '../components/WorkPanel'
 import { FilePanel } from './FileView'
 import { ResultPanel } from '../components/ResultPanel'
 import { ConversationPlan, InvestigationReport, WorkingAnswer } from '../components/InvestigationReading'
-import { go, href, openFile, parse, resultHref, useRoute, viewHref } from '../router'
+import { go, href, openFile, parse, useRoute, viewHref } from '../router'
+import { literatureReviewLink, literatureReviewState } from '../outputs'
 import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../store'
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
@@ -625,7 +626,7 @@ function ModelSteps({ steps, mode, chatId, groups, prompt, paused }: { steps: St
     if (item.role === 'route') {
       flush(index)
       const batch = mode === 'free' && item.orchestrated ? groups.get(index) : undefined
-      if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
+      if (!batch) out.push(<RouteCard key={'route' + index} chatId={chatId} chatMode={mode} index={index} item={item} />)
       else if (batch.length) out.push(<AgentGroup key={batch[0].id} lanes={batch} prompt={prompt} chatId={chatId} />)
     } else if (item.role === 'assistant') {
       if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
@@ -684,7 +685,7 @@ function ModelSteps({ steps, mode, chatId, groups, prompt, paused }: { steps: St
 }
 
 /** What the model started for a message, at which effort, with a way to cancel it. */
-function RouteCard({ chatId, index, item }: { chatId: string; index: number; item: TranscriptItem }) {
+function RouteCard({ chatId, chatMode, index, item }: { chatId: string; chatMode: ChatMode; index: number; item: TranscriptItem }) {
   const app = useApp()
   const [error, setError] = useState('')
   const [acting, setActing] = useState(false)
@@ -727,14 +728,19 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
 
   const task = taskById(app.snapshot, item.task)?.task
   const { queued, running } = routeActivity(item, app.snapshot)
+  const research = item.job_id ? app.research?.find(job => job.id === item.job_id) : undefined
+  const review = mode === 'literature' ? literatureReviewState(research, item.outputs) : null
+  const outputs = review?.outputs || item.outputs
+  const link = !item.job_id || !paged(mode) ? null : review
+    ? literatureReviewLink(chatMode, chatId, item.job_id, review.readable)
+    : { url: href(pageOf(mode), item.job_id, null, chatId), label: 'Open the ' + info.label.toLowerCase() }
   let status = ''
   let variant: Variant = 'ready'
   if (item.job_id && mode === 'prove') {
     const job = app.proofs?.find((proof) => proof.id === item.job_id)
     if (job) ({ variant, label: status } = proofLook(job.status, job.running && (!item.orchestrated || running)))
-  } else if (item.job_id) {
-    const job = app.research?.find((report) => report.id === item.job_id)
-    if (job) ({ variant, label: status } = researchLook(job.status, job.running && (!item.orchestrated || running), job.kind))
+  } else if (research) {
+    ({ variant, label: status } = researchLook(research.status, research.running && (!item.orchestrated || running), research.kind))
   }
   let headline: string
   if (mode === 'critic' && item.status !== 'done' && !queued && !running) { headline = 'Critique retired'; status = ''; variant = 'spent' }
@@ -768,10 +774,8 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && item.outputs && <JobDownloads job={item.job_id} outputs={item.outputs} partial={item.status === 'stopped'} />}
-          {item.job_id && paged(mode) && <a className="btn btn-small btn-quiet" href={mode === 'literature'
-            ? resultHref('free', chatId, item.job_id)
-            : href(pageOf(mode), item.job_id, null, chatId)}>{mode === 'literature' ? 'Read literature review' : 'Open the ' + info.label.toLowerCase()}</a>}
+          {item.job_id && outputs && <JobDownloads job={item.job_id} outputs={outputs} partial={item.status === 'stopped'} />}
+          {link && <a className="btn btn-small btn-quiet" href={link.url}>{link.label}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}

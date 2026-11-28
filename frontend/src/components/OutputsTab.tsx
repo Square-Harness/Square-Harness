@@ -12,7 +12,7 @@ import { InvestigationReport } from './InvestigationReading'
 import { BackIcon, FileIcon } from './Icons'
 import { reviewStatusLook, Square } from './Square'
 import { chatOutputs, type WorkOutput, type JobFormats } from '../outputs'
-import { openResult } from '../router'
+import { href, openResult } from '../router'
 import { useApp, useTick } from '../store'
 import { Report, Passage, flaggedCitations } from '../views/ResearchView'
 import { TexSource } from '../views/WriteupView'
@@ -49,13 +49,13 @@ export const isDocument = (output: WorkOutput) =>
   ['pdf', 'tex', 'body', 'bib', 'file'].includes(output.kind) || (output.kind === 'report' && output.mode !== 'prove')
 
 /** Everything the agents of a conversation produced; `loaded` once the saved index has answered (or failed). */
-export function useChatOutputs(chat: Chat) {
+export function useChatOutputs(chat: Chat, selected: string | null) {
   const { proofs, research } = useApp()
   const tick = useTick(chat.id)
   const index = useLoad(() => api.index({ chat: chat.id }), [chat.id, chat.project_id], tick)
   const [formats, setFormats] = useState<JobFormats>({})
   const legacy = [...new Set(chat.transcript.filter(item => item.role === 'route' && !item.outputs && item.job_id &&
-    ['writeup', 'summarize', 'literature'].includes(item.mode || '')).map(item => item.job_id!))].join(',')
+    ['writeup', 'summarize'].includes(item.mode || '')).map(item => item.job_id!))].join(',')
   useEffect(() => {
     let active = true
     async function discover() {
@@ -74,11 +74,18 @@ export function useChatOutputs(chat: Chat) {
   }, [chat.id, legacy])
   const outputs = useMemo(() => chatOutputs(chat, proofs || [], research || [], index.data?.entries, formats),
     [chat, proofs, research, index.data, formats])
-  return { outputs, loaded: !!index.data || !!index.error, error: index.error }
+  const pendingReview = selected && research?.some(job => job.id === selected && job.kind === 'literature' && !job.has_review)
+    && chat.transcript.some(item => item.role === 'route' && !item.discarded && item.job_id === selected && item.mode === 'literature')
+    ? href('literature', selected, null, chat.id) : null
+  return { outputs, pendingReview, loaded: !!index.data || !!index.error, error: index.error }
+}
+
+export function PendingReview({ url }: { url: string }) {
+  return <p role="status">This worker has not saved a review yet. <a href={url}>View review progress</a></p>
 }
 
 export function OutputsTab({ chat, selected, onSelect }: Props) {
-  const { outputs, loaded, error } = useChatOutputs(chat)
+  const { outputs, pendingReview, loaded, error } = useChatOutputs(chat, selected)
   const chosen = outputs.find(item => item.id === selected || item.aliases.includes(selected || ''))
   const panel = useRef<HTMLDivElement>(null)
   const restore = useRef<string | null>(null)
@@ -101,6 +108,10 @@ export function OutputsTab({ chat, selected, onSelect }: Props) {
     focusPending.current = true
     onSelect(id)
   }
+  if (!chosen && pendingReview) return <div className="work-tab-content work-results" ref={panel}>
+    <button type="button" className="work-back" onClick={() => choose(null)}><BackIcon size={15} /> All results</button>
+    <PendingReview url={pendingReview} />
+  </div>
   if (!outputs.length && !loaded) return <p role="status">Loading results…</p>
   if (!outputs.length) return <><ErrorNote>{error}</ErrorNote><p className="empty-note">Everything the agents produce in this conversation (answers, proofs, reviews, documents, figures) will be listed here.</p></>
   return <div className="work-tab-content work-results" ref={panel}>
