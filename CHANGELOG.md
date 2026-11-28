@@ -4,7 +4,9 @@
 
 - Explore can read an attached document several times in parallel and combine the
   readings into one checked answer (`--explore-samples`, or a conversation's `samples`
-  setting). The saved turn keeps every reading.
+  setting). The first complete reading appears at once as a preliminary answer while
+  the others work; the combination reuses their reference checks. The saved turn keeps
+  every reading.
 - Whole-paper Review groups related proofs using manuscript dependencies and
   gives each group a primary reader. The lead checks connections and remaining
   passages alongside an independent statement-first test. Serious findings

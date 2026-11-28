@@ -1090,8 +1090,13 @@ A different source during an interrupted reading requires starting a fresh one.
 With more than one Explore sample (`--explore-samples` or the conversation's `samples`
 setting), `explore_samples.combined_reading` runs that many fresh readings of the same
 sources in parallel. Each reading has its own agent, workspace and background checks. A
-seeded configuration offsets each reading's seed. A final reading by the turn's own
-agent receives the request, every finished reading as untrusted material and the source.
+seeded configuration offsets each reading's seed. The first complete reading is published
+once into the live turn (a live-only `preliminary` notice, then one call with its text)
+while the others work. A pause after that delivers the shown reading instead of
+discarding the turn, and every fallback prefers it. A final reading by the turn's own agent receives the request,
+every finished reading as untrusted material, the deduplicated `check_reference` results
+of the readings' turns (delivered background checks included; claim and result, an equal
+share of a context-sized cap per reading) and the source.
 Only that exchange enters the conversation history. The saved assistant item lists the
 readings under `readings`. Readings keep the ordinary tool list but decline `WRITE`
 approvals, so only the delivered answer can change files. Failed readings and readings

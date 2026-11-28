@@ -985,9 +985,12 @@ proofs or claims the worker actually checked.
 An Explore conversation can read attached documents several times independently and combine the
 readings. Start the interface with `--explore-samples N` (1–5, default 1), or set `samples` for one
 conversation through `POST /api/chats/<id>/settings`. Each reading receives the whole document and your
-request, and they run at the same time. One more reading then receives the document, your request and
-every finished reading. It checks each point against the source and writes the single answer you see.
-Only the final reading can propose file changes; the independent readings decline them. A failed reading
+request, and they run at the same time. The first complete reading appears at once as a preliminary
+answer, with a notice that the other readings are still working. One more reading then receives the
+document, your request, every finished reading and the reference checks those readings ran. It checks
+each point against the source and writes the single answer that replaces the preliminary one.
+If you pause after the preliminary answer appears, it is kept as the answer. Only the final reading can
+propose file changes; the independent readings decline them. A failed reading
 leaves the others. If the combined reading fails or stops early, the answer is one complete reading, and a
 notice says so. The saved turn keeps each reading. A combined turn starts
 again from the beginning after an interruption. It costs about N + 1 readings.
