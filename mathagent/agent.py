@@ -206,7 +206,7 @@ class Agent:
         schemas = self.workspace.schemas() if tools else []
         if tools and self.mode == 'explore':
             from .explore_tasks import ExploreTasks
-            schemas = ExploreTasks.schemas(schemas)
+            schemas = ExploreTasks.schemas(schemas, review_citations=getattr(self.workspace, 'defer_citations', False))
         payload = self._payload([system, *context, *turn], schemas, self.think, desired, 0)
         try:
             _, fit = allocate_call(self.client, payload, desired, minimum=minimum)
@@ -260,7 +260,8 @@ class Agent:
             return self.notebook_answer
         schemas = self.workspace.schemas()
         if tasks is not None:
-            schemas = tasks.schemas(schemas, saved_checks=bool(tasks.records))
+            schemas = tasks.schemas(schemas, saved_checks=bool(tasks.records),
+                                    review_citations=getattr(self.workspace, 'defer_citations', False))
         external = list((tool_checkpoint or {}).get('external_evidence', []))
         snapshot = (tool_checkpoint or {}).get('evidence_snapshot', '')
 

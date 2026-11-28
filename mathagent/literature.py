@@ -1918,20 +1918,22 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
         return addresses
 
     def _request_once(self, url, headers, max_bytes):
+        if self.cancelled():
+            raise KeyboardInterrupt
         parts = self._url(url)
         addresses = self._addresses(parts.hostname)
         context = _tls_context()
         timeout = self._remaining_timeout()
         conn = http.client.HTTPSConnection(parts.hostname, timeout=timeout, context=context)
         finished = threading.Event()
+        connected = None
 
         def stop_on_pause():
             # A blocked read wakes when its socket is shut down; a pause need not wait for the source.
             while not finished.wait(0.1):
-                if self.cancelled():
+                if self.cancelled() and connected is not None:
                     try:
-                        if conn.sock is not None:
-                            conn.sock.shutdown(socket.SHUT_RDWR)
+                        connected.shutdown(socket.SHUT_RDWR)
                     except (OSError, ValueError):
                         pass
                     return
@@ -1943,6 +1945,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             # Pin the validated IP while retaining the original TLS verification name.
             deadline = time.monotonic() + timeout
             for index, address in enumerate(addresses):
+                if self.cancelled():
+                    raise KeyboardInterrupt
                 raw = None
                 try:
                     remaining = timeout if index == 0 else max(.1, deadline - time.monotonic())
@@ -1968,6 +1972,11 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                         raw.close()
                     if index == len(addresses) - 1 or time.monotonic() >= deadline:
                         raise
+            # http.client clears conn.sock after headers with Connection: close. The
+            # response still owns a readable socket, which must remain interruptible.
+            connected = conn.sock
+            if self.cancelled():
+                raise KeyboardInterrupt
             path = urlunsplit(('', '', parts.path or '/', parts.query, ''))
             from . import __version__
             conn.request('GET', path, headers={'User-Agent': f'SquareHarness/{__version__} literature research',
@@ -1988,12 +1997,16 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             if self.deadline is not None:
                 deadline = min(deadline, self.deadline)
             while True:
+                if self.cancelled():
+                    raise KeyboardInterrupt
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LiteratureError('Document download timed out', code='source_unavailable')
                 if conn.sock:
                     conn.sock.settimeout(min(self.timeout, remaining))
                 chunk = response.read(min(65536, max_bytes + 1 - downloaded))
+                if self.cancelled():
+                    raise KeyboardInterrupt
                 if not chunk:
                     break
                 downloaded += len(chunk)

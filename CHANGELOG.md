@@ -6,6 +6,9 @@
   referee tracks source coverage and findings, and an independent challenger
   examines consequential steps and sends supported objections as it finds them. The referee assesses the evidence and
   writes the saved report. Earlier reviews resume with their original workflow.
+- The main referee starts citation checks in the background and looks for the
+  cited work and passage first. It can continue checking independent proofs,
+  wait for a result its verdict needs, and identify unfinished attributions in the report.
 - Explore can submit independent calculations and reference lookups while
   working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
 - The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.

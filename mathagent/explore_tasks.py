@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-"""Turn-scoped asynchronous evidence for Explore. Only explicitly submitted checks are dispatched."""
+"""Turn-scoped background checks and delivery of their evidence to the working agent."""
 import copy
 import hashlib
 import json
@@ -86,7 +86,7 @@ class ExploreTasks:
             _atomic_write(self.journal, _bytes(json.dumps(self.records, ensure_ascii=False)))
 
     @staticmethod
-    def schemas(original, *, saved_checks=False):
+    def schemas(original, *, saved_checks=False, review_citations=False):
         offered = copy.deepcopy(original)
         available = False
         for spec in offered:
@@ -100,10 +100,23 @@ class ExploreTasks:
                     'type': 'boolean', 'description': 'For a background check, default true: join before writing the '
                     'final answer. Set false only for optional exploration that can be dropped without compromising '
                     'the requested scope or your verdict. An explicitly requested verification is required.'}
+                if review_citations and fn['name'] == 'check_reference':
+                    fn['parameters']['properties']['background']['description'] = (
+                        'Defaults to true in manuscript Review. Submission returns a check ID immediately. '
+                        'Continue working on independent proofs. Set false only for a foreground-only transport.')
+                    fn['parameters']['properties']['required_for_report']['description'] = (
+                        'Set true if the author requested this verification or if the verdict depends on it. '
+                        'Set false for an ancillary attribution that can be disclosed as unverified.')
+                    fn['parameters']['required'].append('required_for_report')
         if available or saved_checks:
             offered.append(schema('await_background_check', 'Wait for one submitted check when further work depends '
                                   'on it. Completed checks arrive automatically; do not poll.',
                                   {'check_id': {'type': 'string'}}, ['check_id']))
+            if review_citations:
+                offered[-1]['function']['parameters']['properties']['needed_for'] = {
+                    'type': 'string', 'description': 'For a pending citation, name the unresolved inference or '
+                    'requested verification that needs this result now. If omitted, the check keeps running '
+                    'while you examine other passages. Completed results are returned immediately.'}
         return offered
 
     def _access(self, name, arguments):
@@ -123,9 +136,10 @@ class ExploreTasks:
                 raise ValueError('Tool arguments must be an object')
             args = dict(args)
             if name == 'await_background_check':
-                return self.await_result(args.get('check_id'))
+                return self.await_result(args.get('check_id'), args.get('needed_for'))
             if name in ELIGIBLE:
-                background = args.pop('background', False)
+                citation = name == 'check_reference' and getattr(self.workspace, 'defer_citations', False)
+                background = args.pop('background', citation)
                 required = args.pop('required_for_report', True)
                 if not isinstance(background, bool) or not isinstance(required, bool):
                     raise ValueError('background and required_for_report must be booleans')
@@ -147,6 +161,8 @@ class ExploreTasks:
                 if self.cancel.is_set():
                     raise KeyboardInterrupt
                 self.records[ident] = {'tool': name, 'required_for_report': required, 'submitted_at': time.time(), 'waits': []}
+                if name == 'check_reference' and getattr(self.workspace, 'defer_citations', False):
+                    self.records[ident]['citation_statement'] = str(args.get('statement') or ident)
                 self.cancellations[ident] = TurnCancellation(self.cancel.is_set)
                 self._save()  # An interrupted dispatch can never be silently resubmitted on resume.
                 self.futures[ident] = self.pool.submit(copy_context().run, self._run, ident, name, args)
@@ -195,9 +211,16 @@ class ExploreTasks:
                 self.records[ident]['waits'].append({'reason': reason, 'start': started, 'end': time.time()})
                 self._save()
 
-    def await_result(self, ident):
+    def await_result(self, ident, needed_for=None):
         if not isinstance(ident, str) or ident not in self.records:
             return 'Tool error: unknown background check ID'
+        with self.lock:
+            row = self.records[ident]
+            if ('citation_statement' in row and 'result' not in row
+                    and not (isinstance(needed_for, str) and needed_for.strip())):
+                return json.dumps({'check_id': ident, 'status': 'running',
+                                   'next': 'Continue an independent part of the review. This result arrives '
+                                   'automatically. To wait now, give the specific dependency in needed_for.'})
         self._wait(ident, 'dependency')
         return self._evidence(ident)
 
@@ -258,8 +281,12 @@ class ExploreTasks:
                     continue
                 seen.add(ident)
                 if data.get('status') == 'submitted' and 'result' in self.records[ident]:
+                    row = self.records[ident]
                     msg['content'] = self._evidence(ident)
-                    changed = True
+                    # The report discloses unfinished ancillary citations by name. Cancellation alone
+                    # supplies no new evidence for the referee to assess in a second generation.
+                    if 'cancelled_at' not in row or 'citation_statement' not in row:
+                        changed = True
             # The process might have stopped after dispatch and before checkpointing the model's tool batch.
             orphaned = [self._evidence(i) for i in self.records.keys() - seen if 'result' in self.records[i]]
         return changed, orphaned

@@ -193,6 +193,15 @@ search_paper is a literal substring search: use one short term, such as the numb
 Guessed numbers are often wrong: if sources quote another number for this result, follow that number.
 Never repeat a call already in the evidence index: repeated calls are skipped. When you have enough evidence, or nothing more to try, reply with short notes and no tool calls."""
 
+ORIGINAL_VERIFY_METHOD = """Check whether the cited work supports the precise use in the question. Start with the
+original publication or an author's version of that same work. Match the authors, title, edition and locator.
+Use a DOI, publisher full text or author copy from the records. Read the relevant passage and its hypotheses
+with search_paper and read_paper. A catalogue entry or a publisher landing page can establish identity alone.
+If the original is unavailable or leaves a consequential question open, a targeted citation from another paper
+can supply indirect evidence. Use find_quotes only when that evidence would help decide the question. Report
+what remains unverified when further searching would only establish the same bibliographic facts.
+When ready to give your verdict, return short notes without tool calls."""
+
 VERDICT_RULES = """Give your verdict on the guess as JSON.
 level: read = you read the statement itself in the work; cited = you read lines of another paper that
 cite this work at a numbered place (a theorem, or a section such as "Sec. 5.7") for this result, even if
@@ -374,7 +383,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         self._emit = quiet
 
     def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None,
-              material='', **overrides):
+              material='', original_first=False, **overrides):
         # An attached reference list (.bib or text) whose entries are each checked against the registries.
         self._bibliography_material = str(material or '')
         if lookup not in ('standard', 'precise'):
@@ -397,6 +406,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                      'seconds': level['seconds']}
         self._asker = asker
         self._lookup = lookup
+        self._original_first = original_first
         self._guesses = [g for g in (_clean_candidate(g, 'caller') for g in guesses or []) if g]
         self._level = dict(level)
         budgets = dict(max_rounds=level['candidates'] * level['verify_rounds'] + level['verify_rounds'],
@@ -422,6 +432,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 'discovered': False, 'answer': '', 'standard_author': '',
                 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
                           'lookup': self._lookup, 'asker': self._asker,
+                          **({'original_first': True} if self._original_first else {}),
                           **({'proof_source': self.proof_source} if self.proof_source else {})}}
 
     # -- context -----------------------------------------------------------------
@@ -554,6 +565,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                                       'why': f'{identifier} given in the question', 'source_type': 'article'}, 'identifier')
                 if c:
                     c['identifier_evidence'] = evidence_id
+                    if s['check'].get('original_first'):
+                        original = identifier
+                        if identifier.startswith('arxiv:'):
+                            version = re.search(re.escape(identifier[6:]) + r'(v\d+)\b', words, re.I)
+                            if version:
+                                original += version[1].lower()
+                        c['original_identifier'] = original
                     found.append(c)
         # Other URLs in the question are opened as given: the page is evidence, and a refusal (robots rules, size,
         # missing page) is reported as it is, never replaced by a topic search.
@@ -580,9 +598,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         return found
 
     def _verify_supplied_document(self):
-        """Start a precise Proof check at the one document its question actually opened."""
+        """Start a precise check at the one supplied document it actually opened."""
         s = self.state
-        if s['check'].get('asker') != 'proof' or s['check'].get('lookup') != 'precise' or s['candidates']:
+        if (s['check'].get('asker') != 'proof' and not s['check'].get('original_first')
+                or s['check'].get('lookup') != 'precise' or s['candidates']):
             return False
         checks = s.get('identifier_checks') or []
         urls = question_urls(s['goal'])
@@ -623,7 +642,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                      'claimed': None, 'verdict': None}
         opened['candidate'] = 0
         s.update(candidates=[candidate], current=0, phase='verify')
-        self.emit('notice', 'Reading the source supplied in the Proof question: ' + url)
+        self.emit('notice', 'Reading the supplied source: ' + url)
         return True
 
     def _recall(self):
@@ -639,6 +658,20 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             keep = {(_fold(' '.join(c['authors'])), _fold(c['title'])) for c in seeded}
             self.state['candidates'] = seeded + [c for c in self.state['candidates']
                                                  if (_fold(' '.join(c['authors'])), _fold(c['title'])) not in keep]
+        original_first = self.state['check'].get('original_first')
+        targets = self.state['candidates']
+        if original_first and len(targets) == 1:
+            for e in self.state['evidence']:
+                if e.get('candidate') == 'identifier' and e['tool'] == 'open_paper':
+                    e['candidate'] = 0  # Include the supplied document in the identity and passage check.
+        if original_first and targets and all(c['title'] for c in targets):
+            # The caller has already identified the works. Alternative papers do not resolve that attribution.
+            self.state.update(current=0, statement=self.state['goal'], phase='verify')
+            for i, c in enumerate(targets):
+                for e in self.state['evidence']:
+                    if e['id'] == c.get('identifier_evidence'):
+                        e['candidate'] = i
+            return
         instruction = ('Recall candidate sources for the exact mathematical question. Briefly state the result '
                        'sought, preserving its hypotheses, and give public topic keywords. List the works you '
                        'remember, most relevant first, with a chapter, section or theorem number only when you '
@@ -647,6 +680,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         standard = self.state['check'].get('lookup') == 'standard'
         if standard:
             instruction = self._standard_recall_instruction()
+        elif original_first:
+            instruction = ('Identify the original publication or publications meant in the citation question. '
+                           'Complete missing bibliographic details when possible. Preserve the cited authors, '
+                           'year, edition and locator. Leave uncertain fields empty. When a particular work is '
+                           'named, give that work alone. When none is named, identify plausible primary sources.')
         if self.state['candidates']:
             instruction += '\nThe asking agent already suggested: ' + '; '.join(
                 describe(c) + f', {c["locator"]}' for c in self.state['candidates']) + '. Keep these first.'
@@ -674,7 +712,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                             'keep the essential setting and do not include guessed authors. '
                             'Include author as the explicitly named author of a latest-publication request, '
                             'or an empty string for all other requests.\n')
-        retry = (instruction if standard else
+        retry = (instruction if standard or original_first else
                  'Give only bibliographic leads you remember for the question. Reply with '
                  '{"candidates":[{"authors":["surname"],"title":"work","locator":"remembered place or empty"}]}. '
                  'If you cannot identify a work, reply with {"candidates":[]}.')
@@ -695,6 +733,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 value, recalled = {}, []
         if not isinstance(value, dict):
             value = {}
+        if original_first and targets:
+            for c in targets:
+                if not c['title']:
+                    matching = [g for g in recalled if g['title'] and
+                                {_fold(n) for n in _surnames(c['authors'])} <= {_fold(n) for n in _surnames(g['authors'])}
+                                and (not c['year'] or not g['year'] or c['year'] == g['year'])]
+                    if len(matching) == 1:
+                        c['title'] = matching[0]['title']
+            recalled = []
         self.state['statement'] = str(value.get('statement') or '')
         keywords = value.get('keywords')
         self.state['keywords'] = [k.strip() for k in (keywords if isinstance(keywords, list) else [])
@@ -803,6 +850,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             if calls:
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
+        if s['check'].get('original_first'):
+            call = self._original_step(c, index)
+            if call:
+                s['pending_tools'] = {'calls': [call], 'index': 0, 'active': False}
+                return
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']
                 and not self._out_of_time()):
             c['rounds'] += 1
@@ -811,7 +863,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             instruction = ('Check the question against the supplied document. Inspect the statement, hypotheses '
                            'and exact lines. Use search_paper or read_paper for other parts of the document. '
                            'When you have enough evidence, reply with short notes and no tool calls.'
-                           if c.get('supplied_document') else VERIFY_METHOD)
+                           if c.get('supplied_document') else
+                           ORIGINAL_VERIFY_METHOD if s['check'].get('original_first') else VERIFY_METHOD)
             result = self._call('verify', instruction, cap=1200, tools=self._schemas())
             if result['text'].strip():
                 c['notes'].append(result['text'])
@@ -821,11 +874,20 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 return
         if not self._out_of_time():
             schema = VERDICT_SCHEMA
+            verdict_rules = VERDICT_RULES
+            if s['check'].get('original_first'):
+                schema = {**schema, 'properties': {**schema['properties'], 'statement_quote': {
+                    'type': 'string', 'description': 'Exact words of the mathematical assertion in the reported lines of the original. '
+                                                     'Leave empty when you only located metadata, a heading or a secondary citation.'}},
+                    'required': [*schema['required'], 'statement_quote']}
+                verdict_rules += (' For read, copy the relevant assertion, including the decisive hypotheses, verbatim '
+                                  'into statement_quote. A table of contents, bibliography, title or locator alone '
+                                  'only locates a work. A different edition needs independent verification of the cited place.')
             if c.get('supplied_document'):
                 schema = {**schema, 'properties': {**schema['properties'], 'needs_other_sources': {
                     'type': 'boolean', 'description': 'Does the question also ask for other references or evidence beyond this document?'}},
                     'required': [*schema['required'], 'needs_other_sources']}
-            result = self._call('verdict', VERDICT_RULES, cap=700, format_schema=schema)
+            result = self._call('verdict', verdict_rules, cap=700, format_schema=schema)
             try:
                 claimed = loads(result['text'])
             except ValueError:
@@ -839,9 +901,41 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def _requests(self):
         return self.literature.stats['requests'] if self.literature else 0
 
+    def _original_step(self, candidate, index):
+        """Open an identified original, then search its cited place before spending a verifier turn."""
+        evidence = [e for e in self.state['evidence'] if e.get('candidate') == index]
+        record = self._record(candidate, evidence)
+        opened = [e for e in evidence if e['tool'] == 'open_paper']
+        if not opened and not candidate.get('original_identifier') and not candidate.get('original_open_dispatched'):
+            record = record or {}
+            identifier = (record.get('full_text_url') or record.get('open_access_url') or
+                          record.get('arxiv_id') or record.get('doi'))
+            if not identifier and str(record.get('identifier') or '').startswith(('arxiv:', 'doi:')):
+                identifier = record['identifier']
+            if identifier:
+                candidate['original_open_dispatched'] = True
+                return {'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': identifier}}}
+            if candidate['title'] and not candidate.get('original_crossref_dispatched'):
+                candidate['original_crossref_dispatched'] = True
+                query = ' '.join([*candidate['authors'], candidate['title'], candidate['year']]).strip()
+                return {'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'crossref'}}}
+        if opened and candidate['locator'] and not candidate.get('original_search_dispatched'):
+            for e in opened:
+                try:
+                    doc = json.loads(e['result'])['document_id']
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if self._document_is_work(doc, candidate, record):
+                    candidate['original_search_dispatched'] = True
+                    return {'function': {'name': 'search_paper', 'arguments': {
+                        'document_id': doc, 'query': _number(candidate['locator']) or candidate['locator']}}}
+        return None
+
     def _seed(self, c):
         if c.get('supplied_document'):
             return [{'function': {'name': 'read_paper', 'arguments': {'document_id': c['supplied_document']}}}]
+        if c.get('original_identifier'):
+            return [{'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': c['original_identifier']}}}]
         names = _surnames(c['authors'])
         if not names:
             return []
@@ -867,7 +961,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         words = re.findall(r'[^\W\d_]+', c['title'])[:8]
         query = f'au:{names[0]}' + (' ti:' + ' '.join(words) if words else '')
         calls.append({'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'zbmath', 'limit': 3}}})
-        if self.state['check'].get('lookup') == 'standard':
+        if self.state['check'].get('lookup') == 'standard' or self.state['check'].get('original_first'):
             return calls
         # All the keywords together: a combined topic query finds far more of the papers that cite the work.
         topic = ' '.join(self.state['keywords'][:4])[:120]
@@ -925,7 +1019,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         s = self.state
         current = s['candidates'][s['current']]
         needs_sources = not self._confirmed()
-        if current.get('supplied_document') and type((current.get('claimed') or {}).get('needs_other_sources')) is bool:
+        if s['check'].get('original_first') and any(c['source'] in ('caller', 'identifier', 'question', 'supplied_url')
+                                                   for c in s['candidates']):
+            needs_sources = False
+        elif current.get('supplied_document') and type((current.get('claimed') or {}).get('needs_other_sources')) is bool:
             needs_sources = current['claimed']['needs_other_sources']
         if s['current'] + 1 < len(s['candidates']) and not self._out_of_time():
             s['current'] += 1
@@ -1011,6 +1108,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         words = _words(candidate['title'])
         best, score = None, 0
         for r in self._records(evidence):
+            if (self.state['check'].get('original_first') and candidate.get('year') and r.get('year')
+                    and str(r['year']) != candidate['year']):
+                continue
             if self.state['check'].get('lookup') == 'standard' and not self._standard_eligible(r, candidate):
                 continue
             authors = {_fold(n) for n in _surnames(r['authors'])}
@@ -1032,6 +1132,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 if not expected or len(expected & actual) / len(expected | actual) < .8:
                     continue
             value = overlap + (3 if wanted and str(r.get('identifier')) == wanted else 0) + (1 if r.get('review') else 0)
+            if self.state['check'].get('original_first') and any(r.get(k) for k in ('full_text_url', 'open_access_url', 'arxiv_id', 'doi')):
+                value += 2
             if self.state['check'].get('lookup') == 'standard' and str(r.get('year')) == str(candidate.get('year')):
                 value += 20
             if value > score:
@@ -1077,13 +1179,29 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             return None
 
     def _document_is_work(self, document_id, candidate, record):
-        if candidate.get('supplied_document'):
+        if candidate.get('supplied_document') and not self.state['check'].get('original_first'):
             return document_id == candidate['supplied_document']
         try:
             metadata, _ = self.literature._document(document_id)
         except (ValueError, OSError, AttributeError):
             return False
-        canonical = _identity(metadata.get('canonical_identifier'))
+        source = str(metadata.get('canonical_identifier') or '')
+        if self.state['check'].get('original_first'):
+            host = (urlsplit(metadata.get('source_url') or '').hostname or '').lower()
+            if host in {'zbmath.org', 'www.zbmath.org', 'api.crossref.org', 'openalex.org', 'api.openalex.org',
+                        'www.semanticscholar.org', 'openlibrary.org'}:
+                return False
+            pinned = candidate.get('original_identifier') or ''
+            if pinned.startswith('arxiv:') and re.search(r'v\d+$', pinned) and source.startswith('arxiv:'):
+                return pinned.lower() == source.lower()
+            if record and record.get('doi') and source.startswith('https://doi.org/'):
+                return _identity(source) == _identity(record['doi'])
+            requested = metadata.get('requested_url')
+            if requested and record and requested in (record.get('full_text_url'), record.get('open_access_url')):
+                return True
+            if candidate.get('supplied_document'):
+                return document_id == candidate['supplied_document']
+        canonical = _identity(source)
         identifiers = [_identity((record or {}).get(k)) for k in ('identifier', 'doi', 'arxiv_id')]
         if canonical and canonical in identifiers:
             return True
@@ -1203,6 +1321,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     elif not self._document_is_work(doc, c, record):
                         reasons.append('the read document was not identified as the candidate work')
                         level = 'located'
+                    elif self.state['check'].get('original_first'):
+                        direct = ' '.join(str(claimed.get('statement_quote') or '').split())
+                        metadata_words = set(re.findall(r'\w+', _fold(
+                            ' '.join([c['title'], locator, *c['authors'], c['year']]))))
+                        if (not direct or direct not in ' '.join(text.split()) or
+                                not (set(re.findall(r'\w+', _fold(direct))) - metadata_words)):
+                            reasons.append('the cited lines do not contain a quoted assertion beyond the bibliographic details')
+                            level = 'located'
                 if level == 'cited':
                     names = _surnames(c['authors']) or ['']
                     body = _fold('\n'.join(full or []))
@@ -1414,7 +1540,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                          'published': record.get('published'), 'updated': record.get('updated'),
                          'suitability': c.get('suitability'),
                          'metadata_confirmed': bool(v.get('record')),
-                         'exact_statement_confirmed': v['level'] in ('read', 'cited')})
+                         'exact_statement_confirmed': v['level'] == 'read' if self.state['check'].get('original_first')
+                                                      else v['level'] in ('read', 'cited')})
         others = [{'reference': describe(c).replace('*', ''), 'place': c['locator'],
                    'level': (c.get('verdict') or {}).get('level', 'not_checked'),
                    'reasons': (c.get('verdict') or {}).get('reasons', [])} for c in self.state['candidates'] if c not in self.chosen()]
@@ -1530,7 +1657,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
 
 def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share_source_budget=False,
-                   share_job_budget=False, max_seconds=None):
+                   share_job_budget=False, max_seconds=None, original_first=False):
     """check_reference for an answering agent: a separate verifier with its own budget and context.
 
     The verifier has its own context and cannot start nested verifiers. A parent can share
@@ -1593,7 +1720,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', **limits)
+            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', original_first=original_first,
+                         **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()

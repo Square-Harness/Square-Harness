@@ -14,7 +14,7 @@ from .referee import MeteredClient, copies_manuscript
 from .research import ResearchRunner
 from .review import EXPLORE_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
 from .review_challenge import Challenge
-from .review_evidence import ReviewEvidence, bibliographic_query
+from .review_evidence import ReviewEvidence, _code_span, bibliographic_query
 from .review_position import _words
 from .source_tasks import scoped_literature
 from .tools import Workspace
@@ -146,7 +146,8 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
             reference_agent = copy.copy(reviewer)
             reference_agent.client = MeteredClient(self, 'reference', 'reference')
             workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True,
-                                               share_job_budget=self.PIPELINE == EXPLORE_PIPELINE)
+                                               share_job_budget=self.PIPELINE == EXPLORE_PIPELINE,
+                                               original_first=self.PIPELINE == EXPLORE_PIPELINE)
 
         query = state['goal']
         if state.get('target'):
@@ -249,8 +250,12 @@ even when you can supply the argument yourself. Give a correction only if you ca
 Check formulas, notation, cross-references, typographical errors and the bibliography. For a citation used in
 a proof, separate existence and bibliographic identity from support for this precise theorem and its hypotheses.
 Identify unavailable sources as unverified. Honor the author's requested focus, language and source restrictions.
-When a computation or reference check can run while you examine another passage, submit it in the background
-and continue reading. Await it when the next inference depends on it. Mark ancillary checks optional for the report.
+Submit citation checks as their need becomes apparent. Give the original citation and its locator if available.
+While they run, verify independent proofs, record findings and prepare the rest of the report. When the paper
+gives its own proof, check it while its historical attribution is being verified. Make a check
+required for the report when the author requests its verification or your verdict depends on the source.
+An ancillary attribution can be reported as unverified. Await a pending citation only when the remaining
+work needs its result. Use background execution for independent computations as well.
 Use the private index to track proofs, other passages and references. Reading lines establishes access; record
 your actual assessment with assess_review_items. Group related items when they have the same specific basis.
 Use record_review_finding for concrete located findings that should survive subsequent tool calls. Validate any
@@ -264,6 +269,7 @@ scope, distinguish a false statement from a gap, give the evidence for any corre
 
 class ReviewWorkspace(ManuscriptWorkspace):
     evidence = None
+    defer_citations = True
 
     def schemas(self):
         return super().schemas() + (self.evidence.schemas() if self.evidence else [])
@@ -344,9 +350,16 @@ class ExploreReviewRunner(LegacyExploreReviewRunner):
 
         try:
             challenge.start(challenge_workspace)
+            journal = artifacts / 'review-background.json'
             answer = reviewer.run(query, display, instruction=instruction, recover_empty_answer=True,
                                   tool_checkpoint=checkpoint, after_tools=after_tools, background_tools=True,
-                                  evidence_hook=at_boundary, task_journal=artifacts / 'review-background.json')
+                                  evidence_hook=at_boundary, task_journal=journal)
+            if answer.strip() and journal.exists():
+                unfinished = [row['citation_statement'] for row in json.loads(_read(journal)).values()
+                              if 'citation_statement' in row and 'cancelled_at' in row]
+                if unfinished:
+                    answer = answer.rstrip() + '\n\n**Citation checks unfinished at delivery**\n\n' + '\n'.join(
+                        '- ' + _code_span(statement) for statement in unfinished)
             if (answer.strip() and not followup and not state.get('target') and not reviewer.last_stop_reason
                     and reviewer.last_stats.get('done_reason') in (None, 'stop')):
                 note = evidence.coverage_note()

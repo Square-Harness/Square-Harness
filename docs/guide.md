@@ -1134,9 +1134,14 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   writes the report you receive. When a full-paper report leaves indexed
   items unresolved or without a recorded assessment, a coverage note names the
   counts and sample locations.
-  Available Python and online tools can run independent checks in the
-  background while the referee examines another passage. You can reopen the
-  report and discuss a particular finding.
+  The referee can run Python while it examines another passage. Citation checks
+  normally start in the background and seek the original publication or the
+  author's version, including the relevant theorem and hypotheses. If only a
+  bibliographic record or another paper's citation is available, the referee
+  identifies the evidence it obtained. It waits for checks you explicitly
+  request and for those needed for the mathematical verdict. It can finish
+  with a still-unverified ancillary attribution and identify it in the report.
+  You can reopen the report and discuss a particular finding.
   If the reviewer stops before it finishes, the job records the interruption.
   An empty answer after tool use gets one opportunity to recover.
 

@@ -1417,6 +1417,15 @@ default to required for the verdict. A pending check submitted with
 `required_for_report=false` is canceled at finalization. A saved
 Review journals submissions and outcomes. Resuming a possibly dispatched
 experiment exposes its interrupted state instead of blindly running it again.
+For the `review-explore-v2` lead, `check_reference` defaults to a background
+submission. The tool schema asks whether completion is required. The lead
+works on independent proofs until it needs a result, and the report records
+unfinished ancillary checks. Its nested precise verifier first seeks the
+cited original and locator. A catalogue record establishes identity, and a
+passage in a different work provides indirect evidence. Only a passage from
+the cited work can directly verify the claim. Ordinary reference checking and
+saved verifiers select their behavior from their own settings.
+
 Older `review-explore-v1` jobs use `LegacyExploreReviewRunner` and the original
 single-agent prompt and execution path.
 
