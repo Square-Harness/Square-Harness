@@ -1106,6 +1106,69 @@ class ReviewBase(ResearchRunner):
                 raise WorkerInputError('Say which result or conversation message to check or explain.', code='target_not_found')
         self.state['sources'] = [chosen] + [source for source in sources if source is not chosen]
 
+    def _passage(self, span, name):
+        """A passage unit: its lines take the place of proof lines, so the walkthrough covers every one of them."""
+        lines = self._lines(self.state['sources'][0]['id'])
+        a, b = span
+        while a < b and not lines[a - 1].strip():
+            a += 1
+        while b > a and not lines[b - 1].strip():
+            b -= 1
+        refs = []  # results the passage cites, given as context
+        for match in re.finditer(r'\b(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption|Remark|Example)\s+[A-Z]?\d+(?:\.\d+)*',
+                                 '\n'.join(lines[a - 1:b])):
+            other = manuscript.resolve(self.state['map'], match.group(0))
+            if other and other['id'] not in refs and not (other['statement'] and a <= other['statement'][0] <= b):
+                refs.append(other['id'])
+        return {'id': 'S', 'name': name, 'statement': None, 'proofs': [[a, b]], 'refs': refs,
+                'statement_refs': [], 'equations': [], 'title': '', 'passage': True}
+
+    def _locate_result(self, request, proof_of=None):
+        """Ask the model which lines the request means; None when it cannot tell or the text does not fit."""
+        sid = self.state['sources'][0]['id']
+        lines = self._lines(sid)
+        numbered = self._numbered(sid, 1, len(lines), mark=False).split('\n')
+        for page, start in reversed(list(enumerate(self._source(sid).get('pages') or [], 1))):
+            numbered.insert(start - 1, f'[page {page}]')
+        policy = (P.LOCATE_PROOF_POLICY.format(name=proof_of['name'], start=proof_of['statement'][0], end=proof_of['statement'][1])
+                  if proof_of else P.LOCATE_POLICY)
+        quick_search = self.VARIANT == 'quick' and not proof_of
+        if quick_search:
+            policy = P.LOCATE_QUICK_PROOF_POLICY
+        prompt = policy + '\n\nREQUEST:\n' + request + '\n\nTEXT:\n' + '\n'.join(numbered)
+        if len(prompt.encode()) > self._room(400, policy):
+            return None
+        result = self._ask('locate', prompt, cap=400, schema=P.LOCATE_QUICK_PROOF_SCHEMA if quick_search else P.LOCATE_SCHEMA,
+                           key='locate-proof' if proof_of else 'locate')
+        value = result['value'] if isinstance(result['value'], dict) else {}
+
+        def span(a, b):
+            a, b = _int(a), _int(b)
+            return [a, b] if 1 <= a <= b <= len(lines) else None
+        if quick_search:
+            matches = [m for m in value.get('matches') or [] if isinstance(m, dict) and m.get('kind') == 'result'
+                       and span(m.get('start_line'), m.get('end_line'))]
+            if len(matches) > 1:
+                names = ', '.join(str(m.get('name') or f"lines {m['start_line']}–{m['end_line']}") for m in matches)
+                raise WorkerInputError(f'Multiple proofs match this request in {self._source(sid)["path"]}: {names}. '
+                                       'Say which result to check.', code='one_result_only', details={'checked': False})
+            if not matches:
+                return None
+            value = matches[0]
+        proof = span(value.get('start_line'), value.get('end_line'))
+        if proof_of:
+            return [proof] if value.get('kind') == 'result' and proof else None
+        name = ' '.join(str(value.get('name') or '').split())
+        if len(name) > 60:  # a heading, not a sentence: cut at a word
+            name = name[:60].rsplit(' ', 1)[0].rstrip(' ,;:(—-')
+        if self.VARIANT == 'explain' and value.get('kind') == 'passage' and proof:
+            return self._passage(proof, name or 'the requested passage')
+        statement = span(value.get('statement_start'), value.get('statement_end'))
+        if value.get('kind') == 'result' and (statement or proof):
+            return {'id': 'L', 'name': name or 'the requested result', 'statement': statement, 'proofs': [proof] if proof else [],
+                    'refs': [], 'statement_refs': [], 'equations': [], 'title': ''}
+        return None
+
     def _pick_unit(self):
         """Quick and explain: the one result to work on, from the target, the request or the text itself.
 
@@ -1138,14 +1201,19 @@ class ReviewBase(ResearchRunner):
         elif self._is_pasted() or self.state.get('conversation_sources'):
             chosen = self._split_pasted()
         elif quick and not candidates:
-            self._nothing_to_check(mapping)
+            chosen = self._locate_result(target or goal)
+            if chosen is None:
+                self._nothing_to_check(mapping)
         else:
             raise WorkerInputError('Say which result to ' + ('check' if quick else 'explain') +
                                    f', for example "Lemma 3.2"; {source["path"]} contains: {_contents(mapping)}.',
                                    code='target_not_found', details={'target': target})
         chosen['source'] = source['id']
         if quick and not chosen['proofs']:
-            self._nothing_to_check(mapping, None if unit is None else chosen['name'])
+            if unit is not None and chosen['statement'] and not self._is_pasted():
+                chosen['proofs'] = self._locate_result(target or goal, proof_of=chosen) or []
+            if not chosen['proofs']:
+                self._nothing_to_check(mapping, None if unit is None else chosen['name'])
         self.state['unit'] = chosen
         self.emit('notice', ('Checking ' if quick else 'Explaining ') + chosen['name'])
 
@@ -1901,7 +1969,7 @@ class ExplainRunner(ReviewBase):
         request = self.state.get('target') or self.state['goal']
         unit = self._passage_unit(request)
         if unit == 'locate':
-            unit = self._locate(request)
+            unit = self._locate_result(request)
             if unit is None:
                 source = self.state['sources'][0]
                 raise WorkerInputError(f'The requested part was not found in {source["path"]}, which contains: '
@@ -1915,14 +1983,14 @@ class ExplainRunner(ReviewBase):
                 # No numbered result fits (a theorem stated in prose, an unnumbered paper): ask where it is.
                 if exc.code != 'target_not_found' or self._is_pasted():
                     raise
-                unit = self._locate(request)
+                unit = self._locate_result(request)
                 if unit is None:
                     raise
             else:
                 unit = self.state['unit']
                 if not unit['proofs'] and unit.get('statement') and PROOF_REQUEST.search(request):
                     # A proof given elsewhere (another section, an appendix, a paragraph without "Proof").
-                    proof = self._locate(request, proof_of=unit)
+                    proof = self._locate_result(request, proof_of=unit)
                     if proof:
                         unit['proofs'] = proof
                 return
@@ -1974,55 +2042,6 @@ class ExplainRunner(ReviewBase):
             if re.search(r'(?i)\b(?:this|cette) page\b', request) and len(source.get('pages') or []) > 1:
                 raise WorkerInputError('Which page of the attached document should be explained?', code='target_not_found')
             return self._passage([1, len(lines)], 'the text')
-        return None
-
-    def _passage(self, span, name):
-        """A passage unit: its lines take the place of proof lines, so the walkthrough covers every one of them."""
-        lines = self._lines(self.state['sources'][0]['id'])
-        a, b = span
-        while a < b and not lines[a - 1].strip():
-            a += 1
-        while b > a and not lines[b - 1].strip():
-            b -= 1
-        refs = []  # results the passage cites, given as context
-        for match in re.finditer(r'\b(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption|Remark|Example)\s+[A-Z]?\d+(?:\.\d+)*',
-                                 '\n'.join(lines[a - 1:b])):
-            other = manuscript.resolve(self.state['map'], match.group(0))
-            if other and other['id'] not in refs and not (other['statement'] and a <= other['statement'][0] <= b):
-                refs.append(other['id'])
-        return {'id': 'S', 'name': name, 'statement': None, 'proofs': [[a, b]], 'refs': refs,
-                'statement_refs': [], 'equations': [], 'title': '', 'passage': True}
-
-    def _locate(self, request, proof_of=None):
-        """Ask the model which lines the request means; None when it cannot tell or the text does not fit."""
-        sid = self.state['sources'][0]['id']
-        lines = self._lines(sid)
-        numbered = self._numbered(sid, 1, len(lines), mark=False).split('\n')
-        for page, start in reversed(list(enumerate(self._source(sid).get('pages') or [], 1))):
-            numbered.insert(start - 1, f'[page {page}]')
-        policy = (P.LOCATE_PROOF_POLICY.format(name=proof_of['name'], start=proof_of['statement'][0], end=proof_of['statement'][1])
-                  if proof_of else P.LOCATE_POLICY)
-        prompt = policy + '\n\nREQUEST:\n' + request + '\n\nTEXT:\n' + '\n'.join(numbered)
-        if len(prompt.encode()) > self._room(400, policy):
-            return None
-        result = self._ask('locate', prompt, cap=400, schema=P.LOCATE_SCHEMA, key='locate-proof' if proof_of else 'locate')
-        value = result['value'] if isinstance(result['value'], dict) else {}
-
-        def span(a, b):
-            a, b = _int(a), _int(b)
-            return [a, b] if 1 <= a <= b <= len(lines) else None
-        proof = span(value.get('start_line'), value.get('end_line'))
-        if proof_of:
-            return [proof] if value.get('kind') == 'result' and proof else None
-        name = ' '.join(str(value.get('name') or '').split())
-        if len(name) > 60:  # a heading, not a sentence: cut at a word
-            name = name[:60].rsplit(' ', 1)[0].rstrip(' ,;:(—-')
-        if value.get('kind') == 'passage' and proof:
-            return self._passage(proof, name or 'the requested passage')
-        statement = span(value.get('statement_start'), value.get('statement_end'))
-        if value.get('kind') == 'result' and (statement or proof):
-            return {'id': 'L', 'name': name or 'the requested result', 'statement': statement, 'proofs': [proof] if proof else [],
-                    'refs': [], 'statement_refs': [], 'equations': [], 'title': ''}
         return None
 
     def _mechanism(self):
@@ -2217,36 +2236,56 @@ class ExplainRunner(ReviewBase):
     def _check_explanation(self):
         unit = self.state['unit']
         plan = self.state.get('explain_plan') or [{'key': 'legacy', 'segment': None}]
-        problems, checked = [], True
-        for item in plan:
-            part = self.state.get('explain_parts', {}).get(item['key'])
-            value = self.state['explanation'] if len(plan) == 1 else (part.get('value') if part else self.state['explanation'])
-            if len(plan) > 1 and value:
+        outcomes, pending = {}, []
+        cap = self._analysis_cap(1500)
+
+        def check(item, part, value):
+            if len(plan) > 1:
                 allowed = {n for a, b in (item['segment'] or unit['proofs']) for n in range(a, b + 1)}
                 value = dict(value, steps=[step for step in self.state['explanation']['steps']
                                           if set(range(step['start_line'], step['end_line'] + 1)) <= allowed])
-            if not value:
-                checked = False
-                continue
-            if part and part.get('checked'):
-                problems += part.get('problems', [])
-                continue
             explanation = json.dumps(value, ensure_ascii=False)
             policy = P.EXPLAIN_CHECK_PASSAGE_POLICY if unit.get('passage') else P.EXPLAIN_CHECK_POLICY
-            packet, _, _ = self._packet(unit, self._room(self._analysis_cap(1500), policy) - len(explanation.encode()),
+            packet, _, _ = self._packet(unit, self._room(cap, policy) - len(explanation.encode()),
                                         segment=item['segment'], context=True)
             prompt = policy + '\n\nEXPLANATION:\n' + explanation + '\n\n' + packet
-            with self._timeout():
-                result = self._ask('explain-check', prompt, cap=self._analysis_cap(1500), schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
+            result = self._ask('explain-check', prompt, cap=cap, schema=P.EXPLAIN_CHECK_SCHEMA, key='check:' + item['key'])
             found = [{'where': str(p.get('where') or ''), 'problem': str(p.get('problem') or ''), 'fix': str(p.get('fix') or '')}
                      for p in (result['value'] or {}).get('problems') or [] if isinstance(p, dict) and p.get('problem')]
-            if part is not None:
-                part.update(checked=result['value'] is not None, problems=found)
-                self._save()
-            checked = checked and result['value'] is not None
-            problems += found
-        self.state['explain_problems'] = problems
-        self.state['explain_checked'] = checked
+            with self._mutex:
+                checked = result['value'] is not None
+                outcomes[item['key']] = checked, found
+                if part is not None:
+                    part.update(checked=checked, problems=found)
+                    self._save()
+
+        for item in plan:
+            key = item['key']
+            part = self.state.get('explain_parts', {}).get(key)
+            value = self.state['explanation'] if len(plan) == 1 or not part else part.get('value')
+            if not value:
+                outcomes[key] = False, []
+            elif part and part.get('checked'):
+                outcomes[key] = True, part.get('problems', [])
+            else:
+                pending.append((key, lambda i=item, p=part, v=value: check(i, p, v)))
+
+        while pending:
+            # Admit full checks together only when even their largest possible inputs and outputs fit.
+            # At the budget boundary the next source part keeps the same priority as in a serial run.
+            output = min(self._tokens_left(), getattr(self.agent.client, 'remaining_tokens', math.inf))
+            inputs = min(self._input_left(), getattr(self.agent.client, 'remaining_input_tokens', math.inf))
+            width = min(self.concurrency, len(pending))
+            while width > 1 and (output < width * cap or inputs < width * self.agent.ctx):
+                width -= 1
+            if width == 1:
+                with self._timeout():
+                    pending[0][1]()
+            else:
+                self._wave(pending[:width])
+            del pending[:width]
+        self.state['explain_problems'] = [problem for item in plan for problem in outcomes[item['key']][1]]
+        self.state['explain_checked'] = all(outcomes[item['key']][0] for item in plan)
 
     def _fix(self):
         if len(self.state.get('explain_plan') or []) > 1:

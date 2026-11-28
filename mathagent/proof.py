@@ -305,8 +305,9 @@ def unsettled_interrupts(state):
 
 
 class ProofRunner:
-    def __init__(self, agent, emit=lambda kind, value: None, *, evidence_coordinator=False):
+    def __init__(self, agent, emit=lambda kind, value: None, *, evidence_coordinator=False, review_concurrency=1):
         self.agent, self.emit = agent, emit
+        self.review_concurrency = review_concurrency if getattr(agent.client, 'backend', None) == 'openai' else 1
         self.turns = ProofTurns(self, ProofDesk(agent), evidence_coordinator or getattr(agent, 'proof_evidence_coordinator', False))
         self.store = None
         self._private_sources = ()

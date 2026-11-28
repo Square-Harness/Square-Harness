@@ -3,6 +3,7 @@
 
 """Run one native delegated mode with its parent's budget and durable child checkpoint."""
 import copy
+from functools import partial
 import hashlib
 import json
 import math
@@ -239,6 +240,33 @@ def worker_error(exc, mode):
                 'scope': 'context', 'details': exc.details}
     return {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
             'scope': 'operation', 'details': {'mode': mode}}
+
+
+def _investigation_sources(host, parent, child, save):
+    """The plan's pinned primary sources, including peers finished since this Proof started."""
+    from .gui.store import index_view
+    with parent._state_lock:
+        pinned = [*child.get('dependency_entries', []), *child.get('peer_source_entries', [])]
+        known = {e['job_id'] for e in pinned} | set(child.get('peer_source_jobs', []))
+        jobs = set(child.get('evidence_jobs', []))
+        for slot in parent.state['investigation']['tasks'].values():
+            if slot.get('status') in ('complete', 'failed') and slot.get('job_id'):
+                jobs.add(slot['job_id'])
+                jobs.update(slot.get('linked_job_ids', []))
+    missing = jobs - known
+    if missing:
+        # The project index can contain other investigations. Start only at native
+        # jobs in this plan and follow their own recorded links to source checks.
+        entries = index_view(host.root, chat=host.chat_id)['entries']
+        linked = missing | {job for e in entries if e['job_id'] in missing for job in e['linked_job_ids']}
+        seen = {e['id'] for e in pinned}
+        new = [e for e in entries if e['job_id'] in linked and e['id'] not in seen and e['documents']]
+        with parent._state_lock:
+            child.setdefault('peer_source_entries', []).extend(new)
+            child['peer_source_jobs'] = sorted(known | missing)
+            save()
+        pinned.extend(new)
+    return {'entries': [e for e in pinned if e.get('documents')]}
 
 
 def run_worker(host, parent, budget, action, child, save):
@@ -574,13 +602,13 @@ def run_worker(host, parent, budget, action, child, save):
         # As in an Explore chat: check_reference, charged to this worker's share and
         # given at most the time of a reference check at the worker's own effort.
         agent.workspace.checker = nested_checker(
-            agent, emit, share_source_budget=bool(limits),
+            agent, emit, share_source_budget=bool(limits), request=action['request'],
             max_seconds=seconds if is_ds4(agent) else min(seconds, REFCHECK_EFFORTS['high']['seconds']))
     try:
         if sandbox_error:
             raise ValueError(sandbox_error)
         if mode == 'prove':
-            runner = ProofRunner(agent, emit, evidence_coordinator=True)
+            runner = ProofRunner(agent, emit, evidence_coordinator=True, review_concurrency=host.review_concurrency())
             if child.get('job_id'):
                 result = runner.resume(child['job_id'])
             else:
@@ -605,7 +633,10 @@ def run_worker(host, parent, budget, action, child, save):
                     max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
                     verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
                     verify_temperature=host.args.proof_verify_temperature)
-            result = complete_proof_evidence(runner, result, view=local_view if scoped is not None else None)
+            investigation_view = (partial(_investigation_sources, host, parent, child, save)
+                                  if parent.state.get('investigation') else None)
+            result = complete_proof_evidence(runner, result, view=local_view if scoped is not None else None,
+                                             investigation_view=investigation_view)
             # The direction of a no-issue review (proved or refuted) words the card and the parent's result.
             claim = result.get('claim_outcome') or 'unclassified'
             reviewed = PROOF_OUTCOMES.get(claim) if result['status'] == 'candidate_complete' else None

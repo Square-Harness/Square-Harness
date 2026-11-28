@@ -829,9 +829,25 @@ right-hand notebook lets you read a literature review or an exploration alongsid
 the answer. If the writing allowance runs out, the completed findings and the
 latest saved answer remain available. Select **@summarize** for a separate LaTeX write-up.
 
+When a Proof solver or verifier asks for literature, it can use papers already
+read in the same investigation. It checks the relevant passages against the new
+question, including the hypotheses and quantifiers, and returns line citations
+when they answer it. For instance, a small-gap result for irrational rectangles
+can answer a question about those rectangles. Extending it to all planar domains
+requires other evidence. When the available passages leave a gap, the Proof
+keeps the relevant passages and requests a High literature review within its
+remaining allowance. Independent model calls in that review use the available
+review concurrency, including when a Proof job resumes. A verifier can ask its own question of the same paper.
+The investigation writer also receives the cited lines when composing the final answer.
+When all previously reported findings are available in full, the final writer
+works directly from the finished findings. It keeps a reviewed formula with
+its definitions and normalization and labels the proposition a refutation rejected.
+
 In the terminal, use `/investigate <question>`, `/investigations`,
 `/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations
-run one worker at a time. Ctrl+C during work requests a pause. When a run pauses
+use the same dependency scheduler as the web app. On a batching backend,
+`--assistant-concurrency` controls how many independent workers may run together.
+Ctrl+C during work requests a pause. When a run pauses
 because the model or a worker failed, the terminal prints the cause above the
 resume command. A terminal investigation uses the
 workspace writer lock shared with the web interface.
@@ -1044,6 +1060,12 @@ References whose requested scope is only partially supported remain labelled
 as unconfirmed leads; rejecting a lead in a later check removes its recommendation.
 A broad reference request checks relevance from indexed descriptions. Exact
 theorems, pages and hypotheses require a precise check when you ask for them.
+When a worker collects further reading, the checker sees the caller's assignment
+as well as the search topic. It can return a checked excerpt from an indexed description to explain why a book or paper is useful. The selector uses the requested number of references.
+A precise check first seeks the original work. When it can verify the requested
+passage there, it can finish that candidate immediately. Missing evidence can
+trigger a search through citing papers. Different requested places and editions
+remain separate checks.
 
 Each reference gets an evidence level:
 
@@ -1066,11 +1088,11 @@ uses that review's saved records and the full texts it cached.
 
 ### Literature review
 
-Ask the mathematical question you want to investigate. You can specify an audience, a length, or a particular setting. Literature review opens with the problem and what the sources establish. It organises the remaining results around the differences that matter for the answer, such as competing hypotheses, a counterexample or a later improvement. It explains the decisive results in detail and situates the other works on the topic in a sentence each. A focused question normally calls for 600–1,500 words. A broad survey can use 3,000–4,000. A comparison table is optional. The chat shows the review itself and offers Markdown and BibTeX downloads: **Download review (.md)** is a standalone Markdown file (title, text with numbered citations, numbered reference list with DOI and arXiv links, mathematics as `$…$`), and **BibTeX (.bib)** holds the works the text cites, in citation order, with keys such as `erdos1947theory`.
+Ask the mathematical question you want to investigate. You can specify an audience, a length, or a particular setting. Literature review opens with the problem and what the sources establish. It organises the remaining results around the differences that matter for the answer, such as competing hypotheses, a counterexample or a later improvement. It chooses the works its reader needs. A teaching question can ask for a worked example and a short reading path. A survey can ask for broader coverage or a complete catalogue. A focused question normally calls for 600–1,500 words. A broad survey can use 3,000–4,000. A comparison table is optional. The chat shows the review itself and offers Markdown and BibTeX downloads: **Download review (.md)** is a standalone Markdown file (title, text with numbered citations, numbered reference list with DOI and arXiv links, mathematics as `$…$`), and **BibTeX (.bib)** holds the works the text cites, in citation order, with keys such as `erdos1947theory`.
 
-The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper available by DOI, it can use OpenAIRE to locate a deposited manuscript. It follows references from relevant works, including papers with different terminology. Search terms, claims in a supplied brief and works recalled by the model are leads to investigate. Each citation in the review points to a retrieved record. A dagger in the references identifies works for which the review used only an abstract or a bibliographic record. The other entries used passages from the paper. After them, **Further reading** lists works the plan placed in the review that the checked text does not discuss; the review makes no claim about them. A bibliography entry establishes the identity of a work but a precise theorem still depends on its hypotheses and on the passage supporting it.
+The search uses zbMATH, arXiv, Crossref and Semantic Scholar. For a key paper available by DOI, it can use OpenAIRE to locate a deposited manuscript. It follows references from relevant works, including papers with different terminology. Search terms, claims in a supplied brief and works recalled by the model are leads to investigate. Each citation in the review points to a retrieved record. A dagger in the references identifies works for which the review used only an abstract or a bibliographic record. The other entries used passages from the paper. A new outline chooses which additional works to recommend under **Further reading**. The references include all works cited in the published text. Older saved outlines can list other works assigned to the plan. A bibliography entry establishes the identity of a work but a precise theorem still depends on its hypotheses and on the passage supporting it.
 
-Every sentence of a section is checked against the available evidence. A first pass names the source sentences that carry it, and a second compares it with those passages. A checker can correct a local error or withhold a sentence it cannot support. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. When the question names an object after people (a "Boulard–Carillo conjecture") that no retrieved record mentions, the review's title and first paragraph say that no work defining or studying it was found, and the works it discusses are presented as nearby literature only. When the request excludes online research, the review identifies the cached sources it used; an arXiv rate limit (HTTP 429) is reported as such, with the advice to resume later. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
+Every sentence of a section is checked against the available evidence. A first pass names the source sentences that carry it, and a second compares it with those passages. A checker can correct a local error or withhold a sentence it cannot support. When the proof of an attribution comes from a later paper, the citation can identify both the original work and the account that was read. When a check fails, the export withholds unchecked claims and keeps the underlying source material accessible. A partial result identifies gaps, including a review based entirely on abstracts, an unavailable section check or an interrupted search. Neither a completed check nor a search that returned no later paper establishes that a question is open. When the question names an object after people (a "Boulard–Carillo conjecture") that no retrieved record mentions, the review's title and first paragraph say that no work defining or studying it was found, and the works it discusses are presented as nearby literature only. When the request excludes online research, the review identifies the cached sources it used; an arXiv rate limit (HTTP 429) is reported as such, with the advice to resume later. Open **Evidence** on the job page to inspect a numbered reference. Each entry links to the paper or registry and shows the saved source passage with its line range, the source-record abstract excerpt, or a bibliographic record. Papers already read appear there while the review runs.
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
@@ -1142,6 +1164,11 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   It needs a proof: statements or formulas without one are not judged (use
   `@sanity_check` to test a formula). Independent verifier passes read it
   through different lenses: line by line, adversarially, the results it uses.
+  When an attached proof is written in prose, the checker can locate its
+  statement and argument by line before running the same verification passes.
+  A full Review uses the section-by-section reader when the manuscript has no
+  mapped results for the other referees to follow. Its progress log gives the
+  reason for this choice.
   A new Proof Check uses the High profile. Its verifier passes examine distinct
   aspects of the proof, and a fresh call rechecks each alleged error. The verdict is *no issue found*, *issues found* or
   *uncertain*; *uncertain* always names the step that was not settled. Each issue
@@ -1226,6 +1253,10 @@ results you have checked. What the request asks for beyond the material (an
 introduction, exercises, solutions, exam questions) is written in sections of
 its own, and any new mathematics in them is marked as generated: a document
 that contains some is a draft until it has been checked.
+
+Write-up and Summarize can justify a requested specialization from the supplied
+hypotheses. Their mathematical fidelity check examines the derivation and
+keeps a draft warning when a step needs another hypothesis or remains unproved.
 
 To convert a finished review, ask “Write it in a LaTeX document please” directly
 after the review in the same conversation. You can also ask this after a written

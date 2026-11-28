@@ -19,6 +19,29 @@
 - Explore can submit independent calculations and reference lookups while
   working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
 - The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.
+
+- Precise reference checks can finish a candidate from the original passage
+  before following citation chains. Duplicate leads share work while distinct
+  requested places and editions retain their own checks. A nested reading-list
+  lookup uses the caller's assignment when selecting references. A delegated
+  bibliography Check receives its selected file and records the registry
+  lookups for each entry.
+- Literature plans its further reading around the requested audience and breadth.
+  New selective reviews read representative primary sources before outlining,
+  then fetch additional works the outline uses for results or comparisons.
+  Source checking can identify both the named original paper and the secondary
+  account used to support an attribution. Citation verification asks whether
+  omitting a hypothesis or quantifier broadens the published claim.
+- Literature called by Proof inherits review concurrency. Terminal
+  investigations can run independent workers concurrently, and Explain can
+  verify independent source segments together within the available budget.
+- Quick Review can locate an attached proof written in prose and check it in
+  the context of the manuscript.
+- Investigate composes its settled answer from the finished evidence when all
+  the earlier findings are available. Write-up and Summarize check requested
+  deductions against the supplied premises. Full Review reports why it selected
+  the section-by-section reader.
+
 - Explore can check a reading recommendation or verify a precise claim. The
   Assistant keeps supporting research with the answer it serves.
 - Narrative literature reviews prioritize primary sources, fill gaps in
@@ -43,6 +66,11 @@
 - Hosted DeepSeek Explore now receives its earlier reasoning alongside completed tool calls when it continues the same task. A subsequent user request starts with the existing conversation history.
 
 - When an OpenRouter response is stopped for confirmed repetition, its existing recovery attempt prefers another configured provider. A saved Proof retains that preference across a pause.
+
+- Investigate Proof solvers and verifiers can answer a literature request from
+  cited passages in papers already read during the plan, including when they
+  phrase the question differently. A request that needs more evidence carries
+  relevant passages into a High literature review.
 
 - Precise citation lookup now asks for candidate bibliographic details before the source-verification step. Hosted DeepSeek streams recognize sustained repetition in an answer or its reasoning. An interrupted Proof verifier can retry against the same saved candidate, and incomplete generated tool calls are discarded.
 

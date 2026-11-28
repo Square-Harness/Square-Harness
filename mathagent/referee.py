@@ -657,14 +657,17 @@ class RefereeRunner(PaperReviewRunner):
             state['pipeline'] = PIPELINES['review']
         return state
 
-    def _route(self):
-        """review-v4 when the whole manuscript, a long tool loop and its answers fit the context; else review-v2."""
-        whole = bool(self.state.get('whole')) and not self.state.get('conversation_sources')
+    def _fallback_reason(self):
+        """The referee team needs a pinned manuscript, mapped results, and room for its tool loops."""
+        if self.state.get('conversation_sources') or self._is_pasted():
+            return 'The manuscript was supplied as conversation text.'
+        if not self.state['map']['units']:
+            return 'The manuscript map contains no recognized results to assign to the referees.'
         # The agent counts each actual tool-loop payload and compacts its history as it grows.
         fixed = (LEAD_TASK + json.dumps(TOOL_SCHEMAS, ensure_ascii=False)).encode()
-        if whole and self.state['map']['units'] and len(self._block(preview=True).encode()) + len(fixed) < self._room(FIRST_ROUND_CAP):
-            return PIPELINE
-        return PIPELINES['review']
+        if not self.state.get('whole') or len(self._block(preview=True).encode()) + len(fixed) >= self._room(FIRST_ROUND_CAP):
+            return 'The whole manuscript and the referee tool loops do not fit the review context.'
+        return ''
 
     def _step(self, phase):
         if not self._v4() or self._followup_mode():
@@ -674,11 +677,10 @@ class RefereeRunner(PaperReviewRunner):
                 from .worker_errors import WorkerInputError
                 raise WorkerInputError('Pin the manuscript to review.', code='invalid_worker_input')
             self._map()
-            route = self._route()
-            if route != PIPELINE:
-                self.state['pipeline'] = route
-                self._warn('The whole manuscript does not fit the model\'s context with room for the referees\' tool '
-                           'loops: the review checks the proofs one by one (the v3 pipeline).')
+            reason = self._fallback_reason()
+            if reason:
+                self.state['pipeline'] = PIPELINES['review']
+                self._warn(reason + ' The review uses its section-by-section workflow.')
                 return super()._step('plan')
             self._prepare_review()
             self.state['phase'] = 'referees'

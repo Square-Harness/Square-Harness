@@ -1428,7 +1428,7 @@ class Hub:
             agent, _ = self._engine(task, mode='prove', ctx=ctx, source_request=goal)
             images.bind(agent, image_refs)
             self._ensure_model(agent)
-            runner = ProofRunner(agent, evidence_coordinator=True)
+            runner = ProofRunner(agent, evidence_coordinator=True, review_concurrency=self.review_concurrency())
             runner.emit = self._job_emit(task, runner, 'proof')
             result = runner.start(goal, max_rounds=rounds, max_tokens=tokens, max_seconds=seconds,
                                 max_predict=solve, verify_tokens=verify, min_solve_tokens=args.proof_min_solve_tokens,
@@ -1486,7 +1486,7 @@ class Hub:
         def work(task):
             original = (state['settings'].get('reference_context') or {}).get('query') or state['goal']
             agent, _ = self._engine(task, mode='prove', source_request=original)
-            runner = ProofRunner(agent, evidence_coordinator=True)
+            runner = ProofRunner(agent, evidence_coordinator=True, review_concurrency=self.review_concurrency())
             runner.emit = self._job_emit(task, runner, 'proof')
             result = runner.resume(proof_id, add_tokens=add_tokens, add_seconds=add_seconds, add_rounds=add_rounds)
             return complete_proof_evidence(runner, result)
@@ -1719,7 +1719,7 @@ class Hub:
                 agent.workspace.pin_files(text_files, selected_only=selected_documents and not requests_workspace_search(content))
                 self._show_experiments(agent.workspace, self.root, chat_id, task, persist=False)
                 if agent.workspace.literature.online:
-                    agent.workspace.checker = nested_checker(agent, emit)
+                    agent.workspace.checker = nested_checker(agent, emit, request=content)
 
             agent, _ = self._engine(task, mode='explore', think=fresh['settings'].get('think'),
                                     source_request=content)
