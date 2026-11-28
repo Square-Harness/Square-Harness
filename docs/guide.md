@@ -951,6 +951,11 @@ readable without an upgrade.
 
 ### Explore
 
+When hosted DeepSeek uses a tool, Explore returns the reasoning that led to
+that call alongside the tool result on its next tool-enabled request in the
+same task. A later user request starts from the saved conversation. Its model
+input omits the previous task’s reasoning.
+
 With `@explore`, attached text, BibTeX and extracted PDF text stay with that worker.
 When the complete set fits the model request and the remaining job allowance, Explore
 receives every file together. Larger sets are read in successive portions. The run

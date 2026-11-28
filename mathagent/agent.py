@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .prompts import SYSTEM, MODES, PROJECT_SCOPE, NOTEBOOK_DISPLAY_RECEIPT, with_notebook_evidence
-from .model_limits import DEFAULT_TEMPERATURE, input_limit
+from .model_limits import DEFAULT_TEMPERATURE, input_limit, is_ds4
 
 
 class AgentError(Exception):
@@ -244,6 +244,7 @@ class Agent:
         schemas = self.workspace.schemas()
         seen_tools, stalled_rounds = set(), 0
         projected, seen_messages = {}, len(messages) - 1
+        tool_reasoning = {}
         round_no, answer_now, forced_final = -1, False, False
         continued = 0
         repetition_retry = False
@@ -269,6 +270,9 @@ class Agent:
             from .call_policy import allocate_call, CallContextError, REPETITION_RECOVERY
             while True:
                 visible = [dict(item, content=projected[i]) if i in projected else item for i, item in enumerate(messages)]
+                if tools and tool_reasoning:
+                    visible = [dict(item, thinking=tool_reasoning[i]) if i in tool_reasoning else item
+                               for i, item in enumerate(visible)]
                 payload['messages'] = [system, *context,
                                        *with_notebook_evidence(visible, getattr(self, 'notebook_source', ''), user_index)]
                 if repetition_retry:
@@ -352,6 +356,10 @@ class Agent:
                 on_first_response = None
             if calls:
                 assistant['tool_calls'] = calls
+                # Hosted DeepSeek consumes the preceding reasoning when continuing
+                # an accepted tool call. It belongs to this active task only.
+                if thinking and is_ds4(self) and self.last_stats.get('done_reason') in ('tool_calls', 'stop'):
+                    tool_reasoning[len(messages)] = thinking
             messages.append(assistant)
             if self.last_stats.get('done_reason') == 'length':
                 emit('notice', 'Generation hit its output limit; any displayed argument may be incomplete.')

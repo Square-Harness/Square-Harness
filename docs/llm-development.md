@@ -22,6 +22,15 @@ Supply a smaller allowance explicitly in tests that exercise exhaustion.
 
 ## Worker source coverage
 
+The ordinary agent tool loop keeps accepted hosted DeepSeek tool-call reasoning
+in memory for the duration of one `Agent.run`. The next tool-enabled request
+returns it as the assistant message’s `reasoning_content` with the original
+tool call and result. This history participates in normal context allocation.
+Interrupted generations contribute no tool reasoning to subsequent dispatches.
+New user turns and reopened sessions use the existing conversation projection.
+DeepSeek’s native API requires previous reasoning on turns replayed as native
+tool history; the active-task guarantee applies only within one worker invocation.
+
 The worker selected by the user and the files supplied to that worker are independent.
 For Explore the journal records the identities of the extracted texts, their positions
 and the findings handed to the next call. Check the actual request including the tool
