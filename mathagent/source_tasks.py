@@ -482,6 +482,10 @@ def _located_answer(response, target, document, start, end):
     return f'{answer.strip()}\n\nSource: {document.name}, lines {first}:{col}–{last}:{last_col}.\n\n> ' + quote.replace('\n', '\n> ')
 
 
+# A complete answer whose selection included unreadable text carries this note as its stop reason.
+UNREADABLE_SOURCES = 'Some assigned source text could not be read.'
+
+
 def explore_sources(agent, files, goal, emit, saved, checkpoint, *, requested=None, history=()):
     """Read every fitting attachment in one call, otherwise page in order and retain the findings across calls.
 
@@ -638,7 +642,7 @@ def explore_sources(agent, files, goal, emit, saved, checkpoint, *, requested=No
             if located:
                 answer = located + '\n\nReading coverage: ' + '; '.join(receipt)
             if unreadable:
-                agent.last_stop_reason = 'Some assigned source text could not be read.'
+                agent.last_stop_reason = UNREADABLE_SOURCES
                 answer += '\n\n' + agent.last_stop_reason + '\n' + '\n'.join(receipt)
             state.update(cursor=end, final=answer, coverage=receipt, stats=agent.last_stats,
                          stop_reason=agent.last_stop_reason)

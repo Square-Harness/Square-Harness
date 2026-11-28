@@ -12,7 +12,7 @@ from contextvars import copy_context
 import threading
 import time
 
-from .source_tasks import explore_sources
+from .source_tasks import UNREADABLE_SOURCES, explore_sources
 
 MAX_EXPLORE_SAMPLES = 5
 
@@ -23,6 +23,11 @@ COMBINE = ('\n\n{count} independent readings of the attached source answered thi
            'disagreements from the source. Answer the user directly without referring to the separate readings.')
 
 
+def _stopped(reason):
+    """An incomplete reading; a complete answer that notes unreadable attachments is not one."""
+    return bool(reason) and reason != UNREADABLE_SOURCES
+
+
 def _ignore_checkpoint(state):
     # A combined reading restarts as a whole; a partial reading state is not resumable on its own.
     return None
@@ -31,7 +36,7 @@ def _ignore_checkpoint(state):
 def _combined_goal(request, readings):
     parts = [request, COMBINE.format(count=len(readings))]
     for number, row in enumerate(readings, 1):
-        note = f'\n(This reading stopped early: {row["stop_reason"]})' if row.get('stop_reason') else ''
+        note = f'\n(This reading stopped early: {row["stop_reason"]})' if _stopped(row.get('stop_reason')) else ''
         parts.append(f'\n\nREADING {number}:\n{row["answer"].strip()}{note}')
     return ''.join(parts)
 
@@ -63,8 +68,12 @@ def combined_reading(agent, make_reader, paths, request, emit, samples, *, histo
         try:
             answer, coverage = explore_sources(reader, paths, request, reader_emit(index), None, _ignore_checkpoint,
                                                requested=request, history=history)
-            row.update(answer=answer, coverage=coverage, stop_reason=reader.last_stop_reason or '',
-                       stats=dict(reader.last_stats or {}))
+            stop = reader.last_stop_reason or ''
+            row.update(coverage=coverage, stop_reason=stop, stats=dict(reader.last_stats or {}))
+            if stop and answer == stop + '\n' + '\n'.join(coverage):
+                row.update(error=stop, receipt=answer)  # Only a stop notice and coverage: no findings to combine.
+            else:
+                row['answer'] = answer
         except Exception as exc:  # A failed reading leaves the others; cancellation still propagates.
             row.update(error=str(exc) or type(exc).__name__, exception=exc)
         row['seconds'] = round(time.monotonic() - started, 3)
@@ -76,27 +85,38 @@ def combined_reading(agent, make_reader, paths, request, emit, samples, *, histo
         return row
 
     say('progress', f'{samples} independent readings in progress')
-    readers = [(index, make_reader(index, reader_emit(index))) for index in range(1, samples + 1)]
+    readers = []
+    for index in range(1, samples + 1):
+        reader = make_reader(index, reader_emit(index))
+        approve = reader.workspace.approve
+        # Readings are independent drafts. Only the delivered answer may propose file changes, so parallel readings
+        # neither ask for several approvals nor change the source that the others and the combination read.
+        reader.workspace.approve = lambda preview, approve=approve: (not str(preview).startswith('WRITE ')
+                                                                     and approve(preview))
+        readers.append((index, reader))
     with ThreadPoolExecutor(max_workers=samples, thread_name_prefix='explore-reading') as pool:
         futures = [pool.submit(copy_context().run, read, index, reader) for index, reader in readers]
         wait(futures)
     rows = [future.result() for future in futures]  # Re-raises a cancellation after every reading stopped.
     usable = [row for row in rows if (row.get('answer') or '').strip()]
-    record = {'samples': samples, 'combined': False, 'note': '',
+    record = {'samples': samples, 'combined': False, 'delivered': None, 'note': '',
               'readings': [{key: value for key, value in row.items() if key != 'exception'} for row in rows]}
-    if not usable:
-        raise next(row['exception'] for row in rows if 'exception' in row) if any('exception' in row for row in rows) \
-            else ValueError('No independent reading produced an answer')
 
-    def fallback(reason):
-        chosen = next((row for row in usable if not row['stop_reason']), usable[0])
+    def fallback(reason, chosen=None):
+        chosen = chosen or next((row for row in usable if not _stopped(row['stop_reason'])), usable[0])
+        record['delivered'] = chosen['index']
         record['note'] = f'{reason} The answer shown is reading {chosen["index"]}, one of the independent readings.'
         say('notice', record['note'])
         agent.last_stats, agent.last_stop_reason = chosen.get('stats', {}), chosen['stop_reason']
-        return chosen['answer'], chosen['coverage'], record
+        return chosen.get('answer') or chosen['receipt'], chosen['coverage'], record
 
+    if not usable:
+        receipt = next((row for row in rows if row.get('receipt')), None)
+        if receipt is None:
+            raise next(row['exception'] for row in rows if 'exception' in row)
+        return fallback(f'None of the {samples} independent readings produced findings.', receipt)
     if len(usable) == 1:
-        return fallback(f'Only one of the {samples} independent readings produced an answer.')
+        return fallback(f'Only one of the {samples} independent readings produced findings.')
     started = time.monotonic()
     try:
         answer, coverage = explore_sources(agent, paths, _combined_goal(request, usable), emit, None,
@@ -107,8 +127,8 @@ def combined_reading(agent, make_reader, paths, request, emit, samples, *, histo
         return fallback(f'The combined reading failed ({record["combine_error"]}).')
     record['combine_seconds'] = round(time.monotonic() - started, 3)
     record['combine_stats'] = dict(agent.last_stats or {})
-    if not answer.strip() or agent.last_stop_reason:
+    if not answer.strip() or _stopped(agent.last_stop_reason):
         record['combine_error'] = agent.last_stop_reason or 'no answer'
         return fallback(f'The combined reading did not finish ({record["combine_error"]}).')
-    record['combined'] = True
+    record['combined'], record['delivered'] = True, 'combined'
     return answer, coverage, record

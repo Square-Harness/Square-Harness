@@ -1090,8 +1090,11 @@ sources in parallel. Each reading has its own agent, workspace and background ch
 seeded configuration offsets each reading's seed. A final reading by the turn's own
 agent receives the request, every finished reading as untrusted material and the source.
 Only that exchange enters the conversation history. The saved assistant item lists the
-readings under `readings`. Failed readings are skipped. A failed or incomplete
-combination delivers one complete reading with a notice. Combined turns do not checkpoint
+readings under `readings`. Readings keep the ordinary tool list but decline `WRITE`
+approvals, so only the delivered answer can change files. Failed readings and readings
+that return only a stop notice are not combined (`UNREADABLE_SOURCES` marks a complete
+answer). A failed or incomplete combination delivers one complete reading, with that
+reading's statistics and a notice. Combined turns do not checkpoint
 partial readings.
 A numbered question or list item is not
 indexed as a section heading. The review parser's `manuscript.TEXT_SECTION`

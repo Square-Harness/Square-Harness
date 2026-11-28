@@ -1769,7 +1769,11 @@ class Hub:
                 self._discarded(chat_id, content if echo_user else '', exc, files=files,
                                 attached_files=attached_files, image_refs=attached_images)
                 raise
-            store.commit_turn(self.root, chat_id, agent.history, capture.calls[-1:] if coverage is not None else capture.calls, capture.notices,
+            calls = capture.calls[-1:] if coverage is not None else capture.calls
+            if readings is not None and not readings['combined']:
+                # The delivered answer is one reading: save its statistics, not those of a failed combination.
+                calls = [{'thinking': '', 'stats': dict(agent.last_stats or {})}]
+            store.commit_turn(self.root, chat_id, agent.history, calls, capture.notices,
                               echo_user=echo_user, mode=turn_mode, files=files, attached_files=attached_files, source_coverage=coverage,
                               user_content=content, display_answer=agent.notebook_answer if coverage is None else None,
                               project_snapshot=project_snapshot, image_refs=attached_images, readings=readings)

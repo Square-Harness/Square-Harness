@@ -980,8 +980,9 @@ readings. Start the interface with `--explore-samples N` (1–5, default 1), or 
 conversation through `POST /api/chats/<id>/settings`. Each reading receives the whole document and your
 request, and they run at the same time. One more reading then receives the document, your request and
 every finished reading. It checks each point against the source and writes the single answer you see.
-A failed reading leaves the others. If the combined reading fails or stops early, the answer is one
-complete reading, and a notice says so. The saved turn keeps each reading. A combined turn starts
+Only the final reading can propose file changes; the independent readings decline them. A failed reading
+leaves the others. If the combined reading fails or stops early, the answer is one complete reading, and a
+notice says so. The saved turn keeps each reading. A combined turn starts
 again from the beginning after an interruption. It costs about N + 1 readings.
 
 Ordinary mathematical chat with read access to your folder (`.tex`, `.bib`, PDF
