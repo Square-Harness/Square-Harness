@@ -1808,7 +1808,7 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
     from .literature import LiteratureTools
     from .tools import Workspace
 
-    def check(statement, guesses):
+    def check(statement, guesses, *, lookup='precise'):
         parent = agent.workspace.literature
         literature = LiteratureTools(agent.workspace.root, online=bool(parent and parent.online),
                                      timeout=parent.timeout if parent else 15)
@@ -1859,8 +1859,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            runner.start(statement, guesses=guesses, effort=effort, asker='nested checker', original_first=original_first,
-                         **limits)
+            runner.start(statement, guesses=guesses, effort=effort, lookup=lookup, asker='nested checker',
+                         original_first=original_first, **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()

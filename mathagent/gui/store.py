@@ -441,12 +441,17 @@ def list_research(root, active=None):
         running = state['status'] == 'running' and (path.name == active or locked(path))
         # A style is listed under its name: its goal is a note about the articles, or a default sentence.
         title = state.get('style_name') if state['kind'] == 'style' else None
-        jobs.append({'id': state['id'], 'kind': state['kind'], 'status': state['status'],
-                     'phase': state['phase'], 'title': title or one_line(proof_request_text(state), 140),
-                     'updated_at': state['updated_at'], 'created_at': state['created_at'],
-                     'running': running, 'sources': [s['path'] for s in state['sources']],
-                     'variant': _variant(state), 'verdict': state.get('verdict') or None,
-                     'tokens': job_output_budget(state, running)})
+        job = {'id': state['id'], 'kind': state['kind'], 'status': state['status'],
+               'phase': state['phase'], 'title': title or one_line(proof_request_text(state), 140),
+               'updated_at': state['updated_at'], 'created_at': state['created_at'],
+               'running': running, 'sources': [s['path'] for s in state['sources']],
+               'variant': _variant(state), 'verdict': state.get('verdict') or None,
+               'tokens': job_output_budget(state, running)}
+        if state['kind'] == 'literature':
+            outputs = state.get('outputs') or {}
+            # Older reading lists saved the review in the draft without publishing separate files.
+            job.update(has_review=bool(outputs.get('review') or (state.get('draft') or '').strip()), outputs=outputs)
+        jobs.append(job)
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
 

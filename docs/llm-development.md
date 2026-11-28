@@ -1016,6 +1016,9 @@ come from the saved decision until their corresponding children exist.
 The panel location uses the chat URL's `panel` and `selected` parameters.
 New output types should reuse the authenticated native preview or download
 endpoint and preserve keyboard navigation and both themes.
+For literature jobs, the research list exposes `has_review` and the saved
+download formats. Use these to route to the job page until a review exists.
+Older reading lists can have a readable draft without downloadable files.
 
 Worker cards and native jobs reuse saved child identifiers after interruption.
 Publish a new Proof, Check or research job directory by rename once its first
@@ -1245,6 +1248,12 @@ earlier `[excerpt; full experiment saved]` of saved conversations) as an
 excerpt. Never shorten a result without the mark.
 
 An Explore worker's `check_reference` is a nested check (`refcheck.nested_checker`).
+The calling model can request `lookup=standard` to confirm a source's
+bibliographic identity and relevance, or `lookup=precise` for the evidence
+behind a particular statement, attribution or locator. Omitting the field
+retains the existing precise lookup. The verifier reports the available
+evidence for each result. Supporting research belongs in the assignment
+whose answer uses it. Independent deliverables can have separate workers.
 It gets a quarter of the worker's remaining time and at most
 `refcheck.EFFORTS[effort]['seconds']` for the worker's own effort: on DS4 the
 check's own allowance is hours.
@@ -1866,6 +1875,36 @@ full-text evidence.
 Source passages retain their line ranges. A locator must occur with the
 corresponding evidence. A metadata-only entry cannot substantiate a theorem.
 
+In the reading stage, adaptive reviews with an unlimited source allowance
+can match up to twelve titles per arXiv query. An incomplete response or an
+ambiguous match sends the affected group through the four-title lookup.
+Keep the base arXiv identifier for deduplication and a dated registry revision
+for retrieval. The worker can refresh missing or stale revision information
+in groups of up to 100 identifiers. A revision-specific cached document retains
+its content and line locators across reviews.
+Older entries may contain an arXiv HTML page fetched under the base identifier.
+The reader can pin its existing text when arXiv's page watermark and toolbar
+both name the requested revision, the cached hashes match, and extracting the
+original bytes reproduces the saved text. The new entry records the original
+URL and document ID. If that evidence is missing, the reader uses its normal
+retrieval path.
+
+One reader handles uncached arXiv papers and two handle independent sources
+and local documents. Each queue can look ahead across model batches. The
+coordinator records the results in reading order and checkpoints each wave.
+All network reads share the HTTP budget and each host's request pacing.
+
+The scope records the requested full-text reading policy. Exhaustive reviews
+and historical scopes without this field retain the complete reading plan.
+Selective reviews use the existing screening judgments to retrieve direct
+works, related primary results, matched seed titles and previously opened
+documents first. All selected records are available to the outline.
+After an initial pass, the reader tries the next ranked candidate for each
+facet still lacking primary passages. Every work assigned to the opening,
+detailed discussion or contextual comparison is promoted through the same title lookup, retrieval
+and evidence extraction path before writing. A resumed job uses its saved
+plan, queued works, evidence and remaining candidates.
+
 For a numbered result with an identifiable source heading and complete text block,
 retain the original theorem, setup and available proof passage directly. Resort
 to model extraction for documents with ambiguous structure. Keep a locator only
@@ -1903,6 +1942,10 @@ model context (`_evidence_room`); a referee request that still does not fit
 leaves its sentences unchecked instead of ending the job. Planned works that the checked text does not cite are
 listed as further reading (`FURTHER_READING`), with no claim about them.
 `_issues` and the review's coverage note record incomplete checks and cuts.
+When a draft cites several numbered results in one work, the verifier can
+also receive the exact, unambiguous passages already exposed for those
+locators, within its evidence allowance. Its verdict still determines what
+survives checking.
 Keep the old call roles renderable for saved jobs.
 
 ### Saved state

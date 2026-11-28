@@ -394,6 +394,9 @@ export type ResearchListItem = {
   tokens: Budget
   variant?: ReviewVariant | null
   verdict?: string | null
+  /** Literature jobs can have a readable draft that predates downloadable files. */
+  has_review?: boolean
+  outputs?: TranscriptItem['outputs']
 }
 
 /** The kinds of review behind the Review notebook (engine kind 'referee'); 'journal' is the former detailed review. */

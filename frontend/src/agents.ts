@@ -3,8 +3,8 @@
 
 import type { Agent, AgentStatus, Chat, ProofListItem, ResearchListItem, TranscriptItem } from './api'
 import { proofLook, researchLook, type Variant } from './components/Square'
-import { conversationAnswers, researchModeName } from './outputs'
-import { href, resultHref } from './router'
+import { conversationAnswers, literatureReviewLink, literatureReviewState, researchModeName } from './outputs'
+import { href } from './router'
 import { VERDICTS } from './review'
 import { PHASES, workProgressText } from './workProgress'
 import { activityCaption, taskNotice, workNotice } from './workNotice'
@@ -66,16 +66,17 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
       : status === 'running' ? phase || latest || 'Starting work' : workNotice(agent.outcome || '')
     const cardOutput = agent.card_index != null && (item?.outputs || oldAnswers.has(agent.card_index))
     const nativeOutput = agent.job_id && (agent.mode === 'check' || proof || job) ? agent.job_id : null
-    const outputId = agent.answer_id || nativeOutput || (cardOutput ? 'card-' + agent.card_index : null)
+    let outputId = agent.answer_id || nativeOutput || (cardOutput ? 'card-' + agent.card_index : null)
     // A missing legacy job stays in the activity view. Only link to a native notebook that exists.
     const book = proof ? 'prove' : job?.kind
-    const notebook = book && agent.job_id ? {
-      url: book === 'literature' ? resultHref(chat.mode, chat.id, agent.job_id)
-        : href(book, agent.job_id, null, chat.id),
-      label: book === 'literature' ? 'Read literature review' : 'Open ' + skillName(agent.mode).toLowerCase(),
-    } : null
+    const review = agent.mode === 'literature' ? literatureReviewState(job, item?.outputs) : null
+    if (review && !review.readable) outputId = review.outputs.bib && agent.job_id ? agent.job_id + ':bib' : null
+    const notebook = !book || !agent.job_id ? null : review
+      ? literatureReviewLink(chat.mode, chat.id, agent.job_id, review.readable)
+      : { url: href(book, agent.job_id, null, chat.id), label: 'Open ' + skillName(agent.mode).toLowerCase() }
     const documentJob = agent.job_id || item?.job_id
-    const documents = documentJob && item?.outputs ? { job: documentJob, outputs: item.outputs } : null
+    const outputs = review?.outputs || item?.outputs
+    const documents = documentJob && outputs ? { job: documentJob, outputs } : null
     return { ...agent, step, notebook, stateLabel: look.label, result: { ...look, outputId }, documents }
   })
 }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
-import { api, type Chat, type ProofListItem, type ResearchListItem, type ResearchDetail, type RecordEntry } from './api'
+import { api, type Chat, type ProofListItem, type ResearchListItem, type ResearchDetail, type RecordEntry, type TranscriptItem } from './api'
 import { artifactUrl, type Artifact } from './artifacts'
 import { MODE_CALLS } from './modeCalls'
-import { href } from './router'
+import { href, resultHref } from './router'
 
 export type OutputKind = 'investigation' | 'answer' | 'proof' | 'report' | 'check' | 'pdf' | 'tex' | 'source' | 'body' | 'bib' | 'file' | 'conversation' | 'experiment'
 export type WorkOutput = {
@@ -78,6 +78,18 @@ export function conversationAnswers(chat: Chat) {
 }
 
 export type JobFormats = Record<string, NonNullable<ResearchDetail['outputs']>>
+
+export function literatureReviewState(job?: ResearchListItem, cardOutputs?: TranscriptItem['outputs']) {
+  const outputs = { ...cardOutputs, ...job?.outputs }
+  return { readable: !!(job?.has_review || outputs?.review), outputs }
+}
+
+export function literatureReviewLink(mode: Chat['mode'], chat: string, job: string, readable: boolean) {
+  return readable
+    ? { url: resultHref(mode, chat, job), label: 'Read literature review' }
+    : { url: href('literature', job, null, chat), label: 'View review progress' }
+}
+
 export function nativeResultPage(mode: string, job: string, chat: string) {
   const screen = mode === 'prove' || mode === 'literature' ? mode
     : ['quick_review', 'detailed_review', 'referee', 'typo_check', 'explain'].includes(mode) ? 'referee'
@@ -119,7 +131,8 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
     if (!job) continue
     const record = jobs.get(job)
     const mode = item.mode
-    const formats = item.outputs || discovered[job]
+    const review = mode === 'literature' ? literatureReviewState(record?.kind === 'literature' ? record : undefined, item.outputs) : null
+    const formats = review?.outputs || item.outputs || discovered[job]
     const page = nativeResultPage(mode, job, chat.id)
     let primary = true
     const named = (value: unknown, fallback: string) => typeof value === 'string' && value ? value : fallback
@@ -148,7 +161,8 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
       if (formats?.source) add('source', 'Source archive', undefined, api.researchSourceUrl(job))
       if (primary) add('report', 'Write-up report')
     } else if (page) {
-      add('report', mode === 'literature' ? 'Literature review' : 'Review report',
+      if (review && !review.readable) primary = false // Reserve the job ID for the review; its bibliography has its own ID.
+      else add('report', mode === 'literature' ? 'Literature review' : 'Review report',
         undefined, formats?.review ? api.reviewMarkdownUrl(job) : undefined)
       if (formats?.bib) add('bib', 'Bibliography (BibTeX)', undefined, formats?.review ? api.reviewBibtexUrl(job) : api.researchBibDownloadUrl(job))
     }

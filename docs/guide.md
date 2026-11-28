@@ -584,8 +584,10 @@ the same viewer, which has more room than the notebook; closing it brings the
 notebook back. Answers, proofs and experiments
 are read in the notebook.
 
-- **Agents** shows what each specialist is doing. From a Literature task,
-  **Open literature review** takes you into the review itself.
+- **Agents** shows what each specialist is doing. While a literature worker is
+  searching or reading, **View review progress** opens its job page. Once it
+  saves a review, **Read literature review** opens the text beside the conversation.
+  A saved partial review can be read there too.
 - **Results** collects investigation reports, saved answers, proof attempts, reviews, experiments and
   Write-Up downloads.
 - **Findings** shows results and sources available in this conversation or project.
@@ -952,6 +954,11 @@ readable without an upgrade.
 
 ### Explore
 
+When you ask for an explanation and reading suggestions, Explore can deliver
+both together. It can check the identity and relevance of a recommended work,
+or look for a primary passage when a claim depends on its wording or hypotheses.
+You can also ask the Assistant for a separate survey or comparison of sources.
+
 When hosted DeepSeek uses a tool, Explore returns the reasoning that led to
 that call alongside the tool result on its next tool-enabled request in the
 same task. A later user request starts from the saved conversation. Its model
@@ -1064,12 +1071,23 @@ Every sentence of a section is checked against the available evidence. A first p
 
 When a model stream stops during screening, the review keeps finished classifications, continues with other candidates, and can retry the affected candidates in smaller groups. A request that the provider accepts without starting to answer is submitted again after 25 seconds, on every key. If the provider repeatedly fails, the review pauses. Before final selection, the Markdown and BibTeX downloads identify provisional references from the retrieved registry records. The token meter shows how much output the provider reported and how much of the allowance is held for calls with unknown usage.
 
+When a later review needs the same arXiv paper, it can reuse the exact revision
+already read in this workspace. If the registry identifies a new revision, the
+worker reads and stores it separately, so the earlier review's citations still
+open the passages it used. While arXiv spaces its downloads, the worker can
+read articles from other sites and process papers already in the workspace.
+
 New Literature reviews use High effort in the Assistant, the standalone form,
 the terminal and the companion survey beside a Referee report. The companion
 searches using its public question. It receives no manuscript attachments.
-The review screens the candidates it collects for the question, ranks relevant
-works, reuses cached papers and retrieves full texts while its reading time
-remains. A follow-up reading pass considers works assigned to the outline.
+The review screens the candidates it collects for the question and ranks
+relevant works. For a narrative survey it reads the directly relevant works
+and related primary results first. When a topic in the plan lacks a primary
+passage, it tries another ranked source. It seeks the full text of the works
+the outline uses, including sources assigned to a brief comparison.
+A systematic request can ask for full-text assessment of every selected work.
+When draft material is withheld, the status gives the number of sections
+whose checks finished and the number of draft units withheld, when recorded.
 An operator can set a source-request or evidence allowance. With the defaults,
 source access continues until the workflow deadline, cancellation or another
 configured budget stops it. Local profiles normally allow 20 minutes. Hosted
