@@ -1858,9 +1858,11 @@ All network reads share the HTTP budget and each host's request pacing.
 
 The scope records the requested full-text reading policy. Exhaustive reviews
 and historical scopes without this field retain the complete reading plan.
-Selective reviews use the existing screening judgments to retrieve direct
-works, related primary results, matched seed titles and previously opened
-documents first. All selected records are available to the outline.
+For new selective reviews with an independent, unlimited source allowance,
+the first reading pass uses the ranked central works, representatives of the
+questions identified during screening, and already opened documents. All
+selected records are available to the outline. Finite and parent-owned
+allowances retain their budgeted priority order.
 After an initial pass, the reader tries the next ranked candidate for each
 facet still lacking primary passages. Every work assigned to the opening,
 detailed discussion or contextual comparison is promoted through the same title lookup, retrieval

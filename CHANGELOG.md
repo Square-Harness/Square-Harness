@@ -9,8 +9,11 @@
   bibliography Check receives its selected file and records the registry
   lookups for each entry.
 - Literature plans its further reading around the requested audience and breadth.
+  New selective reviews read representative primary sources before outlining,
+  then fetch additional works the outline uses for results or comparisons.
   Source checking can identify both the named original paper and the secondary
-  account used to support an attribution.
+  account used to support an attribution. Citation verification asks whether
+  omitting a hypothesis or quantifier broadens the published claim.
 - Literature called by Proof inherits review concurrency. Terminal
   investigations can run independent workers concurrently, and Explain can
   verify independent source segments together within the available budget.

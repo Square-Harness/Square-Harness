@@ -219,6 +219,8 @@ Rules:
 - Compare meanings, not topics: a sentence on the same subject does not certify a different claim. Check formulas
   symbol by symbol, the order of quantifiers, necessity versus sufficiency, strict versus non-strict bounds and what
   a constant may depend on.
+- Read each assertion as written, with its stated dependencies. If omitting a condition or quantifier broadens
+  the assertion, restore it in the proposed correction. Details immaterial to the assertion may be omitted.
 - An abstract or a bibliographic review supports exactly what it says. A title supports only a statement of what the
   work studies, never a result. "Bibliographic record only" supports nothing mathematical.
 - A statement about an earlier work that the unit makes on the authority of another work it cites (that paper's own
@@ -236,8 +238,11 @@ For each numbered unit you get the sentence and, above, the verbatim passages of
 every substantive assertion of the unit is stated by the passages of the cited work: objects, hypotheses, quantifiers
 and their order, direction of implication, strict versus non-strict bounds, constants and what they depend on,
 equation and theorem numbers, and the work a statement is attributed to. Everything in the supplied passages of a
-cited work counts. Equivalent notation and a short valid consequence are faithful; do not fault a unit for leaving
-details out. An abstract supports exactly what it says, and a title only what the work studies. A statement about
+cited work counts. Equivalent notation and a short valid consequence are faithful. Compare each assertion as a
+reader would understand it with its stated dependencies. When a condition or quantifier in your reading is missing
+from the assertion, check whether the omission broadens the domain, conclusion or family over which a bound is
+uniform. If so, mark the unit unfaithful and restore the missing qualification. Immaterial details may be omitted.
+An abstract supports exactly what it says, and a title only what the work studies. A statement about
 an earlier work can rest on the account that a cited paper gives of it, in a passage naming the earlier authors.
 The numbered record identifies that earlier work even if its own text was unavailable. Keep its citation on
 its authors' names and identify the paper supplying the account separately.
@@ -1115,7 +1120,7 @@ class ReviewRunner(ResearchRunner):
                 'pipeline': PIPELINE, 'adaptive_sources': True, 'companion': self._companion, 'checked_export': True, 'scope': None, 'pool': [], 'sweep_log': [],
                 'screened': {}, 'screen_attempts': {}, 'screen_failed': {}, 'filtered': [], 'deferred': [], 'expanded': [],
                 'expand_round': 0, 'leads': {}, 'documents': {}, 'cards': {}, 'card_failed': {}, 'read_plan': {},
-                'read_planned': False, 'selected': [], 'importance': {}, 'dropped': [], 'outline': None,
+                'read_planned': False, 'representative_reads': True, 'selected': [], 'importance': {}, 'dropped': [], 'outline': None,
                 'outline_fallback': False, 'sections': {}, 'intro': None, 'checks': {}, 'check_work': {}, 'timings': {},
                 'unverified': [], 'cuts': [],
                 'bibliography': [], 'references': [], 'coverage': {}, 'outputs': {}}
@@ -3016,17 +3021,20 @@ class ReviewRunner(ResearchRunner):
                 if r is not None:
                     _keep_arxiv_revision(r, raw)
 
-    def _reading_order(self, targets, limit):
+    def _reading_order(self, targets, limit, *, representatives=False):
         """Share a small passage budget between central works, distinct questions and recent
         primary results. The learned/historical path does not prefer any publication date."""
         s = self.state
-        available = [n for n in targets if self._by_n(n).get('arxiv') or self._by_n(n).get('doi')]
+        # Before the title lookup a representative may still acquire an arXiv ID.
+        available = targets if representatives else [n for n in targets if self._by_n(n).get('arxiv') or self._by_n(n).get('doi')]
         screened = s.get('screened') or {}
         facts = lambda n: screened.get(str(n)) or {}
         primary = [n for n in available if facts(n).get('relevance', 0) >= 2
                    and facts(n).get('kind') in ('result', 'foundational')]
         if not primary:
-            return available
+            if not representatives or not available:
+                return available
+            primary = available
 
         # Fix the leading primary work and an early landmark before allocating frontier slots.
         core = [primary[0]]
@@ -3047,7 +3055,8 @@ class ReviewRunner(ResearchRunner):
             teams, distinct = set(), []
             for n in recent:
                 authors = self._by_n(n).get('authors') or []
-                key = (facts(n).get('facet'), _fold(_surname(authors[0])) if authors else n)
+                facet = facts(n).get('facet')
+                key = facet if representatives else (facet, _fold(_surname(authors[0])) if authors else n)
                 if key not in teams:
                     distinct.append(n)
                     teams.add(key)
@@ -3055,12 +3064,18 @@ class ReviewRunner(ResearchRunner):
             recent = distinct[:recent_quota]
         leading = list(dict.fromkeys(core + recent))
         represented = {facts(n).get('facet') for n in leading}
-        for n in primary:
+        for n in (dict.fromkeys([*primary, *available]) if representatives else primary):
             facet = facts(n).get('facet', -1)
             if facet >= 0 and facet not in represented:
                 leading.append(n)
                 represented.add(facet)
-        return list(dict.fromkeys(leading + available))
+        return leading if representatives else list(dict.fromkeys(leading + available))
+
+    def _representative_reads(self):
+        s = self.state
+        return (s.get('representative_reads') and s.get('adaptive_sources') and not self.shared_source_budget
+                and (s.get('scope') or {}).get('reading_policy') == 'selective'
+                and all(s['settings'].get(k) == UNLIMITED_SOURCE for k in ('max_requests', 'max_chars')))
 
     def _initial_reads(self, targets):
         """Keep the complete catalogue for the outline. Read primary evidence before contextual works."""
@@ -3076,6 +3091,12 @@ class ReviewRunner(ResearchRunner):
                     or _full_title(self._by_n(n)['title']) in seeds
                     or (s['documents'].get(str(n)) or {}).get('document_id')):
                 chosen.append(n)
+        if self._representative_reads():
+            # Give the outline primary examples across its facets and everything already fetched.
+            # Every other screened candidate remains available for a main result or comparison.
+            initial = self._reading_order(chosen or targets, len(targets), representatives=True)
+            cached = [n for n in targets if (s['documents'].get(str(n)) or {}).get('document_id')]
+            return list(dict.fromkeys(initial + cached))
         return chosen or targets
 
     def _queue_primary_reads(self, numbers):
@@ -3139,8 +3160,8 @@ class ReviewRunner(ResearchRunner):
                 s['read_plan'][str(n)] = ('full_text' if n in planned else 'abstract'
                                           if record.get('abstract') else 'metadata')
             s['read_order'], s['read_spares'], s['read_planned'] = planned, spares, True
-            if len(primary) < len(targets):
-                chosen = set(primary)
+            chosen = set(planned + spares) if self._representative_reads() else set(primary)
+            if len(chosen) < len(targets):
                 s['read_deferred'] = [n for n in targets if n not in chosen]
             self.emit('notice', f'Collecting primary-source passages for up to {len(planned)} works')
             return
@@ -3157,6 +3178,8 @@ class ReviewRunner(ResearchRunner):
             if s.get('outline'):
                 # A one-sentence comparison can depend on primary evidence just as much as a main result.
                 assigned = {n for i in range(len(s['outline']['sections'])) for n in self._section_works(i)}
+                if self._representative_reads():
+                    assigned.update(s['outline'].get('answer_works') or [])
                 additional = [n for n in s['read_deferred'] if n in assigned]
                 if additional:
                     if not self._late('read'):
