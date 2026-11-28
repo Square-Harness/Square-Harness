@@ -514,7 +514,7 @@ def main():
             last_proof_id = ''
             proof_running = True
             workspace.numerics = bind_numerics('prove')
-            runner = ProofRunner(agent, ui.emit, evidence_coordinator=True)
+            runner = ProofRunner(agent, ui.emit, evidence_coordinator=True, review_concurrency=review_concurrency())
             result = runner.start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
@@ -586,7 +586,7 @@ def main():
             try:
                 if not agent.notebook_answer:
                     ensure_model()
-                workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
+                workspace.checker = nested_checker(agent, ui.emit, request=query) if workspace.literature.online else None
                 chat(agent, query)
             finally:
                 agent.notebook_source = ''
@@ -703,7 +703,7 @@ def main():
                     resume_agent = copy.copy(agent)
                     resume_agent.client = copy.copy(agent.client)
                     workspace.numerics = bind_numerics('prove')
-                    runner = ProofRunner(resume_agent, ui.emit, evidence_coordinator=True)
+                    runner = ProofRunner(resume_agent, ui.emit, evidence_coordinator=True, review_concurrency=review_concurrency())
                     result = runner.resume(
                         last_proof_id, add_tokens=args.resume_add_tokens, add_seconds=args.resume_add_seconds,
                         add_rounds=args.resume_add_rounds)

@@ -310,6 +310,10 @@ def confirm_prompt(issue, packet):
             + f' ({issue["kind"]}):\nQuote: {issue["quote"]}\nAllegation: {issue["evidence"]}\n')
 
 
+WHOLE_CONTEXT = """Use the numbered manuscript for its definitions, standing assumptions, notation and earlier results.
+Read the selected statement and argument in that context. Report issues in the selected lines, including any appeal
+to a result beyond its hypotheses. Cite the lines that support each finding."""
+
 EXTRACT_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['statement_start', 'statement_end', 'proof_start', 'proof_end'],
@@ -400,6 +404,17 @@ page, section, computation, paragraph or other stretch of text: start_line and e
 and the statement lines are 0. Return kind "none", with all lines 0, when the request names no part of the text.
 name: a short name (at most six words) for what will be explained, such as "the main theorem", "Section 4.2" or
 "the computation of (2.4)"."""
+LOCATE_QUICK_PROOF_SCHEMA = {
+    'type': 'object', 'additionalProperties': False, 'required': ['matches'],
+    'properties': {'matches': {'type': 'array', 'maxItems': 2, 'items': LOCATE_SCHEMA}},
+}
+LOCATE_QUICK_PROOF_POLICY = """Identify the attempted proofs in the numbered source that match the user's request.
+For a request naming a particular result, return its match alone. For a general request, read the entire source and
+list up to two independent proved conclusions, in source order, even when one looks more important than the other.
+Steps of one argument belong together. A flawed argument in prose is still an attempted proof.
+Each match has kind "result", a short name, the statement lines and the lines of its argument. Give zero proof lines
+for a requested statement without an argument. A reference to a proof elsewhere supplies no proof lines.
+Return no matches when the requested result is absent."""
 LOCATE_PROOF_POLICY = """The request below asks about {name}, stated at lines {start}-{end} of the numbered text; [page N]
 marks where a page starts. The text proves it elsewhere or in prose, without a "Proof" heading next to the statement.
 Return kind "result", the statement lines as given, and in start_line and end_line the first and last lines of the

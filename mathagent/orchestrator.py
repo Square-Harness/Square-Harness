@@ -608,6 +608,10 @@ class Orchestrator:
     def _worker_files(self, args):
         explicit = args.get('files', [])
         inherited = self.state['files']
+        if args.get('mode') == 'check':
+            # A bibliography is an explicit input to this particular check. A sibling's
+            # manuscript or reference list must not turn a theorem lookup into a bibliography audit.
+            return list(dict.fromkeys(explicit))
         if args.get('mode') == 'prove':
             inherited = [name for name in inherited if not name.lower().endswith('.pdf')]
         return list(dict.fromkeys([*inherited, *explicit]))
@@ -1163,7 +1167,7 @@ class Orchestrator:
                 workspace._readable(path)
                 if not path.is_file():
                     raise ValueError(filename + ' is not a file in this folder')
-                if args['mode'] in ('referee', 'detailed_review', 'typo_check', 'quick_review', 'explain', 'writeup'):
+                if args['mode'] in ('check', 'referee', 'detailed_review', 'typo_check', 'quick_review', 'explain', 'writeup'):
                     human = [self.state['query']] + [m.get('content', '') for m in self.state['history'] if m.get('role') == 'user']
                     if (filename not in self.state['files'] and not any(filename in text for text in human)
                             and not self._identified(filename)):
@@ -1174,13 +1178,17 @@ class Orchestrator:
 
     def _child(self, pending, args, *, shared_proof_objective=None):
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
+        files = self._worker_files(args)
         if child is not None:
+            if args['mode'] == 'check' and child['status'] == 'pending' and not child.get('job_id'):
+                child['action']['files'] = files
             return child
-        source_key = self._source_key(self._worker_files(args))
+        source_key = self._source_key(files)
         request = ' '.join(args['request'].split()).casefold()
         duplicate = next((item for item in self.state['children'] if item['status'] == 'complete'
                           and not _needs_input(item.get('result'))  # a write-up waiting for material is asked again
                           and item['action']['mode'] == args['mode']
+                          and (args['mode'] != 'check' or item['action']['files'] == files)
                           and ' '.join(item['action']['request'].split()).casefold() == request
                           and item.get('source_key', [] if not item['action']['files'] else None) == source_key), None)
         if duplicate is not None:
@@ -1214,7 +1222,7 @@ class Orchestrator:
             child['context']['notebook_source'] = self.state['notebook_source']
         if shared_proof_objective:
             child['shared_proof_objective'] = shared_proof_objective
-        child['action']['files'] = [] if args['mode'] == 'check' else self._worker_files(args)
+        child['action']['files'] = files
         self.state['children'].append(child)
         pending['child_id'] = child['id']
         self._save()

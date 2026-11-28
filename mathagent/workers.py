@@ -600,13 +600,13 @@ def run_worker(host, parent, budget, action, child, save):
         # As in an Explore chat: check_reference, charged to this worker's share and
         # given at most the time of a reference check at the worker's own effort.
         agent.workspace.checker = nested_checker(
-            agent, emit, share_source_budget=bool(limits),
+            agent, emit, share_source_budget=bool(limits), request=action['request'],
             max_seconds=seconds if is_ds4(agent) else min(seconds, REFCHECK_EFFORTS['high']['seconds']))
     try:
         if sandbox_error:
             raise ValueError(sandbox_error)
         if mode == 'prove':
-            runner = ProofRunner(agent, emit, evidence_coordinator=True)
+            runner = ProofRunner(agent, emit, evidence_coordinator=True, review_concurrency=host.review_concurrency())
             if child.get('job_id'):
                 result = runner.resume(child['job_id'])
             else:

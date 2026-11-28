@@ -200,7 +200,10 @@ that place differs from the guess; located = the work exists (its record was fou
 the topic, but no read line cites a place for this result; contradicted = a source gives the guessed place
 to a different statement; not_found = no evidence.
 locator: the place as the read lines cite it (correct the guess if needed), e.g. "Theorem 9.26" or "Section 5.7".
-document_id and lines: where you read it, e.g. "doc-…" and "L120-L122"; empty if nothing was read.
+document_id and lines: the exact document and shortest read span containing this numbered statement and its hypotheses,
+e.g. "doc-…" and "L120-L122". Each range can contain at most 41 lines; a wider range is rejected.
+Give one numbered place per entry. When additional_places is available, put each other required numbered
+result and its own exact read lines and statement there. Empty fields are appropriate if nothing was read.
 record: identifier of the work's record (e.g. "zbl:1220.46002" or a DOI), empty if none.
 statement_found: what the source says at that place, in one sentence. note: anything doubtful.
 Use only identifiers that appear in the evidence."""
@@ -253,6 +256,14 @@ def _lines(value):
     return (a, b) if 1 <= a <= b <= a + 40 else None
 
 
+def _places(candidates):
+    """Expose each independently gated place in the same citation format as a single result."""
+    for candidate in candidates:
+        yield candidate
+        for verdict in (candidate.get('verdict') or {}).get('additional_places', []):
+            yield {**candidate, 'locator': verdict['locator'], 'verdict': verdict}
+
+
 # The answer labels a remembered place itself; a note the model adds to the place
 # ("(by memory, unverified)") would be printed twice.
 _MEMORY_NOTE = re.compile(r'\s*[(\[][^()\[\]]*\b(?:by memory|from memory|de m[ée]moire|unverified|unconfirmed|'
@@ -282,6 +293,43 @@ def _clean_candidate(value, source):
             'source': source, 'rounds': 0, 'notes': [], 'claimed': None, 'verdict': None}
 
 
+def _merge_leads(leads):
+    """Keep one check for compatible descriptions of a work, including its edition and requested place."""
+    def words(text):
+        return tuple(re.findall(r'\w+', _fold(text)))
+
+    def names_match(left, right):
+        if len(left) != len(right):
+            return False
+        for a, b in zip(left, right):
+            surnames = _surnames([a, b])
+            if len(surnames) != 2 or words(surnames[0]) != words(surnames[1]):
+                return False
+            if words(a) != words(b) and words(surnames[0]) not in (words(a), words(b)):
+                return False
+        return True
+
+    kept = []
+    for lead in leads:
+        title = words(lead['title'])
+        matches = [c for c in kept if title and words(c['title']) == title
+                   and names_match(c['authors'], lead['authors'])
+                   and all(not c.get(k) or not lead.get(k) or _fold(c[k]) == _fold(lead[k])
+                           for k in ('year', 'locator', 'identifier_evidence'))]
+        if len(matches) != 1:
+            kept.append(lead)
+            continue
+        previous = matches[0]
+        previous['authors'] = [b if len(words(b)) > len(words(a)) else a
+                               for a, b in zip(previous['authors'], lead['authors'])]
+        for k in ('year', 'locator', 'why', 'identifier_evidence'):
+            if lead.get(k) and not previous.get(k):
+                previous[k] = lead[k]
+        if previous['source_type'] == 'unknown':
+            previous['source_type'] = lead['source_type']
+    return kept
+
+
 _PLACE = re.compile(r'\b(?:Theorem|Thm\.?|Lemma|Proposition|Prop\.?|Corollary|Cor\.?|Section|Chapter|Definition|Remark|Example)'
                     r'\s+(?:\d+(?:\.\d+)*[a-z]?|[A-Z]\b)', re.I)
 _NAME_STOP = frozenset('is it its the a an of in on by and that this theorem lemma proposition corollary section chapter '
@@ -289,11 +337,17 @@ _NAME_STOP = frozenset('is it its the a an of in on by and that this theorem lem
                        'confirm correct whether please survey review give find what which was has have show tell'.split())
 
 
-def question_identifiers(text):
+def question_identifiers(text, *, editions=False):
     """The DOIs and arXiv identifiers written in a question, in order of appearance."""
+    from urllib.parse import unquote
     text = str(text or '')
-    found = sorted(entry_identifiers(text), key=lambda i: (text.lower().find(i.split(':', 1)[1]), i))
-    return [i for i in found if i.startswith(('doi:', 'arxiv:'))]
+    normalized = unquote(text).casefold()
+    def position(identifier):
+        number = re.escape(identifier.split(':', 1)[1])
+        suffix = r'(?![\w/-])' if editions and identifier.startswith('arxiv:') else ''
+        match = re.search(number + suffix, normalized)
+        return (match.start() if match else len(normalized), identifier)
+    return sorted((i for i in entry_identifiers(text, editions=editions) if i.startswith(('doi:', 'arxiv:'))), key=position)
 
 
 def names_open_document(question, opened):
@@ -374,9 +428,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         self._emit = quiet
 
     def start(self, question, *, guesses=(), effort='medium', lookup='precise', reference_context=None, asker=None, job_id=None,
-              material='', **overrides):
+              material='', reading_request='', **overrides):
         # An attached reference list (.bib or text) whose entries are each checked against the registries.
         self._bibliography_material = str(material or '')
+        self._reading_request = reading_request if lookup == 'standard' else ''
         if lookup not in ('standard', 'precise'):
             raise ValueError('lookup must be standard or precise')
         human = reference_context.get('query') if isinstance(reference_context, dict) else None
@@ -418,6 +473,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def _extra_state(self):
         return {**({'bibliography_material': self._bibliography_material} if getattr(self, '_bibliography_material', '') else {}),
+                **({'reading_request': self._reading_request} if self._reading_request else {}),
                 'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
                 'discovered': False, 'answer': '', 'standard_author': '',
                 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
@@ -428,7 +484,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
 
     def _material(self, role):
         s = self.state
-        fixed = 'QUESTION:\n' + s['goal'] + '\n'
+        assignment = s.get('reading_request') if role == 'reference_select' else None
+        fixed = 'QUESTION:\n' + (assignment or s['goal']) + '\n'
+        if assignment:
+            fixed += '\nSEARCH TOPIC supplied by the answering worker:\n' + s['goal'] + '\n'
         fixed += 'Lookup mode: ' + s['check'].get('lookup', 'precise') + '.\n'
         if s['statement']:
             label = ('UNVERIFIED SEARCH INTERPRETATION (must not strengthen the QUESTION or human context):'
@@ -525,20 +584,31 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         """A DOI or arXiv identifier in the question is looked up before any topic search: one registry request
         settles whether it exists, and its record becomes the first candidate to check."""
         s = self.state
-        if s.get('identifier_checks') is not None or not self.literature:
+        if not self.literature:
             return []
         s['identifier_checks'], found = [], []
         words = self._human_words()
         places = _PLACE.findall(words)
-        for identifier in question_identifiers(words):
-            self.emit('tool', 'lookup_identifier ' + identifier)
-            result = str(self.literature.execute('lookup_identifier', {'identifier': identifier}))
+        def lookup(tool, key, value):
+            # A source-budget checkpoint can fall between any two lookups or before recall commits its candidates.
+            # Rebuild the leads from completed evidence and execute only the outstanding requests.
+            arguments = {key: value}
+            for evidence in s['evidence']:
+                if evidence['tool'] == tool and evidence['arguments'] == arguments:
+                    return evidence
+            self.emit('tool', tool + ' ' + value)
+            result = str(self.literature.execute(tool, arguments))
             evidence_id = f'E{len(s["evidence"]) + 1}'
-            s['evidence'].append({'id': evidence_id, 'tool': 'lookup_identifier', 'arguments': {'identifier': identifier},
-                                  'artifact': self._artifact('evidence-' + evidence_id, result), 'result': result,
-                                  'round': s['rounds_started'], 'candidate': 'identifier'})
+            evidence = {'id': evidence_id, 'tool': tool, 'arguments': arguments, 'result': result,
+                        'artifact': self._artifact('evidence-' + evidence_id, result),
+                        'round': s['rounds_started'], 'candidate': 'identifier'}
+            s['evidence'].append(evidence)
+            return evidence
+
+        for identifier in question_identifiers(words, editions=True):
+            evidence = lookup('lookup_identifier', 'identifier', identifier)
             try:
-                value = json.loads(result)
+                value = json.loads(evidence['result'])
             except ValueError:
                 value = {}
             record = value.get('record') if isinstance(value.get('record'), dict) else {}
@@ -553,7 +623,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                                       'locator': places[0] if len(set(p.lower() for p in places)) == 1 else '',
                                       'why': f'{identifier} given in the question', 'source_type': 'article'}, 'identifier')
                 if c:
-                    c['identifier_evidence'] = evidence_id
+                    c['identifier_evidence'] = evidence['id']
+                    if identifier.startswith('arxiv:') and re.search(r'v\d+$', identifier):
+                        c['requested_revision'] = identifier
                     found.append(c)
         # Other URLs in the question are opened as given: the page is evidence, and a refusal (robots rules, size,
         # missing page) is reported as it is, never replaced by a topic search.
@@ -561,14 +633,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         for url in question_urls(words):
             if covered.match(url):
                 continue
-            self.emit('tool', 'open_paper ' + url)
-            result = str(self.literature.execute('open_paper', {'identifier_or_url': url}))
-            evidence_id = f'E{len(s["evidence"]) + 1}'
-            s['evidence'].append({'id': evidence_id, 'tool': 'open_paper', 'arguments': {'identifier_or_url': url},
-                                  'artifact': self._artifact('evidence-' + evidence_id, result), 'result': result,
-                                  'round': s['rounds_started'], 'candidate': 'identifier'})
+            evidence = lookup('open_paper', 'identifier_or_url', url)
             try:
-                value = json.loads(result)
+                value = json.loads(evidence['result'])
             except ValueError:
                 value = {}
             if value.get('error'):
@@ -580,9 +647,9 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         return found
 
     def _verify_supplied_document(self):
-        """Start a precise Proof check at the one document its question actually opened."""
+        """Start a precise check at the single source explicitly supplied in the question."""
         s = self.state
-        if s['check'].get('asker') != 'proof' or s['check'].get('lookup') != 'precise' or s['candidates']:
+        if s['check'].get('lookup') != 'precise' or s['candidates']:
             return False
         checks = s.get('identifier_checks') or []
         urls = question_urls(s['goal'])
@@ -623,7 +690,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                      'claimed': None, 'verdict': None}
         opened['candidate'] = 0
         s.update(candidates=[candidate], current=0, phase='verify')
-        self.emit('notice', 'Reading the source supplied in the Proof question: ' + url)
+        self.emit('notice', 'Reading the source supplied in the question: ' + url)
         return True
 
     def _recall(self):
@@ -632,13 +699,21 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         seeded = self._resolve_identifiers()
         if not seeded and self._verify_supplied_document():
             return
+        if (len(seeded) == 1 and self.state['check']['lookup'] == 'precise'
+                and len(self.state['identifier_checks']) == 1
+                and question_identifiers(self.state['goal'], editions=True) == [self.state['identifier_checks'][0]['identifier']]
+                and len(_merge_leads([*seeded, *self.state['candidates']])) == 1):
+            candidate = seeded[0]
+            candidate['direct_identifier'] = self.state['identifier_checks'][0]['identifier']
+            for evidence in self.state['evidence']:
+                if evidence['id'] == candidate['identifier_evidence']:
+                    evidence['candidate'] = 0
+            self.state.update(candidates=[candidate], current=0, phase='verify')
+            return
         cited = cited_work(self._human_words())
-        if cited and not any(_words(cited['title']) and _words(cited['title']) <= _words(c['title']) for c in seeded):
+        if cited:
             seeded.append(cited)  # the work the claim is attributed to is always checked
-        if seeded:
-            keep = {(_fold(' '.join(c['authors'])), _fold(c['title'])) for c in seeded}
-            self.state['candidates'] = seeded + [c for c in self.state['candidates']
-                                                 if (_fold(' '.join(c['authors'])), _fold(c['title'])) not in keep]
+        self.state['candidates'] = _merge_leads([*seeded, *self.state['candidates']])
         instruction = ('Recall candidate sources for the exact mathematical question. Briefly state the result '
                        'sought, preserving its hypotheses, and give public topic keywords. List the works you '
                        'remember, most relevant first, with a chapter, section or theorem number only when you '
@@ -720,14 +795,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 and self._standard_kind() != 'book' else '')
             if self.state['standard_author']:
                 self.state['candidates'] = []
-        def candidate_key(c):
-            return (_fold(' '.join(c['authors'])), _fold(c['title']),
-                    None if standard else _fold(c['locator']))
-        seen = {candidate_key(c) for c in self.state['candidates']}
-        for c in ([] if self.state.get('standard_author') else recalled):
-            if candidate_key(c) not in seen:
-                self.state['candidates'].append(c)
-                seen.add(candidate_key(c))
+        if not self.state.get('standard_author'):
+            self.state['candidates'] = _merge_leads([*self.state['candidates'], *recalled])
 
         for i, c in enumerate(self.state['candidates']):
             for e in self.state['evidence']:
@@ -795,13 +864,34 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             self._tag(index)
         settings = s['settings']
         if not c.get('seeded'):
-            # Before asking the model, look up the work and how papers quote the guessed place.
             c['seeded'] = True
             c['requests_before'] = self._requests()
+            if c.get('direct_identifier'):
+                c['source_stage'] = 'primary'
+            elif not c.get('supplied_document'):
+                c['source_stage'] = 'record'
             self.emit('notice', f'Checking guess {index + 1}: ' + describe(c).replace('*', '') + (f', {c["locator"]}' if c['locator'] else ''))
-            calls = self._fresh(self._seed(c), index)
-            if calls:
-                s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
+            if self._queue_evidence(self._seed(c), index):
+                return
+        if c.get('source_stage') == 'record':
+            evidence = [e for e in s['evidence'] if e.get('candidate') == index]
+            record = self._record(c, evidence) or {}
+            identifier = record.get('identifier') or ''
+            # A catalog URL describes the work; a DOI or arXiv identifier can lead to its text.
+            supplied = next((e['arguments']['identifier'] for e in evidence if e['id'] == c.get('identifier_evidence')), '')
+            source = supplied or (identifier if identifier.startswith(('arxiv:', 'doi:')) else record.get('doi'))
+            if supplied.startswith('arxiv:') and re.search(r'v\d+$', supplied):
+                c['requested_revision'] = supplied
+            c['source_stage'] = 'primary'
+            if source and (supplied or not any(e['tool'] == 'open_paper' for e in evidence)):
+                if self._queue_evidence([{'function': {'name': 'open_paper',
+                                         'arguments': {'identifier_or_url': source}}}], index):
+                    return
+        if c.get('source_stage') == 'primary':
+            evidence = [e for e in s['evidence'] if e.get('candidate') == index]
+            primary = any(e['tool'] == 'open_paper' and self._source_url(e) for e in evidence)
+            c['source_stage'] = 'read_primary' if primary else 'quotes'
+            if not primary and self._queue_evidence(self._quote_seed(c), index):
                 return
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']
                 and not self._out_of_time()):
@@ -811,7 +901,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             instruction = ('Check the question against the supplied document. Inspect the statement, hypotheses '
                            'and exact lines. Use search_paper or read_paper for other parts of the document. '
                            'When you have enough evidence, reply with short notes and no tool calls.'
-                           if c.get('supplied_document') else VERIFY_METHOD)
+                           if c.get('supplied_document') or c.get('source_stage') == 'read_primary' else VERIFY_METHOD)
             result = self._call('verify', instruction, cap=1200, tools=self._schemas())
             if result['text'].strip():
                 c['notes'].append(result['text'])
@@ -821,10 +911,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 return
         if not self._out_of_time():
             schema = VERDICT_SCHEMA
-            if c.get('supplied_document'):
-                schema = {**schema, 'properties': {**schema['properties'], 'needs_other_sources': {
-                    'type': 'boolean', 'description': 'Does the question also ask for other references or evidence beyond this document?'}},
-                    'required': [*schema['required'], 'needs_other_sources']}
+            if c.get('supplied_document') or c.get('direct_identifier') or c.get('source_stage') == 'read_primary':
+                keys = ('locator', 'document_id', 'lines', 'statement_found')
+                additional = {'type': 'array', 'description': 'Other distinct numbered places needed for the answer, each with its own primary passage. Use [] for a single place.',
+                    'items': {'type': 'object', 'required': list(keys), 'additionalProperties': False,
+                              'properties': {k: schema['properties'][k] for k in keys}}}
+                schema = {**schema, 'properties': {**schema['properties'], 'additional_places': additional, 'needs_other_sources': {
+                    'type': 'boolean', 'description': 'Does the question need other references or additional evidence beyond this source?'}},
+                    'required': [*schema['required'], 'needs_other_sources', 'additional_places']}
             result = self._call('verdict', VERDICT_RULES, cap=700, format_schema=schema)
             try:
                 claimed = loads(result['text'])
@@ -832,6 +926,22 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 claimed = None
             c['claimed'] = claimed if isinstance(claimed, dict) else None
         c['verdict'] = self._gate(index, c['claimed'] or {})
+        extra = (c['claimed'] or {}).get('additional_places')
+        if isinstance(extra, list):
+            for place in (p for p in extra if isinstance(p, dict) and p.get('locator')):
+                verdict = self._gate(index, {**place, 'level': 'read', 'record': (c['claimed'] or {}).get('record', '')})
+                c['verdict'].setdefault('additional_places', []).append(verdict)
+        if c.get('source_stage') == 'read_primary':
+            c['source_stage'] = 'quotes'
+            wanted = _number(c['locator'])
+            places = {_number(item['verdict']['locator']) for item in _places([c]) if item['verdict']['level'] == 'read'}
+            if (c['verdict']['level'] != 'read' or (not c.get('direct_identifier') and
+                    (c['claimed'] or {}).get('needs_other_sources') is not False)
+                    or wanted and wanted not in places):
+                calls = self._quote_seed(c)
+                if calls and not self._out_of_time():
+                    self._queue_evidence(calls, index)
+                    return
         self.emit('notice', f'Guess {index + 1}: ' + LABELS[c['verdict']['level']]
                   + (f' ({c["verdict"]["locator"]})' if c['verdict'].get('locator') else ''))
         self._next()
@@ -839,7 +949,15 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def _requests(self):
         return self.literature.stats['requests'] if self.literature else 0
 
+    def _queue_evidence(self, calls, index):
+        fresh = self._fresh(calls, index)
+        if fresh:
+            self.state['pending_tools'] = {'calls': fresh, 'index': 0, 'active': False}
+        return bool(fresh)
+
     def _seed(self, c):
+        if c.get('direct_identifier'):
+            return [{'function': {'name': 'open_paper', 'arguments': {'identifier_or_url': c['direct_identifier']}}}]
         if c.get('supplied_document'):
             return [{'function': {'name': 'read_paper', 'arguments': {'document_id': c['supplied_document']}}}]
         names = _surnames(c['authors'])
@@ -867,14 +985,16 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         words = re.findall(r'[^\W\d_]+', c['title'])[:8]
         query = f'au:{names[0]}' + (' ti:' + ' '.join(words) if words else '')
         calls.append({'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'zbmath', 'limit': 3}}})
-        if self.state['check'].get('lookup') == 'standard':
-            return calls
+        return calls
+
+    def _quote_seed(self, c):
+        names = _surnames(c['authors'])
         # All the keywords together: a combined topic query finds far more of the papers that cite the work.
         topic = ' '.join(self.state['keywords'][:4])[:120]
-        if _number(c['locator']) or topic:
-            calls.append({'function': {'name': 'find_quotes', 'arguments': {
-                'author': names[0], 'locator': c['locator'] if _number(c['locator']) else '', 'topic': topic, 'title': c['title']}}})
-        return calls
+        if names and (_number(c['locator']) or topic):
+            return [{'function': {'name': 'find_quotes', 'arguments': {
+                'author': names[0], 'locator': c['locator'] if _number(c['locator']) else '', 'topic': topic, 'title': c['title']}}}]
+        return []
 
     def _review_works(self):
         """References of the literature reviews this conversation shows, from their saved registry records: a review
@@ -925,7 +1045,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         s = self.state
         current = s['candidates'][s['current']]
         needs_sources = not self._confirmed()
-        if current.get('supplied_document') and type((current.get('claimed') or {}).get('needs_other_sources')) is bool:
+        if (current.get('supplied_document') or current.get('direct_identifier')) and type((current.get('claimed') or {}).get('needs_other_sources')) is bool:
             needs_sources = current['claimed']['needs_other_sources']
         if s['current'] + 1 < len(s['candidates']) and not self._out_of_time():
             s['current'] += 1
@@ -1083,6 +1203,8 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
             metadata, _ = self.literature._document(document_id)
         except (ValueError, OSError, AttributeError):
             return False
+        if candidate.get('requested_revision'):
+            return metadata.get('canonical_identifier') == candidate['requested_revision']
         canonical = _identity(metadata.get('canonical_identifier'))
         identifiers = [_identity((record or {}).get(k)) for k in ('identifier', 'doi', 'arxiv_id')]
         if canonical and canonical in identifiers:
@@ -1189,7 +1311,11 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     elif not (self._document_is_work(doc, c, record) or any(cites_place(text, number, n, keys) for n in names)):
                         reasons.append('the passage claimed to contradict the place is neither the work nor a citation of it there')
                         level = 'located'
-                if level in ('read', 'cited') and number and not _has_number(text, number):
+                places = {p.casefold() for p in _PLACE.findall(locator)}
+                if level in ('read', 'cited') and len(places) > 1:
+                    reasons.append('each numbered place needs its own statement and source range')
+                    level = 'located'
+                elif level in ('read', 'cited') and number and not _has_number(text, number):
                     reasons.append(f'the read lines do not contain {number}')
                     level = 'located'
                 elif level in ('read', 'cited') and not number:
@@ -1341,7 +1467,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         elif all(c['verdict']['level'] == 'located' for c in chosen):
             out += ['**No exact place was confirmed.** These work records were found; '
                     'the theorem or section is the model\'s guess.', '']
-        for n, c in enumerate(chosen, 1):
+        for n, c in enumerate(_places(chosen), 1):
             v = c['verdict']
             record = v.get('record') or {}
             place = f', {v["locator"]}' if v.get('locator') else ''
@@ -1386,12 +1512,13 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
     def result_for_agent(self):
         """Compact JSON for an agent that called check_reference."""
         if self.state.get('bibliography_check') is not None:
-            entries = [{'entry': r['entry'], 'verdict': r['verdict'], 'differences': r['differences'],
+            entries = [{'entry': r['entry'], 'verdict': r['verdict'], 'differences': r['differences'], 'looked_up': r.get('asked', []),
                         'record': (r.get('record') or {}).get('identifier'), 'notes': r['notes']}
                        for r in self.state['bibliography_check']]
             value = {'status': self.state['status'], 'check_id': self.state['id'], 'bibliography': entries,
                      'stop_reason': self.state.get('stop_reason', ''),
-                     'note': 'Registry metadata only; the papers were not read. Report each entry with its verdict.'}
+                     'note': 'Give each verdict at the scope of its listed lookups. An unsuccessful identifier lookup '
+                             'leaves the work’s existence under another identifier, title or author spelling unresolved.'}
             text = json.dumps(value, ensure_ascii=False)
             while len(text) > self.agent.workspace.result_chars and any(e['notes'] or len(e['entry']) > 60 for e in entries):
                 for e in entries:
@@ -1399,12 +1526,14 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                 text = json.dumps(value, ensure_ascii=False)
             return text
         refs = []
-        for c in self.chosen():
+        reading_list = self.state['check'].get('lookup') == 'standard' and bool(self.state.get('reading_request'))
+        for c in _places(self.chosen()):
             v = c['verdict']
             record = v.get('record') or {}
             source = ({**c, **{k: record.get(k) or '' for k in ('authors', 'title', 'year')}}
                       if record and self.state['check'].get('lookup') == 'standard' else c)
-            refs.append({'level': v['level'], 'reference': describe(source).replace('*', ''), 'place': v.get('locator'),
+            refs.append({'level': v['level'], 'reference': describe(source).replace('*', ''),
+                         'place': None if reading_list and v['level'] == 'located' else v.get('locator'),
                          'corrected_from': v.get('corrected_from'), 'cited_as': v.get('cited_entry') or None,
                          'edition_of_place': v.get('cited_edition'),
                          'statement_found': v.get('statement_found'), 'evidence': f'{v["document_id"]}:{v["lines"]}' if v.get('quote') else None,
@@ -1415,7 +1544,7 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                          'suitability': c.get('suitability'),
                          'metadata_confirmed': bool(v.get('record')),
                          'exact_statement_confirmed': v['level'] in ('read', 'cited')})
-        others = [{'reference': describe(c).replace('*', ''), 'place': c['locator'],
+        others = [{'reference': describe(c).replace('*', ''), 'place': None if reading_list else c['locator'],
                    'level': (c.get('verdict') or {}).get('level', 'not_checked'),
                    'reasons': (c.get('verdict') or {}).get('reasons', [])} for c in self.state['candidates'] if c not in self.chosen()]
         identifiers = [{k: item.get(k) for k in ('identifier', 'found', 'registry', 'note', 'title', 'journal_ref',
@@ -1428,7 +1557,12 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                          'give it as "by memory, I think it is in …", never as a checked place.'}
         if self.state['check'].get('lookup') == 'standard':
             value.update(lookup='standard', disposition='answer_with_qualification',
-                         precise_place_confirmed=bool(self._confirmed()))
+                         precise_place_confirmed=bool(self._confirmed()),
+                         note='For further reading, an identified work can be recommended for the subject its '
+                              'scope_evidence excerpt actually describes. The excerpt is from the named catalog '
+                              'field. The reported coverage is a separate assessment of the full search topic. '
+                              'Omit unchecked theorem attributions or locators. Seek a precise passage when '
+                              'the requested answer needs that evidence.')
             if self.state.get('standard_author'):
                 value['note'] = 'Author lookup: recency uses original arXiv submission dates. Bibliographic metadata only.'
         text = json.dumps(value, ensure_ascii=False)
@@ -1498,8 +1632,10 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
                     'Relevant bibliographic records found; part of the requested scope remains unconfirmed.' if gaps else
                     'One standard-reference lookup finished; precise locations remain unconfirmed.')
             return
-        self.state['status'] = 'answered' if self._confirmed() else 'partial'
-        self.state['stop_reason'] = ('Check finished.' if self._confirmed()
+        gaps = any(p['level'] != 'read' for c in self.state['candidates']
+                   for p in (c.get('verdict') or {}).get('additional_places', []))
+        self.state['status'] = 'answered' if self._confirmed() and not gaps else 'partial'
+        self.state['stop_reason'] = ('Some requested places remain unconfirmed.' if gaps else 'Check finished.' if self._confirmed()
                                      else 'Check finished without a confirmed place; see the levels below.')
 
 
@@ -1523,13 +1659,18 @@ class CheckRunner(StandardReferenceSearch, ResearchRunner):
         for e in s['evidence']:
             out.append(f'- {e["id"]} (guess {e.get("candidate", "?") if not isinstance(e.get("candidate"), int) else e["candidate"] + 1}): '
                        f'`{e["tool"]}` {json.dumps(e["arguments"], ensure_ascii=False)} — [saved result](artifacts/{e["artifact"]}).')
-        if not s['evidence']:
+        if s.get('bibliography_check') is not None:
+            for index, row in enumerate(s['bibliography_check'], 1):
+                lookups = ', '.join(row.get('asked', []))
+                out.append(f'- Entry {index}: {lookups or "no registry lookup recorded"}.')
+        elif not s['evidence']:
             out.append('No source tool was used.')
         out += ['', usage_footer(s), '']
         _atomic_write(self.directory / 'report.md', _bytes('\n'.join(out)))
 
 
-def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share_source_budget=False, max_seconds=None):
+def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share_source_budget=False, max_seconds=None,
+                   request=''):
     """check_reference for an answering agent: a separate verifier with its own budget and context.
 
     It shares the model client but not the answer's literature budget, and it is
@@ -1580,7 +1721,8 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
             limits.update(max_requests=max(0, parent.max_requests-parent.stats['requests']),
                           max_chars=max(0, parent.max_chars-parent.stats['returned_chars']))
         try:
-            runner.start(statement, guesses=guesses, effort=effort, lookup=lookup, asker='nested checker', **limits)
+            runner.start(statement, guesses=guesses, effort=effort, lookup=lookup, asker='nested checker',
+                         reading_request=request if lookup == 'standard' else '', **limits)
         except (ValueError, OSError) as exc:
             return json.dumps({'error': f'Literature check failed: {exc}'})
         return runner.result_for_agent()
@@ -1592,7 +1734,7 @@ def export_evidence(state):
     statuses = {'read': 'source read', 'cited': 'cited by another paper', 'located': 'located, place unconfirmed',
                 'contradicted': 'locator rejected', 'not_found': 'not found', 'inconclusive': 'inconclusive'}
     rows = []
-    for n, candidate in enumerate(state.get('candidates', []), 1):
+    for n, candidate in enumerate(_places(state.get('candidates', [])), 1):
         verdict = candidate.get('verdict') or {}
         level = verdict.get('level')
         if level not in statuses:

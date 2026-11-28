@@ -650,16 +650,16 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 'authors': {'type': 'array', 'items': string}, 'title': string, 'year': string,
                 'locator': {'type': 'string', 'description': 'Theorem, proposition or section, e.g. "Theorem 9.26"'}}}
             result.append(schema('check_reference',
-                'Choose the lookup from the user’s objective. For reading recommendations, use standard. '
-                'For a specific claim, quotation or theorem locator to verify, start with precise: '
-                'it checks the work’s identity and then seeks passage evidence. '
-                'State the topic or claim and supply any known clues.',
+                'Choose the lookup according to what the answer needs from the source. '
+                'For books, papers or notes to learn a topic, use standard and give the topic. '
+                'For a conclusion that depends on verifying a source, use precise and state the claim, '
+                'attribution, quotation or locator. Supply known clues for that task.',
                 {'statement': string, 'guesses': {'type': 'array', 'items': guess},
                  'lookup': {'type': 'string', 'enum': ['standard', 'precise'], 'description':
                             'For further reading, use one standard lookup covering the requested topic. '
                             'A record and assessed relevance complete a recommendation; omit unchecked locators. '
                             'Use precise only when the task needs passage evidence for a specific statement, '
-                            'attribution or locator. Default: precise.'}}, ['statement']))
+                            'attribution or locator.'}}, ['statement', 'lookup']))
         return result
 
     def execute(self, name, arguments, *, on_result=None):

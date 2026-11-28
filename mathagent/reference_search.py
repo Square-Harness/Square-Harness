@@ -295,12 +295,19 @@ class StandardReferenceSearch:
             'For a broad textbook or topic-reference request, indexed descriptions can establish relevance. '
             'Unread full text, missing theorem/page numbers and unasked domain assumptions are limitations, '
             'not unresolved requirements. Reserve partial coverage and unresolved for actual gaps in the QUESTION. '
-            'Return compact JSON: {"selections":[{"id":"R1","reason":"why useful from the indexed description",'
+            'Return compact JSON: {"requested_max":null,"selections":[{"id":"R1","reason":"why useful from the indexed description",'
+            '"scope_excerpt":"one short verbatim phrase from the record’s review or abstract showing this scope; empty if absent",'
             '"coverage":"supported|partial|unknown","limitations":"unverified scope or exact hypotheses"}],'
-            '"unresolved":"remaining question or empty"}. Select the records needed to answer the question; respect any number the user requests. If none fits, selections is empty. '
+            '"unresolved":"remaining question or empty"}. Give the upper number of references requested by the user '
+            'in requested_max, or null when unspecified. Rank selections in recommendation order. If none fits, selections is empty. '
             'A truncated abstract/review is partial evidence; do not infer absent content. '
             'Never name, recommend or allude to any work outside these records, including in unresolved, '
             'reason or limitations. Unresolved describes missing mathematical scope only, not other references.')
+        if s.get('reading_request'):
+            instruction += ('\nIdentify the job the QUESTION gives these references. A source for learning a '
+                            'method has supported coverage when its indexed description shows it teaches the method. '
+                            'Use the SEARCH TOPIC to identify the subject. For an explicitly requested attribution or '
+                            'precise result, assess the requested source support and name any genuine gap.')
         if s.get('standard_author'):
             pool.sort(key=lambda item: item['record'].get('published') or '', reverse=True)
             instruction += ('\nThis is an author lookup. Preserve any topic and other constraints in the QUESTION; '
@@ -318,7 +325,9 @@ class StandardReferenceSearch:
             s['phase'] = 'answer'
             return
         known = {item['id']: item for item in pool}
+        requested_max = value.get('requested_max')
         selected = []
+        rejected_excerpts = []
         previous = [candidate for candidate in s['candidates'] if candidate.get('selected')]
         for candidate in previous:
             candidate['selected'] = False
@@ -359,13 +368,27 @@ class StandardReferenceSearch:
                 'coverage': coverage,
                 'limitations': str(item.get('limitations') or ''),
                 'basis': 'indexed_description' if described else 'metadata_only'}
+            excerpt = item.get('scope_excerpt')
+            if isinstance(excerpt, str) and (excerpt := ' '.join(excerpt.split())):
+                for field in ('review', 'abstract'):
+                    if excerpt in ' '.join((record.get(field) or '').split()):
+                        candidate['suitability']['scope_evidence'] = {'field': field, 'excerpt': excerpt}
+                        break
+                else:
+                    rejected_excerpts.append(item['id'])
+                    candidate['suitability'].update(coverage='unknown', reason='',
+                        limitations='The proposed excerpt could not be located in the indexed description.')
             if not described:
                 candidate['suitability']['limitations'] = 'Only bibliographic metadata was available; exact assumptions and coverage remain unchecked.'
             selected.append(item['id'])
+            if type(requested_max) is int and requested_max > 0 and len(selected) >= requested_max:
+                break
         s['standard_selection_done'] = True
         s['standard_selection_usable'] = True
         s['standard_selection_signature'] = signature
         s['standard_unresolved'] = str(value.get('unresolved') or '') if isinstance(value, dict) else ''
+        if rejected_excerpts and not s['standard_unresolved']:
+            s['standard_unresolved'] = 'The indexed descriptions could not confirm the proposed scope for ' + ', '.join(rejected_excerpts) + '.'
         # Search by topic again only when no record fits. An "unresolved" note or a
         # partial coverage nearly always restates unread places; in live checks a
         # second round never changed the selection and doubled the waiting time.

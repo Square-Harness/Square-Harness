@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Precise reference checks can finish a candidate from the original passage
+  before following citation chains. Duplicate leads share work while distinct
+  requested places and editions retain their own checks. A nested reading-list
+  lookup uses the caller's assignment when selecting references. A delegated
+  bibliography Check receives its selected file and records the registry
+  lookups for each entry.
+- Literature plans its further reading around the requested audience and breadth.
+  Source checking can identify both the named original paper and the secondary
+  account used to support an attribution.
+- Literature called by Proof inherits review concurrency. Terminal
+  investigations can run independent workers concurrently, and Explain can
+  verify independent source segments together within the available budget.
+- Quick Review can locate an attached proof written in prose and check it in
+  the context of the manuscript.
+- Investigate composes its settled answer from the finished evidence when all
+  the earlier findings are available. Write-up and Summarize check requested
+  deductions against the supplied premises. Full Review reports why it selected
+  the section-by-section reader.
+
 - Explore can check a reading recommendation or verify a precise claim. The
   Assistant keeps supporting research with the answer it serves.
 - Narrative literature reviews prioritize primary sources, fill gaps in

@@ -86,7 +86,7 @@ def _strings():
 SCOPE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['topic', 'title', 'setting', 'facets', 'terms', 'keywords', 'categories', 'msc', 'intent', 'seeds',
-                 'reading_policy'],
+                 'reading_policy', 'full_catalogue'],
     'properties': {
         'topic': _string(), 'title': _string(), 'setting': _string(),
         'facets': {'type': 'array', 'minItems': 1, 'items': {
@@ -95,6 +95,7 @@ SCOPE_SCHEMA = {
         'terms': _strings(), 'keywords': _strings(), 'categories': _strings(), 'msc': _strings(),
         'intent': {'type': 'string', 'enum': ['learn', 'frontier', 'both']},
         'reading_policy': {'type': 'string', 'enum': ['selective', 'exhaustive']},
+        'full_catalogue': {'type': 'boolean'},
         'seeds': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['authors', 'title'],
             'properties': {'authors': _strings(), 'title': _string(), 'year': _string()}}},
@@ -121,11 +122,13 @@ CARD_SCHEMA = {
             'context_lines': _string()}}}},
 }
 OUTLINE_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['title', 'word_target', 'answer_works', 'sections'],
+    'type': 'object', 'additionalProperties': False, 'required': ['title', 'word_target', 'answer_works', 'further_reading', 'sections'],
     'properties': {
         'title': _string(), 'word_target': {'type': 'integer', 'minimum': 1},
         'length_request': _string(),
         'answer_works': {'type': 'array', 'items': {'type': 'integer'}},
+        'further_reading': {'type': 'array', 'items': {'type': 'integer'}},
+        'catalogue_request': _string(),
         'sections': {'type': 'array', 'minItems': 1, 'items': {
             'type': 'object', 'additionalProperties': False, 'required': ['heading', 'kind', 'purpose', 'works'],
             'properties': {'heading': _string(), 'kind': {'type': 'string', 'enum': list(SECTION_KINDS)},
@@ -236,6 +239,8 @@ equation and theorem numbers, and the work a statement is attributed to. Everyth
 cited work counts. Equivalent notation and a short valid consequence are faithful; do not fault a unit for leaving
 details out. An abstract supports exactly what it says, and a title only what the work studies. A statement about
 an earlier work can rest on the account that a cited paper gives of it, in a passage naming the earlier authors.
+The numbered record identifies that earlier work even if its own text was unavailable. Keep its citation on
+its authors' names and identify the paper supplying the account separately.
 
 Answer with one JSON object {"checks": [...]}, one entry per unit, in order:
 {"unit": k, "reading": "", "faithful": true or false, "problem": "", "quote": "", "replacement": ""}.
@@ -349,6 +354,14 @@ def _citation(content):
             return None
         out.append((int(found.group(1)), found.group(2).strip() if found.group(2) else None))
     return out
+
+
+def _citation_ids(text):
+    for match in TOKENS.finditer(text):
+        if match.group(2) is None:
+            yield int(match.group(3) or match.group(4))
+        else:
+            yield from (n for n, _ in _citation(match.group(2)) or [])
 
 
 def _has_locator(locator, text):
@@ -1926,6 +1939,9 @@ class ReviewRunner(ResearchRunner):
             'cover the requested facets and use records for background. Choose exhaustive when the request '
             'requires full-text assessment of every eligible work, for instance a systematic review or '
             'paper-by-paper assessment of a supplied corpus. Both policies search and screen the full candidate pool.\n'
+            '- full_catalogue: true only when the user asks to receive the complete bibliography of the selected corpus. '
+            'Decide from their own instructions, independently of whether searching or reading must be exhaustive. '
+            'A request for recommendations, or for references on a particular passage, is false.\n'
             '- seeds: up to 10 works you remember that the review must discuss: first the papers on the topic itself '
             '(the founding papers and the landmark results on exactly this problem, and surveys of it), then at most two '
             'classics of the general field, with surnames, title and year. They are only search hints: they are checked '
@@ -1937,7 +1953,7 @@ class ReviewRunner(ResearchRunner):
         for attempt in (0, 1):
             result = self._ask('scope', instruction + ('' if not attempt else
                                '\n\nAnswer with one JSON object with the fields topic, title, setting, terms, facets, '
-                               'keywords, categories, msc, intent, seeds and reading_policy.'), cap=self._wave_cap(6000, 1), schema=SCOPE_SCHEMA)
+                               'keywords, categories, msc, intent, seeds, reading_policy and full_catalogue.'), cap=self._wave_cap(6000, 1), schema=SCOPE_SCHEMA)
             value = result['value'] or {}
             for key, item in value.items():
                 kept.setdefault(key, item)
@@ -1990,6 +2006,7 @@ class ReviewRunner(ResearchRunner):
             'msc': [m for m in (str(x).strip().upper() for x in _list(value.get('msc'))) if re.fullmatch(r'\d\d[A-Z-]?\d{0,2}', m)],
             'intent': value.get('intent') if value.get('intent') in ('learn', 'frontier', 'both') else 'both',
             'reading_policy': 'selective' if value.get('reading_policy') == 'selective' else 'exhaustive',
+            'full_catalogue': value.get('full_catalogue') is True,
             # Seeds are searched with their titles: the same guard as queries keeps private text out.
             'seeds': list({_norm(s['title']): {'authors': [str(a) for a in _list(s.get('authors')) if str(a).strip()],
                                                'title': ' '.join(str(s['title']).split()),
@@ -3517,21 +3534,23 @@ class ReviewRunner(ResearchRunner):
         works = '\n'.join(line if len(line) <= per_work else f'#{n} ' + line[:per_work] + ' […]'
                           for n in s['selected'] for line in [self._evidence_line(n)])
         prompt = (
-            f'Plan a mathematical survey in the language and for the audience of the request.\n'
-            f'REQUEST: {self._review_question()}\nFocus: {scope["topic"]}\n{self._subject_note()}\n'
-            'The request and search scope specify the question. Neither is evidence for a mathematical assertion. '
-            'Choose an economical narrative that answers it and that shows the reader the literature of the topic: '
-            'who proved what. Explain in detail the decisive results, their predecessors and the strongest relevant '
-            'recent improvements; situate the other works that are directly on the topic in a sentence each. '
-            'Give pivotal counterexamples and results changing a '
-            'hypothesis or deciding a boundary case a place beside the theorem they qualify. '
+            f'Plan the mathematical answer in the language and for the audience of the request.\n'
+            f'REQUEST: {self._review_question()}\nDiscovery topic: {scope["topic"]}\n{self._subject_note()}\n'
+            'The original request governs the answer. The search topic and candidates can extend well beyond what '
+            'the reader asked to learn. Neither the request nor the search scope is mathematical evidence. '
+            'Choose the sources and depth the reader needs for the requested deliverable. For a learning question, '
+            'center the sections on the statement, an instructive example and the proof idea. An explanation with '
+            'a few suggested references ordinarily needs three to five distinct works in total across the opening, '
+            'sections, comparisons and further reading. Reuse sources across these roles. Depart from this range '
+            'when the reader requests a different breadth or an additional source fills a specific need. '
+            'For a research survey, trace the '
+            'decisive results, predecessors and relevant improvements across the requested scope. '
+            'Where the request turns on a hypothesis or boundary case, put the decisive comparison beside the theorem. '
             'A citation count is not a measure of mathematical relevance. '
             'Return answer_works: up to four primary works needed for a short, balanced answer in the opening. '
-            'Include the decisive positive and negative cases when both are known. List each source first among '
-            'the works of the section where its result is explained. Inspect selected works for changes to the '
-            'classification: later papers that remove a hypothesis, supply the missing converse or endpoint, '
-            'or separate two previously conflated cases belong alongside the result they change. Replace '
-            'peripheral examples with these sources. Distinguish earlier cases from their subsequent resolution. '
+            'Include decisive positive and negative cases when needed to answer the question. List each source first among '
+            'the works of the section where its result is explained. For a classification or frontier question, include '
+            'later papers that change a hypothesis, converse or endpoint alongside the results they change. '
             'Assign each main result to one home. Contrast geometries, hypotheses or regimes only where the '
             'difference changes the conclusion. Integrate proof ideas beside the result they explain. '
             'Use neighbouring topics only for an explicit connection. Avoid sections merely to fill a category.\n'
@@ -3544,12 +3563,19 @@ class ReviewRunner(ResearchRunner):
             'For each section give its purpose as an editorial question (no proposed formula or proof), kind, and two '
             'lists of work numbers. works: the few works whose results the section explains in detail; prefer those '
             'with paper passages, then an informative abstract. context_works: the further candidate works directly '
-            'on the section\'s question, each to be situated in one sentence (the same method for another equation '
-            'or setting, a parallel approach, an earlier partial result, a later refinement, a survey). A work known '
+            'whose comparison is needed for this section. A work known '
             'by its record alone supports only bibliographic facts. Assign it to works if obtaining the paper '
-            'would be important to the section; its claims still require evidence. Give every candidate that is about the requested topic '
-            'one place, in works or in context_works. Leave out a candidate that is about something else, however '
-            'prominent or highly rated. Keep a section to one question: a theme that needs more than about four '
+            'would be important to the section; its claims still require evidence. The screened catalogue can be '
+            'much larger than the published review. Assign a work only if its contribution serves the requested scope. '
+            'In further_reading put the work numbers, in reading order, that you would specifically recommend '
+            'beyond the discussion; use [] when none are needed. Count the references you discuss when choosing '
+            'recommendations and respect the number or breadth requested across the whole answer. An introductory '
+            'book, accessible notes and a complementary primary paper can serve different reading goals. '
+            'If the reader explicitly requests a complete bibliography of the selected corpus, quote that instruction '
+            'verbatim in catalogue_request. If the scope has already identified a complete bibliography as the deliverable, '
+            'the export can then append every selected record. Otherwise list the requested further_reading IDs explicitly. '
+            f'Complete catalogue requested in scope: {scope.get("full_catalogue")}. '
+            'Keep a section to one question: a theme that needs more than about four '
             'works explained in detail is two sections with different questions. Start with the problem, the model '
             'and its most instructive result; define notation there once. Later sections address different questions. '
             'Plan at most one comparison table in the entire review, only for genuinely comparable theorems. '
@@ -3633,9 +3659,13 @@ class ReviewRunner(ResearchRunner):
         length_request = str(value.get('length_request') or '').strip()
         requested = bool(length_request and length_request in self._review_question())
         answers = list(dict.fromkeys(n for n in (_int(w) for w in _list(value.get('answer_works'))) if n in selected))
+        further = list(dict.fromkeys(n for n in (_int(w) for w in _list(value.get('further_reading'))) if n in selected))
+        catalogue = str(value.get('catalogue_request') or '').strip()
+        if self.state['scope'].get('full_catalogue') is True and catalogue and catalogue in self._review_question():
+            further = list(dict.fromkeys([*further, *self.state['selected']]))
         return {'title': ' '.join(_math_commands(value.get('title') or self.state['scope']['title']).split())[:150],
                 'word_target': max(1, target) if requested else min(4000, max(1, target)), 'sections': sections, 'answer_works': answers,
-                'length_requested': requested}
+                'length_requested': requested, 'further_reading': further}
 
     def _include_followups(self, sections):
         """Recover a few pivotal sources overlooked by the planner, using their own statements and citation links."""
@@ -3691,7 +3721,9 @@ class ReviewRunner(ResearchRunner):
                      'purpose': 'Explain the strongest supported results and how their hypotheses compare.'}
                     for name, works in groups.items()][:min(5, self._level()['sections'])]
         self._include_followups(sections)
-        return {'title': s['scope']['title'], 'word_target': 650 * len(sections), 'sections': sections}
+        further = list(s['selected']) if s['scope'].get('full_catalogue') is True else []
+        return {'title': s['scope']['title'], 'word_target': 650 * len(sections), 'sections': sections,
+                'further_reading': further}
 
     # -- writing ----------------------------------------------------------------------------
 
@@ -4172,6 +4204,37 @@ class ReviewRunner(ResearchRunner):
                 if str(j) not in work['verdicts']:
                     work['misses'][str(j)] = work['misses'].get(str(j), 0) + 1
 
+    def _secondary_citation(self, body, quote, replacement):
+        """A referee can identify the source it read without assigning that source to the original authors."""
+        old, new = [list(re.finditer(r'\[@(\d+)\]', part)) for part in (quote, replacement)]
+        if len(old) != 1 or len(new) != 1 or quote not in body:
+            return replacement
+        old, new = old[0], new[0]
+        primary, source = int(old[1]), int(new[1])
+        if (primary == source or source not in self.state['selected'] or quote[:old.start()] != replacement[:new.start()]
+                or quote[old.end():] != replacement[new.end():]):
+            return replacement
+        prefix = body[:body.index(quote)] + quote[:old.start()]
+
+        def surnames(n):
+            return [_fold(_surname(a)) for a in (self._by_n(n) or {}).get('authors') or [] if str(a).strip()]
+
+        names = surnames(primary)
+        if not names or set(names) <= set(surnames(source)):
+            return replacement
+        # Match the complete author group immediately before its citation, in registry order.
+        between = r'[\s,;&–—-]+(?:(?:and|et)\s+)?'
+        if not (prefix.rstrip().endswith(f'{{@{primary}}}') or
+                re.search(r'(?<!\w)' + between.join(map(re.escape, names)) + r'\s*$', _fold(prefix))):
+            return replacement
+        # Only a recorded citation of this identifiable work licenses restoring its number.
+        # A mathematical assertion still needs the secondary passage required by the checker.
+        cited = (self._by_n(source) or {}).get('cites') or []
+        identified = primary in cited and [n for n in cited if set(surnames(n)) == set(names)] == [primary]
+        marker = ((old[0] + ' (as cited in ' + new[0] + ')') if identified
+                  else '(as reported in ' + new[0] + ')')
+        return replacement[:new.start()] + marker + replacement[new.end():]
+
     def _repair(self, body, quote, replacement, works):
         """(corrected sentence, quote, replacement) for a referee's drop-in correction, or three empty
         strings when it cannot be applied exactly as written."""
@@ -4181,8 +4244,10 @@ class ReviewRunner(ResearchRunner):
             quote, replacement = quote.replace('\\\\', '\\'), replacement.replace('\\\\', '\\')
         if not quote or not replacement or replacement == quote or '\n' in replacement or body.count(quote) != 1:
             return '', '', ''
+        replacement = self._secondary_citation(body, quote, replacement)
         corrected = body.replace(quote, replacement, 1)
-        if _has_stray_tex(corrected) or any(n not in works for n in self._cited_works(corrected, [])):
+        if (_has_stray_tex(corrected) or any(n not in works for n in _citation_ids(corrected))
+                or any(m[2] is not None and not _citation(m[2]) for m in TOKENS.finditer(replacement))):
             return '', '', ''
         return corrected, quote, replacement
 
@@ -4336,6 +4401,12 @@ class ReviewRunner(ResearchRunner):
                             if objection and objection['quote'] and objection['replacement'] else ''))
         evidence = '\n\n'.join(f'[@{n}] {self._card_header(n)}\n' + '\n'.join(f'{tag}: {body}' for tag, body in blocks.items())
                                 for n, blocks in passages.items())
+        # A named earlier work may be supported by another paper's account. Keep its bibliographic
+        # identity visible to the verifier even when it has no passage of its own in this batch.
+        indirect = dict.fromkeys(n for j in batch for n in self._cited_works(current[j], []) if n not in passages)
+        if indirect:
+            evidence += '\n\nCITED RECORDS (identity only)\n' + '\n'.join(
+                f'[@{n}] {self._card_header(n)}' for n in indirect)
         prompt = (VERIFY + (RECHECK if objections else '') + '\nSOURCE PASSAGES\n' + evidence
                   + '\n\nUNITS\n' + '\n\n'.join(lines))
         answer = self._referee('verify', prompt, cap=cap, schema=_verify_schema(len(batch)), units=[f'{i}:{j}' for j in batch])
@@ -4708,14 +4779,8 @@ class ReviewRunner(ResearchRunner):
 
     def _cited_works(self, text, planned):
         """The cited works, then uncited works assigned to this section (possible contrary evidence)."""
-        cited = []
-        for match in TOKENS.finditer(text):
-            if match.group(2) is not None:
-                cited.extend(n for n, _ in _citation(match.group(2)) or [])
-            else:
-                cited.append(int(match.group(3) or match.group(4)))
         selected = set(self.state['selected'])
-        return list(dict.fromkeys([n for n in cited if n in selected] + list(planned)))
+        return list(dict.fromkeys([n for n in _citation_ids(text) if n in selected] + list(planned)))
 
     def _question_evidence(self, text, works):
         """Check proposed gaps against nearby results, including results assigned to another section."""
@@ -5065,8 +5130,27 @@ class ReviewRunner(ResearchRunner):
     def _checked_text(self, i):
         """The export also honors findings in a legacy checkpoint stopped before its revision."""
         key = str(i)
-        draft = self.state['sections'].get(key, {}).get('text', '')
+        section = self.state['sections'].get(key, {})
+        draft = section.get('text', '')
         check = self.state['checks'].get(key) or {}
+        edits = [f for f in _items(check.get('findings'))
+                 if all(isinstance(f.get(k), str) and '[@' in f[k] for k in ('quote', 'replacement'))]
+        if draft and edits and check.get('revised') and section.get('previous'):
+            # Old jobs saved both the draft and the accepted edit. Requalify just that edit
+            # when its complete resulting sentence is still present exactly once.
+            units = [part for part in self._assertion_units(section['previous']) if part.strip()]
+            for finding in edits:
+                unit = _int(finding.get('unit'))
+                quote, replacement = finding['quote'], finding['replacement']
+                if not unit or not 1 <= unit <= len(units):
+                    continue
+                before = units[unit - 1]
+                if before.count(quote) != 1:
+                    continue
+                qualified = self._secondary_citation(before, quote, replacement)
+                saved = before.replace(quote, replacement, 1)
+                if qualified != replacement and draft.count(saved) == 1:
+                    draft = draft.replace(saved, before.replace(quote, qualified, 1), 1)
         if not draft or check.get('revised') or not check.get('findings'):
             return draft
         units = [part for part in self._check_units(draft) if part.strip()]
@@ -5342,6 +5426,7 @@ class ReviewRunner(ResearchRunner):
         missing = [i for i, sec in enumerate((outline or {}).get('sections') or []) if i not in published
                    and (not parts or (i == 0 or sec['kind'] == 'results') and (s['checks'].get(str(i)) or {}).get('withheld'))]
         guide = self._reading_guide(missing, order) if missing or not parts else []
+        further = (outline or {}).get('further_reading')
         if guide:
             out += ['## Primary-source reading guide', '', ('Some planned sections were withheld after source checking.' if parts
                     else 'No source-checked synthesis was available.') + ' These result numbers were verified in the papers.', '']
@@ -5350,7 +5435,7 @@ class ReviewRunner(ResearchRunner):
             out.append('')
         elif not parts:
             out += [self._empty_review(), '']
-            works = s['selected']
+            works = s['selected'] if further is None else outline.get('answer_works', [])
             if s.get('phase') in SELECTION_PHASES:
                 # Selection and registry confirmation can be interrupted independently.
                 # Export only records already returned by a primary registry. Do not
@@ -5383,12 +5468,13 @@ class ReviewRunner(ResearchRunner):
             if originals:
                 out += ['The PDF text extraction lost mathematical notation in ' + ' and '.join(originals)
                         + '. The linked originals give the typeset statements.', '']
-        discussed = len(order)
-        if parts:
-            # The plan placed these works in the review; their sentences were withheld or never written.
-            # The reader still gets the reference. Nothing is said about its contents.
-            planned = [n for i in range(len(outline['sections'])) for n in self._section_works(i)]
-            for n in [n for n in dict.fromkeys(planned) if n in selected and n not in order]:
+        separate_reading = bool(parts) or further is not None
+        discussed = len(order) if parts or guide or further is None else 0
+        if further is None and parts:
+            # Saved outlines predating the editorial reading list offered every assigned work.
+            further = [n for i in range(len(outline['sections'])) for n in self._section_works(i)]
+        for n in further or []:
+            if n in selected and n not in order:
                 number(n)
         s['bibliography'] = list(order)
         s['references'] = []
@@ -5397,7 +5483,7 @@ class ReviewRunner(ResearchRunner):
             out += ['## Provisional references' if provisional else '## References', '']
             legend = '† Abstract or bibliographic record only. Unmarked entries used passages from the paper.'
             for k, n in enumerate(order, 1):
-                if parts and k == discussed + 1:
+                if separate_reading and k == discussed + 1:
                     if any(row['read'] != 'full_text' for row in s['references']):
                         out += ['', legend]
                     out += ['', '**Further reading.** Works on the topic that the text above does not discuss.', '']
@@ -5424,12 +5510,12 @@ class ReviewRunner(ResearchRunner):
                         + (imprint or 'n.d.').rstrip('.') + '.'
                         + (' arXiv version.' if self._preprint(r) else '')
                         + (' ' + ' · '.join(links) if links else '')
-                        + (' †' if read != 'full_text' and (not parts or k <= discussed) else ''))
+                        + (' †' if read != 'full_text' and (not separate_reading or k <= discussed) else ''))
                 out.append(line)
                 s['references'].append({'k': k, 'n': n, 'title': r['title'], 'authors': r['authors'], 'year': r.get('year'),
                                         'venue': venue or None, 'doi': r.get('doi'), 'arxiv': r.get('arxiv'), 'zbl': r.get('zbl'),
                                         'url': r.get('url'), 'preprint': self._preprint(r), 'read': read,
-                                        'cited': not parts or k <= discussed})
+                                        'cited': not separate_reading or k <= discussed})
             if len(order) == discussed and any(row['read'] != 'full_text' for row in s['references']):
                 out += ['', legend, '']
         if out[-1]:
@@ -5458,8 +5544,7 @@ class ReviewRunner(ResearchRunner):
             return 'No candidate work was found for this topic in the sources that answered.'
         if not self.state['selected']:
             return 'No work was retained after screening and bibliographic confirmation.'
-        return ('No source-checked synthesis was available. The bibliography lists the selected works. '
-                'The Evidence tab shows the source material collected for this question.')
+        return 'No source-checked synthesis was available. The Evidence tab shows the source material collected for this question.'
 
     def _withholding_summary(self):
         sections = (self.state.get('outline') or {}).get('sections') or []

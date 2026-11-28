@@ -29,6 +29,10 @@ Use Markdown and delimited LaTeX. Discuss assumptions, conflicting evidence and 
 Distinguish a computation, a suggested argument, a source's actual result, and a model-reviewed proof.
 Attribute specific literature claims to the named sources in the evidence. A title or abstract alone does not verify
 a theorem. A numerical experiment alone is never a proof. A proof of a special case applies only to its own statement.
+For a reviewed claim, use the Proof finding's definitions, hypotheses and formulas together. Keep its normalization
+when stating a dependent bound or sharp constant. If you change conventions, show the conversion in the formula.
+A refutation's statement examined is the rejected proposition. Take its corrections from the argument itself.
+Resolve disagreements with earlier drafts or exploratory calculations against that argument, and flag any remaining gap.
 Use only the supplied evidence. Do not call the general target proved or refuted without a matching exact review.
 An absence of evidence here does not establish that a question is open in the literature. Correct the previous draft
 if evidence changes it. Do not predict what workers will do or report administrative details. Keep the response
@@ -121,6 +125,13 @@ def _case_prose(answer, verdicts):
                       if not _unsupported_review(p, verdicts) and not _MISSING_PROOF.search(p))
 
 
+def _examined_statement(finding):
+    statement = finding['statement examined']
+    if finding['review'] == 'model-reviewed refutation':
+        return '*Statement examined and refuted*\n\n' + statement
+    return statement
+
+
 def _source_fallback(evidence):
     # The full native record is always available in the notebook. Quote a whole
     # paragraph only when it can stand as attributed evidence without metadata.
@@ -140,7 +151,7 @@ def _source_fallback(evidence):
             # still identifies the result if the argument is too long to quote.
             label = item['review'].capitalize() + (' of the special case' if item['scope'] == 'special case' else ' of the research question')
             excerpt = body if 0 < len(body) <= 2200 and 'excerpt omitted' not in body else excerpt
-            parts.append('**' + label + '**\n\n' + item['statement examined'])
+            parts.append('**' + label + '**\n\n' + _examined_statement(item))
             covered.append(key)
             if excerpt:
                 parts.append('\n'.join('> ' + line for line in excerpt.splitlines()))
@@ -368,6 +379,14 @@ class ProgressiveAnswer:
                 evidence.append((key, finding))
         if not evidence or run.agent.workspace.cancelled():
             return
+        # A completed native Proof may correct an exploratory normalization or even refute its proposed target.
+        # Final synthesis can return to the primary findings once they cover the previous draft.
+        covered = [key for key, _ in evidence]
+        prior_steps = inv.get('synthesis_steps')
+        draft = previous
+        complete_findings = {key for key, finding in evidence if slots[key]['status'] == 'complete' and finding['finding']}
+        if settled and writing_budget is not None and prior_steps and set(prior_steps).issubset(complete_findings):
+            draft = ''
         findings = [finding for _, finding in evidence]
         verdicts = [f['review'] for f in findings if f.get('scope') == 'research question' and f.get('review')]
         cases = [f for f in findings if f.get('scope') == 'special case' and f.get('review')]
@@ -375,7 +394,7 @@ class ProgressiveAnswer:
                    'saved Proof reviews of the exact question': verdicts or ['None'],
                    'saved Proof reviews of special cases': [{'statement': case['statement examined'], 'ruling': case['review']}
                                                            for case in cases],
-                   'findings': findings, 'previous draft': previous}
+                   'findings': findings, 'previous draft': draft}
         def compose():
             return write_answer(run.agent, context, budget=writing_budget, usage=usage,
                                 shares=1 if settled else max(2, len(inv['tasks']) - len(keys) + 1))
@@ -393,7 +412,6 @@ class ProgressiveAnswer:
                     raise
                 # Native receipts remain usable when the writing transport fails.
                 answer = ''
-        covered = [key for key, _ in evidence]
         needs_correction = _unsupported_review(answer, verdicts)
         if cases and answer:
             answer = _case_prose(answer, verdicts)
@@ -426,7 +444,7 @@ class ProgressiveAnswer:
                 raise AgentError('Read the individual findings for their original statements and scope.')
         else:
             for case in cases:
-                answer += '\n\n**' + case['review'].capitalize() + ' of the special case**\n\n' + case['statement examined']
+                answer += '\n\n**' + case['review'].capitalize() + ' of the special case**\n\n' + _examined_statement(case)
         with run._state_lock:
             # A draft finished while another task completed, or while a pause was requested, is
             # kept: it covers the steps it names, and the revision already scheduled corrects it.

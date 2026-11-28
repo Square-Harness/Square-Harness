@@ -313,7 +313,6 @@ def compose(results, *, online=True):
             out.append(f'   - Differs: {difference}')
         for note in r['notes']:
             out.append(f'   - {note}')
-    out += ['', '*Each entry was compared with registry metadata only (Crossref, zbMATH Open, arXiv, the DOI registry); '
-            'the papers were not read. "No matching record" means these registries returned none, not that the work '
-            'cannot exist.*']
+    out += ['', '*Verification covers registry metadata. A missing identifier leaves the publication unconfirmed. '
+            '“No matching record” describes the results of the registries searched.*']
     return '\n'.join(out)

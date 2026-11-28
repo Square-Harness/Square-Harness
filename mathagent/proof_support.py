@@ -245,7 +245,7 @@ def _evidence(runner, request, view, *, investigation_view=None):
     images.bind(agent, [])
     if kind == 'literature':
         # Both registry lanes use the same durable source allowance.
-        child = factory(agent, runner.emit, shared_source_budget=True)
+        child = factory(agent, runner.emit, concurrency=runner.review_concurrency, shared_source_budget=True)
         child.cancel = child_library.cancelled
     else:
         child = factory(agent, runner.emit, proof_source=_named_proof_source(runner, request))

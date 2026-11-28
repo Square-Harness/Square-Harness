@@ -46,7 +46,6 @@ def command(name, argument, args, ui):
         options = copy.copy(args)
         options.terminal_investigation = True
         options.gui_auto_titles = False
-        options.assistant_concurrency = 1
         hub = Hub(options)
         try:
             if record:

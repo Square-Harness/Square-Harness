@@ -34,6 +34,27 @@ Supply a smaller allowance explicitly in tests that exercise exhaustion.
 
 ## Worker source coverage
 
+Precise Check seeks direct source passages before spending requests tracing citations.
+Merge compatible bibliographic leads before verification and preserve distinct
+locators, editions and explicit revisions. A source that cannot substantiate the
+requested claim still needs the usual fallback and evidence-level assessment.
+The shared worker and interactive entries use the same check. A reading-list
+request can finish with qualified catalogue records.
+
+Pass the runtime review concurrency into Literature when Proof starts it,
+including direct, resumed, and delegated jobs. Keep a parent-owned or finite
+HTTP allowance ordered. Terminal investigations use the same dependency gates
+and provider limits as GUI investigations. Explain can check independently
+written source segments concurrently when their calls fit the remaining
+allowances and assembles results in source order. Quick Review and Explain
+share a line locator for unnumbered arguments.
+
+The investigation writer can discard an intermediate synthesis when the settled
+input contains its supporting findings in full. Retain the earlier draft for
+partial or interrupted inputs. The Write-up fidelity pass evaluates deductions
+against the supplied premises, including the constants and the two directions
+of an equivalence. Other document checks keep their existing call settings.
+
 The ordinary agent tool loop keeps accepted hosted DeepSeek tool-call reasoning
 in memory for the duration of one `Agent.run`. The next tool-enabled request
 returns it as the assistant message’s `reasoning_content` with the original
@@ -442,7 +463,9 @@ Version 1.1.0. The source of truth for the machine-readable version is
   user's words before recall, opens other links in them as given, and seeds the
   work a quoted citation names as a candidate. A reference list or attached
   `.bib` takes `bibcheck` (registry metadata only, no model call, entries the
-  budget does not reach are listed as not checked). A check reuses the saved
+  budget does not reach are listed as not checked). A delegated Check receives
+  the files explicitly selected for that child. Its report records the actual
+  registry or identifier lookups for each bibliography entry. A check reuses the saved
   records and cached full texts of a literature review in the workspace whose
   bibliography holds an identifier of the conversation (`_review_works`); a
   conversation's own text never creates a record. Offline, a work with nothing
@@ -1408,11 +1431,11 @@ requests more often). The tester ledger charges a failed stream with unknown usa
 an estimate (`HostedQuota.charge(..., estimated=True)`: input bytes plus framing,
 streamed characters plus 256). Proof gives every replacement a fresh dispatch key.
 
-The Review (mode `referee`) is `referee.RefereeRunner`, pipeline `review-v4`, when
-the whole manuscript fits the model's context with room for tool loops
-(`RefereeRunner._route`: `state['whole']`, which needs DS4's `review_whole` input
-limit, and about 160k tokens to spare); otherwise the same job switches in its `plan`
-phase to `review-v2` and runs the v3 pipeline below (`RefereeRunner` extends
+The Review (mode `referee`) uses `referee.RefereeRunner` and pipeline `review-v4`
+for a pinned, whole manuscript with mapped results and room for its tool calls.
+`RefereeRunner._fallback_reason` identifies which condition requires the
+section-by-section pipeline. The job then switches in its `plan` phase to
+`review-v2` and runs the v3 pipeline below (`RefereeRunner` extends
 `PaperReviewRunner` and delegates every method when `state['pipeline']` is not
 `review-v4`). `review.runner_class('review')` returns `RefereeRunner` for new jobs;
 `runner_for_state` gives saved `review-v2` jobs `PaperReviewRunner`. Phases of v4:
@@ -1878,8 +1901,13 @@ for it, and `_settle_judged` settles the judged sections when time or budget
 stops the check. Verdicts collected so far stay in `state['check_work']` across
 waves and Resume. The evidence of a check or writing prompt is sized to the
 model context (`_evidence_room`); a referee request that still does not fit
-leaves its sentences unchecked instead of ending the job. Planned works that the checked text does not cite are
-listed as further reading (`FURTHER_READING`), with no claim about them.
+leaves its sentences unchecked instead of ending the job. For new outlines, `further_reading`
+records the planner's selection for this audience. Export preserves every surviving body citation
+and appends the additional recommendations in order. Existing saved outlines without this field
+retain their earlier export behavior. During verification a paper's bibliographic identity can
+establish which work an author attribution names. A statement supported by a later account
+still needs its supporting passage. A citation-only correction preserves the original attribution
+when the recorded citation relationship identifies the work.
 `_issues` and the review's coverage note record incomplete checks and cuts.
 When a draft cites several numbered results in one work, the verifier can
 also receive the exact, unambiguous passages already exposed for those

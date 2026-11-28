@@ -420,8 +420,8 @@ def bibtex_entries(body):
     return entries, restore(re.sub(r'\n{3,}', '\n\n', '\n'.join(rest)))
 
 
-def entry_identifiers(text):
-    """Complete, typed identifiers in notes or BibTeX; arXiv versions identify the same work."""
+def entry_identifiers(text, *, editions=False):
+    """Complete, typed identifiers in notes or BibTeX. A passage check may require an exact arXiv edition."""
     # Separate Markdown's DOI label from its URL; the two are not one identifier.
     text = re.sub(r'\[((?:doi:)?10\.\d{4,9}/[^\n]*?)\]\((?=https?://)', r'\1 (', text, flags=re.I)
     def decode_url(match):
@@ -443,7 +443,8 @@ def entry_identifiers(text):
     arxiv = r'(?<![\w.])(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})(?:v\d+)?(?![\w/-]|\.\w)'
     for identifier in re.findall(r'(?:arxiv\s*:\s*|arxiv\.org/(?:abs|html|pdf)/|eprint\s*=\s*[{"]\s*)(' + arxiv + ')',
                                  re.sub(r'\.pdf\b', '', text, flags=re.I), re.I):
-        found.add('arxiv:' + re.sub(r'v\d+$', '', identifier.lower()))
+        number = identifier.lower()
+        found.add('arxiv:' + (number if editions else re.sub(r'v\d+$', '', number)))
     for pattern in (r'\bzbl\s*(?:=\s*[{"]\s*|:\s*|\s+)([\d.]+)',
                     r'zbmath\.org/(?:\?q=an:)?([\d.]+)'):
         found |= {'zbl:' + identifier.rstrip('.') for identifier in re.findall(pattern, text, re.I)}
@@ -1184,6 +1185,9 @@ given), sketched, stated (no argument), uncertain (the author says they are not 
 problems: places where the material is wrong, inconsistent with itself or ambiguous, with the inventory id. Check the
 formulas against the derivations next to them. as_written copies the material's version (a formula or a phrase);
 alternative gives the version its own derivation or context supports, or an empty string when there is none.
+A stated hypothesis, definition or given formula may be used as a premise. A requested special case, or a consequence
+whose steps follow directly from the supplied premises, needs no additional decision or material. Read adjacent proof
+steps together before recording a gap. Record the missing implication when the available premises do not imply it.
 notation: objects written with more than one symbol, and the one symbol to use.
 sections: the outline, in order. role: introduction, abstract, body, proof, exercises, solutions, header or other.
 source: material when the section only restates the material, composed when it needs text or mathematics the material
@@ -2307,9 +2311,8 @@ PART_SCHEMA = _OBJECT({'provides': {'type': 'boolean'}, 'severity': _SEVERITY, '
 FIDELITY_SYSTEM = '''You check a LaTeX document written from a mathematician's material, before it goes into a paper. Do not
 rewrite it and do not judge its style. List each place where it is not faithful:
 - changed: a statement, hypothesis, constant, quantifier or formula that differs from the material (compare each
-  formula of the list given with the material's formula for the same object, symbol by symbol: a term added or
-  removed is a change), a claim the plan's inventory marks uncertain, stated or sketched that the document presents
-  as an established result, or a problem of the material settled differently from the author's decision;
+  formula under the same conventions and hypotheses), an unsupported claim that the document presents as established,
+  or a problem of the material settled differently from the author's decision;
 - missing: a result, hypothesis or step of the material that a section covering it leaves out;
 - added: mathematics the material does not contain, in a section that restates the material (outside the lines
   % BEGIN COMPOSED and % END COMPOSED);
@@ -2320,8 +2323,12 @@ Comment lines (% PART, % TODO, % BEGIN COMPOSED, % END COMPOSED) are the control
 final text: they are never an issue, and neither is a TODO that reports a gap of the material.
 These are not issues: a sentence that links, motivates or comments on results without stating a new mathematical fact;
 a problem of the plan written in its alternative version with a % TODO comment next to it (the author is asked about it
-elsewhere); a few lines that fill a step the material calls obvious or leaves to the reader, when they are correct (if
-they are wrong, that is a changed issue).
+elsewhere). Check logical support across the source and its argument. A requested restriction of a valid statement
+and an explicit calculation from supplied premises are faithful when every implication holds. Check both directions
+of any equivalence, as well as domains and normalizations. If one inference needs a new hypothesis or unproved
+theorem, identify it. For an alleged strengthening, give a case allowed by the premises where the conclusion can
+fail, or pinpoint the first unjustified implication in the displayed proof. Absence of its concluding sentence in
+the original is insufficient. An inventory label describes the source; it cannot settle whether a derivation works.
 The document is shown with its line numbers ("12| text"). For each: line and last_line are the numbers of the first and
 last line of the passage, quote copies the passage without the numbers (one or two lines; for something absent, the
 place where it should be), problem says what is wrong, fix gives the replacement text for the quote or an empty string when only the
@@ -4209,7 +4216,9 @@ class WriteupRunner(ResearchRunner):
                     'A bibliography entry alone supplies no evidence about the mathematics. Report a model review '
                     'only if it is recorded in the supplied material. Describe a source proposed for further work '
                     'as a lead, with its recorded purpose. Do not turn that purpose into a new claim or open '
-                    'question. Report only the mathematical results and open questions the material actually states. '
+                    'question. A requested special case may be stated with the calculation from the supplied premises '
+                    'that justifies it. Give a supplied local file by name when that identifies it; mark an absent '
+                    'locator as a gap only if the task needs a more specific one. '
                     'If a result of the material looks wrong (a false step, a missing hypothesis), give it as the '
                     'material states it and add one sentence that begins "Assessment (not in the material):" saying '
                     'why; never correct the statement silently.')
@@ -4308,13 +4317,13 @@ class WriteupRunner(ResearchRunner):
                 f'as in the material ({keep}) and add no lemma, example or reference. ' + linking + 'A composed section (the outline '
                 'says which) may contain new text; put any new mathematics in it (a statement, an exercise, a question, '
                 'a solution, a computation) between the comment lines % BEGIN COMPOSED and % END COMPOSED. Keep each '
-                'item\'s status from the inventory: an uncertain, stated or sketched claim is never written as an '
-                'established result (it is a remark, a conjecture or an open question, as the material has it), and '
-                'a withdrawn one is left out. Never mention '
+                'item\'s recorded status. Use given hypotheses and formulas as premises. A requested specialization '
+                'or direct consequence can be justified by displaying the steps from them. Keep any unproved '
+                'implication, doubtful claim or missing hypothesis explicit. Leave withdrawn claims out. Never mention '
                 'the notes, the source, the draft or the author\'s doubts in the text: state the mathematics, and write an '
-                'open point as a remark stated as mathematics. For each problem of the material the outline lists, follow '
-                'the author\'s decision when the conversation records one; otherwise keep the material\'s version and mark '
-                'it with % TODO: and the problem. Where the material is unclear or incomplete, keep what it says and add a '
+                'open point as a remark stated as mathematics. Check each proposed problem in the outline against the '
+                'source and the derivation. Follow the author\'s recorded decisions. Where the material remains '
+                'unclear or incomplete, keep what it says and add a '
                 'comment % TODO: ... describing the gap. Start each required part with a comment line % PART: and its rule '
                 'id (for example % PART: X1).')
 
@@ -6507,7 +6516,7 @@ class WriteupRunner(ResearchRunner):
         """A structured call's answer. An answer cut short by its output limit keeps its complete items (`salvage`
         names the array) and is marked truncated: that layer counts as not fully run."""
         try:
-            result = self._call(role, instruction, cap=cap, format_schema=schema, think=False,
+            result = self._call(role, instruction, cap=cap, format_schema=schema, think=role == 'fidelity' and self.agent.think,
                                 trailer='Answer with the JSON object only.')
             if result['complete']:
                 answer = json_loads(result['text'])
