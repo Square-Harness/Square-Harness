@@ -113,8 +113,8 @@ def sanity_policy(overrides=None, max_runs=_DEFAULT_TURN_ALLOWANCE, explicit_max
     uses_chat_run_default = max_runs is _DEFAULT_TURN_ALLOWANCE
     if uses_chat_run_default:
         max_runs = 3
-    if type(max_runs) is not int or not 1 <= max_runs <= MAX_SANITY_RUNS:
-        raise ValueError(f'sanity.max_runs must be an integer from 1 to {MAX_SANITY_RUNS}')
+    if max_runs is not None and (type(max_runs) is not int or not 1 <= max_runs <= MAX_SANITY_RUNS):
+        raise ValueError(f'sanity.max_runs must be null or an integer from 1 to {MAX_SANITY_RUNS}')
     limits = _limits(SANITY_DEFAULTS, overrides, SANITY_BOUNDS, 'sanity')
     return Policy(SANITY, limits, limits, max_runs, escalation=False, explicit_max_runs=_explicit_runs(explicit_max_runs),
                   uses_chat_run_default=uses_chat_run_default)

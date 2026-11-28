@@ -8,6 +8,10 @@ setting up a machine, [llm-install.md](llm-install.md).
 
 ## Worker limits
 
+An explicit `sanity.max_runs: null` allows unlimited automatic Python runs.
+The policy loader distinguishes an omitted field so existing ordinary chat
+installs keep the default of three. Retain numeric limits stored by saved jobs.
+
 Confirmed repetition carries the actual OpenRouter upstream on the generation
 exception. Only an existing recovery dispatch may attach that provider to its
 internal request. The serializer moves its endpoint variants behind the other

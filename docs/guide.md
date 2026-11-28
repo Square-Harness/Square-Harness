@@ -852,7 +852,7 @@ How it works: **solve → verify → repair**.
    statement. Either role can read cached papers, search scholarly sources online,
    and run an isolated Python experiment when the
    automatic numerical sandbox is available. Proof shares its job allowance across
-   computations. Setting `sanity.max_runs` in the sandbox configuration adds an
+   computations. Setting a number for `sanity.max_runs` in the sandbox configuration adds an
    explicit run count across both roles, including after resume. A straightforward proof can finish
    in one solve and one review without using any of these tools.
 2. A fresh verifier, which has not seen the solver's reasoning, reads the whole
@@ -1601,8 +1601,11 @@ and how long it ran. At most two sandbox containers run at once
 (`--python-concurrency`, 1–8); further runs wait their turn.
 
 Change the limits with `--python-limits limits.json`. Values are bounded by
-built-in maxima: for automatic checks 30 s, 4 GB, 2 CPUs and 10 runs; for anything
-600 s, 32 GB and 4 CPUs.
+built-in resource maxima. Automatic checks allow up to 30 s, 4 GB and 2 CPUs per
+script. Set `sanity.max_runs` to `null` for unlimited automatic runs, or to
+an integer from 1 to 10 for a finite allowance. Omitting the field keeps the
+three-run default for ordinary chat. Saved Proof jobs retain explicit allowances.
+The overall per-script maxima are 600 s, 32 GB and 4 CPUs.
 
 ```json
 {"sanity": {"limits": {"timeout_seconds": 5, "memory_mb": 2048}, "max_runs": 3},
