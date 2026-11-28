@@ -16,6 +16,11 @@
 
 - When an OpenRouter response is stopped for confirmed repetition, its existing recovery attempt prefers another configured provider. A saved Proof retains that preference across a pause.
 
+- Investigate Proof solvers and verifiers can answer a literature request from
+  cited passages in papers already read during the plan, including when they
+  phrase the question differently. A request that needs more evidence carries
+  relevant passages into a High literature review.
+
 - Precise citation lookup now asks for candidate bibliographic details before the source-verification step. Hosted DeepSeek streams recognize sustained repetition in an answer or its reasoning. An interrupted Proof verifier can retry against the same saved candidate, and incomplete generated tool calls are discarded.
 
 - Cut the Python suite from 194 tests to 16 covering core workflows, access to

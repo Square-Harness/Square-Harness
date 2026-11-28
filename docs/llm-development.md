@@ -1079,6 +1079,17 @@ the decision's `later` list: the Assistant delegates it once the batch has
 returned, so its worker sees those results. A routed Explore task that asks for
 a LaTeX note or a write-up becomes a Write-up task.
 
+For an Investigate Proof literature request, `workers._investigation_sources`
+supplies the frozen predecessor sources and completed peers from this plan.
+The coordinator consults this view when the solver or verifier actually asks.
+Keep the native request identity on resume. Reuse requires resolving the
+source text and line range, and checking the precise request against the
+passage. A paper's bibliographic identity or the wording of the original
+task is insufficient. A High companion review can use the verified passages
+and pursue the remaining question under the requesting Proof's allowance.
+`investigation_writing.evidence_excerpt` opens the cited ranges against their
+recorded hashes so the writer has the primary text alongside the candidate.
+
 Delegated and direct Explore use `source_tasks.explore_sources`. They supply the entire
 numbered selection in one request when possible. Larger selections are read in
 contiguous pages with durable source hashes, cursors and cumulative findings.
