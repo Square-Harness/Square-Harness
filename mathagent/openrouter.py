@@ -23,6 +23,7 @@ provider. OpenRouter has no tokenizer endpoint, so input tokens are the conserva
 import copy
 import os
 import re
+import sys
 
 from .agent import AgentError
 from .deepinfra import (DeepInfra, HINTS, MODEL, _BUSY, _credit_limit, _generation_failure, _mentions,
@@ -36,6 +37,7 @@ WIRE_MODEL = 'deepseek/deepseek-v4.1-flash-1017'
 DEFAULT_PROVIDERS = ('crusoe', 'cohere', 'coreweave', 'deepinfra', 'parasail')
 MAX_PRICE = {'prompt': '0.30', 'completion': '1.20'}  # USD per million tokens; leaves out "fast" tiers ($0.60/$2.40)
 _SLUG = re.compile(r'^[a-z0-9][a-z0-9._-]*(/[a-z0-9._-]+)*$')
+_GENERATION_ID = re.compile(r'gen-(?:[0-9]{9,13}-)?[A-Za-z0-9]{6,64}')
 # OpenRouter's wording of a refusal that is worth waiting out, matched inside its fields.
 _ROUTER_BUSY = _BUSY + ('rate limited upstream', 'temporarily rate limited', 'retry shortly', 'provider returned error',
                         'no available model provider', 'overloaded')
@@ -95,6 +97,36 @@ class OpenRouter(DeepInfra):
     def _read_service_tier(self):
         # OpenRouter is always sent the standard tier ('default'); SH_DEEPINFRA_SERVICE_TIER is DeepInfra's.
         return 'standard'
+
+    def _generation_observer(self, data):
+        # Compare the response's provider name to this request's eligible providers.
+        # "only" can contain a provider/endpoint slug while the stream names just the provider.
+        providers = {name.partition('/')[0] for name in data.get('provider', {}).get('only', ())}
+        allowed = {re.sub(r'[-._ ]', '', name): name for name in providers}
+        generation_id = provider = None
+
+        def observe(chunk):
+            nonlocal generation_id, provider
+            if chunk is not None:
+                value = chunk.get('id')
+                if generation_id is None and isinstance(value, str) and _GENERATION_ID.fullmatch(value):
+                    generation_id = value
+                value = chunk.get('provider')
+                if provider is None and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9._ -]{1,80}', value):
+                    provider = allowed.get(re.sub(r'[-._ ]', '', value.lower()))
+                if generation_id is None or provider is None:
+                    return None
+            # The GUI service sends stderr to its journal. Record the receipt as soon as both
+            # fields arrive, or at close with whatever OpenRouter actually reported.
+            try:
+                if sys.stderr is not None:
+                    sys.stderr.write(f'OpenRouter generation id={generation_id or "unknown"} provider={provider or "unknown"}\n')
+                    sys.stderr.flush()
+            except (OSError, ValueError):
+                pass  # Diagnostics must never interrupt generation or settlement.
+            return {'service': 'openrouter', 'id': generation_id, 'provider': provider}
+
+        return observe
 
     def _payload(self, payload, *, include_images=True):
         data = super()._payload(payload, include_images=include_images)
