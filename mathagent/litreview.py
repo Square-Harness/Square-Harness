@@ -1040,14 +1040,15 @@ class ReviewRunner(ResearchRunner):
         # Older callers send their selected breadth as a round count. New standalone reviews always use High.
         return self._start_review(goal, source_files, HIGH_ROUNDS, budgets)
 
-    def start_companion(self, goal, *, kind='literature', source_files=(), max_rounds=HIGH_ROUNDS, **budgets):
+    def start_companion(self, goal, *, kind='literature', source_files=(), max_rounds=HIGH_ROUNDS, prior_passage_context=None, **budgets):
         """A review companion searches only its public question, at the same effort as a standalone review."""
         if kind != 'literature' or source_files or type(max_rounds) is not int or not 1 <= max_rounds <= 100:
             raise ValueError('A review companion takes a public literature question without source files')
-        return self._start_review(goal, (), HIGH_ROUNDS, budgets, companion=True)
+        return self._start_review(goal, (), HIGH_ROUNDS, budgets, companion=True, prior_passage_context=prior_passage_context)
 
-    def _start_review(self, goal, source_files, rounds, budgets, *, companion=False):
+    def _start_review(self, goal, source_files, rounds, budgets, *, companion=False, prior_passage_context=None):
         self._companion = companion
+        self._prior_passage_context = prior_passage_context
         if budgets.get('max_requests') is None:
             budgets['max_requests'] = getattr(self.literature, 'max_requests', UNLIMITED_SOURCE)
         if budgets.get('max_chars') is None:
@@ -1097,6 +1098,7 @@ class ReviewRunner(ResearchRunner):
 
     def _extra_state(self):
         return {**({'earlier_review': self._earlier} if getattr(self, '_earlier', None) else {}),
+                **({'prior_passage_context': self._prior_passage_context} if getattr(self, '_prior_passage_context', None) else {}),
                 'pipeline': PIPELINE, 'adaptive_sources': True, 'companion': self._companion, 'checked_export': True, 'scope': None, 'pool': [], 'sweep_log': [],
                 'screened': {}, 'screen_attempts': {}, 'screen_failed': {}, 'filtered': [], 'deferred': [], 'expanded': [],
                 'expand_round': 0, 'leads': {}, 'documents': {}, 'cards': {}, 'card_failed': {}, 'read_plan': {},
@@ -1863,6 +1865,10 @@ class ReviewRunner(ResearchRunner):
                 size += len(line.encode())
             material += (f'\nPINNED MANUSCRIPT {source["id"]} ({source["path"]}), exact opening excerpt '
                          f'1-{len(shown)}; remainder omitted:\n' + '\n'.join(shown))
+        if prior := self.state.get('prior_passage_context'):
+            material += ('\nPreviously checked primary passages and outstanding question (private planning context). '
+                         'Focus additional reading on the missing part. Use only public search terminology. '
+                         'Keep internal locators and copied text out of registry queries.\n' + json.dumps(prior, ensure_ascii=False))
         context = self.state.get('reference_context')
         if context:
             # Store the exact native snapshot, but the search planner needs the mathematical
@@ -2053,13 +2059,16 @@ class ReviewRunner(ResearchRunner):
         private = [phrase(words(source['content'])) for source in self.state['sources']]
         if self.state.get('reference_context'):
             private.append(phrase(words(_reference_prompt(self.state['reference_context']))))
+        prior = self.state.get('prior_passage_context')
+        if prior:
+            private.extend(phrase(words(s)) for s in (prior['missing'], *(p.get('content', '') for p in prior['passages'])))
         allowed = []
         for query in queries:
             tokens = words(query)
             width = min(5, len(tokens))
             copied = bool(width >= 3 and any(phrase(tokens[i:i + width]) in text and phrase(tokens[i:i + width]) not in requested
                                              for i in range(len(tokens) - width + 1) for text in private))
-            if copied:
+            if copied or (prior and re.search(r'doc-[0-9a-f]{24}', query, re.I)):
                 self._warn('A generated public query copied a long phrase from pinned source text and was not sent.')
             else:
                 allowed.append(query)

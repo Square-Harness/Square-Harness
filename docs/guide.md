@@ -829,6 +829,16 @@ right-hand notebook lets you read a literature review or an exploration alongsid
 the answer. If the writing allowance runs out, the completed findings and the
 latest saved answer remain available. Select **@summarize** for a separate LaTeX write-up.
 
+When a Proof solver or verifier asks for literature, it can use papers already
+read in the same investigation. It checks the relevant passages against the new
+question, including the hypotheses and quantifiers, and returns line citations
+when they answer it. For instance, a small-gap result for irrational rectangles
+can answer a question about those rectangles. Extending it to all planar domains
+requires other evidence. When the available passages leave a gap, the Proof
+keeps the relevant passages and requests a High literature review within its
+remaining allowance. A verifier can ask its own question of the same paper.
+The investigation writer also receives the cited lines when composing the final answer.
+
 In the terminal, use `/investigate <question>`, `/investigations`,
 `/investigate-resume <id>`, and `/investigate-report <id>`. Terminal investigations
 run one worker at a time. Ctrl+C during work requests a pause. When a run pauses

@@ -66,6 +66,44 @@ _MISSING_PROOF = re.compile(
     r'\b(?:aucune? (?:revue|preuve) (?:indépendante|séparée)|pas de (?:revue|preuve) séparée)\b', re.IGNORECASE)
 
 
+def _proof_passages(root, job):
+    """Give the writer the source lines an Investigate Proof's evidence request actually cited."""
+    from .ledger import ProofStore
+    from .literature import LiteratureTools
+    from .passage_assessment import restore_passages
+    try:
+        proof = ProofStore.load(root, job)
+    except (OSError, ValueError):
+        return
+    library = None
+    shown = set()
+    for entry in proof.state.get('evidence', []):
+        if entry.get('status') != 'complete' or not entry.get('receipt'):
+            continue
+        try:
+            receipt = json.loads(proof.read_artifact(entry['receipt']))
+            result = receipt['result']
+            if not isinstance(result, dict) or not result.get('passage_assessment'):
+                continue
+            citations = result['passage_assessment'].get('citations', [])
+            cited = {(r['document_id'], r['locator']) for r in citations} - shown
+            references = [p for p in receipt['primary_sources'] if (p.get('document_id'), p.get('locator')) in cited]
+            if not references:
+                continue
+            if library is None:
+                library = LiteratureTools(root, online=False)
+            verified = restore_passages(library, references)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            yield 'A saved Proof evidence receipt could not be read.'
+            continue
+        if cited - verified.keys():
+            yield 'Some primary passages cited by the Proof could not be rechecked against their saved extraction.'
+        for key, p in verified.items():
+            shown.add(key)
+            yield (f"Primary passage from {p.get('title') or p['source_url']} "
+                   f"({p['source_url']}, {p['document_id']}:{p['locator']}):\n{p['content']}")
+
+
 def _unsupported_review(answer, verdicts):
     # Permit the native ruling in the narrative when its direction is unambiguous.
     # No native ruling grants formal certification.
@@ -142,6 +180,8 @@ def evidence_excerpt(root, slot, store, chat_id, *, complete=False):
     text = read_text(root, view, first['id'])
     parts = [first['status'], excerpt(text, 4600)]
     linked = first.get('linked_job_ids', [])
+    if slot['mode'] == 'prove':
+        parts.extend(_proof_passages(root, job))
     for e in view['entries']:
         if e['job_id'] in linked and e['kind'] == 'experiment':
             parts.extend(['Recorded computation: ' + e['status'], excerpt(read_text(root, view, e['id']), 850)])
