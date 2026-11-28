@@ -18,12 +18,12 @@ from .agent import AgentError
 from .call_policy import allocate_call, CallContextError
 from .model_limits import DEFAULT_TEMPERATURE, MODEL_OUTPUT_TOKENS
 from .jsonutil import loads_single
-from .router import JOB_MODES
+from .router import DELIVERABLE_SCOPE, JOB_MODES
 from .refcheck import standalone_reference_request, precise_reference_request
 from .source_tasks import _fold, _instruction_text, instruction_prose, named_attachments, requested_source_tasks
 
 
-POLICY_VERSION = 12
+POLICY_VERSION = 13
 OUTPUT_TOKENS = MODEL_OUTPUT_TOKENS
 SCHEMA = {
     'type': 'object',
@@ -66,7 +66,8 @@ unless one needs the result of another task of this turn: give that task
 for X, then write a note that cites it" is a check now and a writeup with
 after_results. Words such as then, afterwards, using it, with that reference,
 puis or ensuite mark such an order. Shared subject matter alone does not imply a
-dependency. A reference plus a simulation, or a numerical experiment plus an
+dependency. """ + DELIVERABLE_SCOPE + """
+A reference plus a simulation, or a numerical experiment plus an
 independent mathematical explanation, are two deliverables that start together.
 All tasks run at high effort. Use check for a targeted verified reference, literature for a survey,
 python_lab for a specifically requested execution or numerical simulation, explore
@@ -446,6 +447,10 @@ def _validated_tasks(decision, query, files=(), reading=(), known=()):
         (later if waits or document and other_work else assignments).append(assignment)
     if later and not assignments and not questions:
         assignments.append(later.pop(0))  # Nothing in this turn precedes it.
+    if (len(assignments) == 1 and assignments[0]['mode'] == 'explore'
+            and not (later or questions or incomplete or chat_recap)):
+        # Explore receives the conversation and owns this entire turn. A paraphrase can change its mathematics.
+        assignments[0] = {**assignments[0], 'request': query.strip()}
     if chat_recap and not validated and not questions and not incomplete:
         return {'route': 'direct', 'chat_recap': True}
     if not assignments and not questions:

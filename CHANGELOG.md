@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Explore can check a reading recommendation or verify a precise claim. The
+  Assistant keeps supporting research with the answer it serves.
+- Narrative literature reviews prioritize primary sources, fill gaps in
+  coverage and retrieve additional papers chosen by the outline. Systematic
+  full-text assessments can still read the entire selection. The reader can
+  overlap requests across batches. Citation checks retain distinct results
+  cited from the same paper, and partial reviews report how many sections
+  were checked and how much draft material was withheld.
+
 - Literature reviews reuse previously read arXiv revisions, match article
   titles in larger batches, and overlap paced arXiv downloads with reading
   from publishers, repositories and the workspace cache.

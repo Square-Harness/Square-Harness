@@ -596,11 +596,16 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         return f'Exit {p.returncode}; timeout={timed_out}\n{output}' + (
             f'\n[output cut at {self.result_chars} bytes]' if len(data) > self.result_chars else '')
 
-    def check_reference(self, statement, guesses=None):
+    def check_reference(self, statement, guesses=None, lookup='precise'):
         if not isinstance(statement, str) or not statement.strip():
             raise ValueError('Describe the result to find a reference for')
         if guesses is not None and (not isinstance(guesses, list) or not all(isinstance(g, dict) for g in guesses)):
             raise ValueError('guesses must be a list of objects')
+        if lookup not in ('standard', 'precise'):
+            raise ValueError('lookup must be standard or precise')
+        if lookup == 'standard':
+            return self.checker(statement.strip(), guesses or [], lookup=lookup)
+        # Existing precise checker callbacks accept the statement and guesses.
         return self.checker(statement.strip(), guesses or [])
 
     def schemas(self):
@@ -645,11 +650,16 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 'authors': {'type': 'array', 'items': string}, 'title': string, 'year': string,
                 'locator': {'type': 'string', 'description': 'Theorem, proposition or section, e.g. "Theorem 9.26"'}}}
             result.append(schema('check_reference',
-                'Find and verify a precise reference (book or paper, and the theorem or section) for a known result. '
-                'Give the result and your best guesses of where it is stated; a separate verifier checks them against '
-                'zbMATH, Crossref, OpenCitations and open papers and returns how far each was confirmed (read, cited, located, not '
-                'found). Takes a few minutes. Use it before giving a theorem number from memory.',
-                {'statement': string, 'guesses': {'type': 'array', 'items': guess}}, ['statement']))
+                'Choose the lookup from the user’s objective. For reading recommendations, use standard. '
+                'For a specific claim, quotation or theorem locator to verify, start with precise: '
+                'it checks the work’s identity and then seeks passage evidence. '
+                'State the topic or claim and supply any known clues.',
+                {'statement': string, 'guesses': {'type': 'array', 'items': guess},
+                 'lookup': {'type': 'string', 'enum': ['standard', 'precise'], 'description':
+                            'For further reading, use one standard lookup covering the requested topic. '
+                            'A record and assessed relevance complete a recommendation; omit unchecked locators. '
+                            'Use precise only when the task needs passage evidence for a specific statement, '
+                            'attribution or locator. Default: precise.'}}, ['statement']))
         return result
 
     def execute(self, name, arguments, *, on_result=None):

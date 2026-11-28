@@ -28,7 +28,7 @@ from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, RepetitionLoop, ToolCallError
 from .call_policy import CallContextError, REPETITION_RECOVERY, allocate_call, prefer_different_upstream
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
-from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
+from .router import DELIVERABLE_SCOPE, EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .prompts import NOTEBOOK_DISPLAY_RECEIPT, PROJECT_SCOPE, with_notebook_evidence
 from .tools import is_project_notebook, schema
 from .refcheck import standalone_reference_request
@@ -146,6 +146,7 @@ numbers, and pages: a guessed locator never becomes confirmed just because the
 book's bibliographic record was found. At level located, give the work's verified
 metadata and any remembered chapter or section as memory ("by memory, I think it is
 in Chapter 3"), never as a checked place.
+""" + DELIVERABLE_SCOPE + """
 For two independent objectives, return both delegate calls in the same response:
 the controller runs them concurrently within a shared budget. Do not delegate
 dependent objectives together; inspect the first result before choosing the next.

@@ -954,6 +954,11 @@ readable without an upgrade.
 
 ### Explore
 
+When you ask for an explanation and reading suggestions, Explore can deliver
+both together. It can check the identity and relevance of a recommended work,
+or look for a primary passage when a claim depends on its wording or hypotheses.
+You can also ask the Assistant for a separate survey or comparison of sources.
+
 When hosted DeepSeek uses a tool, Explore returns the reasoning that led to
 that call alongside the tool result on its next tool-enabled request in the
 same task. A later user request starts from the saved conversation. Its model
@@ -1065,9 +1070,14 @@ read articles from other sites and process papers already in the workspace.
 New Literature reviews use High effort in the Assistant, the standalone form,
 the terminal and the companion survey beside a Referee report. The companion
 searches using its public question. It receives no manuscript attachments.
-The review screens the candidates it collects for the question, ranks relevant
-works, reuses cached papers and retrieves full texts while its reading time
-remains. A follow-up reading pass considers works assigned to the outline.
+The review screens the candidates it collects for the question and ranks
+relevant works. For a narrative survey it reads the directly relevant works
+and related primary results first. When a topic in the plan lacks a primary
+passage, it tries another ranked source. It seeks the full text of the works
+the outline uses, including sources assigned to a brief comparison.
+A systematic request can ask for full-text assessment of every selected work.
+When draft material is withheld, the status gives the number of sections
+whose checks finished and the number of draft units withheld, when recorded.
 An operator can set a source-request or evidence allowance. With the defaults,
 source access continues until the workflow deadline, cancellation or another
 configured budget stops it. Local profiles normally allow 20 minutes. Hosted

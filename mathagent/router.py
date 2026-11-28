@@ -53,7 +53,16 @@ ROUTE_SCHEMA = {
     },
 }
 
+DELIVERABLE_SCOPE = """Give each requested deliverable one owner. For a mathematical explanation
+with examples, applications or references for further reading, assign one Explore task covering
+the whole request. Its own reference tool supplies the reading suggestions. A separate Check
+requires an independent verification objective; a separate Literature task requires a requested
+survey synthesizing published results. A suggested specialist is a possible owner, never an
+additional objective. Before dispatch, remove tasks whose work is already assigned to another.
+Preserve the user's terminology, including abbreviations, in the assignment."""
+
 ROUTER_POLICY = """You route a mathematician's message to the workflows of a local research harness.
+""" + DELIVERABLE_SCOPE + """
 - explore: answer a mathematical question or discuss approaches, ideas, background or connections.
 - prove: a bounded proof search for one precise mathematical statement to be proved.
 - check: find a useful standard book/paper reference for a known result, optionally a chapter,
