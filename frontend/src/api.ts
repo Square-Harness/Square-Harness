@@ -396,6 +396,7 @@ export type ResearchListItem = {
   verdict?: string | null
   /** Literature jobs can have a readable draft that predates downloadable files. */
   has_review?: boolean
+  has_preliminary?: boolean
   outputs?: TranscriptItem['outputs']
 }
 
@@ -483,6 +484,7 @@ export type ResearchDetail = {
   unit?: string | null
   evidence: Evidence[]
   draft: string
+  preliminary?: string | null
   review: string
   draft_complete?: boolean
   review_complete?: boolean

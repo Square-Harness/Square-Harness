@@ -5,13 +5,16 @@
 import copy
 import hashlib
 import json
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from contextvars import ContextVar, copy_context
+from functools import partial
+from http.client import HTTPConnection, HTTPSConnection
+from urllib.request import HTTPHandler, HTTPSHandler, OpenerDirector
 
-from .ledger import _atomic_write, _bytes, _read
 from .tools import schema
 
 
@@ -41,10 +44,119 @@ class TurnCancellation:
         return True
 
 
+class _PeerConnection:
+    def __init__(self, *args, cancel, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cancel = cancel
+
+    def getresponse(self):
+        # The regular Interruptible transport takes over once the response headers have arrived.
+        # A server can accept a connection and queue a generation before sending any headers.
+        sock = self.sock
+        done = threading.Event()
+        def watch():
+            while not done.wait(0.05):
+                if self.cancel.is_set():
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
+        watcher = threading.Thread(target=watch, daemon=True, name='explore-check-headers')
+        watcher.start()
+        try:
+            return super().getresponse()
+        finally:
+            done.set()
+            watcher.join()
+
+
+class _PeerHTTP(_PeerConnection, HTTPConnection):
+    pass
+
+
+class _PeerHTTPS(_PeerConnection, HTTPSConnection):
+    pass
+
+
+class _PeerOpen:
+    def do_open(self, connection, request, **options):
+        peer = _PeerHTTPS if connection is HTTPSConnection else _PeerHTTP
+        return super().do_open(partial(peer, cancel=self.cancel), request, **options)
+
+
+class _PeerHTTPHandler(_PeerOpen, HTTPHandler):
+    pass
+
+
+class _PeerHTTPSHandler(_PeerOpen, HTTPSHandler):
+    pass
+
+
+def _peer_opener(opener, cancel):
+    # Copy configured handlers, including redirect/proxy and TLS policies. Swap only stdlib connections.
+    peer = OpenerDirector()
+    peer.addheaders = list(opener.addheaders)
+    for handler in opener.handlers:
+        clone = copy.copy(handler)
+        variant = {HTTPHandler: _PeerHTTPHandler, HTTPSHandler: _PeerHTTPSHandler}.get(type(handler))
+        if variant:
+            clone.__class__ = variant
+            clone.cancel = cancel
+        peer.add_handler(clone)
+    return peer
+
+
+def fork_cancellable(client, cancel):
+    """A private stream transport with independent cancellation but the same provider and quota accounting.
+
+    Known CLI transports acquire the GUI's existing interruptible stream implementation. Unknown/custom
+    adapters can supply fork_for_review(cancel) to preserve their own metering and cancellation semantics.
+    """
+    from .assistant_budget import BudgetClient
+    from .agent import Ollama
+    from .api_profiles import MLX
+    from .backends import LlamaCpp, OpenAICompatible
+    from .deepinfra import DeepInfra
+    from .openrouter import OpenRouter
+    from .gui.hub import (Interruptible, InterruptibleDeepInfra, InterruptibleLlamaCpp, InterruptibleMLX,
+                          InterruptibleOllama, InterruptibleOpenAI, InterruptibleOpenRouter)
+
+    if isinstance(client, BudgetClient):
+        transport = fork_cancellable(client.client, cancel)
+        if transport is None:
+            return None
+        sibling = client.fork(transport, allowance=client.allowance, usage=client.usage,
+                              input_allowance=client.input_allowance, slots=client.slots)
+        sibling.deadline = client.deadline
+        return sibling
+    factory = getattr(client, 'fork_for_review', None)
+    if factory:
+        return factory(cancel)
+    if isinstance(client, Interruptible):
+        sibling = copy.copy(client)
+    else:
+        adapters = {Ollama: InterruptibleOllama, DeepInfra: InterruptibleDeepInfra, OpenRouter: InterruptibleOpenRouter,
+                    OpenAICompatible: InterruptibleOpenAI, LlamaCpp: InterruptibleLlamaCpp, MLX: InterruptibleMLX}
+        adapter = adapters.get(type(client))
+        if adapter is None:
+            return None
+        # Carry the configured transport, including its provider allowlist, privacy/usage settings and opener.
+        # Reconstructing it from the environment could silently change the provider for a saved job.
+        sibling = adapter.__new__(adapter)
+        vars(sibling).update(vars(client))
+        sibling.owner = sibling.pool = sibling.on_model_wait = None
+    sibling.cancel = cancel
+    sibling._active_responses = {}
+    sibling._response_lock = threading.Lock()
+    sibling._admitted = threading.local()
+    sibling.opener = _peer_opener(client.opener, cancel)
+    return sibling
+
+
 class ExploreTasks:
-    def __init__(self, workspace, journal=None):
+    def __init__(self, workspace):
         self.workspace = workspace
-        self.journal = journal
         self.cancel = TurnCancellation(getattr(workspace, 'cancelled', lambda: False))
         self.pool = ThreadPoolExecutor(thread_name_prefix='explore-check')
         self.records = {}
@@ -52,12 +164,6 @@ class ExploreTasks:
         self.cancellations = {}
         self.lock = threading.RLock()
         self.library_lock = threading.RLock()
-        if journal is not None and journal.exists():
-            self.records = json.loads(_read(journal))
-            for row in self.records.values():
-                if 'result' not in row:
-                    row['result'] = 'Interrupted before the result was saved. No evidence is available; this check was not repeated.'
-            self._save()
 
     def __enter__(self):
         library = getattr(self.workspace, 'literature', None)
@@ -81,12 +187,8 @@ class ExploreTasks:
             if library is not None:
                 library.cancelled = self.original_cancelled
 
-    def _save(self):
-        if self.journal is not None:
-            _atomic_write(self.journal, _bytes(json.dumps(self.records, ensure_ascii=False)))
-
     @staticmethod
-    def schemas(original, *, saved_checks=False, review_citations=False):
+    def schemas(original):
         offered = copy.deepcopy(original)
         available = False
         for spec in offered:
@@ -100,27 +202,10 @@ class ExploreTasks:
                     'type': 'boolean', 'description': 'For a background check, default true: join before writing the '
                     'final answer. Set false only for optional exploration that can be dropped without compromising '
                     'the requested scope or your verdict. An explicitly requested verification is required.'}
-                if review_citations and fn['name'] == 'check_reference':
-                    fn['parameters']['properties']['background']['description'] = (
-                        'Defaults to true in manuscript Review. Submission returns a check ID immediately. '
-                        'Continue working on independent proofs. Set false only for a foreground-only transport.')
-                    fn['parameters']['properties']['required_for_report']['description'] = (
-                        'Set true if the author requested this verification or if the verdict depends on it. '
-                        'Set false for an ancillary attribution that can be disclosed as unverified.')
-                    fn['parameters']['required'].append('required_for_report')
-        if available or saved_checks:
+        if available:
             offered.append(schema('await_background_check', 'Wait for one submitted check when further work depends '
                                   'on it. Completed checks arrive automatically; do not poll.',
                                   {'check_id': {'type': 'string'}}, ['check_id']))
-            if review_citations:
-                offered[-1]['function']['parameters']['properties']['needed_for'] = {
-                    'type': 'string', 'description': 'For a pending citation, name the unresolved inference or '
-                    'requested verification that needs this result now. If omitted, the check keeps running '
-                    'while you examine other passages. Completed results are returned immediately.'}
-                offered[-1]['function']['parameters']['properties']['required_for_report'] = {
-                    'type': 'boolean', 'description': 'Set true only when a previously ancillary citation has '
-                    'become necessary for your mathematical verdict or for verification the author requested. '
-                    'Explain the change in needed_for. Other ancillary citations continue in the background.'}
         return offered
 
     def _access(self, name, arguments):
@@ -140,10 +225,9 @@ class ExploreTasks:
                 raise ValueError('Tool arguments must be an object')
             args = dict(args)
             if name == 'await_background_check':
-                return self.await_result(args.get('check_id'), args.get('needed_for'), args.get('required_for_report'))
+                return self.await_result(args.get('check_id'))
             if name in ELIGIBLE:
-                citation = name == 'check_reference' and getattr(self.workspace, 'defer_citations', False)
-                background = args.pop('background', citation)
+                background = args.pop('background', False)
                 required = args.pop('required_for_report', True)
                 if not isinstance(background, bool) or not isinstance(required, bool):
                     raise ValueError('background and required_for_report must be booleans')
@@ -164,15 +248,11 @@ class ExploreTasks:
             if ident not in self.records:
                 if self.cancel.is_set():
                     raise KeyboardInterrupt
-                self.records[ident] = {'tool': name, 'required_for_report': required, 'submitted_at': time.time(), 'waits': []}
-                if name == 'check_reference' and getattr(self.workspace, 'defer_citations', False):
-                    self.records[ident]['citation_statement'] = str(args.get('statement') or ident)
+                self.records[ident] = {'tool': name, 'required_for_report': required}
                 self.cancellations[ident] = TurnCancellation(self.cancel.is_set)
-                self._save()  # An interrupted dispatch can never be silently resubmitted on resume.
                 self.futures[ident] = self.pool.submit(copy_context().run, self._run, ident, name, args)
             elif required and not self.records[ident].get('required_for_report', True):
                 self.records[ident]['required_for_report'] = True
-                self._save()
         return json.dumps({'background_check_id': ident, 'status': 'submitted'})
 
     def _run(self, ident, name, args):
@@ -184,9 +264,6 @@ class ExploreTasks:
             with self._access(name, args):
                 if cancel.is_set():
                     raise KeyboardInterrupt
-                with self.lock:
-                    self.records[ident]['started_at'] = time.time()
-                    self._save()
                 result = self.workspace.execute(name, args)
         except KeyboardInterrupt:
             result = 'Check interrupted; no completed evidence was returned.'
@@ -197,44 +274,13 @@ class ExploreTasks:
         with self.lock:
             row = self.records[ident]
             row.setdefault('result', result)  # A cancelled optional result is never promoted back into evidence.
-            row['finished_at'] = time.time()
-            self._save()
 
-    def _wait(self, ident, reason):
-        future = self.futures.get(ident)
-        if future is None or future.cancelled():
-            return
-        if future.done():
-            future.result()  # Propagate a failed journal write.
-            return
-        started = time.time()
-        try:
-            future.result()
-        finally:
-            with self.lock:
-                self.records[ident]['waits'].append({'reason': reason, 'start': started, 'end': time.time()})
-                self._save()
-
-    def await_result(self, ident, needed_for=None, required_for_report=None):
+    def await_result(self, ident):
         if not isinstance(ident, str) or ident not in self.records:
             return 'Tool error: unknown background check ID'
-        with self.lock:
-            row = self.records[ident]
-            if 'citation_statement' in row and 'result' not in row:
-                if not (isinstance(needed_for, str) and needed_for.strip()):
-                    return json.dumps({'check_id': ident, 'status': 'running',
-                                       'next': 'Continue an independent part of the review. This result arrives '
-                                       'automatically. To wait now, give the specific dependency in needed_for.'})
-                if not row['required_for_report']:
-                    if required_for_report is not True:
-                        return json.dumps({'check_id': ident, 'status': 'running', 'next':
-                            'This citation is ancillary. Continue the review or finish with its attribution '
-                            'unverified. If the verdict now depends on it or the author requested it, '
-                            'set required_for_report to true and identify that dependency in needed_for.'})
-                    row['required_for_report'] = True
-                    row['promoted_for'] = needed_for
-                    self._save()
-        self._wait(ident, 'dependency')
+        future = self.futures[ident]
+        if not future.cancelled():
+            future.result()
         return self._evidence(ident)
 
     def _evidence(self, ident):
@@ -262,23 +308,20 @@ class ExploreTasks:
     def deliver(self, messages, final):
         """Replace submitted receipts by the corresponding real tool output, retaining native tool roles/IDs."""
         if not self.records:
-            return False, []
+            return False
         if final:
             # Let optional work finish while waiting for any required results.
             for ident in self.futures:
                 if self.records[ident].get('required_for_report', True):
-                    self._wait(ident, 'final verdict')
+                    self.futures[ident].result()
             with self.lock:
                 for ident, future in self.futures.items():
                     row = self.records[ident]
                     if 'result' not in row and not row.get('required_for_report', True):
                         self.cancellations[ident].stopped.set()
-                        row.update(cancelled_at=time.time(), result='Optional check was unfinished at finalization; '
-                                   'it supplies no evidence.')
-                        if future.cancel():
-                            row['finished_at'] = time.time()
-                        self._save()
-        changed, seen = False, set()
+                        row['result'] = 'Optional check was unfinished at finalization; it supplies no evidence.'
+                        future.cancel()
+        changed = False
         with self.lock:
             for msg in messages:
                 if msg['role'] != 'tool' or 'background_check_id' not in msg.get('content', ''):
@@ -292,14 +335,7 @@ class ExploreTasks:
                 ident = data.get('background_check_id')
                 if not isinstance(ident, str) or ident not in self.records:
                     continue
-                seen.add(ident)
                 if data.get('status') == 'submitted' and 'result' in self.records[ident]:
-                    row = self.records[ident]
                     msg['content'] = self._evidence(ident)
-                    # The report discloses unfinished ancillary citations by name. Cancellation alone
-                    # supplies no new evidence for the referee to assess in a second generation.
-                    if 'cancelled_at' not in row or 'citation_statement' not in row:
-                        changed = True
-            # The process might have stopped after dispatch and before checkpointing the model's tool batch.
-            orphaned = [self._evidence(i) for i in self.records.keys() - seen if 'result' in self.records[i]]
-        return changed, orphaned
+                    changed = True
+        return changed

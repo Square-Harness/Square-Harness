@@ -397,6 +397,9 @@ _LINE_SEPARATORS = str.maketrans({char: '\n' for char in '\r\v\f\x1c\x1d\x1e\x85
 def _source_text(workspace, filename):
     path = workspace.path(filename, pdf=True)
     workspace._readable(path)
+    if getattr(workspace, 'immutable_excerpts', False):
+        lines, pages, _ = workspace._document_lines(path)
+        return '\n'.join(lines), pages
     if path.suffix.lower() == '.pdf':
         if workspace.literature is None:
             raise ValueError('Local PDF extraction is unavailable')

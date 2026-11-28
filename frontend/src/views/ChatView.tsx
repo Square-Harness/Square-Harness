@@ -13,7 +13,7 @@ import { Glyph, type Cover } from '../components/Glyph'
 import { ModeMessage } from '../components/ModeMessage'
 import { ProjectSelector } from '../components/Projects'
 import { ImageGallery, isImagePath, PinnedImages } from '../components/ImageAttachments'
-import { callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
+import { callName, callPayload, typedCall, validCall, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, MathMacrosProvider, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -35,7 +35,7 @@ import { getState, refreshLists, setProjectFilter, useApp, useTick } from '../st
 import { BusyNote, QUIET_TOOLS, Thinking, toolLine } from './shared'
 
 import { activeAgent, deriveAgents, groupsOf, type AgentLane } from '../agents'
-import { AgentGroup, WaitingForResults } from '../components/AgentGroup'
+import { AgentGroup, FirstReading, WaitingForResults } from '../components/AgentGroup'
 import { JobDownloads } from '../components/JobDownloads'
 import { AttachMenu } from '../components/FileExplorer'
 
@@ -562,7 +562,7 @@ function sentMessages(transcript: TranscriptItem[]) {
     for (let next = index + 1; next < transcript.length && transcript[next].role !== 'user' && !call; next++) {
       if (transcript[next].role === 'route' && transcript[next].reason?.startsWith(EXPLICIT_CALL)) call = transcript[next]
     }
-    const text = call?.mode && call.mode !== 'clarify' ? `@${call.mode} ${item.content}` : item.content
+    const text = call?.mode && call.mode !== 'clarify' ? `@${callName(call.mode)} ${item.content}` : item.content
     if (sent.at(-1) !== text) sent.push(text)
   })
   return sent
@@ -580,7 +580,7 @@ function UserMessage({ item, call }: { item: TranscriptItem; call?: TranscriptIt
       <div className="message-body">
         {picked && <p className="message-call" title="You selected this skill for the message">
           {cover && <span className={`route-cover mode-${cover}`} aria-hidden="true"><Glyph mode={cover} /></span>}
-          <strong>@{picked}</strong>{call?.effort && effortKind(picked as RouteMode) ? <span> · {effortLabel(call.effort)} effort</span> : null}
+          <strong>@{callName(picked)}</strong>{call?.effort && effortKind(picked as RouteMode) ? <span> · {effortLabel(call.effort)} effort</span> : null}
         </p>}
         <Markdown quiet>{literalUnderscores(item.content)}</Markdown>
         {attached.length > 0 && (
@@ -730,7 +730,7 @@ function RouteCard({ chatId, chatMode, index, item }: { chatId: string; chatMode
   const { queued, running } = routeActivity(item, app.snapshot)
   const research = item.job_id ? app.research?.find(job => job.id === item.job_id) : undefined
   const review = mode === 'literature' ? literatureReviewState(research, item.outputs) : null
-  const outputs = review?.outputs || item.outputs
+  const outputs = review?.outputs || research?.outputs || item.outputs
   const link = !item.job_id || !paged(mode) ? null : review
     ? literatureReviewLink(chatMode, chatId, item.job_id, review.readable)
     : { url: href(pageOf(mode), item.job_id, null, chatId), label: 'Open the ' + info.label.toLowerCase() }
@@ -757,7 +757,7 @@ function RouteCard({ chatId, chatMode, index, item }: { chatId: string; chatMode
   else if (kind === 'check') { headline = 'References checked below'; status = ''; variant = 'complete' }
   else { headline = info.label }
   return (
-    <div className={'entry route route-' + (item.status || 'proposed')}>
+    <><div className={'entry route route-' + (item.status || 'proposed')}>
       <span className={`in-margin speaker speaker-model mode-${info.cover}`} title={info.label}><Glyph mode={info.cover} /></span>
       <div className="route-card route-auto">
         <div className="route-line">
@@ -774,7 +774,7 @@ function RouteCard({ chatId, chatMode, index, item }: { chatId: string; chatMode
               {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && outputs && <JobDownloads job={item.job_id} outputs={outputs} partial={item.status === 'stopped'} />}
+          {item.job_id && outputs && <JobDownloads job={item.job_id} outputs={outputs} partial={item.status === 'stopped' || !!research?.has_preliminary || research?.status === 'partial'} />}
           {link && <a className="btn btn-small btn-quiet" href={link.url}>{link.label}</a>}
           {mode !== 'critic' && mode !== 'free' && !item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={() => start(mode)}>
@@ -796,6 +796,7 @@ function RouteCard({ chatId, chatMode, index, item }: { chatId: string; chatMode
         <ErrorNote>{error}</ErrorNote>
       </div>
     </div>
+    {research?.has_preliminary && item.job_id && <FirstReading key={item.job_id} job={item.job_id} />}</>
   )
 }
 

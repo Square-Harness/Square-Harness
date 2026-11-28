@@ -36,7 +36,7 @@ const REVIEW: Record<ReviewVariant, Copy> = {
   },
   review: {
     title: 'Review a manuscript',
-    lede: 'Attach the manuscript to check its main results, proofs and references before submission. You can ask the reviewer to focus on a particular theorem or proof.',
+    lede: 'Two readers independently examine the manuscript. You can read the first report while the final reviewer checks their findings against the paper. Specify a focus or a target journal if you have one.',
     placeholder: 'Optional focus, e.g. concentrate on the proof of Theorem 1.4 and the lemmas it uses.',
     pinHint: 'Pin the manuscript (a TeX source gives the best results; PDF, Markdown and text work too).',
     field: 'Focus of the review (optional)', files: 'Manuscript', noun: 'review',

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Vincent Boulard, Louis Carillo, and contributors
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { MODE_CALLS, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
+import { MODE_CALLS, callName, coverOf, modeOptions, modeQuery, typedCall, updateCall, validCall, type ModeCall, type ModeQuery } from '../modeCalls'
 import { CloseIcon } from './Icons'
 import { Glyph } from './Glyph'
 import './ModeMessage.css'
@@ -56,7 +56,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, onKey, disa
   const select = (index: number) => {
     if (!query || !options[index]) return
     const mode = options[index].mode
-    const token = '@' + mode
+    const token = '@' + callName(mode)
     const suffix = value.slice(query.end)
     const space = suffix.length === 0 ? ' ' : ''
     const next = value.slice(0, query.start) + token + space + suffix
@@ -91,8 +91,8 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, onKey, disa
       {validCall(value, call) && (() => {
         const info = MODE_CALLS.find((item) => item.mode === call.mode)
         return <div className={'selected-mode-wrap' + (pinned ? ' selected-mode-open' : '')} ref={chip}>
-          <div className="selected-mode-menu" role="group" aria-label={`@${call.mode} options`}>
-            <p className="selected-mode-title"><strong>@{call.mode}</strong>{info && info.label !== call.mode && <span> · {info.label}</span>}</p>
+          <div className="selected-mode-menu" role="group" aria-label={`@${callName(call.mode)} options`}>
+            <p className="selected-mode-title"><strong>@{callName(call.mode)}</strong>{info && info.label.toLowerCase() !== callName(call.mode) && <span> · {info.label}</span>}</p>
             {info && <p className="selected-mode-about">{info.summary}</p>}
 
           </div>
@@ -100,7 +100,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, onKey, disa
             onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setPinned((on) => !on) } else if (event.key === 'Escape') setPinned(false) }}
             aria-haspopup="true" aria-expanded={pinned}>
             <span className={`route-cover mode-${coverOf(call.mode)}`}><Glyph mode={coverOf(call.mode)} /></span>
-            <strong>@{call.mode}</strong><span>Selected for this message</span>
+            <strong>@{callName(call.mode)}</strong><span>Selected for this message</span>
             <button type="button" className="chip-remove" aria-label="Clear selected skill" onClick={(event) => { event.stopPropagation(); declined.current = call; onCall(null); setPinned(false); setQuery(null); input.current?.focus() }}><CloseIcon size={13} /></button>
           </div>
         </div>
@@ -112,7 +112,7 @@ export function ModeMessage({ value, onChange, call, onCall, onSend, onKey, disa
             aria-selected={index === active} className={'mode-option' + (index === active ? ' mode-option-active' : '')}
             onMouseEnter={() => setActive(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => select(index)}>
             <span className={`route-cover mode-${coverOf(item.mode)}`}><Glyph mode={coverOf(item.mode)} /></span>
-            <span><strong>@{item.mode}</strong><span className="mode-option-summary">{item.summary}</span></span>
+            <span><strong>@{callName(item.mode)}</strong><span className="mode-option-summary">{item.summary}</span></span>
           </div>)}
         </div>
       </div>}

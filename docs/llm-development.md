@@ -953,7 +953,7 @@ documented together when releasing these features.
 | | `jsonutil.py` | Decode model JSON (fences, prose, TeX escapes) without relying on server grammars |
 | Proof | `proof.py`, `proof_policy.py`, `ledger.py` | Solve → verify → repair, immutable candidates, `ProofStore` |
 | Research base | `research.py` | `ResearchRunner`: job directory, pinned sources, skill text, budgets, `_call`, provenance and citation checks, report |
-| Skills | `litreview.py`, `refcheck.py`, `review.py` + `review_policy.py` + `manuscript.py`, `referee.py` (saved Review v4 jobs), `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
+| Skills | `litreview.py`, `refcheck.py`, `reading_review.py` + `explore_samples.py` (whole-paper Review), `review.py` + `review_policy.py` + `manuscript.py`, `referee.py` (saved Review v4 jobs), `writeup.py`, `style.py` | One controller per skill (see the diagram); `style.py` also extracts macros and packages, checks the model's quotations against the articles and renders a style digest for write-ups |
 | | `texcheck.py` | Write-up source checker: deterministic findings (BLOCKER, MATH, PROSE, LAYOUT, FIDELITY) on the body and the compile log, and the gate each rule belongs to |
 | Sources | `literature.py` | `LiteratureTools`: arXiv, Semantic Scholar, zbMATH, Crossref, OpenCitations, optional Brave; cache; request budgets; retries and the provider breaker (`down`); a wider CA-bundle fallback for TLS |
 | | `reference_search.py`, `web.py` | Bounded reference retrieval; web pages and paginated bibliographies |
@@ -1448,103 +1448,34 @@ requests more often). The tester ledger charges a failed stream with unknown usa
 an estimate (`HostedQuota.charge(..., estimated=True)`: input bytes plus framing,
 streamed characters plus 256). Proof gives every replacement a fresh dispatch key.
 
-New whole-paper Reviews use mode `referee` and pipeline `review-graph-v1`.
-`review.runner_class` selects `GraphReviewRunner` for new Review jobs.
-`runner_for_state` selects the saved pipeline on resume. The normal Explore
-chat continues through its own entry point and instruction.
+New whole-paper Reviews use mode `referee` and pipeline `review-readings-v1`.
+Two independent Explore readers receive the same pinned source and the author's
+request. `reading_review.ReadingReviewRunner` saves the progress of each reader.
+Their tool histories are private to each reading. The combining reader
+receives the manuscript, the completed readings and their completed citation
+checks. It verifies findings against the manuscript even when only one reader
+raised them. Source paging uses `source_tasks.explore_sources`. The combination
+prompt and citation handoff are shared with `explore_samples.py`. Direct Explore
+retains its configurable sample count.
 
-`review_graph_plan.build_graph_plan` maps frozen statements, proof ranges,
-and explicit references. It preserves source locators, groups related
-proofs under one primary reader, and assigns remaining passages to the lead
-or to passage readers. The initial independent test starts from a statement
-and its setting. It has full source access. Statement-first independence
-relies on the initial packet and the role instruction. In a family packet,
-the mathematical reader checks a referenced premise at the downstream use
-site even when another reader is checking the premise's own proof.
+The saved Review records its readings and shows the first complete one as a
+preliminary answer while the work continues. The final report is the document
+used for the Notebook and download. A partial result keeps the first reading
+labeled as preliminary. Resume reuses completed readings and the pinned source
+snapshot. Dispatch uses the saved pipeline.
 
-`graph_review.GraphReviewRunner` starts ready assignments in the configured
-review pool. A transport with no independent streams executes them serially.
-The lead can request a further located mathematical test. The scheduler
-creates a fresh judge for consequential or disputed structured findings.
-A separate code-only check matches citation keys and compiles eligible
-frozen TeX sources with the existing compiler. The final editor receives
-the full handoffs, judge decisions and source diagnostics. It writes in
-a fresh context with the same manuscript available. Coverage here means
-assignment and reported assessment; neither a graph edge nor a completed
-model call establishes validity. Family readers can submit assessments of their own
-proof units in a batch. Delivery identifies mapped proofs with no recorded assessment.
+Explore readers can submit independent calculations and reference checks in the
+background through `explore_tasks.py`. They can continue working until the
+result arrives at a model boundary or they explicitly await the check.
+Optional checks still in progress at finalization have an unfinished status.
 
-`review_graph_worker` runs the tool-enabled mathematical roles with their
-own histories, handoffs and background journals on the shared job budget.
-The graph meter admits ready model requests in waiting order when settled budget
-can cover them. Readers and their nested citation checks can wait for a
-sibling's outstanding reservation to settle. A genuine shortage still
-uses the normal pause path. Saved citation calls carry the owning worker's ID.
-The saved artifacts include the plan and per-role tool checkpoints. Restore
-completed assignments, continue interrupted ones, and retain the printed
-manuscript as the authority if the graph or a reader misstates it.
-Follow-up questions about an earlier report retain their focused path.
-
-Saved two-reader reviews (pipeline `review-explore-v2`) use
-the normal Explore tool loop with a dedicated pre-submission instruction.
-The main referee owns the manuscript and the final Markdown. The
-`ExploreReviewRunner` in `explore_review.py` adds a read-only source index
-and an atomic notebook (`review_evidence.py`). Completed full-paper reports
-append the computed coverage disclosure when needed, before saving and returning
-the same Markdown. An assessment is a reported
-judgment about a passage whose lines were supplied. It is not a proof certificate.
-Follow-ups use their own instruction, the original manuscript and its saved report.
-
-`review_challenge.py` gives one independent reader the manuscript and scope.
-It selects consequential implications independently, using source tools and an
-available sandbox, and sends each supported objection immediately. It can
-continue with another independent question. It sees the manuscript and its own
-evidence. A private transport uses the shared provider and job accounting.
-At finalization the referee closes the handoff, collects available evidence
-and explicitly flagged unfinished checks, and cancels speculative work. The
-referee can independently finish a check that bears on the verdict. The
-challenger adds no private clock, output allowance or tool-round count. A single
-inference slot or a transport without independent cancellation can leave the
-referee working alone. Saved jobs record which case occurred.
-
-Explore can use eligible tools synchronously or request background execution
-through `explore_tasks.py`. Independent work can continue until a model boundary
-delivers a result or the agent explicitly waits for the check it needs. Checks
-default to required for the verdict. A pending check submitted with
-`required_for_report=false` is canceled at finalization. A saved
-Review journals submissions and outcomes. Resuming a possibly dispatched
-experiment exposes its interrupted state instead of blindly running it again.
-For the `review-explore-v2` lead, `check_reference` defaults to a background
-submission. The tool schema asks whether completion is required. The lead
-works on independent proofs until it needs a result. Awaiting an unfinished
-ancillary citation requires promoting it with `required_for_report: true` and
-giving the dependency in `needed_for`. A completed lookup returns immediately.
-The report records unfinished ancillary checks. Its nested precise verifier first seeks the
-cited original and locator. A catalogue record establishes identity, and a
-passage in a different work provides indirect evidence. Only a passage from
-the cited work can directly verify the claim. Ordinary reference checking and
-saved verifiers select their behavior from their own settings.
-
-Older `review-explore-v1` jobs use `LegacyExploreReviewRunner` and the original
-single-agent prompt and execution path.
-
-An active Review checkpoint also keeps the reasoning attached to completed
-hosted tool calls for the next call on the same assignment. If the shared
-stream detector interrupts a generation, Review clears its draft and retries
-from the last completed work. The interrupted text cannot enter the report.
-
-Saved v4 reviews use `referee.RefereeRunner` and saved v2 reviews use
-`PaperReviewRunner`. Their historical execution and report formats follow.
-Phases of v4:
-
-The Review (mode `referee`) uses `referee.RefereeRunner` and pipeline `review-v4`
-for a pinned, whole manuscript with mapped results and room for its tool calls.
+Saved jobs using pipeline `review-v4` resume with `referee.RefereeRunner`. That
+pipeline uses its referee pool for a pinned, whole manuscript with mapped results and room for its tool calls.
 `RefereeRunner._fallback_reason` identifies which condition requires the
 section-by-section pipeline. The job then switches in its `plan` phase to
 `review-v2` and runs the v3 pipeline below (`RefereeRunner` extends
 `PaperReviewRunner` and delegates every method when `state['pipeline']` is not
-`review-v4`). `review.runner_class('review')` returns `RefereeRunner` for new jobs;
-`runner_for_state` gives saved `review-v2` jobs `PaperReviewRunner`. Phases of v4:
+`review-v4`). Saved `review-v2` jobs use `PaperReviewRunner`. Phases of v4:
 `plan` (the map, `_directions`: the proofs in at most five groups by position, the main
 results' proofs first; `_reader_plan`; `_bibliography_check`; `state['referee_clock']`), `referees`
 (one pool), `write` (untimed: the report). In `referees` a lead (`LEAD_TASK`, 40 tool

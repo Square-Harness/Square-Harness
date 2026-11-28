@@ -132,7 +132,7 @@ export function chatOutputs(chat: Chat, proofs: ProofListItem[] = [], research: 
     const record = jobs.get(job)
     const mode = item.mode
     const review = mode === 'literature' ? literatureReviewState(record?.kind === 'literature' ? record : undefined, item.outputs) : null
-    const formats = review?.outputs || item.outputs || discovered[job]
+    const formats = review?.outputs || (record && 'outputs' in record && record.outputs) || item.outputs || discovered[job]
     const page = nativeResultPage(mode, job, chat.id)
     let primary = true
     const named = (value: unknown, fallback: string) => typeof value === 'string' && value ? value : fallback

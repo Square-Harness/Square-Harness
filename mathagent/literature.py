@@ -649,6 +649,7 @@ class LiteratureTools:
         self.result_chars = result_budget(None)
         self.online = bool(online)
         self.assigned_sources = None  # Set on a scoped view when the task explicitly limits evidence to its inputs.
+        self.allowed_local_sources = None  # A scoped reader can restrict local cache access to exact document IDs.
         self.timeout = min(30, max(1, float(timeout)))
         self._last_request = {}
         self.down = set()  # sources that kept failing: not asked again until DOWN_COOLDOWN has passed
@@ -1953,6 +1954,9 @@ class LiteratureTools:
         if raw is None:
             raise LiteratureError('Document not found in this workspace cache; use open_paper first', code='document_not_found')
         metadata = json.loads(raw)
+        if (self.allowed_local_sources is not None and str(metadata.get('source_url', '')).startswith('workspace:')
+                and document_id not in self.allowed_local_sources):
+            raise LiteratureError('This local document is outside the selection. Read the pinned manuscript files.')
         if self.assigned_sources is not None and not ({document_id, metadata.get('source_url')} & self.assigned_sources):
             raise LiteratureError('This request limits evidence to the assigned sources.')
         return metadata

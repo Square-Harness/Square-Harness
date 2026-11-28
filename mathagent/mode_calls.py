@@ -301,6 +301,8 @@ def validated_mode_call(content, selection, files=()):
     if not isinstance(mode, str) or mode not in JOB_MODES + USER_MODES + ('investigate',) or type(start) is not int:
         raise ValueError('Unknown selected mode call')
     token = '@' + mode
+    if mode == 'referee' and content.startswith('@review', start):
+        token = '@review'
     end = start + len(token)
     if (start < 0 or content[start:end] != token
             or (start and _word(content[start - 1]))

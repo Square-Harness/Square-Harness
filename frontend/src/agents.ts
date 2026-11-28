@@ -25,6 +25,7 @@ const summaryStages: Record<string, string> = {
 export type AgentLane = Agent & {
   step: string
   stateLabel: string
+  hasPreliminary: boolean
   notebook: { url: string; label: string } | null
   result: { label: string; variant: Variant; outputId: string | null }
   /** The document a write-up, summary or literature review produced (its card's downloads), once saved. */
@@ -75,9 +76,10 @@ export function deriveAgents(chat: Chat, proofs: ProofListItem[] = [], research:
       ? literatureReviewLink(chat.mode, chat.id, agent.job_id, review.readable)
       : { url: href(book, agent.job_id, null, chat.id), label: 'Open ' + skillName(agent.mode).toLowerCase() }
     const documentJob = agent.job_id || item?.job_id
-    const outputs = review?.outputs || item?.outputs
+    const outputs = review?.outputs || job?.outputs || item?.outputs
     const documents = documentJob && outputs ? { job: documentJob, outputs } : null
-    return { ...agent, step, notebook, stateLabel: look.label, result: { ...look, outputId }, documents }
+    return { ...agent, step, notebook, hasPreliminary: !!job?.has_preliminary, stateLabel: look.label,
+      result: { ...look, outputId }, documents }
   })
 }
 

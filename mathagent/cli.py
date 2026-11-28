@@ -117,8 +117,8 @@ HELP = '''Commands
   /explore [query]                     Explore approaches and connections
   /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
-  /referee [task]                     Referee report on the --research-file manuscript: every proof checked,
-                                      second opinions, a recommendation (/detailed_review is the same)
+  /referee [task]                     Two readings of the --research-file manuscript, then a combined review.
+                                      /detailed_review is the same. Specify a focus or a target journal in the task.
   /typo_check [task]                  Typos and presentation of the --research-file manuscript, corrections checked
   /quick_review [statement + proof]   Is this proof correct? Verdict and located issues; or name a
                                       result of the --research-file manuscript, e.g. "Lemma 3.2"

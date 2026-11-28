@@ -34,7 +34,7 @@ from ..literature import LiteratureError, LiteratureTools, UNLIMITED_SOURCE
 from ..litreview import ReviewRunner, STATEMENT, _has_locator, _publication_record
 from ..reporting import job_output_budget, output_totals, reported_output
 from ..research import PINNED_SOURCE_BYTES, _job_directory, _read_state as _read_research
-from ..review import variant_for_state
+from ..review import READINGS_PIPELINE, variant_for_state
 from ..review_position import manuscript_has_title
 from ..review_export import review_bibtex, review_markdown
 from ..tools import FALLBACK, READ_GROUPS, SKIP, TEXT, Workspace, decode_text, is_source_archive, source_suffix
@@ -451,6 +451,9 @@ def list_research(root, active=None):
             outputs = state.get('outputs') or {}
             # Older reading lists saved the review in the draft without publishing separate files.
             job.update(has_review=bool(outputs.get('review') or (state.get('draft') or '').strip()), outputs=outputs)
+        elif state.get('pipeline') == READINGS_PIPELINE:
+            job.update(has_preliminary=bool(running and state.get('preliminary') and state.get('draft')),
+                       outputs=state.get('outputs') or {})
         jobs.append(job)
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
@@ -508,6 +511,8 @@ def research_detail(root, job_id, active=None):
         **({'review_evidence_count': len(_review_evidence_order(s))} if s.get('pipeline') == ReviewRunner.PIPELINE else {}),
         **({key: s[key] for key in ('references', 'coverage', 'outputs') if key in s}
            if s['kind'] == 'literature' else {}),
+        **({'preliminary': s.get('preliminary') if running else None, 'outputs': s.get('outputs') or {}}
+           if s.get('pipeline') == READINGS_PIPELINE else {}),
     }
 
 
@@ -589,8 +594,12 @@ def research_review_file(root, job_id, output):
 
 
 def research_review_download(root, job_id, output):
-    """A literature review as a clean standalone download: Markdown ('md') or the BibTeX of its cited works ('bib')."""
+    """Download the saved manuscript report, or export a literature review with its cited bibliography."""
     state = research_state(root, job_id)
+    if state.get('pipeline') == READINGS_PIPELINE:
+        if output != 'md' or not (state.get('outputs') or {}).get('review'):
+            raise NotFound('This manuscript review has no such download yet')
+        return _review_name(state) + '.md', _read(_job_directory(root, job_id) / 'report.md').encode('utf-8')
     if state['kind'] != 'literature' or not (state.get('outputs') or {}).get('review'):
         raise NotFound('This literature review has no text to download yet')
     if state.get('pipeline') != ReviewRunner.PIPELINE:

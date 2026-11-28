@@ -32,10 +32,12 @@ export const modeOptions = (query: string) => {
 }
 export type ModeCall = { mode: RouteMode; start: number; end: number }
 export type ModeQuery = { start: number; end: number; query: string }
+/** The manuscript Review retains its engine identifier in saved conversations. */
+export const callName = (mode: string) => mode === 'referee' ? 'review' : mode
 const word = (char: string) => /[\p{L}\p{N}_@.+/\-]/u.test(char)
 
 export function validCall(text: string, call: ModeCall | null): call is ModeCall {
-  return !!call && text.slice(call.start, call.end) === '@' + call.mode
+  return !!call && [call.mode, callName(call.mode)].includes(text.slice(call.start + 1, call.end)) && text[call.start] === '@'
     && (!call.start || !word(text[call.start - 1]))
     && (call.end === text.length || !word(text[call.end]))
 }
@@ -44,9 +46,10 @@ export function validCall(text: string, call: ModeCall | null): call is ModeCall
 export function typedCall(text: string, atEnd = false): ModeCall | null {
   for (const match of text.matchAll(/@([a-z_]+)/g)) {
     const start = match.index!, end = start + match[0].length
-    if (!MODE_CALLS.some((item) => item.mode === match[1]) || (start && word(text[start - 1]))) continue
+    const selected = MODE_CALLS.find(item => item.mode === match[1] || callName(item.mode) === match[1])
+    if (!selected || (start && word(text[start - 1]))) continue
     if (end < text.length ? !/\s/.test(text[end]) : !atEnd) continue
-    return { mode: match[1] as RouteMode, start, end }
+    return { mode: selected.mode, start, end }
   }
   return null
 }

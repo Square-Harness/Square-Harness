@@ -645,9 +645,6 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             guess = {'type': 'object', 'properties': {
                 'authors': {'type': 'array', 'items': string}, 'title': string, 'year': string,
                 'locator': {'type': 'string', 'description': 'The theorem, proposition or section named in the citation.'}}}
-            if getattr(self, 'defer_citations', False):
-                guess['properties']['identifier'] = {'type': 'string', 'description':
-                    'The DOI or arXiv identifier printed for this work. Preserve a cited version.'}
             result.append(schema('check_reference',
                 'Choose the lookup according to what the answer needs from the source. '
                 'For books, papers or notes to learn a topic, use standard and give the topic. '

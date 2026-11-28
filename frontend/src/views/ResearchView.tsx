@@ -15,7 +15,7 @@ import { activeTasks, capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, StreamBody, roleInfo, useJobClass, useLiveStream } from './shared'
-import { AUTHOR_REVIEW_PIPELINE, FIXED_VARIANTS, GRAPH_REVIEW_PIPELINE, isManuscriptReview, PIPELINE_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
+import { FIXED_VARIANTS, READINGS_PIPELINE, PIPELINE_STEPS, VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS, resumeAdditionalSeconds } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review: code searches and follows citations; the model screens the records,
@@ -124,7 +124,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       <ol className="phases phases-wide" aria-label="Workflow">
         {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
-          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{isManuscriptReview(data.pipeline) && data.pipeline !== GRAPH_REVIEW_PIPELINE && step === 'plan' ? 'Prepare' : data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
+          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{data.pipeline === READINGS_PIPELINE && step === 'plan' ? 'Prepare' : data.variant === 'explain' && step === 'check' ? 'Accuracy' : names[step]}</li>
         })}
       </ol>
       <WorkProgressNote progress={data.progress} status={data.status} running={data.running} pipeline={data.pipeline} taskId={ownTask?.id} />
@@ -161,11 +161,11 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
 
 export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagged: Set<string>; issues: string[]; onCite: (ref: string) => void }) {
   // The saved partial report identifies interrupted work even when the agent streamed some prose.
-  const report = isManuscriptReview(data.pipeline) && !data.running
-    ? data.report || data.draft : data.draft || data.report
+  const readings = data.pipeline === READINGS_PIPELINE
+  const report = readings ? (data.running ? data.draft : data.report || data.draft) : data.draft || data.report
   return (
     <div className={data.pipeline === REVIEW_PIPELINE ? 'report literature-review' : 'report'}>
-      {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}
+      {!readings && data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} pipeline={data.pipeline} owner={data.owner_task} />}
       {issues.length > 0 && (
         <div className="checks-note">
           <p className="objection-label">{data.variant ? 'Notes from the controller' : data.pipeline ? 'The self-check found gaps' : 'The controller could not confirm every citation'}</p>
@@ -180,22 +180,23 @@ export function Report({ data, flagged, issues, onCite }: { data: ResearchDetail
       )}
       {report ? (
         <>
-          <p className="caveat">{data.pipeline === GRAPH_REVIEW_PIPELINE ? 'Pre-submission review of the manuscript and its proofs.' : data.pipeline === AUTHOR_REVIEW_PIPELINE ? 'Pre-submission report for the author.' : isManuscriptReview(data.pipeline) ? 'Manuscript review by the Explore agent.' : data.pipeline === 'review-v1' ? 'This earlier review assessed the presentation and gave an overview of the manuscript. Its workflow did not check the proofs.' : data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline === REVIEW_PIPELINE
+          {!readings && <p className="caveat">{data.pipeline === 'review-v1' ? 'This earlier review assessed the presentation and gave an overview of the manuscript. Its workflow did not check the proofs.' : data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline === REVIEW_PIPELINE
             ? 'Every reference comes from a returned bibliographic record. Statements of results come from abstracts and, where marked, from full texts; this is a model-written survey to check against the papers.'
             : data.pipeline
             ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
-            : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
+            : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>}
           {(data.outputs?.review || data.outputs?.bib) && (
             <div className="outputs">
-              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(data.id)} download>{data.status === 'complete' ? 'Download review (.md)' : 'Download partial review (.md)'}</a>}
+              {data.outputs.review && <a className="btn btn-small btn-primary" href={api.reviewMarkdownUrl(data.id)} download>{['complete', 'reviewed'].includes(data.status) ? 'Download review (.md)' : 'Download partial review (.md)'}</a>}
               {data.outputs.bib && <a className={'btn btn-small' + (data.outputs.review ? '' : ' btn-primary')} href={data.outputs.review ? api.reviewBibtexUrl(data.id) : api.researchBibDownloadUrl(data.id)} download>BibTeX (.bib)</a>}
             </div>
           )}
           {data.coverage && <p className="caveat">{coverageText(data.coverage)}</p>}
           <Markdown className="report-text" onCite={onCite} flagged={flagged}>{report}</Markdown>
+          {data.preliminary && <p role="status" className="notice">{data.preliminary}</p>}
         </>
       ) : (
-        <p className="empty-note">No draft yet. {isManuscriptReview(data.pipeline) ? (data.running ? 'The reviewer is examining the manuscript.' : '') : data.running
+        <p className="empty-note">No draft yet. {readings ? (data.running ? 'The readers are examining the manuscript.' : '') : data.running
           ? (data.pipeline === REVIEW_PIPELINE ? 'The review is written once the key papers are read and the sections planned.' : data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.')
           : 'The plan and working notes are under Plan and notes.'}</p>
       )}
@@ -235,7 +236,7 @@ function Checks({ data, sources, issues, cite, onCite }: {
   return (
     <div className="ledger">
       {cite && <Passage refText={cite} data={data} sources={sources} onClose={() => onCite(null)} />}
-      {(!isManuscriptReview(data.pipeline) || issues.length > 0) && <section className="aside-section">
+      {(data.pipeline !== READINGS_PIPELINE || issues.length > 0) && <section className="aside-section">
         <h3 className="aside-title">Citation checks</h3>
         {issues.length ? (
           <ul className="issue-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>

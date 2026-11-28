@@ -771,7 +771,7 @@ def run_worker(host, parent, budget, action, child, save):
             if coverage:
                 # What a quick review did and did not check: one proof is never a verdict on the document.
                 result['coverage'] = coverage['summary']
-            if mode == 'literature' and runner.state.get('outputs'):
+            if (whole_review or mode == 'literature') and runner.state.get('outputs'):
                 result['outputs'] = copy.deepcopy(runner.state['outputs'])
             if runner.state.get('progress'):
                 result['progress'] = copy.deepcopy(runner.state['progress'])
@@ -884,7 +884,7 @@ def run_worker(host, parent, budget, action, child, save):
                           native_status=result['status'], error_code=(result.get('error') or {}).get('code'),
                           job_id=result['job_id'] if mode not in ('explore',) + USER_MODES else None,
                           **({'outputs': runner.state.get('outputs') or {}}
-                             if mode in ('writeup', 'summarize', 'literature') and runner and runner.state else {}))
+                             if (whole_review or mode in ('writeup', 'summarize', 'literature')) and runner and runner.state else {}))
         host.saved()
         return result
     except KeyboardInterrupt:

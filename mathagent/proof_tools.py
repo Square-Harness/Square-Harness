@@ -17,6 +17,18 @@ PAPER_TOOLS = ('search_papers', 'open_paper', 'search_paper', 'read_paper')
 SANDBOX_TOOLS = ('execute_python', 'read_experiment')
 
 
+def outbound_terms(url):
+    """Decode the lookup that will reach the provider, including arXiv field and boolean syntax."""
+    values = [unquote_plus(url)]
+    target = urlsplit(url)
+    if target.hostname == 'export.arxiv.org' and target.path == '/api/query':
+        for query in parse_qs(target.query).get('search_query', []):
+            # arxiv_query formats plain words as all:"word" AND all:"word" before the HTTP request.
+            query = re.sub(r'\b(?:all|ti|au|abs|co|jr|cat|rn|id|submittedDate):', '', query)
+            values.append(re.sub(r'\s+(?:ANDNOT|AND|OR)\s+', ' ', query))
+    return values
+
+
 class ProofDesk:
     def __init__(self, agent, private_texts=()):
         self.workspace = agent.workspace
@@ -59,14 +71,7 @@ class ProofDesk:
         """A support worker may reason about private text. Check what will actually reach each source."""
         if url in self.requested_urls:
             return
-        values = [unquote_plus(url)]
-        target = urlsplit(url)
-        if target.hostname == 'export.arxiv.org' and target.path == '/api/query':
-            for query in parse_qs(target.query).get('search_query', []):
-                # arxiv_query formats plain words as all:"word" AND all:"word" before the HTTP request.
-                query = re.sub(r'\b(?:all|ti|au|abs|co|jr|cat|rn|id|submittedDate):', '', query)
-                values.append(re.sub(r'\s+(?:ANDNOT|AND|OR)\s+', ' ', query))
-        self._check_text(values)
+        self._check_text(outbound_terms(url))
 
     def _check_text(self, values):
         if any(copied_phrases({'results': values}, source) for source in self.private_texts):

@@ -7,15 +7,11 @@
   setting). The first complete reading appears at once as a preliminary answer while
   the others work; the combination reuses their reference checks. The saved turn keeps
   every reading.
-- Whole-paper Review groups related proofs using manuscript dependencies and
-  gives each group a primary reader. The lead checks connections and remaining
-  passages alongside an independent statement-first test. Serious findings
-  can receive a fresh mathematical judgment before the report is written.
-  Progress and worker evidence survive a pause. Earlier saved reviews retain
-  their original workflow.
-- The main referee starts citation checks in the background and looks for the
-  cited work and passage first. It can continue checking independent proofs,
-  wait for a result its verdict needs, and identify unfinished attributions in the report.
+- Whole-paper Review now starts two independent readings of the same manuscript.
+  The first finished reading appears as a preliminary answer. A further reading
+  checks their findings against the manuscript, reuses completed citation checks
+  and writes the report for the conversation, Notebook and download. Previously
+  saved reviews keep their original workflow when resumed.
 - Explore can submit independent calculations and reference lookups while
   working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
 - The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.
@@ -39,7 +35,7 @@
   the context of the manuscript.
 - Investigate composes its settled answer from the finished evidence when all
   the earlier findings are available. Write-up and Summarize check requested
-  deductions against the supplied premises. Full Review reports why it selected
+  deductions against the supplied premises. Saved v4 Reviews record why they selected
   the section-by-section reader.
 
 - Explore can check a reading recommendation or verify a precise claim. The

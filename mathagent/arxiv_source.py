@@ -459,6 +459,28 @@ def assemble_tex(members, main, *, deadline=None, cancelled=lambda: False):
     return {'text': '\n'.join(out), 'line_map': runs, 'members': used, 'missing': missing}
 
 
+def unique_tex_root(candidates, sources):
+    """Recognize an unambiguous included project among otherwise ambiguous manuscript attachments."""
+    if not candidates or any(s.get('source_archive') or PurePosixPath(s['path']).suffix.lower() not in TEX_SUFFIXES
+                             for s in candidates):
+        return None
+    required = {s['path'] for s in candidates}
+    members = {s['path']: s['content'] for s in sources}
+    main, other_mains = main_document({s['path']: s['content'] for s in candidates})
+    possible = set([main, *other_mains]) if main else required
+    matched = []
+    for s in candidates:
+        if s['path'] in possible and _INCLUDE.search(s['content']):
+            try:
+                assembled = assemble_tex(members, s['path'])
+            except SourceArchiveError:
+                continue
+            if required.issubset(assembled['members']) and not any('circular inclusion' in problem
+                                                                   for problem in assembled['missing']):
+                matched.append(s)
+    return matched[0] if len(matched) == 1 else None
+
+
 def member_line(line_map, line):
     """(member, line) of an assembled line, or None outside the map."""
     for start, member, member_start, count in line_map:

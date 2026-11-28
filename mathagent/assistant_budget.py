@@ -20,9 +20,7 @@ class AssistantBudget(AgentError):
 
 
 class AssistantAdmissionRefused(AssistantBudget, ModelNotDispatched):
-    def __init__(self, message, *, resource=None):
-        super().__init__(message)
-        self.resource = resource
+    pass
 
 
 class _Pool:
@@ -303,12 +301,12 @@ class BudgetClient:
             self.ensure_limits(max_tokens=self.pool.state['tokens'] + cap,
                                max_input_tokens=self.pool.state['input_tokens'] + count)
             if type(cap) is not int or cap <= 0 or cap > self.remaining_tokens:
-                raise AssistantAdmissionRefused('Assistant output budget cannot cover the next model call.', resource='output')
+                raise AssistantAdmissionRefused('Assistant output budget cannot cover the next model call.')
             if self.input_allowance is not None and self.usage['input_tokens'] + count > self.input_allowance:
-                raise AssistantAdmissionRefused('Worker input budget exhausted; no mathematical context was clipped.', resource='input')
+                raise AssistantAdmissionRefused('Worker input budget exhausted; no mathematical context was clipped.')
             input_limit = self.pool.state['max_input_tokens']
             if input_limit is not None and self.pool.state['input_tokens'] + count > input_limit:
-                raise AssistantAdmissionRefused('Assistant input budget exhausted; no mathematical context was clipped.', resource='input')
+                raise AssistantAdmissionRefused('Assistant input budget exhausted; no mathematical context was clipped.')
             # Reserve before dispatch. Interrupted or unaccounted calls retain
             # their allowance, so a resume cannot spend those tokens twice.
             self.pool.state['tokens'] += cap

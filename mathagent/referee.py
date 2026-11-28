@@ -538,10 +538,8 @@ class MeteredClient:
         return min(left, outer) if isinstance(outer, (int, float)) else left
 
     def _round_capacity(self, cap, count):
-        # Called under the job mutex, immediately before this call is reserved in the ledger.
-        if is_ds4(self.runner.agent):
-            return int(min(cap, self.remaining_tokens))
-        return cap
+        # Recheck the shared allowance under the review's lock, immediately before reservation.
+        return int(min(cap, self.remaining_tokens)) if is_ds4(self.runner.agent) else cap
 
     def fork_reference(self, ident, transport):
         client = MeteredClient(self.runner, self.role, ident)

@@ -73,8 +73,24 @@ function SingleAgent({ lane, prompt }: { lane: AgentLane; prompt?: string }) {
 }
 
 export function AgentGroup({ lanes, prompt, chatId }: { lanes: AgentLane[]; prompt?: string; chatId?: string }) {
-  return lanes.length === 1 && activeAgent(lanes[0])
-    ? <SingleAgent lane={lanes[0]} prompt={prompt} /> : <AgentBatch lanes={lanes} chatId={chatId} />
+  return <>
+    {lanes.length === 1 && activeAgent(lanes[0])
+      ? <SingleAgent lane={lanes[0]} prompt={prompt} /> : <AgentBatch lanes={lanes} chatId={chatId} />}
+    {lanes.map(lane => lane.hasPreliminary && lane.job_id && <FirstReading key={lane.job_id} job={lane.job_id} />)}
+  </>
+}
+
+/** Read the checkpoint once when it becomes available. The card drops this view when the review finishes. */
+export function FirstReading({ job }: { job: string }) {
+  const { data } = useLoad(() => api.research(job), [job])
+  if (!data?.preliminary || !data.draft) return null
+  return <div className="entry message message-model">
+    <span className="in-margin speaker speaker-model mode-referee"><Glyph mode="referee" /></span>
+    <div className="message-body">
+      <Markdown className="answer" mathProse>{data.draft}</Markdown>
+      <p className="notice" role="status">{data.preliminary}</p>
+    </div>
+  </div>
 }
 
 /** A finished agent's answer, readable in place while the other agents of its batch are still working. */

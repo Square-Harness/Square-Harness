@@ -39,7 +39,7 @@ def preliminary_notice(samples, remaining):
             'the source will replace this one, to make it more complete and more reliable.')
 
 
-def _reference_checks(messages, start):
+def _reference_checks(messages, start, limit=CHECK_CHARS):
     """(claim checked, result) for each reference check a reading completed in its turn.
 
     ``start`` is the index of the turn's own request: prompts the agent adds later in the turn are part of it.
@@ -58,6 +58,7 @@ def _reference_checks(messages, start):
                     except ValueError:
                         arguments = {}
                 claims[call.get('id')] = str((arguments or {}).get('statement') or '')
+    size = 0
     for message in turn:
         if message.get('role') != 'tool' or message.get('tool_name') not in ('check_reference', 'await_background_check'):
             continue
@@ -87,7 +88,10 @@ def _reference_checks(messages, start):
                                  ensure_ascii=False)
         elif message.get('tool_name') != 'check_reference' or not content:
             continue
-        checks.append((claim, content))
+        entry_size = len(claim) + len(content)
+        if size + entry_size <= limit:
+            checks.append((claim, content))
+            size += entry_size
     return checks
 
 

@@ -51,9 +51,7 @@ LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
 # The Review with free referees and an independent judge (referee.RefereeRunner); it keeps 'review-v2' (the pipeline of
 # this module) when the whole paper does not fit the model's context.
 V4_PIPELINE = 'review-v4'
-LEGACY_EXPLORE_PIPELINE = 'review-explore-v1'
-EXPLORE_PIPELINE = 'review-explore-v2'
-GRAPH_PIPELINE = 'review-graph-v1'
+READINGS_PIPELINE = 'review-readings-v1'
 SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
 TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
 MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
@@ -164,8 +162,8 @@ def level_for(rounds):
 def runner_class(variant):
     """Dispatch new jobs; saved jobs are dispatched using their recorded pipeline."""
     if variant in ('review', 'journal'):
-        from .graph_review import GraphReviewRunner
-        return GraphReviewRunner
+        from .reading_review import ReadingReviewRunner
+        return ReadingReviewRunner
     return {'quick': QuickReviewRunner, 'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
 
 
@@ -174,7 +172,7 @@ def variant_for_state(state):
     effort, when the typo check was the review's lowest effort, is a typo check."""
     variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
                    LEGACY_PIPELINES.get(state.get('pipeline')))
-    if state.get('pipeline') in (V4_PIPELINE, LEGACY_EXPLORE_PIPELINE, EXPLORE_PIPELINE, GRAPH_PIPELINE):
+    if state.get('pipeline') in (V4_PIPELINE, READINGS_PIPELINE):
         variant = 'review'
     return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
@@ -185,13 +183,7 @@ def runner_for_state(state):
     if variant == 'review' and state.get('pipeline') == V4_PIPELINE:
         from .referee import RefereeRunner
         return RefereeRunner
-    if variant == 'review' and state.get('pipeline') == LEGACY_EXPLORE_PIPELINE:
-        from .explore_review import LegacyExploreReviewRunner
-        return LegacyExploreReviewRunner
-    if variant == 'review' and state.get('pipeline') == EXPLORE_PIPELINE:
-        from .explore_review import ExploreReviewRunner
-        return ExploreReviewRunner
-    if variant == 'review' and state.get('pipeline') != GRAPH_PIPELINE:
+    if variant == 'review' and state.get('pipeline') != READINGS_PIPELINE:
         return PaperReviewRunner  # saved v2/v3 jobs resume with their own pipeline
     return runner_class(variant) if variant else ResearchRunner
 
@@ -1059,8 +1051,8 @@ class ReviewBase(ResearchRunner):
         if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
             # Several manuscripts and none named: ask, never review whichever happens to come first.
             matches = documents(manuscripts) or [sources[0]]
-            if len(matches) > 1 and self.PIPELINE == GRAPH_PIPELINE:
-                from .review_graph_plan import unique_tex_root
+            if len(matches) > 1 and self.PIPELINE == READINGS_PIPELINE:
+                from .arxiv_source import unique_tex_root
                 root = unique_tex_root(matches, sources)
                 if root is not None:
                     matches = [root]
@@ -4506,6 +4498,17 @@ def export_evidence(state):
         return [{'kind': 'review', 'mode': 'quick_review', 'text': task, 'qualifiers': quals, 'links': links,
                  'status': labels.get(state.get('verdict'), 'review unfinished'),
                  'evidence': {'unit': unit.get('id'), 'source': unit.get('source'), 'proof_ranges': unit.get('proofs', [])}}]
+    if state.get('pipeline') == READINGS_PIPELINE:
+        record = state.get('readings') or {}
+        rows = record.get('readings', [])
+        completed = sum(bool(row.get('complete')) for row in rows)
+        summary = f'{completed} of {record["samples"]} independent readings finished.'
+        if record.get('combined'):
+            summary += ' The combined report checked the readings against the manuscript.'
+        return [{'kind': 'review', 'mode': 'referee', 'status': 'referee report' if record.get('combined') else 'partial review',
+                 'qualifiers': quals, 'links': links, 'summary': summary,
+                 'evidence': {'combined': bool(record.get('combined')), 'readings': [
+                     {k: r.get(k) for k in ('index', 'coverage', 'stop_reason', 'reference_checks')} for r in rows]}}]
     if state.get('pipeline') == V4_PIPELINE:
         issues = state.get('issues') or []
         judged = [i for i in issues if i.get('status') == 'judged']

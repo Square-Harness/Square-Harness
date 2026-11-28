@@ -651,7 +651,7 @@ app and the other way round: both use the same saved files.
 | Literature check | 1–2 references, each with its evidence level | `@check` | `/check` |
 | Literature review | A survey of the requested question, with theorems in their settings, proof ideas and linked references | `@literature`, New literature review | `/literature` |
 | Quick review | Is this proof correct? Verdict and located issues | `@quick_review` | `/quick_review` |
-| Review | Pre-submission review of results, proofs and references by a referee with an independent reader checking consequential steps | `@referee`, New review | `/referee` |
+| Review | Two independent whole-manuscript readings combined into a pre-submission report | `@review`, `@referee`, New review | `/referee` |
 | Typo check | The typos and presentation problems of a manuscript, each correction checked | `@typo_check`, New review | `/typo_check` |
 | Explain | A result and its proof, a page or a section explained step by step | `@explain` | `/explain` |
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
@@ -1166,9 +1166,6 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   through different lenses: line by line, adversarially, the results it uses.
   When an attached proof is written in prose, the checker can locate its
   statement and argument by line before running the same verification passes.
-  A full Review uses the section-by-section reader when the manuscript has no
-  mapped results for the other referees to follow. Its progress log gives the
-  reason for this choice.
   A new Proof Check uses the High profile. Its verifier passes examine distinct
   aspects of the proof, and a fresh call rechecks each alleged error. The verdict is *no issue found*, *issues found* or
   *uncertain*; *uncertain* always names the step that was not settled. Each issue
@@ -1176,40 +1173,24 @@ The review kinds work on a proof you paste, or on a manuscript you attach
   is never rewritten. When the proof is in an attached file and the model has a
   large context (DS4), every pass also sees the whole file, so definitions and
   standing assumptions made elsewhere are in force.
-- **Review** (`@referee`) reads a whole manuscript. Attach the paper in an
+- **Review** (`@review` or `@referee`) reads a whole manuscript. Attach the paper in an
   Assistant conversation and say “review that paper”, or choose Review from the
   form. You can specify a focus such as “check the proof of Theorem 1.4”.
-  Review maps the statements, proofs and explicit dependencies in the pinned
-  manuscript. It assigns related arguments to a reader. Each reader receives
-  the statements and proof passages it owns, the places where results are used,
-  and access to the whole manuscript. Readers can work at the same time. When
-  one proof uses another theorem, its reader checks whether the theorem as
-  stated applies there. The reader who owns the theorem examines its proof.
-  A lead referee examines the connections between arguments, unassigned prose,
-  references and presentation. An independent reader tests a consequential
-  statement starting from its hypotheses. The lead can ask for an additional
-  focused check. A fresh judge examines serious or disputed objections.
-  The report writer receives the full handoffs and source diagnostics and
-  produces one report for the author. If the reviewers cannot settle a point,
-  the report should explain what remains open. Earlier saved reviews resume
-  with the workflow that created them. A coverage note names any mapped proofs
-  whose reader omitted a concrete assessment.
-  The referee can run Python while it examines another passage. Citation checks
-  normally start in the background and seek the original publication or the
-  author's version, including the relevant theorem and hypotheses. If only a
-  bibliographic record or another paper's citation is available, the referee
-  identifies the evidence it obtained. It waits for checks you explicitly
-  request and for those needed for the mathematical verdict. An ancillary
-  attribution stays in the background unless it becomes necessary to the
-  review. The report names any such attribution still unfinished at delivery.
-  You can reopen the report and discuss a particular finding.
-  If the reviewer stops before it finishes, the job records the interruption.
-  An empty answer after tool use gets one opportunity to recover.
+  Two readers independently read the same manuscript with your question in view.
+  The first finished reading appears as a preliminary answer. When both are
+  ready, a final reader checks their findings against the manuscript, including
+  points that only one reader raised. It also receives the citation checks they
+  completed. The final report replaces the preliminary answer. You can reopen
+  it in the Notebook, download it, or ask about a particular finding. If the
+  job pauses, the completed reading stays available and Resume continues from
+  its saved progress.
+  Earlier saved reviews resume with the workflow that created them.
 
   To ask for a separate survey, say “review that paper and compare its results
   with the literature” in the conversation. With online search enabled, the
   Assistant then adds a comparison based on the literature review's sources.
   For an ordinary review, the agent can look up individual citations as needed.
+
 - **Typo check** (`@typo_check`): the typos and presentation problems of a
   manuscript, and nothing else. The paper is proofread in parts of about 220
   lines (each call with the whole paper in view) for typos, misprinted formulas,
