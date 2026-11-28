@@ -705,13 +705,21 @@ select {
 .file-view-markdown:hover { border-color: var(--line); background: var(--sheet); }
 .file-view-markdown:focus-visible { outline: 2px solid var(--focus); }
 .file-view-note { margin: 24px 0; }
-/* The viewer beside a conversation (a .work-panel): the notebook's header, then the tools, then the file. */
+.job-source-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.job-source-workspace > .job { min-width: 0; }
+@media (min-width: 1200px) {
+  .job-source-workspace:has(.file-panel) > .job { grid-template-columns: minmax(0, 1fr); }
+  .job-source-workspace:has(.file-panel) .job-aside { display: none; }
+}
+/* The viewer beside a conversation (a .work-panel): one header line (name, tools, Download, Close), then the file. */
 .file-panel .file-view { padding: 10px 16px 16px; }
 .file-panel-head h2, .file-panel-head .notebook-head-status { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-view-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; }
-.file-view-tools > .file-view-mode { margin-right: auto; }
-.file-view-tools .file-view-state { min-width: 0; }
+.file-panel-head { gap: 8px; }
+.file-panel-head > .btn { flex: none; }
+a.icon-btn { display: inline-grid; place-items: center; color: inherit; }
 .file-panel-dragging { user-select: none; }
+/* A document an agent produced, in the viewer: read like a Markdown file. */
+.result-document { max-width: var(--measure); padding: 4px 4px 12px; }
 .file-panel-dragging iframe { pointer-events: none; }
 @media (max-width: 1199px) { .work-panel.file-panel { width: min(760px, 92vw); } }
 @media (max-width: 760px) { .work-panel.file-panel { width: 100%; } }

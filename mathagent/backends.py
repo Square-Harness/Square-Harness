@@ -45,6 +45,21 @@ class TokenBudgetError(AgentError):
                          f'({self.stats["eval_count"]} > {requested_cap})')
 
 
+class RepetitionLoop(AgentError):
+    """Local stop before delivery of a complete response or any executable tool calls."""
+
+    category = 'repetition'
+
+    def __init__(self, channel, stream_progress=None, stats=None, *, kind='exact', provider=None):
+        self.channel = channel
+        self.kind = kind
+        self.provider = provider
+        self.stream_progress = dict(stream_progress or {})
+        self.stats = dict(stats or {})
+        label = 'reasoning' if channel == 'thinking' else 'answer'
+        super().__init__(f'The model repeated a passage in its {label}. This generation was stopped.')
+
+
 class ToolCallError(AgentError):
     """A finished response has invalid calls; none may be executed.
 
@@ -326,6 +341,7 @@ class OpenAICompatible:
     # Seconds without model output, once a stream has started, before the call is ended. None for
     # local servers, whose scheduler may hold a started request for a long time; set by hosted profiles.
     stall_seconds = None
+    detect_repetition = False
 
     @staticmethod
     def _sse(response, deadline=None):
@@ -362,13 +378,22 @@ class OpenAICompatible:
     def _first_model_output(self):
         """Transport hook for an observer monitoring a silent, accepted stream."""
 
+    def _generation_observer(self, data):
+        """A per-response metadata observer, when the service identifies its upstream."""
+        return None
+
     def _stream_deadline(self):
         return time.monotonic() + self.timeout
 
     def _stream(self, data, output_char_limit=None, start_seconds=None, *, before_send=None, on_usage=None):
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
+        observe, receipt, observed_provider = None, None, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
+        detectors = {}
+        if self.detect_repetition:
+            from .repetition import RepetitionDetector
+            detectors = {field: RepetitionDetector() for field in ('content', 'thinking')}
         generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = self._stream_deadline()
@@ -377,6 +402,7 @@ class OpenAICompatible:
         try:
             with self.request('/chat/completions', data, **request_options) as response:
                 accepted = True
+                observe = self._generation_observer(data)
                 output = {'started': False, 'last': None}
                 lines = response if start_seconds is None else _started(response, start_seconds, output)
                 if self.stall_seconds:
@@ -407,6 +433,11 @@ class OpenAICompatible:
                             raise AgentError('Model finished with tool_calls but supplied no calls')
                         event = {'message': {'tool_calls': complete_calls} if complete_calls else {},
                                  'done': True, **stats}
+                        if observe is not None:
+                            receipt = observe(None)
+                            observe = None
+                        if receipt is not None:
+                            event['generation'] = receipt
                         if on_usage is not None:
                             warning = on_usage(usage, progress)
                             on_usage = None
@@ -417,6 +448,11 @@ class OpenAICompatible:
                     chunk = json.loads(raw)
                     if not isinstance(chunk, dict):
                         raise AgentError('Malformed SSE model event')
+                    if observe is not None:
+                        receipt = observe(chunk)
+                        if receipt is not None:
+                            observed_provider = receipt.get('provider')
+                            observe = None
                     # A tool ID or an unfinished function fragment is model output
                     # even if no complete tool call has reached the caller. Inspect
                     # co-located deltas before an error in that same frame.
@@ -516,12 +552,25 @@ class OpenAICompatible:
                             finish = reason
                         if finish is not None and reported:
                             final_usage = reported
+                        # Tool arguments can legitimately contain large repeated datasets. Keep their
+                        # fragments private until the whole call finishes, even if a text channel loops.
+                        for channel, value in message.items():
+                            if channel in detectors and detectors[channel].feed(value):
+                                if observe is not None:
+                                    observed_provider = (observe(None) or {}).get('provider')
+                                    observe = None
+                                raise RepetitionLoop(channel, progress, final_usage, kind=detectors[channel].kind,
+                                                     provider=observed_provider)
                         if message:
-                            yield {'message': message, 'done': False}
+                            event = {'message': message, 'done': False}
+                            if receipt is not None:
+                                event['generation'] = receipt
+                                receipt = None
+                            yield event
                     if not choices and finish is not None and reported:
                         final_usage = reported
             error = AgentError('Model stream ended before [DONE]; partial output is incomplete')
-        except (ToolCallError, TokenBudgetError):
+        except (ToolCallError, TokenBudgetError, RepetitionLoop):
             raise
         except KeyboardInterrupt:
             if final_usage:
@@ -541,6 +590,8 @@ class OpenAICompatible:
             if accepted and on_usage is not None:
                 # Includes early close, local guards, model errors and cancellation before a usage trailer.
                 on_usage(final_usage, progress)
+            if observe is not None:
+                observe(None)
         raise self._stream_failure(error, 'interrupted', progress, final_usage, output_started)
 
 

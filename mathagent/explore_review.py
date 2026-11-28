@@ -170,6 +170,12 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
             if kind == 'start':
                 chunks.clear()
                 partial.clear()
+            elif kind == 'discard':
+                # The discarded generation cannot supply a report, even if its replacement is interrupted.
+                chunks.clear()
+                partial.clear()
+                state['draft'] = ''
+                self._save()
             elif kind == 'draft':
                 partial.append(value)
                 if time.monotonic() - last_write >= 2:

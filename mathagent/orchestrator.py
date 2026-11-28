@@ -25,8 +25,8 @@ from urllib.parse import urlsplit
 from .agent import AgentError
 from .api_profiles import HOSTED_PROFILES
 from .assistant_budget import AssistantBudget
-from .backends import MeasuredStreamCancellation, ToolCallError
-from .call_policy import CallContextError, allocate_call
+from .backends import MeasuredStreamCancellation, RepetitionLoop, ToolCallError
+from .call_policy import CallContextError, REPETITION_RECOVERY, allocate_call, prefer_different_upstream
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .prompts import NOTEBOOK_DISPLAY_RECEIPT, PROJECT_SCOPE, with_notebook_evidence
@@ -772,7 +772,7 @@ class Orchestrator:
                 + with_notebook_evidence(copy.deepcopy(self.state['messages']), self.state.get('notebook_source'),
                                          self.state.get('history_prefix_count', 0)),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
-                        'temperature': 0, 'top_p': self.agent.top_p},
+                        'temperature': self.agent.temperature, 'top_p': self.agent.top_p},
         }
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + self.state['main_calls']) % (2 ** 31)
@@ -834,9 +834,6 @@ class Orchestrator:
                 'It writes with what there is and marks what is still missing.'}
             payload['messages'].append(waiting_notice)
         if self.state.get('tool_call_recovery_pending'):
-            # Greedy decoding can reproduce the same malformed repetition.
-            # Keep the exact premises and give one explicit correction request.
-            payload['options']['temperature'] = 0.6
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER TOOL-CALL RECOVERY: the previous tool call contained malformed JSON '
                 'and was rejected before execution. No tools ran from that response. Choose the '
@@ -960,7 +957,18 @@ class Orchestrator:
         with generation_attempts(self.agent.client, self.emit, before_retry=before_retry, replay=False) as attempts:
             for attempt in attempts:
                 with attempt:
-                    return self._stream_once(payload)
+                    try:
+                        return self._stream_once(payload)
+                    except RepetitionLoop as exc:
+                        if not before_retry(exc):
+                            raise
+                        self.emit('notice', f'{exc} Retrying from the completed conversation and tool results.')
+                        payload = copy.deepcopy(payload)
+                        prefer_different_upstream(payload, exc.provider)
+                        payload['messages'][0]['content'] += '\n\n' + REPETITION_RECOVERY
+                        payload, allocation = allocate_call(self.agent.client, payload, payload['options']['num_predict'])
+                        self.state['next_allocation'] = allocation
+                        return self._stream_once(payload)
 
     def _stream_once(self, payload, output_char_limit=None):
         self.agent.last_stats = {}
@@ -1024,6 +1032,12 @@ class Orchestrator:
             if rejected_before_inference(exc):
                 self.state['last_call'].update(status='rejected', charged_tokens=0, charged_input_tokens=0)
                 self.state['main_calls'] -= 1
+            elif isinstance(exc, RepetitionLoop):
+                self.state['last_call'].update(status='repetition', repetition_channel=exc.channel,
+                                               stream_progress=exc.stream_progress)
+                self.agent.last_stats = dict(exc.stats)
+                assistant = {'role': 'assistant', 'content': ''}
+                calls = []
             elif isinstance(exc, DeepInfraGenerationError):
                 self.state['last_call'].update(status='interrupted', provider_error=exc.category,
                                                stream_progress=exc.stream_progress)
@@ -1039,7 +1053,7 @@ class Orchestrator:
             self.state['last_call']['stats'] = copy.deepcopy(self.agent.last_stats)
             if retry and assistant['content'] and (calls or warning != ''):
                 self.emit('text', assistant['content'])
-            self.emit('end', '')
+            self.emit('discard' if self.state['last_call'].get('status') == 'repetition' else 'end', '')
         if calls:
             assistant['tool_calls'] = calls
         if warning:

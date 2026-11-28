@@ -30,7 +30,7 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _read
 from .research import ResearchBudget, ResearchRunner, _estimate, _working_reference_prompt, _reference_snapshot, remaining_limit, usable_completion, _job_directory, _read_state
-from .call_policy import allocate_call, CallContextError
+from .call_policy import allocate_call, CallContextError, prefer_different_upstream, retry_repeated_prompt
 from .proof import count_input
 from .worker_errors import WorkerInputError
 from .jsonutil import loads as json_loads
@@ -615,7 +615,7 @@ class ReviewBase(ResearchRunner):
         return bool(getattr(self.agent, 'think', False)) and self._cap(cap) >= 4096
 
     def _judge(self, role, prompt, *, cap, schema, key, direct_cap=3000, reason=True):
-        """A call that reasons first when there is room, then once more without thinking (warmer) if unusable.
+        """A call that reasons first when there is room, then once more without thinking if unusable.
 
         reason=False answers at once with the full allowance: for a written explanation the visible
         text already carries the derivation, and hidden reasoning repeated it at several times the cost.
@@ -637,13 +637,13 @@ class ReviewBase(ResearchRunner):
                 self._warn(f'A {role} answer was not usable after thinking; it was asked again without thinking.')
             if role == 'explain' and result.get('complete') is False:
                 return self._larger_explanation(result, role, prompt, cap, schema, key)
-            return self._ask(role, prompt, cap=min(cap, direct_cap), schema=schema, key=key + ':direct', temperature=0.2)
+            return self._ask(role, prompt, cap=min(cap, direct_cap), schema=schema, key=key + ':direct')
         result = self._ask(role, prompt, cap=min(cap, direct_cap), schema=schema, key=key)
         if role == 'explain' and result.get('complete') is False:
             return self._larger_explanation(result, role, prompt, cap, schema, key)
         if result['value'] is None and result['complete'] and self._affordable(min(cap, direct_cap), 2000):
             self._warn(f'A {role} answer was not usable; it was asked again.')
-            result = self._ask(role, prompt, cap=min(cap, direct_cap), schema=schema, key=key + ':again', temperature=0.6)
+            result = self._ask(role, prompt, cap=min(cap, direct_cap), schema=schema, key=key + ':again')
         return result
 
     def _larger_explanation(self, result, role, prompt, cap, schema, key):
@@ -663,9 +663,10 @@ class ReviewBase(ResearchRunner):
         """A last check before a call is charged (under the mutex): raise to refuse it. The Review keeps a share of
         the allowance for its judges this way."""
 
+    @retry_repeated_prompt
     @retry_generation_call
-    def _ask(self, role, prompt, *, cap, schema=None, key='', temperature=0.2, think=False, minimum_output=None,
-                  reference=True):
+    def _ask(self, role, prompt, *, cap, schema=None, key='', think=False, minimum_output=None, reference=True,
+             repeated_provider=None):
         """One model call with a fixed prompt; thread-safe, budgeted, streamed to an artifact.
 
         reference=False leaves out the delegation context: a call that does not read the manuscript (the
@@ -679,7 +680,8 @@ class ReviewBase(ResearchRunner):
             if cap < 128:
                 raise ResearchBudget('Generated-token budget exhausted')
             payload = {'model': self.agent.model, 'stream': True, 'think': think,
-                       'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': temperature}}
+                       'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+            prefer_different_upstream(payload, repeated_provider)
             if self.agent.seed is not None:
                 payload['options']['seed'] = (self.agent.seed + zlib.crc32(key.encode())) % (2 ** 31)
             if schema:
@@ -3596,7 +3598,7 @@ class PaperReviewRunner(ReviewBase):
                       and isinstance(value.get('comments'), list))
             if not usable and self._affordable(self._read_cap(), 6000, share=.9):
                 self._warn(f'Reading {_lines_text(a, b)} produced an unusable answer; one fresh attempt was made on the same exact source.')
-                result = self._ask('read', prompt, cap=self._read_cap(), schema=schema, key=key + ':retry', temperature=.4)
+                result = self._ask('read', prompt, cap=self._read_cap(), schema=schema, key=key + ':retry')
                 value = result['value'] or {}
                 usable = (result['complete'] and isinstance(value.get('summary'), str) and bool(value['summary'].strip())
                           and isinstance(value.get('comments'), list))

@@ -17,7 +17,7 @@ import unicodedata
 from .agent import AgentError
 from .call_policy import allocate_call
 from .jsonutil import loads
-from .model_limits import substantive_output
+from .model_limits import DEFAULT_TEMPERATURE, substantive_output
 
 HEADING = '## Position in the literature'
 BRIEF_OUTPUT, POSITION_OUTPUT = 900, 2500
@@ -90,12 +90,12 @@ def manuscript_head(text, budget=None):
     return (title + '\n' + body)[:budget].strip()
 
 
-def bounded_json(client, model, ctx, system, user, schema, output):
+def bounded_json(client, model, ctx, system, user, schema, output, *, temperature=DEFAULT_TEMPERATURE):
     """One short structured call outside the conversation; the answer as a dict, or AgentError."""
     output = substantive_output(client, output)
     payload = {'model': model, 'stream': True, 'think': False, 'format': schema,
                'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
-               'options': {'num_ctx': ctx, 'num_predict': output, 'temperature': 0}}
+               'options': {'num_ctx': ctx, 'num_predict': output, 'temperature': temperature}}
     remaining = getattr(client, 'remaining_tokens', None)
     cap = (max(0, int(remaining)) if isinstance(remaining, (int, float)) and not isinstance(remaining, bool)
            and math.isfinite(remaining) else None)
@@ -169,6 +169,12 @@ def literature_goal(value, head):
 
 
 _BRACED = r'\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}'
+
+
+def manuscript_has_title(manuscript, title):
+    """Does the published title match a title declared in this TeX manuscript?"""
+    titles, _ = _manuscript_names(manuscript)
+    return bool(titles and ' '.join(_words(title)) in titles)
 
 
 def _manuscript_names(manuscript):

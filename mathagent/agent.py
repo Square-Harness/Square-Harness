@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .prompts import SYSTEM, MODES, PROJECT_SCOPE, NOTEBOOK_DISPLAY_RECEIPT, with_notebook_evidence
-from .model_limits import input_limit
+from .model_limits import DEFAULT_TEMPERATURE, input_limit, is_ds4
 
 
 class AgentError(Exception):
@@ -155,7 +155,7 @@ def _fit_read_history(messages, projected, seen):
 class Agent:
     def __init__(self, client, workspace, model='qwen3.8:27b', ctx=8192,
                  predict=4096, think=True, mode='prove', max_rounds=None,
-                 seed=None, temperature=0.6, top_p=0.95):
+                 seed=None, temperature=DEFAULT_TEMPERATURE, top_p=0.95):
         self.client, self.workspace = client, workspace
         self.model, self.ctx, self.predict = model, ctx, predict
         self.think, self.mode, self.max_rounds = think, mode, max_rounds
@@ -285,6 +285,8 @@ class Agent:
         def checkpoint():
             if after_tools:
                 data = {'messages': messages, 'round': round_no}
+                if tool_reasoning:
+                    data['tool_reasoning'] = dict(tool_reasoning)
                 if external:
                     data['external_evidence'] = external
                 if snapshot:
@@ -294,10 +296,13 @@ class Agent:
         watch_progress = self.max_rounds is None and getattr(self, 'stop_on_stalled_tools', True)
         seen_tools, stalled_rounds = set(), 0
         projected, seen_messages = {}, len(messages) - 1
+        tool_reasoning = {int(index): value for index, value in (tool_checkpoint or {}).get('tool_reasoning', {}).items()}
         round_no = tool_checkpoint['round'] if tool_checkpoint else -1
         answer_now = False
         forced_final = self.max_rounds is not None and round_no >= self.max_rounds - 1 and bool(tool_checkpoint)
         continued = 0
+        repetition_retry = False
+        repeated_provider = None
         while True:
             round_no += 1
             open_ended = self.max_rounds is None
@@ -310,6 +315,8 @@ class Agent:
             left = getattr(self.client, 'remaining_tokens', None)
             predict = self.predict if not isinstance(left, (int, float)) else int(min(self.predict, left))
             if predict < 128:
+                if repetition_retry:
+                    raise AgentError('The repeating response was discarded. The remaining allowance cannot fund a fresh answer.')
                 self.last_stop_reason = ('Output limit reached while reasoning; no allowance remains for a final answer.'
                                          if answer_now else 'Generated-token budget exhausted before a final answer.')
                 for message in messages:
@@ -319,11 +326,17 @@ class Agent:
             payload = self._payload([system, *context, *messages], tools, self.think and not answer_now, predict, round_no)
             # The complete native request is counted, including tool schemas.
             # Context fitting adjusts output room, never mathematical premises.
-            from .call_policy import allocate_call, CallContextError
+            from .call_policy import allocate_call, CallContextError, prefer_different_upstream, REPETITION_RECOVERY
             while True:
                 visible = [dict(item, content=projected[i]) if i in projected else item for i, item in enumerate(messages)]
+                if tools and tool_reasoning:
+                    visible = [dict(item, thinking=tool_reasoning[i]) if i in tool_reasoning else item
+                               for i, item in enumerate(visible)]
                 payload['messages'] = [system, *context, *evidence,
                                        *with_notebook_evidence(visible, getattr(self, 'notebook_source', ''), user_index)]
+                if repetition_retry:
+                    prefer_different_upstream(payload, repeated_provider)
+                    payload['messages'][0] = dict(system, content=system['content'] + '\n\n' + REPETITION_RECOVERY)
                 if recovery_notes:
                     payload['messages'] = copy.deepcopy(payload['messages'])
                     payload['messages'][-1]['content'] += ('\n\nUNVERIFIED WORKING NOTES (final excerpt of generated reasoning):\n'
@@ -371,22 +384,35 @@ class Agent:
             # A spontaneous final can race a result. Publish it only when all requested evidence has been seen.
             buffer_text = bool(tools and (evidence_hook or tasks and tasks.pending_receipts(messages)))
             from .deepinfra import generation_stream
-            for event in generation_stream(self.client, payload, emit):
-                msg = event.get('message', {})
-                if msg.get('thinking'):
-                    thinking += msg['thinking']
-                    emit('thinking', msg['thinking'])
-                if msg.get('content'):
-                    assistant['content'] += msg['content']
-                    if not buffer_text:
-                        emit('text', msg['content'])
-                    elif evidence_hook:
-                        emit('draft', msg['content'])
-                calls.extend(msg.get('tool_calls') or [])
-                if event.get('done'):
-                    self.last_stats = {k: event[k] for k in ('eval_count', 'eval_duration',
-                        'prompt_eval_count', 'done_reason') if k in event}
-                    done = True
+            from .backends import RepetitionLoop
+            try:
+                for event in generation_stream(self.client, payload, emit):
+                    msg = event.get('message', {})
+                    if msg.get('thinking'):
+                        thinking += msg['thinking']
+                        emit('thinking', msg['thinking'])
+                    if msg.get('content'):
+                        assistant['content'] += msg['content']
+                        if not buffer_text:
+                            emit('text', msg['content'])
+                        elif evidence_hook:
+                            emit('draft', msg['content'])
+                    calls.extend(msg.get('tool_calls') or [])
+                    if event.get('done'):
+                        self.last_stats = {k: event[k] for k in ('eval_count', 'eval_duration',
+                            'prompt_eval_count', 'done_reason') if k in event}
+                        done = True
+            except RepetitionLoop as exc:
+                self.last_stats = dict(exc.stats)
+                emit('discard', '')
+                if repetition_retry:
+                    raise
+                emit('notice', f'{exc} Retrying this step with the completed tool results.')
+                repetition_retry = True
+                repeated_provider = exc.provider
+                round_no -= 1
+                continue
+            repetition_retry = False
             late_evidence = done and not calls and bool(tools) and collect(final=True)
             if buffer_text and not late_evidence and assistant['content']:
                 emit('text', assistant['content'])
@@ -407,6 +433,10 @@ class Agent:
                 on_first_response = None
             if calls:
                 assistant['tool_calls'] = calls
+                # Hosted DeepSeek consumes the preceding reasoning when continuing
+                # an accepted tool call. It belongs to this active task only.
+                if thinking and is_ds4(self) and self.last_stats.get('done_reason') in ('tool_calls', 'stop'):
+                    tool_reasoning[len(messages)] = thinking
             messages.append(assistant)
             if self.last_stats.get('done_reason') == 'length':
                 emit('notice', 'Generation hit its output limit; any displayed argument may be incomplete.')

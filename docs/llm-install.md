@@ -314,8 +314,11 @@ Every command below accepts that form in place of `.venv/bin/square-harness`.
 ## Plan C: Hosted DS4 with a local interface
 
 Choose the provider that will receive the model requests. Each provider uses its own key.
+Both profiles run the Assistant and its workers at temperature 1 by default.
 
 ### OpenRouter
+
+The hosted DeepSeek profiles check incoming streams for sustained repetitive prose locally. This uses the existing client process and requires no additional service or credential.
 
 Save the OpenRouter key at the hidden prompt, then start the interface:
 

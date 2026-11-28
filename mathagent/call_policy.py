@@ -8,6 +8,7 @@ units belong in a request and which bounded recovery is appropriate afterward.
 """
 import copy
 import json
+from functools import wraps
 
 from .agent import AgentError
 
@@ -15,6 +16,37 @@ from .agent import AgentError
 CONTEXT_MARGIN = 512
 MIN_PROOF_REVIEW_TOKENS = 128
 POLICY_VERSION = 1
+
+REPETITION_RECOVERY = ('A previous generation repeated a passage and was discarded. Work from the supplied '
+                       'evidence. If a check is settled, move to the next open point. When the evidence supports '
+                       'a conclusion, or an essential point remains unresolved, return the requested result.')
+
+
+def prefer_different_upstream(payload, provider):
+    """Recovery metadata for OpenRouter; never sent as part of the model's prompt."""
+    if provider:
+        payload['_sh_repeated_provider'] = provider
+
+
+def retry_repeated_prompt(method):
+    """Re-enter admission and journaling for a fresh worker call, discarding its unfinished response."""
+    @wraps(method)
+    def wrapped(self, role, *args, **options):
+        from .backends import RepetitionLoop
+        try:
+            return method(self, role, *args, **options)
+        except RepetitionLoop as exc:
+            self.emit('notice', f'{exc} Retrying the saved step.')
+            if exc.provider:
+                options['repeated_provider'] = exc.provider
+        # Research calls this argument instruction. The Review workers call it prompt.
+        if args:
+            prompt, *rest = args
+            return method(self, role, prompt + '\n\n' + REPETITION_RECOVERY, *rest, **options)
+        field = 'instruction' if 'instruction' in options else 'prompt'
+        options[field] += '\n\n' + REPETITION_RECOVERY
+        return method(self, role, **options)
+    return wrapped
 
 
 class CallContextError(AgentError):

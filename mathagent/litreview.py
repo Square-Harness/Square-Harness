@@ -25,8 +25,8 @@ import time
 from xml.etree.ElementTree import ParseError
 
 from .agent import AgentError
-from .backends import TokenBudgetError
-from .call_policy import allocate_call, CallContextError
+from .backends import RepetitionLoop, TokenBudgetError
+from .call_policy import allocate_call, CallContextError, prefer_different_upstream, REPETITION_RECOVERY
 from .jsonutil import complete_fields, loads
 from .ledger import _atomic_write, _bytes
 from .literature import ARXIV_ID, UNLIMITED_SOURCE, LiteratureError, _fold, _crossref_title
@@ -1191,9 +1191,10 @@ class ReviewRunner(ResearchRunner):
     def _failure_count(self, role, unit):
         return self.state.get('generation_failures', {}).get(role, {}).get(str(unit), 0)
 
-    def _ask(self, role, prompt, *, cap, schema=None, temperature=.3, units=()):
+    def _ask(self, role, prompt, *, cap, schema=None, units=()):
         """Retry critical work once, defer failed independent units, and preserve every call's accounting."""
         answer_only = False
+        repeated_provider = None
         last_provider_error = None
         # Immediate replacements share a deadline. A deferred unit in a later
         # wave is separately admitted work under the saved phase and job limits.
@@ -1212,8 +1213,8 @@ class ReviewRunner(ResearchRunner):
                 replacement = any(self._failure_count(role, key) for key in units or (role,))
                 with self._timeout(), generation_window(self.agent.client, replacement=replacement, deadline=deadline), \
                         refusal_notices(getattr(self, 'emit', None)):
-                    result = self._started(role, prompt, cap=cap, schema=schema, temperature=temperature,
-                                           units=units, answer_only=answer_only)
+                    result = self._started(role, prompt, cap=cap, schema=schema, units=units, answer_only=answer_only,
+                                           repeated_provider=repeated_provider)
                     if attempt == 0 and result.get('stopped') == 'reasoning_limit':
                         # The first call delivered no answer. The same prompt and source passage
                         # still need a verdict, under the original cumulative and elapsed limits.
@@ -1222,6 +1223,13 @@ class ReviewRunner(ResearchRunner):
                         continue
                     return result
             except (AgentError, KeyboardInterrupt) as exc:
+                if isinstance(exc, RepetitionLoop):
+                    if attempt:
+                        raise
+                    prompt += '\n\n' + REPETITION_RECOVERY
+                    repeated_provider = exc.provider
+                    self._warn(f'{exc} Retrying the {role} step from its saved evidence.')
+                    continue
                 if isinstance(exc, DeepInfraGenerationError) or rejected_before_inference(exc):
                     if (not isinstance(exc, DeepInfraGenerationError) or isinstance(exc, DeepInfraRateLimit)
                             or exc.category in ('quota', 'auth', 'rate_limit') or self._provider_pause):
@@ -1268,7 +1276,8 @@ class ReviewRunner(ResearchRunner):
                 self._cancel()
                 self._warn(f'A {role} call was accepted by the provider but did not start; it was submitted again.')
 
-    def _ask_once(self, role, prompt, *, cap, schema, temperature, units=(), answer_only=False, resubmission=0):
+    def _ask_once(self, role, prompt, *, cap, schema, units=(), answer_only=False, resubmission=0,
+                  repeated_provider=None):
         with self._mutex:
             self._cancel()
             if self._provider_pause:
@@ -1285,7 +1294,8 @@ class ReviewRunner(ResearchRunner):
             hosted = is_ds4(self.agent)
             payload = {'model': self.agent.model, 'stream': True,
                        'think': bool(deliberate and not answer_only and getattr(self.agent, 'think', True) and cap >= 1800),
-                       'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': temperature}}
+                       'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': self.agent.temperature}}
+            prefer_different_upstream(payload, repeated_provider)
             if hosted:
                 # Under the tester ledger too: a closed silent stream is charged an estimate of its input
                 # (hosted_quota).
@@ -3582,7 +3592,7 @@ class ReviewRunner(ResearchRunner):
                   + 'SOURCES FOR THIS SECTION:\n' + self._pack(works, budget=self._evidence_room(WRITE_EVIDENCE)))
         text = cut = ''
         for attempt in range(2):
-            result = self._ask('write', prompt, cap=cap, temperature=.3, units=[i])
+            result = self._ask('write', prompt, cap=cap, units=[i])
             candidate = self._clean_section(result['text'], section['heading'], allowed=works, table=table)
             if len(candidate) >= min(80, words * 2) and not announces_only(candidate):
                 if result['complete']:
@@ -4213,7 +4223,7 @@ class ReviewRunner(ResearchRunner):
             s['core_recovery'] = {'stage': 'drafting'}
             self._save()
             response = self._ask('recover-write', prompt, cap=int(min(substantive_output(self.agent, 3800), self._tokens_left() * .44)),
-                                 schema=RECOVERY_SCHEMA, temperature=.15)
+                                 schema=RECOVERY_SCHEMA)
             rows = _items((response.get('value') or {}).get('statements')) if response.get('complete') else []
             candidates = []
             seen = set()
@@ -4284,8 +4294,7 @@ class ReviewRunner(ResearchRunner):
                   'itself establishes no mathematical facts.\nRequest: ' + question + '\n\n' + '\n\n'.join(evidence))
         prior['stage'] = 'verifying'
         self._save()
-        response = self._ask('recover-check', prompt, cap=self._wave_cap(4800, 1), schema=RECOVERY_CHECK_SCHEMA,
-                             temperature=0)
+        response = self._ask('recover-check', prompt, cap=self._wave_cap(4800, 1), schema=RECOVERY_CHECK_SCHEMA)
         decisions = _items((response.get('value') or {}).get('decisions')) if response.get('complete') else []
         accepted = []
         for row in candidates:

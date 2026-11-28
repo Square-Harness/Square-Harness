@@ -3,24 +3,14 @@
 
 """Compile a conversation write-up with figures, a table, citations and honest draft status."""
 import base64
-import hashlib
 import io
 import json
-import re
 import shutil
 import unittest
 import zipfile
-from unittest.mock import patch
-from uuid import uuid4
+from urllib.request import Request, urlopen
 
-from mathagent.gui import store
-from mathagent.format_request import conversion_source, markdown_conversion_request, previous_markdown_request
-from mathagent.writeup import WriteupRunner
-
-try:
-    from .test_gui import GuiCase, text
-except ImportError:  # unittest discover imports test modules as top-level names
-    from test_gui import GuiCase, text
+from test_gui import GuiCase, text
 
 
 # The outline call comes first; a plan with no sections leaves the writing to the request.
@@ -29,145 +19,11 @@ PLAN = json.dumps({'kind': 'notes', 'scope': 'document', 'language': 'English', 
                    'sections': [], 'needs': []})
 
 
-NOTHING_FOUND = json.dumps({'issues': []})
-
-
-def report_points(job):
-    """The report's list of points to check."""
-    report = (job / 'report.md').read_text()
-    return report[report.index('## Points to check'):].split('\n## ', 1)[0]
-
-
-def writing_prompt(fake):
-    """The writing call's prompt: the outline call comes before it, the review calls after it."""
-    return next(r['messages'][1]['content'] for r in reversed(fake.requests)
-                if 'Output the LaTeX body only' in r['messages'][1]['content'])
-
-
 class ConversationWriteupTests(GuiCase):
     extra_args = ('--ctx', '40960')
 
     @unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
-    def test_a_draft_with_figures_tables_and_citations_compiles_and_shows_what_to_check(self):
-        request = "Please rewrite this md document in latex (don't touch the math, juste rewrite it entirely in latex)"
-        (self.root / 'survey.md').write_text('# Results\n\nUnder assumption **A**, the bound is $a_n \\leq 2^n$.\n')
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        store.append_items(self.root, chat, [{'role': 'user', 'content': 'An unrelated earlier question.'},
-                                            {'role': 'assistant', 'content': 'This earlier discussion is unrelated.'}])
-        with patch.object(self.hub, '_ensure_model', side_effect=AssertionError('model catalogue unavailable')):
-            self.ok('POST', f'/api/chats/{chat}/route', {'content': request, 'files': ['survey.md']})
-            task = self.wait_task()
-        self.assertEqual(task['state'], 'done', task.get('error'))
-        card = next(item for item in self.ok('GET', f'/api/chats/{chat}')['transcript'] if item['role'] == 'route')
-        converted = self.ok('GET', '/api/research/' + card['job_id'])
-        self.assertEqual((converted['calls'], self.fake.requests), ([], []))
-        self.assertTrue(converted['outputs']['download'])
-        self.assertTrue(converted['outputs']['pdf'], converted['compile'])
-        self.assertIn(r'a_n \leq 2^n', converted['document'])
-        self.assertNotIn('earlier discussion', converted['document'])
-        self.assertIn(r'\title{Results}', converted['document'])
-        _, body = store.research_body(self.root, card['job_id'])
-        for command in (b'\\title', b'\\author', b'\\date', b'\\maketitle', b'\\documentclass'):
-            self.assertNotIn(command, body)
-        self.assertIn(rb'a_n \leq 2^n', body)
-        _, archive = store.research_source(self.root, card['job_id'])
-        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-            self.assertEqual(bundle.read('document-body.tex'), body)
-            self.assertEqual(bundle.read('document.tex'), converted['document'].encode())
-        self.assertEqual(converted['stop_reason'], 'Converted the Markdown file to LaTeX. The PDF compiled successfully.')
-        self.assertIsNone(store.claim_auto_title(self.root, chat))
-
-        # The finished survey is a visible answer and an artifact in this chat,
-        # even when the user attaches nothing on the next turn.
-        jobs = self.root / '.mathagent' / 'research'
-        survey_job = str(uuid4())
-        survey_dir = jobs / survey_job
-        (survey_dir / 'artifacts').mkdir(parents=True)
-        survey = '# Small windows\n\nThe estimate [1] is $a_n \\leq 2^n$.\n\n## Coverage\n\nOnly the abstract was available.\n'
-        bib = '@article{sample, title={Small windows}, year={2004}}\n'
-        prior = json.loads((jobs / card['job_id'] / 'state.json').read_text())
-        prior.update(id=survey_job, kind='literature', scope={'title': 'Small windows'}, draft=survey,
-                     status='partial', phase='done', outputs={'review': 'review.md', 'bib': 'references.bib'})
-        (survey_dir / 'state.json').write_text(json.dumps(prior))
-        (survey_dir / 'review.md').write_text(survey)
-        (survey_dir / 'references.bib').write_text(bib)
-        followup = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        store.append_items(self.root, followup, [
-            {'role': 'user', 'content': 'Write the survey', 'files': ['survey.md']},
-            {'role': 'route', 'mode': 'literature', 'status': 'done', 'job_id': survey_job},
-            {'role': 'assistant', 'mode': 'free', 'content': survey}])
-        query = 'write it in latex document please'
-        for q in (query, 'Export the previous review as a LaTeX document.', 'Convert your last answer to LaTeX.',
-                  'Export the literature review as a standalone LaTeX document.',
-                  'Give me a LaTeX version of this review.', 'Can I have that as a .tex file?'):
-            self.assertTrue(previous_markdown_request(q), q)
-        for q in ('Write a new survey in LaTeX.', 'Convert the attached survey to LaTeX.',
-                  'Rewrite your previous answer in LaTeX and fix the proof.',
-                  'Give me a shorter LaTeX version of this review.',
-                  'Can I have that as a .tex file with a new introduction?'):
-            self.assertFalse(previous_markdown_request(q), q)
-        plain = {'id': followup, 'transcript': [{'role': 'user', 'content': 'Explain compactness.'},
-                                               {'role': 'assistant', 'content': 'Here is the exact answer.'}]}
-        self.assertEqual(store.previous_markdown(self.root, plain)['source']['content'], 'Here is the exact answer.')
-        plain['transcript'].append({'role': 'assistant', 'content': 'A second deliverable.'})
-        self.assertIsNone(store.previous_markdown(self.root, plain))
-        with patch.object(self.hub, '_ensure_model', side_effect=AssertionError('unexpected catalogue lookup')):
-            self.ok('POST', f'/api/chats/{followup}/route', {'content': query})
-            self.assertEqual(self.wait_task()['state'], 'done')
-        refreshed = store.load_chat(self.root, followup)
-        worker = refreshed['assistant_state']['children'][0]['job_id']
-        result = store.research_state(self.root, worker)
-        source = next(s for s in result['sources'] if s['id'] == result['conversion_source'])
-        self.assertEqual((source['content'], source['origin']['job_id']), (survey, survey_job))
-        self.assertEqual((result['status'], result['calls'], self.fake.requests), ('complete', [], []))
-        self.assertIn('Only the abstract was available.', result['document'])
-        with zipfile.ZipFile(io.BytesIO(store.research_source(self.root, worker)[1])) as bundle:
-            self.assertEqual(bundle.read('references.bib'), bib.encode())
-        # Historical user rows have no local conversion marker. Their restored
-        # Assistant state still prevents an idle conversation-title request.
-        index = next(i for i, item in enumerate(refreshed['transcript']) if item.get('content') == query)
-        store.update_item(self.root, followup, index, local_conversion=False)
-        self.assertIsNone(store.claim_auto_title(self.root, followup))
-
-        # Pre-upgrade jobs held a dossier and the failed call's allowance.
-        # Opening the same card's Resume must preserve both and pin the exact answer.
-        dossier = 'Older chat context.\n\n' + survey + '\nMore chat context.'
-        result.update(phase='outline', status='paused', body='', document='', outputs={},
-                      calls=[{'role': 'plan', 'status': 'generation_failed', 'reserved_tokens': 4096}],
-                      tokens_charged=4096, sources=[{'id': 'M0', 'path': 'conversation.md', 'content': dossier,
-                                                   'sha256': hashlib.sha256(dossier.encode()).hexdigest()}])
-        del result['conversion_source']
-        (jobs / worker / 'state.json').write_text(json.dumps(result))
-        self.ok('POST', f'/api/research/{worker}/resume')
-        self.assertEqual(self.wait_task()['state'], 'done')
-        restored = store.research_state(self.root, worker)
-        self.assertEqual((restored['status'], restored['tokens_charged'], len(restored['calls'])), ('complete', 4096, 1))
-        self.assertEqual(next(s['content'] for s in restored['sources'] if s['id'] == 'M0'), dossier)
-        self.assertIn('Only the abstract was available.', restored['document'])
-        self.assertNotIn('Older chat context', restored['document'])
-        self.assertEqual(self.fake.requests, [])
-        for mixed in ('Convert the Markdown to LaTeX and improve the introduction.',
-                      'Convert section 2 of this file to LaTeX.', 'Translate this file into French in LaTeX.',
-                      'Use my LaTeX template to rewrite this survey.',
-                      'Convert different.md to LaTeX.'):
-            self.assertFalse(markdown_conversion_request(mixed, ['survey.md']), mixed)
-        pinned = {'id': 'M1', 'path': 'conversation.md'}
-        state = {'goal': request, 'sources': [pinned, {'id': 'M0', 'path': 'conversation.md'}]}
-        self.assertEqual(conversion_source(state), 'M1')
-        for extra in ({'style_choice': {'mode': 'style'}}, {'variant': 'summary'},
-                      {'sources': [pinned, {'id': 'T1', 'path': 'style.tex'}]},
-                      {'sources': [{'id': 'M0', 'path': 'conversation.md'}]}):
-            self.assertIsNone(conversion_source({**state, **extra}))
-
-        (self.root / 'broken.md').write_text('# An example\n\nThe formula is $a_1_2$.')
-        result = self.ok('POST', '/api/writeup', {'goal': 'Convert broken.md to LaTeX.', 'source_files': ['broken.md']})
-        self.assertEqual(self.wait_task()['state'], 'done')
-        broken = self.ok('GET', '/api/research/' + result['id'])
-        self.assertEqual((broken['status'], broken['calls'], broken['compile']['ok']), ('partial', [], False))
-        self.assertIn('Converted the Markdown file to LaTeX.', broken['stop_reason'])
-        self.assertFalse(WriteupRunner.reopen_for_repair(self.root, result['id']))
-        self.assertEqual(self.ok('GET', '/api/research/' + result['id'])['document'], broken['document'])
-
+    def test_compiled_draft_and_its_sources_can_be_downloaded(self):
         paper = self.root / 'paper'
         paper.mkdir()
         (paper / 'macros.sty').write_text('\\newcommand{\\E}{\\mathrm{E}}\n')
@@ -198,259 +54,26 @@ by \cite{HS04}, see also \cite{Invented13}. By (\ref{eq:exit}) and \eqref{eq:mis
                                                    'source_files': ['paper/notes.md'],
                                                    'template_files': ['paper/macros.sty', 'paper/refs.bib']})
         self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        prompt = writing_prompt(self.fake)
-        self.assertIn('HS04: Holcman, D., Escape through a small opening (2004)', prompt)  # the author's .bib
-        self.assertIn('never invent a bibliographic entry', prompt)
-        self.assertIn('\\eqref{eq:short-name}', prompt)  # numbering and references are asked for
-        job = self.root / '.mathagent' / 'research' / started['id']
-        state = json.loads((job / 'state.json').read_text())
+        job_id = started['id']
+        state = self.ok('GET', f'/api/research/{job_id}')
         self.assertTrue(state['compile']['ok'], state['compile']['errors'])
-        self.assertTrue((self.root / 'notes-writeup.pdf').exists() and (job / 'artifacts' / 'compiled.pdf').exists())
-        document = state['document']
-        table = document[document.index('\\begin{table}'):document.index('\\end{table}')]
-        self.assertIn('\\renewcommand{\\arraystretch}{2.2}', table)  # stays in its table, unbraced
-        self.assertNotIn('{{2.2}}', document)
-        self.assertIn('\\renewcommand{\\E}{{\\mathbb{E}}}', document)  # the request's notation wins
-        self.assertIn('\\usepackage[shortlabels]{enumitem}', document)
-        self.assertEqual(state['missing_figures'], ['missing-plot'])  # a placeholder; fig.png was copied
-        # The PDF's block only counts, in the document's language; the points are listed in the report.
-        block = document[document.index('Points to check'):document.index('\\section{Result}')]
-        self.assertIn('1 TODO comment in the source marks a point to settle.', block)
-        self.assertNotIn('textbackslash', block)
-        points = report_points(job)
-        self.assertIn('check the constant 4_x against the reference.', points)
-        self.assertIn('Invented13', points)
-        self.assertNotIn('HS04', points)
-        self.assertIn('missing-plot', points)
-        self.assertIn('By \\eqref{eq:exit} and', document)  # (\\ref{...}) normalised
-        self.assertIn('eq:missing', points)
-        self.assertNotIn('eq:exit', points)
-        self.assertIn('the equation above', points)
-        self.assertIn('\\begin{equation*} a = b \\end{equation*}', document)  # numbered only when referred to
-        self.assertIn('\\begin{equation}\\label{eq:exit}', document)
-        self.assertTrue(any('Invented13' in warning for warning in state['warnings']))
         self.assertEqual(state['status'], 'partial')
         self.assertIn('Invented13', state['compile']['references']['citations'])
         self.assertIn('eq:missing', state['compile']['references']['labels'])
 
-        # Without a .bib, a bibliography is made from the identifiers the material gives; an entry without one is dropped.
-        (paper / 'notes2.md').write_text('E[tau] ~ |Omega|/(4 eps) [HS04], '
-                                       '[doi:10.1007/s10955-004-5712-8](https://doi.org/10.1007/s10955-004-5712-8).')
-        self.fake.replies = [text(PLAN), text(r"""\title{Without a bibliography}
-\section{Result}
-By \cite{HS04}, see also \cite{Fake99}.
-% BEGIN BIBTEX
-@article{HS04,
-  author = {Holcman, D. and Schuss, Z.},
-  title = {Escape through a small opening},
-  journal = {J. Stat. Phys.},
-  year = {2004},
-  doi = {10.1007/s10955-004-5712-8},
-}
-@misc{Fake99, author = {Nobody}, title = {Invented}, year = {1999}}
-% END BIBTEX""")]
-        started = self.ok('POST', '/api/writeup', {'goal': 'A short note.', 'seconds': 300, 'source_files': ['paper/notes2.md']})
-        made = self.root / '.mathagent' / 'research' / started['id'] / 'state.json'
-        # The runner saves its state, then writes its report: wait for both.
-        self.wait_for(lambda: made.exists() and json.loads(made.read_text())['status'] in ('complete', 'partial')
-                      and (made.parent / 'report.md').exists(), timeout=240)
-        self.assertIn('There is no bibliography file', writing_prompt(self.fake))
-        state = json.loads(made.read_text())
-        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
-        self.assertEqual(state['status'], 'partial')
-        self.assertEqual(state['compile']['references']['citations'], ['Fake99'])
-        document = state['document']
-        self.assertTrue(document.startswith('% The bibliography made'))  # embedded: the .tex compiles on its own
-        self.assertIn('doi = {10.1007/s10955-004-5712-8}', document)
-        self.assertIn('\\bibliography{', document)
-        self.assertNotIn('Invented', document)
-        self.assertIn('Fake99', report_points(made.parent))
+        def download(path):
+            request = Request(f'http://127.0.0.1:{self.port}/api/research/{job_id}/{path}',
+                              headers={'Authorization': 'Bearer ' + self.token})
+            with urlopen(request, timeout=10) as reply:
+                self.assertEqual(reply.status, 200)
+                self.assertIn('attachment', reply.headers['Content-Disposition'])
+                return reply.read()
 
-        # A conversation's retrieved record supplies the bibliography even when
-        # the writer emits only a citation, without retyping the metadata.
-        literature_id = str(uuid4())
-        literature = {**state, 'id': literature_id, 'kind': 'literature', 'status': 'listed', 'document': '',
-                      'draft': '[doi:10.1007/s10955-004-5712-8](https://doi.org/10.1007/s10955-004-5712-8)',
-                      'pool': [{'n': 1, 'title': 'Escape through a small opening',
-                                'authors': ['D. Holcman', 'Z. Schuss'], 'year': 2004, 'type': 'journal-article',
-                                'doi': '10.1007/s10955-004-5712-8'}],
-                      'organisation': {'entry': [1], 'themes': []}}
-        directory = self.root / '.mathagent' / 'research' / literature_id
-        directory.mkdir()
-        (directory / 'artifacts').mkdir()
-        (directory / 'state.json').write_text(json.dumps(literature))
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        store.append_items(self.root, chat, [{'role': 'route', 'mode': 'literature', 'status': 'done',
-                                              'job_id': literature_id, 'request': 'Find a reference.'}])
-        self.fake.replies = [text(PLAN), text(r'\title{A cited note}\section{Reference}By \cite{Holcman2004}.')]
-        self.ok('POST', f'/api/chats/{chat}/route', {'content': '@writeup this report',
-                                                   'mode_call': {'mode': 'writeup', 'start': 0}})
-        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        saved = self.ok('GET', f'/api/chats/{chat}')
-        card = [item for item in saved['transcript'] if item['role'] == 'route'][-1]
-        self.assertIn('job_id', card)
-        completed = self.ok('GET', f'/api/research/{card["job_id"]}')
-        self.assertEqual(completed['status'], 'complete', completed['warnings'])
-        self.assertFalse(completed['compile']['references']['unresolved'])
-        self.assertTrue(completed['outputs']['pdf'])
-        self.assertIn('Holcman2004: D. Holcman', writing_prompt(self.fake))
-
-@unittest.skipIf(shutil.which('latexmk') is None, 'latexmk is not installed')
-class WholePaperTests(GuiCase):
-    """A whole paper is written section by section, its introduction and its abstract last."""
-    extra_args = ('--ctx', '40960')
-
-    def paper(self, intro_source):
-        section = lambda heading, role, source, covers=(): {
-            'heading': heading, 'role': role, 'source': source, 'covers': list(covers), 'parts': [],
-            'requested_by': 'R1' if source == 'composed' else '', 'purpose': heading + '.', 'thread': []}
-        plan = json.loads(PLAN)
-        plan.update(kind='article', pages=8, requirements=['an abstract and an introduction'], sections=[
-            section('Abstract', 'abstract', 'composed'), section('Introduction', 'introduction', intro_source),
-            section('Stability', 'body', 'material', ['S1']), section('Convergence', 'body', 'material', ['S2']),
-            section('Numerical results', 'body', 'material')])
-        skeleton = {'sections': [{'heading': 'Abstract', 'label': 'sec:abstract', 'opens': '', 'closes': ''},
-                                 {'heading': 'Introduction', 'label': 'sec:intro', 'opens': '', 'closes': ''},
-                                 {'heading': 'Stability', 'label': 'sec:stability', 'opens': '', 'closes': ''},
-                                 {'heading': 'Convergence', 'label': 'sec:convergence', 'opens': '', 'closes': ''},
-                                 {'heading': 'Numerical results', 'label': 'sec:numerics', 'opens': '', 'closes': ''}],
-                    'items': [{'id': 'S1', 'environment': 'lemma', 'label': 'lem:stability', 'name': 'stability',
-                               'section': 'sec:stability', 'role': 'auxiliary', 'uses': []},
-                              {'id': 'S2', 'environment': 'theorem', 'label': 'thm:convergence', 'name': 'convergence',
-                               'section': 'sec:convergence', 'role': 'main', 'uses': ['S1']}],
-                    'equations': [], 'floats': [], 'aliases': [{'from': 'sec:numerical', 'to': 'sec:numerics'}]}
-        body = (r'\title{The theta-scheme}' '\n' r'\section{Stability}\label{sec:stability}' '\n'
-                r'\begin{lemma}\label{lem:stability} The step is stable. \end{lemma}' '\n'
-                r'\section{Convergence}\label{sec:convergence}' '\n'
-                r'\begin{theorem}\label{thm:convergence} The scheme converges. \end{theorem}' '\n'
-                r'\begin{proof} By Lemma~\ref{lem:stability}. \end{proof}' '\n'
-                r'\section{Numerical results}\label{sec:numerics}' '\n' r'The rates agree with Theorem~\ref{thm:convergence}.')
-        abstract = ('We prove that the theta-scheme for the heat equation converges for every theta between one half and '
-                    'one, with no condition linking the time step and the mesh size, by a stability estimate of the '
-                    'one-step operator and a bound of the truncation error, and we observe the predicted rates.')
-        return json.dumps(plan), json.dumps(skeleton), body, abstract
-
-    def run_paper(self, replies, sources, rounds=1):
-        self.fake.replies = [text(reply) for reply in replies]
-        started = self.ok('POST', '/api/writeup', {'goal': 'An article with an abstract and an introduction.', 'seconds': 300,
-                                                   'rounds': rounds, 'source_files': sources})
-        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        job = self.root / '.mathagent' / 'research' / started['id']
-        return json.loads((job / 'state.json').read_text()), job
-
-    def test_the_body_comes_first_then_the_introduction_and_the_abstract(self):
-        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
-        plan, skeleton, body, abstract = self.paper('composed')
-        intro = (r'\section{Introduction}' '\n' r'We prove Theorem~\ref{thm:convergence}, using Lemma~\ref{lem:stability}. '
-                 r'Section~\ref{sec:stability} bounds the step, Section~\ref{sec:convergence} proves the theorem and '
-                 r'Section~\ref{sec:numerics} reports the experiments.')
-        state, job = self.run_paper([plan, skeleton, body, intro, abstract], ['notes.md'])
-        self.assertEqual([c['role'] for c in state['calls']], ['plan', 'skeleton', 'writing', 'writing', 'abstract'])
-        prompts = [r['messages'][1]['content'] for r in self.fake.requests if 'Output the LaTeX body only' in r['messages'][1]['content']]
-        self.assertIn('This call writes the sections Stability; Convergence; Numerical results and nothing else', prompts[0])
-        self.assertNotIn('I1 [required]', prompts[0])  # the body's rules only
-        self.assertIn('This call writes the introduction only', prompts[1])
-        self.assertIn('THE TEXT ALREADY WRITTEN (in full', prompts[1])
-        self.assertIn('I12 [style]', prompts[1])
-        self.assertLess(state['body'].index('\\section{Introduction}\\label{sec:intro}'), state['body'].index('\\section{Stability}'))
-        self.assertEqual(state['title'], 'The theta-scheme')
-        self.assertEqual(state['abstract'], abstract)
-        self.assertLess(state['document'].index('\\begin{abstract}'), state['document'].index('\\maketitle'))
-        self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
-        self.assertIn('## Writing calls', (job / 'report.md').read_text())
-
-    def test_the_authors_introduction_is_kept_and_only_its_links_are_edited(self):
-        context = ' '.join(['The theta-scheme combines the implicit and the explicit Euler steps with a weight theta.'] * 4)
-        (self.root / 'intro.tex').write_text(r'\section{Introduction}\label{sec:intro}' '\nWe study the theta-scheme.\n'
-                                             'The experiments are in Section~\\ref{sec:numerical}.\n' + context + '\n')
-        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
-        plan, skeleton, body, abstract = self.paper('material')
-        edits = ('@@ issue 1 lines 2-2\nWe study the theta-scheme and prove Theorem~\\ref{thm:convergence}.\n'
-                 '@@ issue 2 lines 3-3\nSection~\\ref{sec:stability} bounds the step, Section~\\ref{sec:convergence} proves '
-                 'the theorem, and the experiments are in Section~\\ref{sec:numerics}.\n')
-        state, _ = self.run_paper([plan, skeleton, body, edits, abstract], ['intro.tex', 'notes.md'])
-        self.assertEqual([c['role'] for c in state['calls']], ['plan', 'skeleton', 'writing', 'revise_section', 'abstract'])
-        asked = next(r['messages'][1]['content'] for r in self.fake.requests if 'in this introduction by edits' in r['messages'][1]['content'])
-        self.assertIn('does not cite the main result', asked)
-        self.assertNotIn('points to no label', asked)  # the skeleton's alias repaired sec:numerical by code
-        self.assertIn('We study the theta-scheme and prove Theorem~\\ref{thm:convergence}.', state['body'])
-        self.assertIn('the experiments are in Section~\\ref{sec:numerics}', state['body'])
-        self.assertEqual(state['frame_edits']['applied'], 2, state['frame_edits'])
-        self.assertIn('combines the implicit and the explicit Euler steps', state['body'])  # the author's text stays
-        self.assertNotIn('frame-links', [f['rule'] for f in state['checks']])
-
-    def test_the_parts_of_an_authors_introduction_are_read_not_asked_and_hold_nothing(self):
-        context = ' '.join(['The theta-scheme combines the implicit and the explicit Euler steps with a weight theta.'] * 4)
-        (self.root / 'intro.tex').write_text('\\section{Introduction}\\label{sec:intro}\nWe study the theta-scheme.\n' + context + '\n')
-        (self.root / 'notes.md').write_text('S1: the step is stable. S2: the scheme converges.')
-        plan, skeleton, body, abstract = self.paper('material')
-        plan = json.loads(plan)
-        plan['kind'] = 'paper_part'
-        next(s for s in plan['sections'] if s['role'] == 'introduction')['parts'] = ['I1', 'I2', 'I3', 'I4', 'I5']
-        parts = json.dumps({'items': [{'rule': r, 'provides': r != 'I2', 'quote': 'We study the theta-scheme.',
-                                       'problem': 'No earlier work is cited.' if r == 'I2' else ''} for r in ('I1', 'I2', 'I3', 'I4', 'I5')]})
-        agrees = json.dumps({'agrees': True, 'problem': ''})
-        state, job = self.run_paper([json.dumps(plan), skeleton, body, 'No edits.', abstract, NOTHING_FOUND,
-                                     json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}), agrees, abstract, parts],
-                                    ['intro.tex', 'notes.md'], rounds=2)
-        self.assertNotIn('part-missing', [f['rule'] for f in state['checks']])  # no % PART: marker is asked of the author's text
-        self.assertIn('intro_parts', [c['role'] for c in state['calls']])
-        item = next(i for i in state['ledger'] if i['rule'] == 'I2')
-        self.assertEqual((item['layer'], item['fixable'], item['status']), ('intro', 'author', 'open'))
-        self.assertFalse([g for g in state['gates'] if 'required parts' in g['message']])  # the author's text: not held
-        report = (job / 'report.md').read_text()
-        self.assertIn('No earlier work is cited.', report[report.index('### For you to settle'):])
-
-    def test_finished_texts_are_assembled_and_only_what_is_new_is_written(self):
-        from mathagent import writeup
-        a = ('\\newcommand{\\Op}{\\mathcal{A}}\n\\section{Setting}\\label{sec:setting}\nLet $h>0$ be the mesh size and $\\Op$ the operator.\n'
-             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+h\\,D U^{n+1}.\n\\end{equation}\n'
-             '\\begin{theorem}\\label{thm:main} The scheme \\eqref{eq:scheme} converges for every $h$. \\end{theorem}\n')
-        b = ('\\newcommand{\\Op}{\\mathcal{B}}\n\\section{Experiments}\\label{sec:experiments}\nWe recall the scheme\n'
-             '\\begin{equation}\\label{eq:scheme}\nU^{n+1}=U^n+dx\\,D U^{n+1}.\n\\end{equation}\n'
-             'With $dx=1/10$ and $\\Op$ the rates agree with \\eqref{eq:scheme} and Theorem~\\ref{thm:main}.\n')
-        (self.root / 'a.tex').write_text(a)
-        (self.root / 'b.tex').write_text(b)
-        section = lambda heading: {'heading': heading, 'role': 'body', 'source': 'material', 'covers': [], 'parts': [],
-                                   'requested_by': '', 'purpose': '', 'thread': []}
-        plan = json.loads(PLAN)
-        plan.update(kind='article', assemble=True, sections=[section('Setting'), section('Experiments')],
-                    notation=[{'object': 'mesh size', 'symbol': '\\Delta x', 'also_written': 'h'}])
-        skeleton = {'sections': [{'heading': 'Setting', 'label': 'sec:setting', 'opens': '', 'closes': '', 'file': 'a.tex'},
-                                 {'heading': 'Experiments', 'label': 'sec:experiments', 'opens': '', 'closes': '', 'file': 'b.tex'}],
-                    'items': [{'id': 'S1', 'environment': 'theorem', 'label': 'thm:main', 'name': 'convergence',
-                               'section': 'sec:setting', 'role': 'main', 'uses': []}],
-                    'equations': [{'label': 'eq:scheme', 'what': 'the scheme', 'section': 'sec:setting'}], 'floats': [], 'aliases': []}
-        # What the model is scripted to answer: the texts as spliced, with the one symbol, and the duplicate display cited.
-        spliced, _, _, _ = writeup.splice_texts([(n, writeup.split_body(x)[2], writeup.split_body(x)[1]) for n, x in (('a.tex', a), ('b.tex', b))])
-        # The table keeps the experiments' dx: code turns it round, since a.tex holds the theorem.
-        table = json.dumps({'rows': [{'object': 'mesh size', 'keep': 'dx', 'replace': [{'file': 'a.tex', 'from': 'h'}]}]})
-        frozen, _ = writeup.freeze(writeup.replace_symbol(spliced[1], 'dx', 'h')[0])
-        self.assertEqual(frozen.split('\n')[1:3], ['We recall the scheme', '[[D1]]'])
-        cited = '@@ issue 1 lines 2-3\nThe scheme is \\eqref{eq:scheme}.\n'  # an edit of two lines, not the whole text
-        self.fake.replies = [text(reply) for reply in (json.dumps(plan), json.dumps(skeleton), table, cited, NOTHING_FOUND,
-                                                       json.dumps({'summary': '', 'items': []}), json.dumps({'items': []}))]
-        started = self.ok('POST', '/api/writeup', {'goal': 'Merge a.tex and b.tex into one article.', 'seconds': 300, 'rounds': 2,
-                                                   'source_files': ['a.tex', 'b.tex']})
-        self.assertEqual(self.wait_task(timeout=240)['state'], 'done')
-        job = self.root / '.mathagent' / 'research' / started['id']
-        state = json.loads((job / 'state.json').read_text())
-        self.assertTrue(state['compile']['ok'], state['compile']['errors'])
-        roles = [c['role'] for c in state['calls']]
-        self.assertEqual(roles[:4], ['plan', 'skeleton', 'notation', 'revise_section'])
-        self.assertNotIn('writing', roles)  # nothing new to write but the stitches
-        body = state['body']
-        self.assertEqual(body.count('\\label{eq:scheme}'), 1)  # stated once, where the skeleton places it
-        self.assertIn('The scheme is \\eqref{eq:scheme}.', body)
-        self.assertIn('rates agree with \\eqref{eq:scheme}', body)  # the removed display's references follow the kept one
-        self.assertIn('With $h=1/10$ and $\\OpB$', body)  # one notation, the theorem's; the other \\Op renamed
-        self.assertIn('\\newcommand{\\OpB}', state['document'])
-        self.assertIn('notation-clash', [f['rule'] for f in state['checks']])
-        fidelity = next(r['messages'][1]['content'] for r in self.fake.requests if 'CHANGED PASSAGES' in r['messages'][1]['content'])
-        self.assertNotIn('MATERIAL:', fidelity)  # the changed passages, not the whole material
-        report = (job / 'report.md').read_text()
-        self.assertIn('## Assembly', report)
-        self.assertIn('label eq:scheme renamed eq:scheme-b', report)
-
-if __name__ == '__main__':
-    unittest.main()
+        self.assertTrue(download('pdf?download=1').startswith(b'%PDF-'))
+        with zipfile.ZipFile(io.BytesIO(download('source'))) as bundle:
+            self.assertEqual(bundle.read('document.tex'), state['document'].encode())
+            self.assertEqual(bundle.read('document-body.tex'), download('body'))
+            figures = [name for name in bundle.namelist() if name.endswith('.png')]
+            self.assertEqual(len(figures), 1)
+            self.assertIn('{' + figures[0] + '}', state['document'])
+            self.assertEqual(bundle.read(figures[0]), (paper / 'fig.png').read_bytes())

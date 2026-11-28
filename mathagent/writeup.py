@@ -46,7 +46,7 @@ from .research import PINNED_SOURCE_BYTES, ResearchBudget, ResearchRunner, _job_
 from .style import (_group, annotated, definition_body, departure_line, environment_definitions, grouped,
                     list_profiles, macro_definitions, needed_macros, settable, style_digest, uses)
 from .worker_errors import WorkerInputError
-from .model_limits import output_limit, input_limit, sampling, is_ds4, substantive_output
+from .model_limits import output_limit, input_limit, is_ds4, substantive_output
 
 TEMPLATE_SUFFIXES = ('.sty', '.cls', '.tex', '.bib')
 GRAPHIC_SUFFIXES = ('.pdf', '.png', '.jpg', '.jpeg')
@@ -2794,7 +2794,7 @@ class WriteupRunner(ResearchRunner):
     WRITE_TOKENS = 24576   # one writing call: reasoning and the whole document
     REPAIR_ROUNDS = 4      # passage repairs, one compile error at a time
     THINK_TOKENS = 8192    # of which reasoning, at most
-    SAMPLING = {'temperature': 0.6, 'top_p': 0.95}  # Qwen's recommended sampling when it reasons
+    WRITING_TOP_P = 0.95
 
     def __init__(self, agent, emit=lambda kind, value: None, *, styles_root=None):
         super().__init__(agent, emit)
@@ -4416,7 +4416,7 @@ class WriteupRunner(ResearchRunner):
         # A one-minute job needs its time for the document, not a long hidden reasoning prelude.
         think = (self.state['settings']['max_seconds'] - self._elapsed() > 60
                  and not part.get('retried') and not part.get('retried_incomplete'))
-        result = self._call('writing', instruction, cap=cap, think=think, minimum_output=minimum, sampling=sampling(self.agent, self.SAMPLING),
+        result = self._call('writing', instruction, cap=cap, think=think, minimum_output=minimum, top_p=self.WRITING_TOP_P,
                             thinking_budget=min(self.THINK_TOKENS, cap // 2), trailer=trailer)
         title, definitions, body = split_body(result['text'])
         body = normalised_references(body)
@@ -4799,7 +4799,7 @@ class WriteupRunner(ResearchRunner):
         cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, max(2048, len(frozen) // 2 + 1024)))
         try:
             result = self._call('revise_section', instruction, cap=cap, think=False, minimum_output=min(cap, 256),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the edits now.')
+                                top_p=self.WRITING_TOP_P, trailer='Output the edits now.')
         except ResearchBudget:
             return text, 0, ['no budget left']
         edits = parse_edits(result['text'])
@@ -4920,7 +4920,7 @@ class WriteupRunner(ResearchRunner):
         self.state['abstract_written'] = True
         try:
             result = self._call('abstract', instruction, cap=cap, think=False, minimum_output=min(cap, 512),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Write the abstract now.')
+                                top_p=self.WRITING_TOP_P, trailer='Write the abstract now.')
         except ResearchBudget:
             return
         text = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
@@ -6857,7 +6857,7 @@ class WriteupRunner(ResearchRunner):
         cap = int(min(output_limit(self.agent, 'writeup', self.WRITE_TOKENS), remaining, max(2048, len(section) // 2 + 1024)))
         try:
             result = self._call('revise_section', instruction, cap=cap, think=False, minimum_output=min(cap, 256),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the edits now.')
+                                top_p=self.WRITING_TOP_P, trailer='Output the edits now.')
         except ResearchBudget:
             return {'status': 'skipped', 'reason': 'no budget left'}
         edits, rebuttals = parse_edits(result['text']), parse_rebuttals(result['text'])
@@ -6956,7 +6956,7 @@ class WriteupRunner(ResearchRunner):
                                   'outcomes': {i['id']: {'result': 'refused', 'reason': reason} for i in issues}}
         try:
             result = self._call('rewrite_section', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the rewritten section now.')
+                                top_p=self.WRITING_TOP_P, trailer='Output the rewritten section now.')
         except ResearchBudget:
             return {'status': 'skipped', 'reason': 'no budget left'}
         new = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())
@@ -7277,7 +7277,7 @@ class WriteupRunner(ResearchRunner):
         self.state['repaired'] = True
         try:
             result = self._call('repair', instruction, cap=cap, think=seconds_left > 60, minimum_output=max(1, min(self._minimum_output(), cap)),
-                                sampling=sampling(self.agent, self.SAMPLING), thinking_budget=min(4096, cap // 4),
+                                top_p=self.WRITING_TOP_P, thinking_budget=min(4096, cap // 4),
                                 trailer='Output the whole corrected body now.')
         except ResearchBudget:
             # Out of time during the repair: the written document is still offered, with its errors.
@@ -7324,7 +7324,7 @@ class WriteupRunner(ResearchRunner):
         self._repairing = True
         try:
             result = self._call('repair', instruction, cap=cap, think=False, minimum_output=min(cap, 256),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the definitions now.')
+                                top_p=self.WRITING_TOP_P, trailer='Output the definitions now.')
         except ResearchBudget:
             return False
         finally:
@@ -7444,7 +7444,7 @@ class WriteupRunner(ResearchRunner):
         self._repairing = True
         try:
             result = self._call('repair', instruction, cap=cap, think=False, minimum_output=min(cap, 1024),
-                                sampling=sampling(self.agent, self.SAMPLING), trailer='Output the corrected passage now.')
+                                top_p=self.WRITING_TOP_P, trailer='Output the corrected passage now.')
         finally:
             self._repairing = False
         fixed = re.sub(r'^\s*```[a-zA-Z]*[ \t]*\n|\n```\s*$', '', result['text'].strip())

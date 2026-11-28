@@ -10,6 +10,29 @@
   working on other passages, then use their results when needed. Submitted checks queue when the service is busy.
 - The default assistant, Explore, and evidence-gathering instructions apply across mathematics. The user’s question, selected sources and any explicit preferences supply the research setting.
 
+- OpenRouter now tries Cohere first, followed by DeepInfra, Crusoe, Parasail and CoreWeave. On eight loop-prone citation questions at production sampling, Cohere and DeepInfra had zero repeated-text failures in 30 served calls and the other providers had eight in 48. Two of the DeepInfra calls separately ran away in whitespace. Hosted workers now detect sustained whitespace and repeated labels or templates whose intervening text keeps cycling. In the saved benchmark and smoke runs the new checks caught four previously missed text loops and four whitespace runaways.
+
+- Hosted DeepSeek streams can now detect a repeating sequence spanning many pages of reasoning. The check preserves distinct mathematical arguments that reuse a heading or proof structure. The hosted service records the generation ID and upstream provider reported by OpenRouter so operators can trace interrupted requests.
+
+- Hosted DeepSeek Explore now receives its earlier reasoning alongside completed tool calls when it continues the same task. A subsequent user request starts with the existing conversation history.
+
+- When an OpenRouter response is stopped for confirmed repetition, its existing recovery attempt prefers another configured provider. A saved Proof retains that preference across a pause.
+
+- Precise citation lookup now asks for candidate bibliographic details before the source-verification step. Hosted DeepSeek streams recognize sustained repetition in an answer or its reasoning. An interrupted Proof verifier can retry against the same saved candidate, and incomplete generated tool calls are discarded.
+
+- Cut the Python suite from 194 tests to 16 covering core workflows, access to
+  private data, hosted accounting and sandbox isolation. Removed the other cases
+  and their unused fixtures.
+
+- The Assistant and all workers now use temperature 1 by default, including routing,
+  retries, and final answers. `--temperature` applies throughout a run. Proof retains
+  its separate verifier override and restores saved sampling settings on resume.
+
+- Paper citations in conversation answers now show the document name and line
+  range. When a published passage matches a TeX manuscript used in the chat,
+  the link shows the filename and its source lines and opens the manuscript
+  for editing. Other citations open the saved passage beside the conversation.
+
 - Restored image attachments and screenshot paste for DS4.1 Flash 1017 on
   OpenRouter. The chat and workers send the original images through the
   configured provider route, including when a follow-up refers to an earlier
@@ -26,6 +49,26 @@
   run count. Proof reserves output for writing and independent review, and can continue
   with partial evidence when a reference check exhausts its own allowance.
   Pre-upgrade proofs retain their tool-free protocol and saved allowances.
+
+- Text files in the viewer (code, TeX, BibTeX, Markdown being edited) show line
+  numbers in a margin; a wrapped line keeps one number. Texts over 400,000
+  characters stay plain, without colours or numbers.
+- The notebook and the viewer can be widened to 75% of the window (was 65%).
+
+- Documents open in the file viewer beside the conversation, not inside the
+  notebook: **View** in a worker's box, **Read literature review**, and the
+  PDF, LaTeX, BibTeX, review and figure results of the notebook's **Results**
+  (`?result=<id>` in the conversation's address, `ResultPanel`). They open like
+  any file: the file name on top (`theta-scheme.pdf`, `review.md`,
+  `references.bib`), then the document alone, a PDF fitted to the width, LaTeX
+  and BibTeX coloured, a review rendered with its citations; the request and
+  the buttons stay in the notebook and the worker's box. Closing the viewer
+  brings the notebook back. Answers, proofs and experiments are still read in
+  the notebook.
+- The viewer's header is one line: the name and facts, Edit or Preview and
+  Save for a text file (the save state joins the facts), then Download and
+  Close. The row of buttons above the file is gone, so the document keeps the
+  height.
 
 - Project instructions apply only to chats assigned to that project and their
   workers. An unassigned chat no longer discovers another project's notebook
@@ -60,7 +103,7 @@
   comes from another folder), and **View file**, shown when the pointer is over
   a file, opens it in the file viewer beside the conversation; a double click on
   an attached file does the same. The viewer takes the notebook's place (the
-  notebook returns when it closes), resizes like it up to 65% of the window, and
+  notebook returns when it closes), resizes like it up to 75% of the window, and
   leaves the message box usable, so that one can write while reading
   (`?file=` in the conversation's address; on a page without a conversation,
   `#/file?path=` with a way back). The viewer shows a PDF in the browser's
@@ -95,7 +138,7 @@
   Existing workspaces keep saved file-type permissions. In folders with older
   restrictions, the new group starts disabled. `GET/POST /api/settings` and
   the `read` field of `/api/status` remain available.
-- The notebook can be widened to 65% of the window (was 600 px). The
+- The notebook can be widened to 75% of the window (was 600 px). The
   conversation narrows to make room; below 620 px it uses compact margins and
   composer controls, and below 420 px the Send button shows only its arrow.
 

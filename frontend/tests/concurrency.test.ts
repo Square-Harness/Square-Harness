@@ -48,3 +48,22 @@ test('a notice shown while a model call waits (a busy provider) does not hide th
     { type: 'notice', text: 'DeepInfra is busy; trying again in 2 s' },
   ])
 })
+
+test('discard removes only the unfinished call and the retry starts with a fresh preview', () => {
+  const origin = { ...snapshot, tasks: JSON.parse(JSON.stringify(snapshot.tasks)) }
+  const chat = { task: 'first', chat: 'chat-a' }
+  let current = reduceChat(origin, { ...chat, seq: 2, kind: 'start' })
+  current = reduceChat(current, { ...chat, seq: 3, kind: 'delta', text: 'Earlier result' })
+  current = reduceChat(current, { ...chat, seq: 4, kind: 'end' })
+  current = reduceChat(current, { ...chat, seq: 5, kind: 'start' })
+  current = reduceChat(current, { ...chat, seq: 6, kind: 'delta', thinking: 'Abandoned reasoning', text: 'Partial answer' })
+  current = reduceChat(current, { ...chat, seq: 7, kind: 'notice', text: 'Provider update' })
+  current = reduceChat(current, { ...chat, seq: 8, kind: 'discard' })
+  current = reduceChat(current, { ...chat, seq: 9, kind: 'start' })
+  current = reduceChat(current, { ...chat, seq: 10, kind: 'delta', thinking: 'Fresh reasoning', text: 'Conclusion' })
+  assert.deepEqual(chatWork(current, 'chat-a').active?.live?.steps, [
+    { type: 'call', thinking: '', text: 'Earlier result' },
+    { type: 'notice', text: 'Provider update' },
+    { type: 'call', thinking: 'Fresh reasoning', text: 'Conclusion' },
+  ])
+})

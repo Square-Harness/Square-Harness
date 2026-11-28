@@ -555,7 +555,8 @@ class Investigation(Orchestrator):
         client = self.agent.client
         payload = {'model': self.agent.model, 'stream': True, 'think': False,
                    'messages': [{'role': 'system', 'content': policy}, *copy.deepcopy(messages)], 'tools': tools,
-                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0, 'top_p': self.agent.top_p}}
+                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
+                               'temperature': self.agent.temperature, 'top_p': self.agent.top_p}}
         if getattr(client, 'backend', None) == 'openai' and required:
             payload['tool_choice'] = {'type': 'function', 'function': {'name': required}}
         if self.agent.seed is not None:

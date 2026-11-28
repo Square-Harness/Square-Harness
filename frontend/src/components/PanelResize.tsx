@@ -7,8 +7,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
  * cover the page. */
 export const WIDE = '(min-width: 1200px)'
 export const PANEL_MIN = 304
-// A panel may cover up to 65% of the window; the conversation column narrows to make room.
-const MAX_SHARE = 0.65
+// A panel may cover up to 75% of the window; the conversation column narrows to make room.
+const MAX_SHARE = 0.75
 export const panelMax = () => Math.max(PANEL_MIN, Math.round(window.innerWidth * MAX_SHARE))
 export const clampPanel = (value: number) => Math.max(PANEL_MIN, Math.min(panelMax(), Math.round(value)))
 

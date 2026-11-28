@@ -648,6 +648,13 @@ export type Artifact = {
 export type WorkspaceFile = { path: string; size: number; kind: 'text' | 'pdf' | 'image'; updated_at?: string }
 /** One folder of the workspace for the file explorer: its subfolders and the files the model can be given. */
 /** A file as the viewer shows it; text and digest only for text kinds (the digest guards a save). */
+export type CitedDocument = {
+  id: string; title: string; text: string; syntax?: 'latex' | 'paper'; workspace_path?: string; sha256?: string
+}
+export type DocumentCitation = Pick<CitedDocument, 'id' | 'title'> & {
+  source?: { path: string; start: number; end: number; sha256: string }
+}
+export const REFRESH_CITATIONS = 'square-refresh-citations'
 export type ViewedFile = { path: string; name: string; kind: 'pdf' | 'markdown' | 'text' | 'image' | 'unsupported' | 'too_large'
   size: number; updated_at: string; text?: string; encoding?: string; sha256?: string; editable?: boolean; note?: string }
 export type WorkspaceFolder = { name: string; path: string; project: boolean; items: number }
@@ -767,6 +774,11 @@ export const api = {
   /** One folder below the interface root; paths are relative to the root, not to the open folder. */
   browse: (path = '') => get<FolderFiles>('/api/files/browse?path=' + encodeURIComponent(path)),
   /** One file for the viewer, by its path relative to the interface root. */
+  document: (id: string, chat?: string | null, lines?: { start: number; end: number }) => {
+    const query = chat && lines ? '?' + new URLSearchParams({ chat, start: String(lines.start), end: String(lines.end) }) : ''
+    return get<DocumentCitation>('/api/documents/' + encodeURIComponent(id) + query)
+  },
+  documentContent: (id: string) => get<CitedDocument>('/api/documents/' + encodeURIComponent(id) + '?content=1'),
   viewFile: (path: string) => get<ViewedFile>('/api/files/view?path=' + encodeURIComponent(path)),
   /** Save a text file edited in the viewer; refused (409) if it changed since `sha256` was read. */
   saveFile,
@@ -872,6 +884,9 @@ export const api = {
 }
 
 /** The address of a PDF or an image for the browser to display (path relative to the interface root). */
+/** Opens a PDF frame fitted to its width (refitting when resized), without the thumbnail column: Chrome reads view
+ * and navpanes, Firefox zoom and pagemode; each ignores the others. */
+export const PDF_FIT = '#view=FitH&navpanes=0&pagemode=none&zoom=page-width'
 export const fileRawUrl = (path: string) => '/api/files/raw?path=' + encodeURIComponent(path)
 /** The file as it is on disk, as a download. */
 export const fileDownloadUrl = (path: string) => fileRawUrl(path) + '&download=1'

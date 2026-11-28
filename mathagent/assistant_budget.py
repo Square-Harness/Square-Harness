@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager, nullcontext
 
 from .agent import AgentError, ModelNotDispatched
-from .backends import MeasuredStreamCancellation, TokenBudgetError, ToolCallError
+from .backends import MeasuredStreamCancellation, RepetitionLoop, TokenBudgetError, ToolCallError
 from .deepinfra import DeepInfraGenerationError, generation_deadline, rejected_before_inference
 from .call_policy import interrupted_charge
 from .proof import count_input
@@ -358,7 +358,7 @@ class BudgetClient:
                     self.usage['input_tokens'] -= count
                 raise
             if (reserved and not charged and isinstance(exc, (DeepInfraGenerationError, ToolCallError, TokenBudgetError,
-                                                               MeasuredStreamCancellation)) and exc.stats):
+                                                              MeasuredStreamCancellation, RepetitionLoop)) and exc.stats):
                 used = exc.stats.get('eval_count')
                 if type(used) is not int or used < 0 or (used > cap and not isinstance(exc, TokenBudgetError)):
                     raise AssistantBudget('Invalid token usage on a failed model call.') from exc
@@ -370,11 +370,16 @@ class BudgetClient:
                     self.pool.state['measured_tokens'] += used
                     count = self._settle_input(exc.stats.get('prompt_eval_count'), count)
                 raise
-            if reserved and not charged and isinstance(exc, KeyboardInterrupt):
+            repetition = exc if isinstance(exc, RepetitionLoop) else exc.__cause__
+            if reserved and not charged and (isinstance(exc, KeyboardInterrupt) or isinstance(repetition, RepetitionLoop)):
+                if isinstance(repetition, RepetitionLoop):
+                    # The transport counted the triggering frame and partial tool arguments before closing.
+                    streamed = max(streamed, sum(repetition.stream_progress.values()))
                 self._settle_estimate(cap, streamed)
                 reserved = False
             if isinstance(exc, AgentError) and not isinstance(exc, TokenBudgetError) and self.remaining_seconds <= 0:
-                raise AssistantBudget('Assistant time budget exhausted during generation.') from exc
+                raise AssistantBudget('Assistant time budget exhausted during generation.') from (
+                    repetition if isinstance(repetition, RepetitionLoop) else exc)
             raise
         except GeneratorExit:
             # The worker stopped reading (its own deadline or pause): settle what was streamed.

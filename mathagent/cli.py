@@ -18,7 +18,7 @@ from .backends import OpenAICompatible, create_client
 from .call_policy import MIN_PROOF_REVIEW_TOKENS
 from .api_profiles import API_PROFILES, create_profile_client, profile_class, resolve_api_profile
 from .format_request import markdown_conversion_request
-from .model_limits import MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
+from .model_limits import DEFAULT_TEMPERATURE, MODEL_OUTPUT_TOKENS, apply_defaults, hosted_profile
 from .prompts import FRESH_REVIEW, MODES, SANDBOX_MODES
 from .numerics import IMAGE, PythonSandbox, SandboxUnavailable
 from . import skill_catalog
@@ -99,6 +99,9 @@ class UI:
                 self.say('\n[answer]')
                 self.text_started = True
             print(clean(value), end='', flush=True)
+        elif kind == 'discard':
+            self.stop()
+            self.say('\n[Unfinished model response discarded.]')
         elif kind == 'end':
             self.stop()
             self.say('')
@@ -172,7 +175,8 @@ def parser():
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
     p.add_argument('--request-timeout', type=float, default=1800, help='Maximum seconds per model request')
     p.add_argument('--seed', type=int, help='Base sampling seed; saved proof jobs retain their original seed')
-    p.add_argument('--temperature', type=float, default=0.6, help='Solver/chat sampling temperature')
+    p.add_argument('--temperature', type=float, default=DEFAULT_TEMPERATURE,
+                   help='Sampling temperature for the Assistant and all workers (default: %(default)s)')
     p.add_argument('--top-p', type=float, default=0.95)
     p.add_argument('--ctx', type=int, default=40960)
     p.add_argument('--predict', type=int, default=4096,

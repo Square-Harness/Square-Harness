@@ -28,7 +28,7 @@ from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources, references_previous_pdf
 from ..deepinfra import DeepInfraGenerationError, DeepInfraRateLimit, TesterAllowanceInsufficient, generation_deadline
 from ..format_request import can_recover_previous_markdown, compile_followup_request, markdown_conversion_request, previous_markdown_request
-from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, create_client
+from ..backends import LlamaCpp, MeasuredStreamCancellation, OpenAICompatible, RepetitionLoop, create_client
 from ..api_profiles import MLX, DeepInfra, create_profile_client, resolve_api_profile
 from ..openrouter import OpenRouter
 from ..model_limits import MODEL_OUTPUT_TOKENS, substantive_output, output_limit, is_ds4, PROOF_CALL_SECONDS, workflow_budget, HOSTED_DS4, ProviderChanged
@@ -356,15 +356,17 @@ class Interruptible:
             # Preserve confirmed zero usage even when a stop/deadline races the HTTP status.
             raise
         except Exception as exc:
+            # Cancellation wins the race. Retain the detected loop's counters for the job ledger.
+            repetition = exc if isinstance(exc, RepetitionLoop) else None
             if self.cancel.is_set():
-                if isinstance(exc, DeepInfraGenerationError) and exc.stats:
-                    raise MeasuredStreamCancellation(exc.stats) from None
-                raise KeyboardInterrupt from None
+                if isinstance(exc, (DeepInfraGenerationError, RepetitionLoop)) and exc.stats:
+                    raise MeasuredStreamCancellation(exc.stats) from repetition
+                raise KeyboardInterrupt from repetition
             if state['expired']:
-                if isinstance(exc, DeepInfraGenerationError) and exc.stats:
+                if isinstance(exc, (DeepInfraGenerationError, RepetitionLoop)) and exc.stats:
                     raise DeepInfraGenerationError('The model stream reached its time limit.', category='deadline',
-                                                   stream_progress=exc.stream_progress, stats=exc.stats) from None
-                raise AgentError('Model stream exceeded its elapsed-time guard') from None
+                                                   stream_progress=exc.stream_progress, stats=exc.stats) from repetition
+                raise AgentError('Model stream exceeded its elapsed-time guard') from repetition
             raise
         finally:
             finished.set()
@@ -482,6 +484,11 @@ class ChatCapture:
                 steps.append({'type': 'call', 'thinking': '', 'text': ''})
             elif kind == 'progress' and data['text']:
                 steps.append({'type': 'notice', 'text': data['text'], 'progress': True})
+            elif kind == 'discard':
+                for index in reversed(range(len(steps))):
+                    if steps[index]['type'] == 'call':
+                        del steps[index]
+                        break
             elif kind == 'delta':
                 # Output belongs to the current model call, even after a notice (a provider wait) shown since it started.
                 step = next((s for s in reversed(steps) if s['type'] == 'call'), None)
@@ -509,6 +516,11 @@ class ChatCapture:
             self._buffer[kind] += value
             if time.monotonic() - self._flushed >= self.FLUSH:
                 self._flush()
+        elif kind == 'discard':
+            self._buffer = {'thinking': '', 'text': ''}
+            if self.calls and not self.calls[-1].get('discarded'):
+                self.calls[-1].update(thinking='', stats=dict(self.agent.last_stats), discarded=True)
+                self._publish('discard')
         elif kind == 'end':
             self._flush()
             if self.calls:
@@ -916,7 +928,7 @@ class Hub:
                         'Do not solve the task. Use the language the user writes in; when there is no clear language '
                         '(code, LaTeX, formulas), English. No quotes or formatting.'},
                         {'role': 'user', 'content': excerpt}],
-                    'options': {'num_ctx': agent.ctx, 'num_predict': 64, 'temperature': 0}}
+                    'options': {'num_ctx': agent.ctx, 'num_predict': 64, 'temperature': agent.temperature}}
                 parts, done = [], False
                 for event in client.stream(payload):
                     parts.append(event.get('message', {}).get('content', ''))

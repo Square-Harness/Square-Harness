@@ -21,8 +21,9 @@ Self-hosting on your own computer or research GPU is the primary setup. For a
 temporary hosted-model test, `--backend openai --api-profile deepinfra`
 uses DeepSeek V4.1 Flash 1017 through DeepInfra, and `--api-profile openrouter`
 uses the same model through OpenRouter, which routes each call among a fixed list
-of providers that keep no data (Crusoe first, then Cohere, CoreWeave, DeepInfra,
-Parasail; change it with `SH_OPENROUTER_PROVIDERS`), so a busy provider is replaced
+of providers that keep no data (Cohere first, then DeepInfra, Crusoe, Parasail,
+CoreWeave, based on a comparison using citation lookups; change the order with
+`SH_OPENROUTER_PROVIDERS`), so a busy provider is replaced
 by the next one. The provider is only a setting: `scripts/start-deepinfra.py
 --provider openrouter` (or `deepinfra`, the default), each with its own key
 (`scripts/setup-deepinfra.py`, `scripts/setup-openrouter.py`). The harness and
@@ -461,18 +462,27 @@ one with a message.
   **View file**, or a double click on a file attached above the text box or in a
   message, opens the file viewer beside the conversation, in the notebook's
   place (the notebook comes back when you close the file). Resize it by its left
-  edge like the notebook, up to 65% of the window, and keep writing your message
-  while you read. It shows a PDF in the browser's PDF viewer, fitted to the
+  edge like the notebook, up to 75% of the window, and keep writing your message
+  while you read. In a conversation answer, click a paper citation such as
+  **draft.tex:42–48** to open the source at those lines. You can edit a matching
+  workspace text file there. If the worker cited a published paper and the
+  passage can be located in a TeX manuscript used in this chat, the link
+  shows the manuscript filename and its TeX line numbers. It opens the same
+  editor as **View file**. When the source passage cannot be matched, the
+  citation opens the edition the worker read, at that edition’s lines.
+  The file viewer shows a PDF in the browser's PDF viewer, fitted to the
   viewer's width, Markdown rendered with its mathematics, an image as is, and
   other text files as text, coloured as in VS Code for TeX, BibTeX, Python,
   Julia, Rust, JavaScript, C and C++, shell, JSON, TOML and YAML. Archives and
   other files are marked as not supported. The viewer can open and save text
   files up to the 20 MiB per-file upload allowance. To edit Markdown or text, click in the text
   (on a Markdown page, click the rendered text or **Edit**), type, then **Save**
-  or Ctrl+S (⌘S on a Mac); **Download** saves the file as last saved. The file
+  or Ctrl+S (⌘S on a Mac). The viewer's header holds these buttons, then
+  **Download** (the file as last saved) and the close button, on one line. The file
   keeps its encoding. If the file changed on disk after you opened it (the model
   edited it, for example), it is not overwritten: reload it, or copy your text
-  first. Closing the viewer, opening another file or leaving the conversation
+  first. Text files (code, TeX, Markdown being edited) show line numbers in the
+  margin. Closing the viewer, opening another file or leaving the conversation
   with unsaved changes asks first. Text files are best saved as UTF-8; older files in Latin-1 or
   Windows-1252 (accents saved by an older editor) are read too, in the encoding
   their `\usepackage[…]{inputenc}` declares when they declare one. UTF-16 files
@@ -566,8 +576,13 @@ can be opened while the other agents continue. If an answer reached its output
 limit, the agent shows the failure and its partial text remains readable. A
 worker that produced a document (a write-up, a summary, a literature review)
 shows **View** and its downloads in its box once it is done: **View** opens the
-document in the notebook's **Results**, and the downloads are the PDF, the
-sources, the LaTeX file, the review or the BibTeX file it saved.
+document in the file viewer beside the conversation, like any file (its name on
+top, then the document alone), and the downloads are the PDF, the sources, the
+LaTeX file, the review or the BibTeX file it saved. Documents chosen in the
+notebook's **Results** (a PDF, LaTeX or BibTeX file, a review, a figure) open in
+the same viewer, which has more room than the notebook; closing it brings the
+notebook back. Answers, proofs and experiments
+are read in the notebook.
 
 - **Agents** shows what each specialist is doing. From a Literature task,
   **Open literature review** takes you into the review itself.
@@ -585,7 +600,7 @@ sources, the LaTeX file, the review or the BibTeX file it saved.
 On a wide screen the notebook opens beside the conversation. A file opened in
 the viewer takes its place until you close the file. Drag its divider
 or focus the divider and use the arrow keys to resize it (End widens it fully).
-It can cover up to 65% of the window; the conversation narrows to make room and
+It can cover up to 75% of the window; the conversation narrows to make room and
 switches to compact margins and controls. On a smaller screen
 the panel overlays the page. On a phone it fills the screen. Close it with
 Escape or its close button. The URL identifies the tab and selected item, so
@@ -640,6 +655,11 @@ app and the other way round: both use the same saved files.
 | Write-up | Your notes or results as LaTeX in your own style | `@writeup`, `@summarize`, New write-up | `/writeup` |
 | Python Lab | Your computations and plots, run in a sandbox | `@python_lab` | `/python-lab` |
 | Sanity check | An attempt to falsify a claim numerically | `@sanity_check`, automatic | `/sanity-check` |
+
+The Assistant and all workers use a sampling temperature of 1 by default, including
+on retries. To run an experiment at a different temperature, pass `--temperature`
+when starting Square Harness. Proof also accepts `--proof-verify-temperature` for
+its verifier and restores its saved settings when resumed.
 
 ### Conversation (the Assistant)
 
@@ -932,6 +952,18 @@ readable without an upgrade.
 
 ### Explore
 
+When hosted DeepSeek uses a tool, Explore returns the reasoning that led to
+that call alongside the tool result on its next tool-enabled request in the
+same task. A later user request starts from the saved conversation. Its model
+input omits the previous task’s reasoning.
+
+When the hosted service detects sustained repetition, a worker with an
+existing recovery attempt repeats the affected step with its saved evidence.
+On OpenRouter that attempt prefers a different configured provider when the
+service identified the original one. The original provider remains eligible
+if the others cannot serve the request. A single-provider configuration
+continues to use its selected provider.
+
 With `@explore`, attached text, BibTeX and extracted PDF text stay with that worker.
 When the complete set fits the model request and the remaining job allowance, Explore
 receives every file together. Larger sets are read in successive portions. The run
@@ -1037,6 +1069,10 @@ The job report shows the time spent at each step, including waits between
 requests to arXiv.
 
 ### When the model provider is busy
+
+A hosted DeepSeek response can repeat a passage while the connection stays active. Square Harness stops a generation when its answer or reasoning shows sustained repetition, including a series of repeated labels or checks that cycles through the same text. It also stops a stream that produces a long uninterrupted run of whitespace. Proof retains the candidate and completed checks. It makes a fresh attempt at the affected step. A second repetition leaves the job available to resume. For a precise citation check, the first call proposes bibliographic details. The reference worker then checks the publication and the cited result against source evidence.
+
+A repeated sequence can span several pages. Square Harness compares the actual intervening passages, including their mathematical values. This lets a verifier continue working through different cases that use the same wording. A model that paraphrases an earlier argument can still escape detection.
 
 With the hosted model (DS4 on DeepInfra), every mode and every key handles provider
 failures the same way. DeepInfra sometimes refuses calls for minutes at a time because

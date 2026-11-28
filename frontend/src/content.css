@@ -228,6 +228,13 @@
 
 /* Reports and citations */
 .report-text.prose { font-size: 17px; }
+.prose .document-cite {
+  font: 500 0.88em/1.4 var(--font-ui); color: var(--ink);
+  text-decoration: underline; text-underline-offset: 0.17em; overflow-wrap: anywhere;
+}
+.document-cite svg { display: inline; vertical-align: -0.08em; margin-inline-end: 0.22em; }
+.document-cite-lines { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.prose .document-cite.cite-flagged { color: var(--red); text-decoration-style: wavy; }
 .cite {
   display: inline; padding: 0 0.35em; vertical-align: baseline; cursor: pointer; white-space: nowrap;
   font: 0.78em/1.4 var(--font-mono); color: var(--ink); background: var(--ink-soft); border: 1px solid var(--ink-soft-strong); border-radius: 4px;
