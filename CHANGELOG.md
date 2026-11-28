@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenRouter now tries Cohere first, then DeepInfra, Crusoe, Parasail and CoreWeave. In 160 matched calls of a loop-prone request, Cohere and DeepInfra produced no repetition loops while the other three looped in 35 of 96. Hosted streams also stop a template repeated with one changing word, a repeated label list, and a structured answer that has turned into whitespace. On replay these checks caught the eight such runaways the previous detector missed, and fired on none of 1,256 stored healthy streams.
+
 - Hosted DeepSeek streams can now detect a repeating sequence spanning many pages of reasoning. The check preserves distinct mathematical arguments that reuse a heading or proof structure. The hosted service records the generation ID and upstream provider reported by OpenRouter so operators can trace interrupted requests.
 
 - Hosted DeepSeek Explore now receives its earlier reasoning alongside completed tool calls when it continues the same task. A subsequent user request starts with the existing conversation history.

@@ -4,6 +4,7 @@
 """Recognize sustained repetition in one generated text channel."""
 
 import re
+import zlib
 from collections import Counter
 from hashlib import blake2b
 
@@ -23,6 +24,17 @@ _TEX_COMMAND = re.compile(r"\\[a-zA-Z@]+")
 _PROSE_MARK = re.compile(r"[:;!?。！？]|\.(?!\d)")
 _NUMERIC_CELL = re.compile(r'(?:^|[,;])\s*"?[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"?\s*(?:[,;]|$)')
 _PASSAGE_END = re.compile(r'[.!?。！？][ \t]|\n')
+# A degenerate template can vary one slot per copy ("(not read) (no page) (no line) ..."), or repeat a label
+# without sentence punctuation ("[unverified memory] ..."); neither forms an exact prose cycle. Measured on
+# DeepSeek V4.1 Flash 1017 (November 2026): such tails compress to 0.5-4% of their size and only 0.2-5% of their
+# words are distinct. Healthy reasoning compresses to 20-35%. A shared frame that brings new numbers or formulas
+# in each copy is progress: it keeps 15% or more distinct words, so it stays clear of both bounds.
+_TEMPLATE_WINDOW = 16384
+_TEMPLATE_RATIO = 0.06
+_TEMPLATE_DISTINCT = 0.08
+_TEMPLATE_PHRASE = 20
+# A JSON grammar allows unbounded whitespace between tokens; no healthy answer or reasoning has this long a run.
+_WHITESPACE_RUN = 2048
 
 
 def _is_tabular(text: str) -> bool:
@@ -83,6 +95,24 @@ def _has_recycled_sentences(tail: str) -> bool:
         if len(words) == 6 and all(_WORD.search(word) for word in words[:5]):
             openings[tuple(words[:5])] += 1
     return bool(openings) and max(openings.values()) >= 0.85 * len(recent) and not _is_tabular(window)
+
+
+def _is_compressed_template(tail: str) -> bool:
+    window = tail[-_TEMPLATE_WINDOW:]
+    raw = window.encode("utf-8", "surrogatepass")
+    # A data table or matrix has rows; one long line (a JSON string value) is not a table.
+    if len(zlib.compress(raw, 6)) >= _TEMPLATE_RATIO * len(raw) or (window.count("\n") >= 8 and _is_tabular(window)):
+        return False
+    words = window.split()
+    if not words or len(set(words)) >= _TEMPLATE_DISTINCT * len(words):
+        return False
+    phrases = Counter(tuple(words[i:i + 8]) for i in range(len(words) - 7))
+    if not phrases:
+        return False
+    phrase, count = phrases.most_common(1)[0]
+    # Repeated language, not a matrix, a table of numbers or a formula.
+    language = _WORD.findall(_TEX_COMMAND.sub("", " ".join(phrase)).casefold())
+    return count >= _TEMPLATE_PHRASE and len(set(language)) >= 2
 
 
 class _Landmark:
@@ -192,9 +222,15 @@ class RepetitionDetector:
         self._pending_size = 0
         self._tail = ""
         self._long = _LongProseCycles()
+        self._blank_run = 0
 
     def feed(self, text: str) -> bool:
-        """Return true once this channel shows sustained repetitive prose."""
+        """Return true once this channel shows sustained repetitive prose or a runaway of whitespace."""
+        if self.kind is None and text:
+            kept = text.rstrip()
+            self._blank_run = self._blank_run + len(text) if not kept else len(text) - len(kept)
+            if self._blank_run >= _WHITESPACE_RUN:
+                self.kind = "whitespace"
         offset = 0
         while self.kind is None and offset < len(text):
             take = min(_STRIDE - self._pending_size, len(text) - offset)
@@ -216,4 +252,10 @@ class RepetitionDetector:
                 and _has_recycled_sentences(self._tail)
             ):
                 self.kind = "repeated_prose"
+            elif (
+                self.characters_seen >= _TEMPLATE_WINDOW
+                and self.characters_seen % (4 * _STRIDE) == 0
+                and _is_compressed_template(self._tail)
+            ):
+                self.kind = "template"
         return self.kind is not None
