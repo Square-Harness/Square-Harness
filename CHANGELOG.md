@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Whole-paper Review now gives the author a pre-submission report. The main
-  referee tracks source coverage and findings, and an independent challenger
-  examines consequential steps and sends supported objections as it finds them. The referee assesses the evidence and
-  writes the saved report. Earlier reviews resume with their original workflow.
+- Whole-paper Review groups related proofs using manuscript dependencies and
+  gives each group a primary reader. The lead checks connections and remaining
+  passages alongside an independent statement-first test. Serious findings
+  can receive a fresh mathematical judgment before the report is written.
+  Progress and worker evidence survive a pause. Earlier saved reviews retain
+  their original workflow.
 - The main referee starts citation checks in the background and looks for the
   cited work and passage first. It can continue checking independent proofs,
   wait for a result its verdict needs, and identify unfinished attributions in the report.

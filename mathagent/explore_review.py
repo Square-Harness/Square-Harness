@@ -12,7 +12,7 @@ from .ledger import _atomic_write, _bytes, _read
 from .refcheck import nested_checker
 from .referee import MeteredClient, copies_manuscript
 from .research import ResearchRunner
-from .review import EXPLORE_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
+from .review import EXPLORE_PIPELINE, GRAPH_PIPELINE, LEGACY_EXPLORE_PIPELINE, PaperReviewRunner, ReviewBase
 from .review_challenge import Challenge
 from .review_evidence import ReviewEvidence, _code_span, bibliographic_query
 from .review_position import _words
@@ -115,7 +115,8 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
         numerics = base.workspace.numerics
         if numerics is None and self.sandbox is not None:
             numerics = self.sandbox.automatic_session(base.workspace.root, cancel=getattr(self, 'cancel', None), ctx=base.ctx)
-        if self.PIPELINE == EXPLORE_PIPELINE and getattr(numerics, 'invocation', None) == 'automatic':
+        author_review = self.PIPELINE in (EXPLORE_PIPELINE, GRAPH_PIPELINE)
+        if author_review and getattr(numerics, 'invocation', None) == 'automatic':
             numerics = numerics.for_proof(state.get('sandbox_run_limit')) or numerics
             state['sandbox_run_limit'] = numerics.run_limit
         if numerics is not None:
@@ -146,8 +147,7 @@ class LegacyExploreReviewRunner(PaperReviewRunner):
             reference_agent = copy.copy(reviewer)
             reference_agent.client = MeteredClient(self, 'reference', 'reference')
             workspace.checker = nested_checker(reference_agent, self.emit, share_source_budget=True,
-                                               share_job_budget=self.PIPELINE == EXPLORE_PIPELINE,
-                                               original_first=self.PIPELINE == EXPLORE_PIPELINE)
+                                               share_job_budget=author_review, original_first=author_review)
 
         query = state['goal']
         if state.get('target'):

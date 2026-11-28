@@ -1121,19 +1121,21 @@ The review kinds work on a proof you paste, or on a manuscript you attach
 - **Review** (`@referee`) reads a whole manuscript. Attach the paper in an
   Assistant conversation and say “review that paper”, or choose Review from the
   form. You can specify a focus such as “check the proof of Theorem 1.4”.
-  The main referee checks the manuscript for the author. It starts with threats
-  to the main results, identifies missing arguments and checks notation,
-  cross-references and bibliographic support. A private notebook holds located
-  findings across tool calls. A source index helps the referee track which
-  statements, proofs and references still need attention. For a new whole-paper
-  review an independent challenger selects consequential steps and checks them
-  alongside the referee. It sends each supported objection as soon as it has
-  evidence, then can examine another step. When the referee is ready to
-  finish, it takes the available evidence and any specific outstanding check
-  and closes the challenger. The referee evaluates that evidence and
-  writes the report you receive. When a full-paper report leaves indexed
-  items unresolved or without a recorded assessment, a coverage note names the
-  counts and sample locations.
+  Review maps the statements, proofs and explicit dependencies in the pinned
+  manuscript. It assigns related arguments to a reader. Each reader receives
+  the statements and proof passages it owns, the places where results are used,
+  and access to the whole manuscript. Readers can work at the same time. When
+  one proof uses another theorem, its reader checks whether the theorem as
+  stated applies there. The reader who owns the theorem examines its proof.
+  A lead referee examines the connections between arguments, unassigned prose,
+  references and presentation. An independent reader tests a consequential
+  statement starting from its hypotheses. The lead can ask for an additional
+  focused check. A fresh judge examines serious or disputed objections.
+  The report writer receives the full handoffs and source diagnostics and
+  produces one report for the author. If the reviewers cannot settle a point,
+  the report should explain what remains open. Earlier saved reviews resume
+  with the workflow that created them. A coverage note names any mapped proofs
+  whose reader omitted a concrete assessment.
   The referee can run Python while it examines another passage. Citation checks
   normally start in the background and seek the original publication or the
   author's version, including the relevant theorem and hypotheses. If only a

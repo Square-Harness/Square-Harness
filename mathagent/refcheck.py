@@ -1833,8 +1833,7 @@ def nested_checker(agent, emit=lambda kind, value: None, effort='high', *, share
                 return json.dumps({'error': 'This transport cannot cancel an independent verifier. '
                                    'Run check_reference in the foreground.'})
             if isinstance(client, MeteredClient):
-                client = MeteredClient(client.runner, client.role, ident)
-                client.client = transport
+                client = client.fork_reference(ident, transport)
             else:
                 client = transport
         workspace = Workspace(agent.workspace.root, literature=literature, read_types=())

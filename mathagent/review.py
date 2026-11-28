@@ -53,6 +53,7 @@ LEGACY_PIPELINES = {'review-v1': 'review', 'journal-v1': 'review'}
 V4_PIPELINE = 'review-v4'
 LEGACY_EXPLORE_PIPELINE = 'review-explore-v1'
 EXPLORE_PIPELINE = 'review-explore-v2'
+GRAPH_PIPELINE = 'review-graph-v1'
 SKILLS = {'quick': 'review-quick', 'review': 'review', 'typos': 'typo-check', 'explain': 'explain'}
 TITLES = {'quick': 'Proof check', 'review': 'Referee report', 'typos': 'Typos and presentation', 'explain': 'Explanation'}
 MANUSCRIPT_VARIANTS = ('review', 'typos')  # they need a pinned manuscript
@@ -161,10 +162,10 @@ def level_for(rounds):
 
 
 def runner_class(variant):
-    """Use Explore for a new whole-paper review, including the former 'journal' entry point."""
+    """Dispatch new jobs; saved jobs are dispatched using their recorded pipeline."""
     if variant in ('review', 'journal'):
-        from .explore_review import ExploreReviewRunner
-        return ExploreReviewRunner
+        from .graph_review import GraphReviewRunner
+        return GraphReviewRunner
     return {'quick': QuickReviewRunner, 'typos': TypoCheckRunner, 'explain': ExplainRunner}[variant]
 
 
@@ -173,7 +174,7 @@ def variant_for_state(state):
     effort, when the typo check was the review's lowest effort, is a typo check."""
     variant = next((variant for variant, pipeline in PIPELINES.items() if state.get('pipeline') == pipeline),
                    LEGACY_PIPELINES.get(state.get('pipeline')))
-    if state.get('pipeline') in (V4_PIPELINE, LEGACY_EXPLORE_PIPELINE, EXPLORE_PIPELINE):
+    if state.get('pipeline') in (V4_PIPELINE, LEGACY_EXPLORE_PIPELINE, EXPLORE_PIPELINE, GRAPH_PIPELINE):
         variant = 'review'
     return 'typos' if variant == 'review' and state.get('level') == 'low' else variant
 
@@ -187,7 +188,10 @@ def runner_for_state(state):
     if variant == 'review' and state.get('pipeline') == LEGACY_EXPLORE_PIPELINE:
         from .explore_review import LegacyExploreReviewRunner
         return LegacyExploreReviewRunner
-    if variant == 'review' and state.get('pipeline') != EXPLORE_PIPELINE:
+    if variant == 'review' and state.get('pipeline') == EXPLORE_PIPELINE:
+        from .explore_review import ExploreReviewRunner
+        return ExploreReviewRunner
+    if variant == 'review' and state.get('pipeline') != GRAPH_PIPELINE:
         return PaperReviewRunner  # saved v2/v3 jobs resume with their own pipeline
     return runner_class(variant) if variant else ResearchRunner
 
@@ -1055,6 +1059,11 @@ class ReviewBase(ResearchRunner):
         if not matches and self.VARIANT in MANUSCRIPT_VARIANTS:
             # Several manuscripts and none named: ask, never review whichever happens to come first.
             matches = documents(manuscripts) or [sources[0]]
+            if len(matches) > 1 and self.PIPELINE == GRAPH_PIPELINE:
+                from .review_graph_plan import unique_tex_root
+                root = unique_tex_root(matches, sources)
+                if root is not None:
+                    matches = [root]
             if len(matches) > 1:
                 names = [Path(source.get('source_archive') or source['path']).name if source.get('line_map') is not None
                          else source['path'] for source in matches]

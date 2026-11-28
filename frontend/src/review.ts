@@ -36,15 +36,17 @@ export const VARIANT_STEPS: Record<ReviewVariant, string[]> = {
   typos: ['plan', 'audit', 'done'],
   explain: ['plan', 'extract', 'explain', 'fill', 'check', 'fix', 'done'],
 }
+export const GRAPH_REVIEW_PIPELINE = 'review-graph-v1'
 export const AUTHOR_REVIEW_PIPELINE = 'review-explore-v2'
 const LEGACY_EXPLORE_REVIEW = 'review-explore-v1'
 
-export function isExploreReview(pipeline: string | undefined | null) {
-  return pipeline === AUTHOR_REVIEW_PIPELINE || pipeline === LEGACY_EXPLORE_REVIEW
+export function isManuscriptReview(pipeline: string | undefined | null) {
+  return pipeline === GRAPH_REVIEW_PIPELINE || pipeline === AUTHOR_REVIEW_PIPELINE || pipeline === LEGACY_EXPLORE_REVIEW
 }
 
 /** Saved pipelines keep their own phase sequence. */
 export const PIPELINE_STEPS: Record<string, string[]> = {
+  [GRAPH_REVIEW_PIPELINE]: ['plan', 'review', 'done'],
   [AUTHOR_REVIEW_PIPELINE]: ['plan', 'review', 'done'],
   [LEGACY_EXPLORE_REVIEW]: ['plan', 'review', 'done'],
   'review-v4': ['plan', 'referees', 'write', 'done'],

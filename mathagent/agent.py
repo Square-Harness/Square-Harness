@@ -94,7 +94,7 @@ ANNOUNCED_ONLY = 'The final answer announced further work instead of reporting r
 
 
 _PAGED_READS = {'read_file', 'search_text', 'list_files', 'read_page', 'read_index', 'list_index', 'read_experiment',
-                'read_skill_reference', 'execute_python'}
+                'read_skill_reference', 'execute_python', 'read_assignment', 'get_peer_evidence'}
 
 
 def _fit_read_history(messages, projected, seen):
@@ -115,7 +115,8 @@ def _fit_read_history(messages, projected, seen):
                     return True
     # Even one fresh reply can exceed the space left by other turns or a tool batch. Retain a
     # prefix with a cursor into the saved original. A new execution can be reopened by ID.
-    names = {'read_file', 'read_experiment', 'execute_python', 'read_skill_reference'}
+    names = {'read_file', 'read_experiment', 'execute_python', 'read_skill_reference',
+             'read_assignment', 'get_peer_evidence'}
     candidates = [(len(projected.get(i, m.get('content', ''))), i) for i, m in enumerate(messages)
                   if i >= seen and m.get('role') == 'tool' and m.get('tool_name') in names]
     for size, i in sorted(candidates, reverse=True):

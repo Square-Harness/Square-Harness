@@ -1388,7 +1388,44 @@ requests more often). The tester ledger charges a failed stream with unknown usa
 an estimate (`HostedQuota.charge(..., estimated=True)`: input bytes plus framing,
 streamed characters plus 256). Proof gives every replacement a fresh dispatch key.
 
-New whole-paper reviews (mode `referee`, pipeline `review-explore-v2`) use
+New whole-paper Reviews use mode `referee` and pipeline `review-graph-v1`.
+`review.runner_class` selects `GraphReviewRunner` for new Review jobs.
+`runner_for_state` selects the saved pipeline on resume. The normal Explore
+chat continues through its own entry point and instruction.
+
+`review_graph_plan.build_graph_plan` maps frozen statements, proof ranges,
+and explicit references. It preserves source locators, groups related
+proofs under one primary reader, and assigns remaining passages to the lead
+or to passage readers. The initial independent test starts from a statement
+and its setting. It has full source access. Statement-first independence
+relies on the initial packet and the role instruction. In a family packet,
+the mathematical reader checks a referenced premise at the downstream use
+site even when another reader is checking the premise's own proof.
+
+`graph_review.GraphReviewRunner` starts ready assignments in the configured
+review pool. A transport with no independent streams executes them serially.
+The lead can request a further located mathematical test. The scheduler
+creates a fresh judge for consequential or disputed structured findings.
+A separate code-only check matches citation keys and compiles eligible
+frozen TeX sources with the existing compiler. The final editor receives
+the full handoffs, judge decisions and source diagnostics. It writes in
+a fresh context with the same manuscript available. Coverage here means
+assignment and reported assessment; neither a graph edge nor a completed
+model call establishes validity. Family readers can submit assessments of their own
+proof units in a batch. Delivery identifies mapped proofs with no recorded assessment.
+
+`review_graph_worker` runs the tool-enabled mathematical roles with their
+own histories, handoffs and background journals on the shared job budget.
+The graph meter admits ready model requests in waiting order when settled budget
+can cover them. Readers and their nested citation checks can wait for a
+sibling's outstanding reservation to settle. A genuine shortage still
+uses the normal pause path. Saved citation calls carry the owning worker's ID.
+The saved artifacts include the plan and per-role tool checkpoints. Restore
+completed assignments, continue interrupted ones, and retain the printed
+manuscript as the authority if the graph or a reader misstates it.
+Follow-up questions about an earlier report retain their focused path.
+
+Saved two-reader reviews (pipeline `review-explore-v2`) use
 the normal Explore tool loop with a dedicated pre-submission instruction.
 The main referee owns the manuscript and the final Markdown. The
 `ExploreReviewRunner` in `explore_review.py` adds a read-only source index

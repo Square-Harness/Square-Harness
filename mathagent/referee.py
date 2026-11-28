@@ -537,6 +537,17 @@ class MeteredClient:
         outer = getattr(self.client, 'remaining_tokens', None)
         return min(left, outer) if isinstance(outer, (int, float)) else left
 
+    def _round_capacity(self, cap, count):
+        # Called under the job mutex, immediately before this call is reserved in the ledger.
+        if is_ds4(self.runner.agent):
+            return int(min(cap, self.remaining_tokens))
+        return cap
+
+    def fork_reference(self, ident, transport):
+        client = MeteredClient(self.runner, self.role, ident)
+        client.client = transport
+        return client
+
     def stream(self, payload):
         runner = self.runner
         if self.stop_at is None:
@@ -548,9 +559,7 @@ class MeteredClient:
         cap = payload['options']['num_predict']
         count, method = count_input(self.client, payload)
         with runner._mutex:
-            if is_ds4(runner.agent):
-                # Another reviewer can start between Agent's preflight and this locked reservation.
-                cap = payload['options']['num_predict'] = int(min(cap, self.remaining_tokens))
+            cap = payload['options']['num_predict'] = self._round_capacity(cap, count)
             if cap < 1 or runner._tokens_left() < cap or runner._input_left() < count:
                 reason = "The review's token allowance cannot cover another round."
                 if self.stop_at is None:
