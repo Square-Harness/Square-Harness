@@ -246,6 +246,7 @@ class Agent:
         projected, seen_messages = {}, len(messages) - 1
         round_no, answer_now, forced_final = -1, False, False
         continued = 0
+        repetition_retry = False
         while True:
             round_no += 1
             open_ended = self.max_rounds is None
@@ -254,6 +255,8 @@ class Agent:
             left = getattr(self.client, 'remaining_tokens', None)
             predict = self.predict if not isinstance(left, (int, float)) else int(min(self.predict, left))
             if predict < 128:
+                if repetition_retry:
+                    raise AgentError('The repeating response was discarded. The remaining allowance cannot fund a fresh answer.')
                 self.last_stop_reason = ('Output limit reached while reasoning; no allowance remains for a final answer.'
                                          if answer_now else 'Generated-token budget exhausted before a final answer.')
                 for message in messages:
@@ -263,11 +266,13 @@ class Agent:
             payload = self._payload([system, *context, *messages], tools, self.think and not answer_now, predict, round_no)
             # The complete native request is counted, including tool schemas.
             # Context fitting adjusts output room, never mathematical premises.
-            from .call_policy import allocate_call, CallContextError
+            from .call_policy import allocate_call, CallContextError, REPETITION_RECOVERY
             while True:
                 visible = [dict(item, content=projected[i]) if i in projected else item for i, item in enumerate(messages)]
                 payload['messages'] = [system, *context,
                                        *with_notebook_evidence(visible, getattr(self, 'notebook_source', ''), user_index)]
+                if repetition_retry:
+                    payload['messages'][0] = dict(system, content=system['content'] + '\n\n' + REPETITION_RECOVERY)
                 if recovery_notes:
                     payload['messages'] = copy.deepcopy(payload['messages'])
                     payload['messages'][-1]['content'] += ('\n\nUNVERIFIED WORKING NOTES (final excerpt of generated reasoning):\n'
@@ -313,19 +318,31 @@ class Agent:
             assistant = {'role': 'assistant', 'content': ''}
             calls, thinking, done = [], '', False
             from .deepinfra import generation_stream
-            for event in generation_stream(self.client, payload, emit):
-                msg = event.get('message', {})
-                if msg.get('thinking'):
-                    thinking += msg['thinking']
-                    emit('thinking', msg['thinking'])
-                if msg.get('content'):
-                    assistant['content'] += msg['content']
-                    emit('text', msg['content'])
-                calls.extend(msg.get('tool_calls') or [])
-                if event.get('done'):
-                    self.last_stats = {k: event[k] for k in ('eval_count', 'eval_duration',
-                        'prompt_eval_count', 'done_reason') if k in event}
-                    done = True
+            from .backends import RepetitionLoop
+            try:
+                for event in generation_stream(self.client, payload, emit):
+                    msg = event.get('message', {})
+                    if msg.get('thinking'):
+                        thinking += msg['thinking']
+                        emit('thinking', msg['thinking'])
+                    if msg.get('content'):
+                        assistant['content'] += msg['content']
+                        emit('text', msg['content'])
+                    calls.extend(msg.get('tool_calls') or [])
+                    if event.get('done'):
+                        self.last_stats = {k: event[k] for k in ('eval_count', 'eval_duration',
+                            'prompt_eval_count', 'done_reason') if k in event}
+                        done = True
+            except RepetitionLoop as exc:
+                self.last_stats = dict(exc.stats)
+                emit('discard', '')
+                if repetition_retry:
+                    raise
+                emit('notice', f'{exc} Retrying this step with the completed tool results.')
+                repetition_retry = True
+                round_no -= 1
+                continue
+            repetition_retry = False
             emit('end', '')
             if not done:
                 raise AgentError('Model stream ended before its completion event. This turn was not saved.')

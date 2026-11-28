@@ -45,6 +45,20 @@ class TokenBudgetError(AgentError):
                          f'({self.stats["eval_count"]} > {requested_cap})')
 
 
+class RepetitionLoop(AgentError):
+    """Local stop before delivery of a complete response or any executable tool calls."""
+
+    category = 'repetition'
+
+    def __init__(self, channel, stream_progress=None, stats=None, *, kind='exact'):
+        self.channel = channel
+        self.kind = kind
+        self.stream_progress = dict(stream_progress or {})
+        self.stats = dict(stats or {})
+        label = 'reasoning' if channel == 'thinking' else 'answer'
+        super().__init__(f'The model repeated a passage in its {label}. This generation was stopped.')
+
+
 class ToolCallError(AgentError):
     """A finished response has invalid calls; none may be executed.
 
@@ -326,6 +340,7 @@ class OpenAICompatible:
     # Seconds without model output, once a stream has started, before the call is ended. None for
     # local servers, whose scheduler may hold a started request for a long time; set by hosted profiles.
     stall_seconds = None
+    detect_repetition = False
 
     @staticmethod
     def _sse(response, deadline=None):
@@ -369,6 +384,10 @@ class OpenAICompatible:
         calls, finish, usage = {}, None, None
         accepted, output_started, final_usage = False, False, None
         progress = {'content_chars': 0, 'thinking_chars': 0, 'tool_chars': 0}
+        detectors = {}
+        if self.detect_repetition:
+            from .repetition import RepetitionDetector
+            detectors = {field: RepetitionDetector() for field in ('content', 'thinking')}
         generated_chars = 0
         requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = self._stream_deadline()
@@ -516,12 +535,17 @@ class OpenAICompatible:
                             finish = reason
                         if finish is not None and reported:
                             final_usage = reported
+                        # Tool arguments can legitimately contain large repeated datasets. Keep their
+                        # fragments private until the whole call finishes, even if a text channel loops.
+                        for channel, value in message.items():
+                            if channel in detectors and detectors[channel].feed(value):
+                                raise RepetitionLoop(channel, progress, final_usage, kind=detectors[channel].kind)
                         if message:
                             yield {'message': message, 'done': False}
                     if not choices and finish is not None and reported:
                         final_usage = reported
             error = AgentError('Model stream ended before [DONE]; partial output is incomplete')
-        except (ToolCallError, TokenBudgetError):
+        except (ToolCallError, TokenBudgetError, RepetitionLoop):
             raise
         except KeyboardInterrupt:
             if final_usage:

@@ -1950,6 +1950,8 @@ single-user path. Keep all existing container restrictions intact.
 
 ### Hosted provider profiles (DeepInfra, OpenRouter)
 
+The hosted clients feed reasoning and visible text to separate instances of `repetition.RepetitionDetector`. An established cycle raises `backends.RepetitionLoop` and closes that response before a completed tool batch can be returned. Admission and accounting belong to each generation attempt. Preserve provider usage when available, otherwise settle the interrupted generation using its recorded progress. Recovery starts from the saved request, evidence and completed tool results. A discarded generation is excluded from committed conversations and verifier verdicts. Precise reference recall requests compact bibliographic candidates as plain JSON text with reasoning disabled. Source verification uses its own evidence-gathering calls.
+
 The hosted DS4 profiles are `model_limits.HOSTED_DS4` (`deepinfra`, `openrouter`): every DS4 budget, preset,
 routing, concurrency and retry decision keys on that set (`is_ds4`, `ds4_args`, `hosted_profile`), never on one
 provider's name. `api_profiles.profile_class(name)` returns the client class. `deepinfra.DeepInfra` is the hosted

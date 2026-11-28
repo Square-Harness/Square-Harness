@@ -20,7 +20,7 @@ import time
 from . import __version__, briefs, images
 from .jsonutil import loads_single
 from .agent import AgentError
-from .backends import MeasuredStreamCancellation, TokenBudgetError
+from .backends import MeasuredStreamCancellation, RepetitionLoop, TokenBudgetError
 from .call_policy import (CONTEXT_MARGIN, MIN_PROOF_REVIEW_TOKENS, CallContextError, allocate_call, count_input, interrupted_charge,
                           streamed_characters)
 from .deepinfra import DeepInfraGenerationError, rejected_before_inference, retry_generation_call
@@ -29,7 +29,7 @@ from .ledger import MAX_FILE_BYTES, LedgerError, ProofStore
 from .model_limits import is_ds4, HOSTED_DS4, ProviderChanged
 from .numerics.artifacts import EXPERIMENT_ID
 from .proof_tools import ProofDesk
-from .proof_turns import ProofTurns, SUBMIT
+from .proof_turns import ProofTurns, SUBMIT, review_evidence
 from .proof_policy import (
     CONTINUE_POLICY, LEGACY_VERIFIER_SCHEMA, REPAIR_HISTORY_POLICY, REPAIR_POLICY,
     VERIFIER_SCHEMA, VERIFIER_SCHEMA_V2, VERIFIER_SCHEMA_V3, initial_request, review_request,
@@ -333,6 +333,8 @@ class ProofRunner:
             'harness_version': __version__,
         }
         profile = getattr(self.agent.client, 'profile', 'default')
+        if profile in HOSTED_DS4:
+            value['transport_sha256']['repetition.py'] = hashlib.sha256(Path(__file__).with_name('repetition.py').read_bytes()).hexdigest()
         if profile != 'default':
             value['api_profile'] = profile
             # The hosted transport (deepinfra.py), plus the provider's own module for another hosted profile.
@@ -841,7 +843,7 @@ class ProofRunner:
                     primary = self.turns.primary(self.turns.lineage(candidate))
                     if primary:
                         messages = [*messages, {'role': 'user', 'content': 'Recorded primary evidence (inspect '
-                                     'independently):\n' + json.dumps(primary, ensure_ascii=False)}]
+                                     'independently):\n' + json.dumps(review_evidence(primary), ensure_ascii=False)}]
                 messages = [*messages, *self.turns.history(role)]
             if pending.get(role + '_turns'):
                 progress = self.turns.resource_note(role, tools=bool(schemas))
@@ -1240,13 +1242,15 @@ class ProofRunner:
             if call['status'] not in {'running', 'interrupted'}:
                 continue
             result = self._read_stream(call['stream'])
+            pending = self.state.get('pending')
+            role = call['role']
             if result['done']:
                 self._charge_completed(call, result)
+                if pending and call['key'] == self._call_key(role):
+                    pending.pop(role + '_repetition_retry', None)
             else:
                 call['status'] = 'interrupted'
                 self._settle_unknown(call, result)
-                pending = self.state.get('pending')
-                role = call['role']
                 if pending and call['key'] == self._call_key(role):
                     if role == 'solver' and not pending.get('solver_turns') and not result['calls'] and (result['text'] or result['thinking']):
                         candidate = self._candidate(result, pending)
@@ -1281,10 +1285,36 @@ class ProofRunner:
     def _call(self, role, messages, cap, format_schema=None):
         if self._find_call(self._call_key(role)) is not None:
             return self._read_stream(self._find_call(self._call_key(role))['stream'])
-        # Admission precedes durable generation reservations. Queue waiting is
-        # cancelable and does not consume the workflow's active-time allowance.
-        with self._inference_slot():
-            return self._dispatch_call(role, messages, cap, format_schema)
+        while True:
+            try:
+                # A fresh generation, including a repetition retry, gets its own slot and reservation.
+                with self._inference_slot():
+                    return self._dispatch_call(role, messages, cap, format_schema)
+            except RepetitionLoop:
+                if self.state['status'] == 'paused':
+                    raise AgentError(self.state['stop_reason']) from None
+                self.emit('notice', f'The {role} repeated a passage. Retrying the saved step with its original evidence.')
+
+    def _record_repetition(self, role, call, exc):
+        """Checkpoint both the charge and the next dispatch key before releasing the inference slot."""
+        pending = self.state['pending']
+        call.update(status='repetition', repetition_channel=exc.channel, repetition_kind=exc.kind,
+                    stream_progress=exc.stream_progress)
+        cap = call['reserved_tokens']
+        if exc.stats:
+            charge = exc.stats['eval_count']
+            call['stats'] = dict(exc.stats)
+        else:
+            characters = sum(exc.stream_progress.values())
+            charge = interrupted_charge(cap, characters)
+            call.update(charge_basis='estimate', streamed_characters=characters)
+        call['charged_tokens'] = charge
+        self.state['tokens_charged'] += charge - cap
+        pending[role + '_dispatch'] = pending.get(role + '_dispatch', 0) + 1
+        if role + '_repetition_retry' in pending:
+            self._stop('paused', f'The {role} repeated a passage again. Proof paused with the preceding work saved.')
+        else:
+            pending[role + '_repetition_retry'] = call['key']
 
     @retry_generation_call
     def _dispatch_call(self, role, messages, cap, format_schema=None):
@@ -1318,6 +1348,10 @@ class ProofRunner:
             if self.state['settings'].get('full_output_ceiling'):
                 minimum = self._call_cap(cap)
             def fit(base):
+                if pending.get(role + '_repetition_retry'):
+                    action = ('Give the proof, a counterexample, or the precise remaining gap.' if role == 'solver' else
+                              'Return one complete verdict for this same candidate, including any essential unresolved issue.')
+                    base = [*base, {'role': 'user', 'content': action + ' Check each essential point once.'}]
                 # When tools are offered, the model might spend its full call on a request.
                 # Preserve room for the requesting role's final response and independent review.
                 def allocate(payload):
@@ -1409,6 +1443,8 @@ class ProofRunner:
         stream_file = self.store.start_stream(role)
         call = {'key': key, 'role': role, 'round': self.state['rounds_started'], 'status': 'running',
                 'reserved_tokens': cap, 'request': request, 'stream': stream_file, 'context': context}
+        if pending.get(role + '_repetition_retry'):
+            call['repetition_retry_of'] = pending[role + '_repetition_retry']
         if surplus_limited:
             call['evidence_surplus_limited'] = True
         self.state['calls'].append(call)
@@ -1435,11 +1471,15 @@ class ProofRunner:
             if not result['done']:
                 raise AgentError('Model stream ended without completion; exact partial work was saved')
             self._charge_completed(call, result)
+            pending.pop(role + '_repetition_retry', None)
             self.agent.last_stats = result['stats']
             # Apply a complete result even when its final event meets the deadline.
             return result
         except BaseException as exc:
-            if isinstance(exc, TokenBudgetError):
+            repetition = exc if isinstance(exc, RepetitionLoop) else exc.__cause__
+            if isinstance(repetition, RepetitionLoop):
+                self._record_repetition(role, call, repetition)
+            elif isinstance(exc, TokenBudgetError):
                 previous_charge = call.get('charged_tokens', cap)
                 call.update(status='budget_violation', stats=exc.stats, charged_tokens=exc.stats['eval_count'])
                 self.state['tokens_charged'] += call['charged_tokens'] - previous_charge
@@ -1474,7 +1514,7 @@ class ProofRunner:
                 client.timeout = old_timeout
             call['seconds'] = time.monotonic() - started
             self._save()
-            self.emit('end', '')
+            self.emit('discard' if call['status'] == 'repetition' else 'end', '')
 
     def _result(self):
         # A stopped request may already contain useful written material. Publish
