@@ -22,6 +22,12 @@ REPETITION_RECOVERY = ('A previous generation repeated a passage and was discard
                        'a conclusion, or an essential point remains unresolved, return the requested result.')
 
 
+def prefer_different_upstream(payload, provider):
+    """Recovery metadata for OpenRouter; never sent as part of the model's prompt."""
+    if provider:
+        payload['_sh_repeated_provider'] = provider
+
+
 def retry_repeated_prompt(method):
     """Re-enter admission and journaling for a fresh worker call, discarding its unfinished response."""
     @wraps(method)
@@ -31,6 +37,8 @@ def retry_repeated_prompt(method):
             return method(self, role, *args, **options)
         except RepetitionLoop as exc:
             self.emit('notice', f'{exc} Retrying the saved step.')
+            if exc.provider:
+                options['repeated_provider'] = exc.provider
         # Research calls this argument instruction. The Review workers call it prompt.
         if args:
             prompt, *rest = args

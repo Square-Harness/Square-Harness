@@ -134,6 +134,11 @@ class OpenRouter(DeepInfra):
         data['usage'] = {'include': True}
         data['service_tier'] = 'default'
         data['provider'] = copy.deepcopy(self.routing)
+        if provider := payload.get('_sh_repeated_provider'):
+            # Only change priority within the original allowlist. Endpoint
+            # variants of the repeated provider stay available as fallbacks.
+            data['provider']['order'] = sorted(data['provider']['order'],
+                                              key=lambda slug: slug.partition('/')[0] == provider)
         data['plugins'] = [{'id': 'context-compression', 'enabled': False}]
         return data
 

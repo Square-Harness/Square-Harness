@@ -8,6 +8,14 @@ setting up a machine, [llm-install.md](llm-install.md).
 
 ## Worker limits
 
+Confirmed repetition carries the actual OpenRouter upstream on the generation
+exception. Only an existing recovery dispatch may attach that provider to its
+internal request. The serializer moves its endpoint variants behind the other
+entries in the configured order, retaining the original allowlist, fallback,
+required parameters, privacy, quantization and price filters. Proof stores
+the provider with the failed call so restarting from the checkpoint recovers
+the same routing decision. Ordinary requests use the original configuration.
+
 The CLI, Agent and benchmark use `model_limits.DEFAULT_TEMPERATURE` (1.0).
 Build model requests with the agent's configured temperature and pass it to nested
 workers, routers, retries and synthesis. Proof records the solver and verifier

@@ -26,7 +26,7 @@ from .agent import AgentError
 from .api_profiles import HOSTED_PROFILES
 from .assistant_budget import AssistantBudget
 from .backends import MeasuredStreamCancellation, RepetitionLoop, ToolCallError
-from .call_policy import CallContextError, REPETITION_RECOVERY, allocate_call
+from .call_policy import CallContextError, REPETITION_RECOVERY, allocate_call, prefer_different_upstream
 from .deepinfra import DeepInfraGenerationError, generation_attempts, rejected_before_inference
 from .router import EFFORTS, LEGACY_EFFORTS, JOB_MODES, TASK_SCHEMA, effort_for
 from .prompts import NOTEBOOK_DISPLAY_RECEIPT, PROJECT_SCOPE, with_notebook_evidence
@@ -964,6 +964,7 @@ class Orchestrator:
                             raise
                         self.emit('notice', f'{exc} Retrying from the completed conversation and tool results.')
                         payload = copy.deepcopy(payload)
+                        prefer_different_upstream(payload, exc.provider)
                         payload['messages'][0]['content'] += '\n\n' + REPETITION_RECOVERY
                         payload, allocation = allocate_call(self.agent.client, payload, payload['options']['num_predict'])
                         self.state['next_allocation'] = allocation

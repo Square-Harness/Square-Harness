@@ -6,6 +6,8 @@
 
 - Hosted DeepSeek Explore now receives its earlier reasoning alongside completed tool calls when it continues the same task. A subsequent user request starts with the existing conversation history.
 
+- When an OpenRouter response is stopped for confirmed repetition, its existing recovery attempt prefers another configured provider. A saved Proof retains that preference across a pause.
+
 - Precise citation lookup now asks for candidate bibliographic details before the source-verification step. Hosted DeepSeek streams recognize sustained repetition in an answer or its reasoning. An interrupted Proof verifier can retry against the same saved candidate, and incomplete generated tool calls are discarded.
 
 - Cut the Python suite from 194 tests to 16 covering core workflows, access to
